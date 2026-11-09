@@ -133,8 +133,7 @@ fn rollback_refuses_a_content_proof_from_the_other_release() -> TestResult {
         &material.tps1,
         &material.evidence,
         &projection,
-        &signature,
-        &content,
+        (&signature, &content),
         TrustEvaluationPointV1::new(utc, TICK),
         activation(world.timeline, 3),
     );

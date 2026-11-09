@@ -162,8 +162,7 @@ pub fn rollback_plugin_release_v1(
         request.tps1_bytes,
         request.evidence,
         &verified.projection,
-        &verified.signature,
-        &verified.content,
+        (&verified.signature, &verified.content),
         verified.point,
         request.activation,
     )?;

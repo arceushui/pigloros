@@ -72,8 +72,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Admit and activate one release, or return the identical earlier decision.
     ///
-    /// `release_proof` must bind the authorized release and key, and `content_proof`
-    /// must bind the same release; `point` supplies trusted time and Tick.
+    /// `proofs` contains the signature bound to the authorized release and key,
+    /// followed by the content proof bound to the same release; `point` supplies trusted time and Tick.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -83,8 +83,10 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        proofs: (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1>;
@@ -104,8 +106,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Re-activate a previously admitted release of the active Plugin ID.
     ///
-    /// `release_proof` must bind the authorized target and key, and `content_proof`
-    /// must bind the same target; `point` supplies trusted time and Tick.
+    /// `proofs` contains the signature bound to the authorized target and key,
+    /// followed by the content proof bound to the same target; `point` supplies trusted time and Tick.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -115,8 +117,10 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        proofs: (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<PluginRollbackReceiptV1, PluginTrustPolicyRegistryErrorV1>;

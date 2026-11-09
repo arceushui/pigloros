@@ -55,8 +55,7 @@ fn genuine_registry_fixtures_have_content_proofs_bound_to_their_manifests() -> T
         &material.tps1,
         &material.evidence,
         &projection,
-        &signature,
-        &content,
+        (&signature, &content),
         TrustEvaluationPointV1::new(trusted(UTC)?, TICK),
         activation(h.timeline, 1),
     )?;
@@ -273,8 +272,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
-                &one.content_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
@@ -286,8 +284,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
-                &one.content_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
@@ -433,8 +430,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
-                &one.content_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
@@ -446,8 +442,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
-                &one.content_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
@@ -567,8 +562,10 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &release_one().projection()?,
-        &release_one().release_proof()?,
-        &release_one().content_proof()?,
+        (
+            &release_one().release_proof()?,
+            &release_one().content_proof()?,
+        ),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 9),
     )?;
@@ -761,8 +758,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -774,8 +770,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -807,8 +802,10 @@ fn an_unbound_fail_closed_erasure_gate_refuses_the_activation_fence() -> TestRes
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
-            &release_one().content_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -854,8 +851,10 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
-            &release_one().content_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),

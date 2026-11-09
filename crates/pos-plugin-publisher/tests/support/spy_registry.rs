@@ -132,8 +132,10 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
@@ -154,8 +156,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tps1_bytes,
             evidence,
             projection,
-            release_proof,
-            content_proof,
+            (release_proof, content_proof),
             point,
             activation,
         )
@@ -179,8 +180,10 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
@@ -199,8 +202,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tps1_bytes,
             evidence,
             target,
-            release_proof,
-            content_proof,
+            (release_proof, content_proof),
             point,
             activation,
         )

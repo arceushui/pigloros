@@ -699,9 +699,9 @@ impl ManifestSpec {
             }]
         }).to_string().into_bytes();
         let previous = match self.previous {
-            Some(0x11) => Some(release_one().content_projection()?.release_digest()),
-            Some(0x12) => Some(release_two().content_projection()?.release_digest()),
-            Some(0x13) => Some(release_three().content_projection()?.release_digest()),
+            Some(0x11) => Some(release_one().release_digest()?),
+            Some(0x12) => Some(release_two().release_digest()?),
+            Some(0x13) => Some(release_three().release_digest()?),
             Some(other) => Some([other; 32]),
             None => None,
         };
@@ -799,10 +799,10 @@ impl ManifestSpec {
     /// # Errors
     /// Returns the fixture construction error.
     pub fn proof_fields(&self) -> TestResult<PluginReleaseSignatureFixtureV1> {
-        let projection = self.content_projection()?;
+        let content = self.content_proof()?;
         Ok(PluginReleaseSignatureFixtureV1 {
-            pmf1_digest: projection.pmf1_digest(),
-            release_digest: projection.release_digest(),
+            pmf1_digest: content.pmf1_digest(),
+            release_digest: content.release_digest(),
             owner: OwnerIdV1::new(OWNER)?,
             epoch: self.epoch,
             public_key: publisher_public(self.epoch),
@@ -846,12 +846,31 @@ impl ManifestSpec {
         .map(VerifiedPluginReleaseSignatureV1::from))
     }
 
+    /// SHA-256 digests of the Component and WIT descriptors in this closure.
+    ///
+    /// # Errors
+    /// Returns a closure construction error or a missing fixture member.
+    pub fn descriptor_digests(&self) -> TestResult<[[u8; 32]; 2]> {
+        let bundle = self.content_bundle()?;
+        let digest = |name| -> TestResult<[u8; 32]> {
+            let bytes = bundle
+                .members()
+                .iter()
+                .zip(bundle.member_bytes())
+                .find(|(member, _)| member.member() == name)
+                .map(|(_, bytes)| bytes)
+                .ok_or("missing fixture member")?;
+            Ok(Sha256::digest(bytes).into())
+        };
+        Ok([digest("component")?, digest("wit")?])
+    }
+
     /// The actual complete-PMF1 digest.
     ///
     /// # Errors
     /// Returns the closure construction or projection error.
     pub fn pmf1_digest(&self) -> TestResult<[u8; 32]> {
-        Ok(self.content_projection()?.pmf1_digest())
+        Ok(self.content_proof()?.pmf1_digest())
     }
 
     /// The actual release digest.
@@ -859,7 +878,7 @@ impl ManifestSpec {
     /// # Errors
     /// Returns the closure construction or projection error.
     pub fn release_digest(&self) -> TestResult<[u8; 32]> {
-        Ok(self.content_projection()?.release_digest())
+        Ok(self.content_proof()?.release_digest())
     }
 }
 
@@ -1085,8 +1104,12 @@ impl<S: Backend> Harness<S> {
             &material.tps1,
             &material.evidence,
             &manifest.projection()?,
-            proof,
-            &pos_plugin_content::validate_plugin_bundle_content_v1(&manifest.content_bundle()?)?,
+            (
+                proof,
+                &pos_plugin_content::validate_plugin_bundle_content_v1(
+                    &manifest.content_bundle()?,
+                )?,
+            ),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))
@@ -1150,8 +1173,10 @@ impl<S: Backend> Harness<S> {
             &material.tps1,
             &material.evidence,
             &target.projection()?,
-            proof,
-            &pos_plugin_content::validate_plugin_bundle_content_v1(&target.content_bundle()?)?,
+            (
+                proof,
+                &pos_plugin_content::validate_plugin_bundle_content_v1(&target.content_bundle()?)?,
+            ),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))

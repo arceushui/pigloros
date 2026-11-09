@@ -492,7 +492,7 @@ fn a_tps1_only_artifact_denial_refuses_the_release() -> TestResult {
     for denied in [
         release_one().pmf1_digest()?,
         release_one().release_digest()?,
-        release_one().projection()?.descriptor_digests()[0],
+        release_one().descriptor_digests()?[0],
     ] {
         let mut h = admitted()?;
         let genesis = h.env.genesis()?;
@@ -714,8 +714,7 @@ fn scopes_evaluate_independently() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        &one.release_proof()?,
-        &one.content_proof()?,
+        (&one.release_proof()?, &one.content_proof()?),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;

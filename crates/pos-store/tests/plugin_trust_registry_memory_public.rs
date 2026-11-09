@@ -44,8 +44,10 @@ mod erased_activation {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                &release_one().release_proof()?,
-                &release_one().content_proof()?,
+                (
+                    &release_one().release_proof()?,
+                    &release_one().content_proof()?
+                ),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),

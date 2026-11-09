@@ -183,8 +183,7 @@ fn advance_and_read(
             tps1,
             evidence,
             &projection,
-            &proof,
-            &content,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, TICK),
             activation(timeline, 9),
         );

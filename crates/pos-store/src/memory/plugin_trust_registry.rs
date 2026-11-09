@@ -382,8 +382,10 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
@@ -433,8 +435,10 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
@@ -583,8 +587,7 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &manifest.projection()?,
-                &manifest.release_proof()?,
-                &manifest.content_proof()?,
+                (&manifest.release_proof()?, &manifest.content_proof()?),
                 TrustEvaluationPointV1::new(utc, genesis.tick),
                 activation(timeline, tag),
             )?;
@@ -649,8 +652,7 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            &proof,
-            &content,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 1),
         )?;
@@ -667,8 +669,10 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &release_two().projection()?,
-            &release_two().release_proof()?,
-            &release_two().content_proof()?,
+            (
+                &release_two().release_proof()?,
+                &release_two().content_proof()?,
+            ),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 2),
         )?;
@@ -693,8 +697,7 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            &proof,
-            &content,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 3),
         )?;
@@ -756,8 +759,10 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    &release_one().release_proof()?,
-                    &release_one().content_proof()?,
+                    (
+                        &release_one().release_proof()?,
+                        &release_one().content_proof()?
+                    ),
                     TrustEvaluationPointV1::new(utc, genesis.tick),
                     activation(timeline, 1)
                 ),
@@ -769,8 +774,10 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    &release_one().release_proof()?,
-                    &release_one().content_proof()?,
+                    (
+                        &release_one().release_proof()?,
+                        &release_one().content_proof()?
+                    ),
                     TrustEvaluationPointV1::new(utc, genesis.tick),
                     activation(timeline, 1)
                 ),
@@ -797,8 +804,10 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                &release_one().release_proof()?,
-                &release_one().content_proof()?,
+                (
+                    &release_one().release_proof()?,
+                    &release_one().content_proof()?
+                ),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),

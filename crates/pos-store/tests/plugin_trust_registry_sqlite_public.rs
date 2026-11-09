@@ -71,8 +71,10 @@ fn a_preexisting_store_file_is_missing_state_until_provisioned() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
-            &release_one().content_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),

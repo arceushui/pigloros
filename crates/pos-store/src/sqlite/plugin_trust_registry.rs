@@ -246,8 +246,10 @@ impl SqliteStore {
         &self,
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         activation: &ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         let connection = &self.conn;
@@ -285,8 +287,10 @@ impl SqliteStore {
         &self,
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
-        content_proof: &ValidatedPluginBundleContentV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         activation: &ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let connection = &self.conn;

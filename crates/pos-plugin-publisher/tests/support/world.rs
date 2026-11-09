@@ -786,8 +786,7 @@ impl World {
             &material.tps1,
             &material.evidence,
             &projection,
-            &proof,
-            &content,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
@@ -829,8 +828,7 @@ impl World {
             &material.tps1,
             &material.evidence,
             &projection,
-            &proof,
-            &content,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))

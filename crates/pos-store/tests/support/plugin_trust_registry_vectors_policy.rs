@@ -135,7 +135,7 @@ fn a_tps1_only_artifact_denial_blocks_admission_but_not_advance_policy() -> Test
     for denied in [
         release_two().pmf1_digest()?,
         release_two().release_digest()?,
-        release_two().projection()?.descriptor_digests()[0],
+        release_two().descriptor_digests()?[0],
     ] {
         let mut h = Harness::<Store>::open()?;
         let genesis = h.env.genesis()?;
@@ -441,8 +441,10 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
         &other_genesis.tps1,
         &other_genesis.evidence,
         &ManifestSpec::new("plugin-a", 0x50, 0x60, None).projection()?,
-        &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
-        &ManifestSpec::new("plugin-a", 0x50, 0x60, None).content_proof()?,
+        (
+            &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
+            &ManifestSpec::new("plugin-a", 0x50, 0x60, None).content_proof()?,
+        ),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 3),
     )?;
@@ -458,8 +460,10 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
             &other_genesis.tps1,
             &other_genesis.evidence,
             &foreign_digest_in_other_scope.projection()?,
-            &foreign_digest_in_other_scope.release_proof()?,
-            &foreign_digest_in_other_scope.content_proof()?,
+            (
+                &foreign_digest_in_other_scope.release_proof()?,
+                &foreign_digest_in_other_scope.content_proof()?
+            ),
             TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
             activation(h.timeline, 4)
         ),
@@ -654,8 +658,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
@@ -667,8 +670,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
@@ -716,8 +718,7 @@ fn two_scopes_keep_independent_floors_pointers_and_ledgers() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        &one.release_proof()?,
-        &one.content_proof()?,
+        (&one.release_proof()?, &one.content_proof()?),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
@@ -805,8 +806,8 @@ fn every_admission_denial_names_its_error_and_changes_nothing() -> TestResult {
     )?;
     for revoked in [
         release_one().release_digest()?,
-        release_one().projection()?.descriptor_digests()[0],
-        release_one().projection()?.descriptor_digests()[1],
+        release_one().descriptor_digests()?[0],
+        release_one().descriptor_digests()?[1],
     ] {
         let artifact_denied = genesis_after(
             &h,

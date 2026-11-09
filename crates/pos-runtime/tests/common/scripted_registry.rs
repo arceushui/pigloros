@@ -92,8 +92,10 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _projection: &ValidatedPluginManifestProjectionV1,
-        _release_proof: &VerifiedPluginReleaseSignatureV1,
-        _content_proof: &ValidatedPluginBundleContentV1,
+        (_release_proof, _content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
@@ -117,8 +119,10 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _target: &ValidatedPluginManifestProjectionV1,
-        _release_proof: &VerifiedPluginReleaseSignatureV1,
-        _content_proof: &ValidatedPluginBundleContentV1,
+        (_release_proof, _content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {

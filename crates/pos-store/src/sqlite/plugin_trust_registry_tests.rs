@@ -212,8 +212,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &three.projection()?,
-            &three.release_proof()?,
-            &three.content_proof()?,
+            (&three.release_proof()?, &three.content_proof()?),
             TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
@@ -226,8 +225,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
@@ -264,8 +262,10 @@ fn a_store_that_is_not_in_wal_mode_is_refused() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
-            &release_one().content_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(TimelineId::new(), 1)
         ),
@@ -425,8 +425,7 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
-            &one.content_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1),
         )?;
@@ -1357,8 +1356,7 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
                 &material.tps1,
                 &material.evidence,
                 &projection,
-                &proof,
-                &content,
+                (&proof, &content),
                 TrustEvaluationPointV1::new(utc, material.tick),
                 activation(timeline, 2),
             );

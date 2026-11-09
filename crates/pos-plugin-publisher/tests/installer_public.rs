@@ -127,8 +127,7 @@ fn registry_refuses_a_content_proof_from_another_verified_release() -> TestResul
             &material.tps1,
             &material.evidence,
             &projection,
-            &signature,
-            substituted,
+            (&signature, substituted),
             TrustEvaluationPointV1::new(utc, TICK),
             activation(world.timeline, 1),
         );
