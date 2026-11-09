@@ -18,10 +18,8 @@ pub struct KnownAnswer {
 /// Pin the independent values, exact case inventory and upstream provenance.
 /// The corpus is test input, never a production key/nonce configuration.
 pub fn load() -> Result<[KnownAnswer; 3], Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/vectors/community-aes-gcm-siv.json");
-    let encoded = std::fs::read(path)?;
-    let cases: [KnownAnswer; 3] = serde_json::from_slice(&encoded)?;
+    let encoded = include_bytes!("../vectors/community-aes-gcm-siv.json");
+    let cases: [KnownAnswer; 3] = serde_json::from_slice(encoded)?;
     // Pin values independently of JSON whitespace or formatting.
     let canonical = serde_json::to_vec(&cases)?;
     let digest: [u8; 32] = Sha256::digest(&canonical).into();
