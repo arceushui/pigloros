@@ -716,15 +716,15 @@ fn seen() -> Vec<u8> {
 /// hands its endpoint.
 fn request_bytes(call: WorkerCallV1) -> Vec<u8> {
     let host = GPlugProtocolHostV1::new(record);
-    match call {
+    match &call {
         WorkerCallV1::Describe => {
             assert!(host.describe().is_none());
         }
         WorkerCallV1::Reduce(invocation) => {
-            assert!(host.reduce(&invocation).is_none());
+            assert!(host.reduce(invocation).is_none());
         }
         WorkerCallV1::Drive(invocation) => {
-            assert!(host.drive(&invocation).is_none());
+            assert!(host.drive(invocation).is_none());
         }
     }
     seen()
@@ -777,7 +777,7 @@ fn the_fixture_guest_answers_describe_reduce_and_drive_over_the_protocol() -> Te
     ] {
         let decoded = decode_worker_request_v1(&request_bytes(call.clone()))
             .map_err(|_| "undecodable request")?;
-        assert_eq!(decoded.component, G_PLUG_COMPONENT_V1);
+        assert_eq!(decoded.component.as_slice(), G_PLUG_COMPONENT_V1);
         assert_eq!(decoded.call, call);
         assert_eq!(decoded.negotiation.not_granted_capabilities.len(), 4);
         // Every negotiated limit is 1 MiB.

@@ -237,14 +237,17 @@ impl CommunityPluginSupervisorV1 {
         call: WorkerCallV1,
     ) -> Result<WorkerReturnV1, Error> {
         let limits = negotiated.limits().values();
-        let request = WorkerRequestV1 {
-            component: component.to_vec(),
-            negotiation: negotiated.to_transport(),
-            watchdog_millis: u64::try_from(self.watchdog.as_millis()).unwrap_or(u64::MAX),
-            host_inputs,
-            call,
+        let request = {
+            let request = WorkerRequestV1 {
+                component: component.to_vec().into(),
+                negotiation: negotiated.to_transport(),
+                watchdog_millis: u64::try_from(self.watchdog.as_millis()).unwrap_or(u64::MAX),
+                host_inputs,
+                call,
+            };
+            encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)
         };
-        let request = encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)?;
+        let request = request?;
         let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, self.watchdog);
         let deadline = Instant::now() + self.watchdog;
         let worker =

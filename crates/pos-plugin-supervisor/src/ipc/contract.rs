@@ -6,6 +6,8 @@
 //! `option` is `null` or its value. The decoder enforces each WIT count bound;
 //! semantic validation stays with the engine and the supervisor.
 
+use zeroize::Zeroizing;
+
 use pos_runtime::community_plugin_host::{
     ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, OperationalLogRecord,
     PluginDescriptorV1, PluginErrorCodeV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
@@ -77,21 +79,35 @@ pub(super) fn read_invocation(reader: &mut EnvelopeReader<'_>) -> Decoded<Plugin
         tick: reader.unsigned()?,
         scheduler_position: read_u32(reader)?,
     };
+    let output_base_ordinal = read_u32(reader)?;
+    let principal_ref = read_artifact(reader)?;
+    let authorization_decision = read_artifact(reader)?;
+    let observation_snapshot = read_artifact(reader)?;
+    // Keep each private allocation owned on every later decoding failure.
+    // Transfer it into the completed invocation only after the last read.
+    let mut observation_bytes = Zeroizing::new(read_bytes(reader, MAX_OBSERVATION_BYTES_V1)?);
+    let prior_state_schema = reader.bytes()?;
+    let mut prior_state_bytes = Zeroizing::new(read_bytes(reader, MAX_STATE_BYTES_V1)?);
+    let execution_profile_digest = reader.bytes()?;
+    let trust_policy_snapshot_digest = reader.bytes()?;
+    let mut deterministic_budget_id = Zeroizing::new(read_text(reader, MAX_TEXT_BYTES)?);
+    let deterministic_random_domain = reader.bytes()?;
+    let provenance_root = reader.bytes()?;
     Ok(PluginInvocationV1 {
         invocation_id,
         timeline_position,
-        output_base_ordinal: read_u32(reader)?,
-        principal_ref: read_artifact(reader)?,
-        authorization_decision: read_artifact(reader)?,
-        observation_snapshot: read_artifact(reader)?,
-        observation_bytes: read_bytes(reader, MAX_OBSERVATION_BYTES_V1)?,
-        prior_state_schema: reader.bytes()?,
-        prior_state_bytes: read_bytes(reader, MAX_STATE_BYTES_V1)?,
-        execution_profile_digest: reader.bytes()?,
-        trust_policy_snapshot_digest: reader.bytes()?,
-        deterministic_budget_id: read_text(reader, MAX_TEXT_BYTES)?,
-        deterministic_random_domain: reader.bytes()?,
-        provenance_root: reader.bytes()?,
+        output_base_ordinal,
+        principal_ref,
+        authorization_decision,
+        observation_snapshot,
+        observation_bytes: std::mem::take(&mut *observation_bytes),
+        prior_state_schema,
+        prior_state_bytes: std::mem::take(&mut *prior_state_bytes),
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+        deterministic_budget_id: std::mem::take(&mut *deterministic_budget_id),
+        deterministic_random_domain,
+        provenance_root,
     })
 }
 

@@ -491,7 +491,7 @@ impl GPlugProtocolHostV1 {
 /// record with every G-PLUG capability not granted, and Local mode.
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
     WorkerRequestV1 {
-        component: G_PLUG_COMPONENT_V1.to_vec(),
+        component: G_PLUG_COMPONENT_V1.to_vec().into(),
         negotiation: NegotiatedTransportV1 {
             world: WORLD.to_owned(),
             plugin_id: G_PLUG_GUEST_PLUGIN_ID_V1.to_owned(),
@@ -621,18 +621,18 @@ pub fn g_plug_invocation_v1(
 pub fn serve_g_plug_fixture_guest_v1(request: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     decode_worker_request_v1(request)
         .ok()
-        .filter(|request| request.component == G_PLUG_COMPONENT_V1)
-        .and_then(|request| encode_worker_response_v1(&Ok(guest_return(request.call))).ok())
+        .filter(|request| request.component.as_slice() == G_PLUG_COMPONENT_V1)
+        .and_then(|request| encode_worker_response_v1(&Ok(guest_return(&request.call))).ok())
 }
 
-fn guest_return(call: WorkerCallV1) -> WorkerReturnV1 {
+fn guest_return(call: &WorkerCallV1) -> WorkerReturnV1 {
     match call {
         WorkerCallV1::Describe => WorkerReturnV1::Described(report(Ok(descriptor()))),
         WorkerCallV1::Drive(invocation) => {
-            WorkerReturnV1::Produced(report(Ok(drive_output(&invocation))))
+            WorkerReturnV1::Produced(report(Ok(drive_output(invocation))))
         }
         WorkerCallV1::Reduce(invocation) => {
-            WorkerReturnV1::Produced(report(reduce_output(&invocation)))
+            WorkerReturnV1::Produced(report(reduce_output(invocation)))
         }
     }
 }

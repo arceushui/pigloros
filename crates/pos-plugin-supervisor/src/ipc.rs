@@ -34,6 +34,8 @@
 mod contract;
 mod wire;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use pos_crypto::plugin_execution::{DeterministicBudgetV1, PluginCapabilityDescriptorV1};
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, GuestReturnV1,
@@ -98,6 +100,8 @@ pub struct WorkerEnvelopeErrorV1;
 /// The export one worker invokes, with its input.
 ///
 /// `migrate-state` has no call: a V1 host never invokes it.
+/// Every owned `reduce`/`drive` input is erased on drop, including a decoded
+/// input rejected by a later envelope check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerCallV1 {
     /// `describe`.
@@ -108,11 +112,26 @@ pub enum WorkerCallV1 {
     Drive(PluginInvocationV1),
 }
 
+impl Zeroize for WorkerCallV1 {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Describe => {}
+            Self::Reduce(invocation) | Self::Drive(invocation) => invocation.zeroize(),
+        }
+    }
+}
+
+impl Drop for WorkerCallV1 {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// One invocation request from the supervisor to a fresh worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerRequestV1 {
-    /// The verified Component bytes.
-    pub component: Vec<u8>,
+    /// The verified Component bytes, erased when their owned staging is dropped.
+    pub component: Zeroizing<Vec<u8>>,
     /// The supervisor's negotiated record.
     pub negotiation: NegotiatedTransportV1,
     /// The supervisor's wall-time watchdog, in milliseconds.
@@ -194,7 +213,7 @@ pub fn decode_worker_request_v1(bytes: &[u8]) -> Result<WorkerRequestV1, WorkerE
     reader.fixed_array(7)?;
     header(&mut reader, WORKER_REQUEST_MAGIC_V1)?;
     let request = WorkerRequestV1 {
-        component: read_bytes(&mut reader, MAX_WORKER_COMPONENT_BYTES_V1)?,
+        component: read_bytes(&mut reader, MAX_WORKER_COMPONENT_BYTES_V1)?.into(),
         negotiation: read_negotiation(&mut reader)?,
         watchdog_millis: reader.unsigned()?,
         host_inputs: HostInputs {

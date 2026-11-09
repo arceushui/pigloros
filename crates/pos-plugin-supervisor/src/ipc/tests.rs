@@ -21,7 +21,7 @@ fn wide_invocation() -> PluginInvocationV1 {
 
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
     WorkerRequestV1 {
-        component: b"component".to_vec(),
+        component: b"component".to_vec().into(),
         negotiation: negotiated().to_transport(),
         watchdog_millis: 60_000,
         host_inputs: HostInputs {
@@ -50,6 +50,54 @@ fn requests_round_trip_every_call_and_mode() {
     air_gapped.negotiation.required_features = vec!["alpha".to_owned(), "beta".to_owned()];
     air_gapped.negotiation.declared_minors = (3, 300);
     assert_eq!(round_trip_request(&air_gapped).as_ref(), Ok(&air_gapped));
+}
+
+#[test]
+fn private_request_inputs_have_explicit_erasure_after_a_wire_round_trip() {
+    for call in [
+        WorkerCallV1::Describe,
+        WorkerCallV1::Reduce(invocation(b"private observation")),
+        WorkerCallV1::Drive(invocation(b"private observation")),
+    ] {
+        let original = request(call);
+        let mut decoded = ok(round_trip_request(&original));
+        decoded.component.zeroize();
+        decoded.call.zeroize();
+        assert!(decoded.component.is_empty());
+        match &decoded.call {
+            WorkerCallV1::Describe => assert_eq!(original.call, WorkerCallV1::Describe),
+            WorkerCallV1::Reduce(input) | WorkerCallV1::Drive(input) => {
+                assert!(input.observation_bytes.is_empty());
+                assert!(input.prior_state_bytes.is_empty());
+                assert_eq!(input.validate(), Err(Error::InvalidInvocation));
+                assert_ne!(original.call, decoded.call);
+            }
+        }
+        assert_eq!(original.component.as_slice(), b"component");
+    }
+}
+
+#[test]
+fn partial_private_invocations_and_trailing_requests_are_refused() {
+    for call in [
+        WorkerCallV1::Reduce(wide_invocation()),
+        WorkerCallV1::Drive(wide_invocation()),
+    ] {
+        let original = request(call);
+        let encoded = ok(encode_worker_request_v1(&original));
+        for end in 0..encoded.len() {
+            assert_eq!(
+                decode_worker_request_v1(&encoded[..end]),
+                Err(WorkerEnvelopeErrorV1)
+            );
+        }
+        let trailing = [encoded.as_slice(), &[0]].concat();
+        assert_eq!(
+            decode_worker_request_v1(&trailing),
+            Err(WorkerEnvelopeErrorV1)
+        );
+        assert_eq!(decode_worker_request_v1(&encoded).as_ref(), Ok(&original));
+    }
 }
 
 #[test]
@@ -137,7 +185,7 @@ fn the_describe_request_has_its_golden_prefix_and_suffix() {
 #[test]
 fn only_an_oversize_component_stops_the_encoder() {
     let mut largest = request(WorkerCallV1::Describe);
-    largest.component = vec![0; MAX_WORKER_COMPONENT_BYTES_V1];
+    largest.component = vec![0; MAX_WORKER_COMPONENT_BYTES_V1].into();
     assert_eq!(round_trip_request(&largest).as_ref(), Ok(&largest));
     let mut oversized = largest;
     oversized.component.push(0);

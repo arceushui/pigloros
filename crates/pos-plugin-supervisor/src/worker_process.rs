@@ -348,7 +348,7 @@ mod tests {
 
     fn request() -> WorkerRequestV1 {
         WorkerRequestV1 {
-            component: b"component".to_vec(),
+            component: b"component".to_vec().into(),
             negotiation: negotiated().to_transport(),
             watchdog_millis: 1_000,
             host_inputs: HostInputs { simulation_time: 9 },

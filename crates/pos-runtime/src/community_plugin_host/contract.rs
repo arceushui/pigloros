@@ -30,6 +30,7 @@ pub use pos_core::community_lifecycle::{
     TimelinePositionV1,
 };
 use pos_crypto::plugin_execution::is_valid_id_v1;
+use zeroize::Zeroize;
 
 use super::error::CommunityPluginHostErrorV1;
 
@@ -47,6 +48,8 @@ pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
 /// never name the other export. The host verifies every referenced artifact
 /// and digest before it builds one (ADR-061); the engine checks the bounds
 /// WIT cannot express before any guest code runs.
+/// Owners of private copies use [`Zeroize`] or a zeroizing guard before
+/// releasing them; this plain contract value does not erase itself on drop.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginInvocationV1 {
     /// Invocation ID.
@@ -77,6 +80,34 @@ pub struct PluginInvocationV1 {
     pub deterministic_random_domain: [u8; 32],
     /// Provenance root.
     pub provenance_root: [u8; 32],
+}
+
+impl Zeroize for PluginInvocationV1 {
+    fn zeroize(&mut self) {
+        self.invocation_id.zeroize();
+        self.timeline_position.timeline_id.zeroize();
+        self.timeline_position.seq.zeroize();
+        self.timeline_position.tick.zeroize();
+        self.timeline_position.scheduler_position.zeroize();
+        self.output_base_ordinal.zeroize();
+        for artifact in [
+            &mut self.principal_ref,
+            &mut self.authorization_decision,
+            &mut self.observation_snapshot,
+        ] {
+            artifact.schema_id.zeroize();
+            artifact.byte_length.zeroize();
+            artifact.digest.zeroize();
+        }
+        self.observation_bytes.zeroize();
+        self.prior_state_schema.zeroize();
+        self.prior_state_bytes.zeroize();
+        self.execution_profile_digest.zeroize();
+        self.trust_policy_snapshot_digest.zeroize();
+        self.deterministic_budget_id.zeroize();
+        self.deterministic_random_domain.zeroize();
+        self.provenance_root.zeroize();
+    }
 }
 
 impl PluginInvocationV1 {
@@ -322,6 +353,60 @@ mod tests {
         let mut unnamed = invocation();
         unnamed.deterministic_budget_id = "Budget".to_owned();
         assert_eq!(unnamed.validate(), error);
+    }
+
+    #[test]
+    fn erasing_an_owned_invocation_invalidates_every_field_without_changing_its_source() {
+        let mut source = invocation();
+        source.observation_bytes = b"private observation".to_vec();
+        source.prior_state_bytes = b"private State".to_vec();
+        let artifact = ArtifactRefV1 {
+            schema_id: 23,
+            byte_length: 42,
+            digest: [0xa5; 32],
+        };
+        source.principal_ref = artifact;
+        source.authorization_decision = artifact;
+        source.observation_snapshot = artifact;
+        let mut owned = source.clone();
+        owned.zeroize();
+        let empty_artifact = ArtifactRefV1 {
+            schema_id: 0,
+            byte_length: 0,
+            digest: [0; 32],
+        };
+        assert_eq!(
+            owned,
+            PluginInvocationV1 {
+                invocation_id: [0; 16],
+                timeline_position: TimelinePositionV1 {
+                    timeline_id: [0; 16],
+                    seq: 0,
+                    tick: 0,
+                    scheduler_position: 0,
+                },
+                output_base_ordinal: 0,
+                principal_ref: empty_artifact,
+                authorization_decision: empty_artifact,
+                observation_snapshot: empty_artifact,
+                observation_bytes: Vec::new(),
+                prior_state_schema: [0; 32],
+                prior_state_bytes: Vec::new(),
+                execution_profile_digest: [0; 32],
+                trust_policy_snapshot_digest: [0; 32],
+                deterministic_budget_id: String::new(),
+                deterministic_random_domain: [0; 32],
+                provenance_root: [0; 32],
+            }
+        );
+        assert_eq!(
+            owned.validate(),
+            Err(CommunityPluginHostErrorV1::InvalidInvocation)
+        );
+        assert_eq!(source.observation_bytes, b"private observation");
+        assert_eq!(source.prior_state_bytes, b"private State");
+        assert_eq!(source.principal_ref, artifact);
+        assert_eq!(source.validate(), Ok(()));
     }
 
     fn output() -> PluginOutputV1 {
