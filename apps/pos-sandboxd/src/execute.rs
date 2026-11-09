@@ -41,7 +41,6 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zbus::OwnedFd;
 
-use crate::local_network::admitted_endpoints;
 use crate::{
     ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
     ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
@@ -642,6 +641,27 @@ impl<K: UnitKiller> Drop for SubmissionGuard<K> {
             });
         }
     }
+}
+
+/// The distinct endpoints `admission` plans exchanges with, in order.
+///
+/// LPS1 decoding admits only four- and sixteen-byte addresses, so every
+/// admitted capability names one.
+fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<std::net::SocketAddr> {
+    admission
+        .exchanges()
+        .filter_map(|(_, capability)| {
+            <[u8; 4]>::try_from(capability.address.as_slice())
+                .map(std::net::IpAddr::from)
+                .or_else(|_| {
+                    <[u8; 16]>::try_from(capability.address.as_slice()).map(std::net::IpAddr::from)
+                })
+                .ok()
+                .map(|address| std::net::SocketAddr::new(address, capability.destination_port))
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn prepare<B, N>(

@@ -1613,3 +1613,33 @@ fn the_failure_names_its_cause_and_the_unit_state() {
     );
     assert!(std::error::Error::source(&failure).is_some());
 }
+
+#[test]
+fn a_namespace_reaches_each_distinct_admitted_endpoint_once() -> TestResult {
+    let endpoint = |address: Vec<u8>, destination_port| NetworkCapability {
+        address,
+        destination_port,
+        ..capability(SocketAddr::from(([127, 0, 0, 1], 1)))
+    };
+    let ipv6 = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let admission = crate::test_fixtures::admission(
+        ATTEMPT,
+        grant_authority(),
+        [4, 5, 6],
+        vec![
+            (plan()?, endpoint(ipv6.to_vec(), 8443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+        ],
+    );
+    assert_eq!(
+        admitted_endpoints(&admission),
+        [
+            SocketAddr::from(([192, 0, 2, 10], 443)),
+            SocketAddr::from((ipv6, 8443)),
+        ]
+    );
+    Ok(())
+}
