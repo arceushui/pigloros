@@ -101,7 +101,7 @@ fn provenance_allows_metadata_without_fetching_and_requires_one_exact_subject() 
     })?;
     assert_eq!(result(&fixture)?, Ok(()));
     fixture.provenance(|value| {
-        value["predicate"]["buildDefinition"]["resolvedDependencies"] = json!(null)
+        value["predicate"]["buildDefinition"]["resolvedDependencies"] = json!(null);
     })?;
     assert_eq!(result(&fixture)?, Ok(()));
     Ok(())
@@ -180,7 +180,7 @@ fn spdx_checks_direct_files_snippets_and_declared_external_metadata() -> TestRes
 fn spdx_refuses_duplicate_external_documents_and_extracted_licences() -> TestResult {
     let mut fixture = references_fixture()?;
     fixture.sbom(|value| {
-        value["externalDocumentRefs"] = json!([external_document(), external_document()])
+        value["externalDocumentRefs"] = json!([external_document(), external_document()]);
     })?;
     assert_eq!(
         result(&fixture)?,
