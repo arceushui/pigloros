@@ -91,21 +91,21 @@ pub trait NetlinkTransport {
 pub struct NetlinkSocket(OwnedFd);
 
 impl NetlinkSocket {
-    /// Open a socket of `protocol`, such as [`netlink::ROUTE`] or
-    /// [`netlink::NETFILTER`], in the calling thread's network namespace,
+    /// Open a socket of `protocol`, such as [`ROUTE`] or [`NETFILTER`], in
+    /// the calling thread's network namespace,
     /// whose receives fail after `receive_timeout`.
     ///
     /// # Errors
     /// Fails if the socket cannot be created, bound or given its timeout.
     pub fn open(
-        protocol: rustix::net::Protocol,
+        protocol: Option<rustix::net::Protocol>,
         receive_timeout: Duration,
     ) -> Result<Self, NetlinkError> {
         let socket = rustix::net::socket_with(
             AddressFamily::NETLINK,
             SocketType::RAW,
             SocketFlags::CLOEXEC,
-            Some(protocol),
+            protocol,
         )?;
         rustix::net::bind(&socket, &SocketAddrNetlink::new(0, 0))
             .and_then(|()| set_socket_timeout(&socket, Timeout::Recv, Some(receive_timeout)))
@@ -182,7 +182,7 @@ impl NetlinkSession<NetlinkSocket> {
     ///
     /// # Errors
     /// Fails if the socket cannot be opened.
-    pub fn open(protocol: rustix::net::Protocol) -> Result<Self, NetlinkError> {
+    pub fn open(protocol: Option<rustix::net::Protocol>) -> Result<Self, NetlinkError> {
         NetlinkSocket::open(protocol, RECEIVE_TIMEOUT).map(Self::new)
     }
 }
@@ -402,10 +402,11 @@ fn observed_link(message: LinkMessage) -> Result<ObservedLink, NetlinkError> {
     .ok_or(NetlinkError::Unrepresentable)
 }
 
-/// The route netlink protocol, for callers that open sessions.
-pub const ROUTE: rustix::net::Protocol = netlink::ROUTE;
+/// The route netlink protocol, for callers that open sessions:
+/// `NETLINK_ROUTE` is protocol 0, the default.
+pub const ROUTE: Option<rustix::net::Protocol> = None;
 /// The netfilter netlink protocol, for callers that open sessions.
-pub const NETFILTER: rustix::net::Protocol = netlink::NETFILTER;
+pub const NETFILTER: Option<rustix::net::Protocol> = Some(netlink::NETFILTER);
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
