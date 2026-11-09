@@ -40,7 +40,7 @@ mod unit_teardown;
 #[cfg(target_os = "linux")]
 pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 #[cfg(all(test, target_os = "linux"))]
-pub(super) use unit_teardown::{TeardownFixture, TeardownReset, TeardownStop};
+pub use unit_teardown::{TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop};
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
