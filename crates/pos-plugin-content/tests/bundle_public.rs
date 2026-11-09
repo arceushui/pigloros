@@ -31,6 +31,15 @@ mod cases {
     }
 
     #[test]
+    fn malformed_pmf1_is_refused_before_any_content_claim() -> TestResult {
+        let mut fixture = Fixture::new();
+        fixture.provenance = b"not JSON".to_vec();
+        let bundle = fixture.bundle_with_invalid_manifest()?;
+        assert!(matches!(validate(&bundle), Err(Error::Manifest(_))));
+        Ok(())
+    }
+
+    #[test]
     fn reuses_wit_checks_before_any_json_artifact() -> TestResult {
         let mut fixture = Fixture::new();
         fixture.wit = b"not tar".to_vec();

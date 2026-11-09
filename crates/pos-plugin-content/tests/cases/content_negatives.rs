@@ -61,6 +61,16 @@ fn checksum_wit_header(archive: &mut [u8]) {
 
 #[test]
 fn provenance_required_fields_fail_with_their_closed_artifact_error() -> TestResult {
+    for root in [json!(null), json!([]), json!(true)] {
+        let mut fixture = Fixture::new();
+        fixture.provenance = bytes(&root);
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::Malformed {
+                artifact: Artifact::Provenance
+            })
+        );
+    }
     for (pointer, replacement) in [
         ("/_type", json!(null)),
         ("/predicateType", json!(false)),
@@ -117,6 +127,23 @@ fn provenance_required_fields_fail_with_their_closed_artifact_error() -> TestRes
             artifact: Artifact::Provenance
         })
     );
+    Ok(())
+}
+
+#[test]
+fn invalid_schema_uri_references_are_refused_without_retrieval() -> TestResult {
+    for keyword in ["$id", "$ref"] {
+        let mut schema = serde_json::Map::new();
+        schema.insert(keyword.to_owned(), json!("https://example.invalid/%zz"));
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(&Value::Object(schema))];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 }
+            })
+        );
+    }
     Ok(())
 }
 

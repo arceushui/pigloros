@@ -116,6 +116,19 @@ impl Fixture {
         .map_err(Into::into)
     }
 
+    pub(super) fn bundle_with_invalid_manifest(&self) -> TestResult<VerifiedReleaseBundleV1> {
+        Ok(build_oci_closure_v1(&ReleaseClosureInputV1 {
+            pmf1: b"not a PMF1",
+            component: COMPONENT,
+            wit: &self.wit,
+            schemas: self.schemas.iter().map(Vec::as_slice).collect(),
+            provenance: &self.provenance,
+            sbom: &self.sbom,
+            licences: self.licences.iter().map(Vec::as_slice).collect(),
+            migration_fixtures: Vec::new(),
+        })?)
+    }
+
     pub(super) fn provenance(&mut self, change: impl FnOnce(&mut Value)) -> TestResult {
         let mut value = serde_json::from_slice(&self.provenance)?;
         change(&mut value);
