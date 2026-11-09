@@ -33,6 +33,7 @@ mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
+pub(super) use observe::recorded_generations_absent;
 pub use release::ReleasedAttemptRoot;
 
 use std::{
@@ -221,21 +222,6 @@ fn recheck<K: AttachmentKernel>(
         })
         .and_then(|()| authority().map_err(|_| ImageActivationError::EvidenceMismatch))
         .map(|()| root.expected.root_directory.clone())
-}
-
-/// Whether the recorded mapper and loop generations of a previous runtime's
-/// root are both absent now, as fresh sysfs observations in this boot.
-///
-/// Restart reconciliation uses this only for a root whose directory is already
-/// unmounted. No block-device descriptor is opened.
-///
-/// # Errors
-/// [`ImageActivationError::ResourceAbsenceUnverified`] for a contradictory
-/// generation stamp, an unreadable device index or a zero sequence.
-pub(super) async fn recorded_generations_absent(
-    generations: [((u32, u32), u64); 2],
-) -> Result<bool, ImageActivationError> {
-    generations_absent(&HostKernel::system(), generations).await
 }
 
 async fn generations_absent(
