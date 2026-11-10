@@ -403,8 +403,10 @@ impl NetlinkNamespaceControl {
     }
 }
 
-/// Run the blocking `sweep` on Tokio's blocking pool; a sweep that panics
-/// fails as [`NetlinkError::Panicked`].
+/// Run the blocking `sweep` on Tokio's blocking pool. A sweep that panics,
+/// or whose task is cancelled because the runtime shuts down, fails as
+/// [`NetlinkError::Panicked`]: the sweep is never reported done unless it
+/// ran to completion.
 async fn on_blocking_pool(
     sweep: impl FnOnce() -> Result<(), OrphanSweepError> + Send + 'static,
 ) -> Result<(), OrphanSweepError> {
