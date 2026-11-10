@@ -17,6 +17,7 @@ mod prepared;
 mod profile;
 mod progress;
 mod protected_object;
+mod quarantine;
 mod quarantine_control;
 mod reservation;
 mod revision;
@@ -58,7 +59,16 @@ pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
 };
-pub use quarantine_control::ArtifactRefV1;
+pub use quarantine::{
+    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
+    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    CommunityQuarantineRevisionV1,
+};
+pub use quarantine_control::{
+    ArtifactRefV1, CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
+    CommunityQuarantineControlV1, CommunityQuarantineDispositionV1,
+    CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
+};
 pub use reservation::{
     CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
     CommunityReservationV1,
