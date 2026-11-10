@@ -4451,6 +4451,9 @@ fn native_outstanding_controller_callback_survives_abandonment() -> TestResult {
         .ok_or("late-controller factory still shared")?
         .stop()?;
     drop(fixture.loopback);
+    // The retired fixture still owns the records directory handle; release it
+    // before the later fresh ceremony and final root removal on Windows.
+    drop(fixture.store);
     check_final_process_failures(None)?;
     if let Some(error) = failure {
         return Err(error);
@@ -4476,4 +4479,5 @@ fn native_outstanding_controller_callback_survives_abandonment() -> TestResult {
     drop(creation_guard);
     fresh_success_after_retirement(Path::new(&runtime), &root.0, 0xd3)?;
     root.remove()
+        .map_err(|error| format!("late-controller fixture root removal: {error}").into())
 }
