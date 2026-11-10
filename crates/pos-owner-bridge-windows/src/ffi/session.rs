@@ -117,6 +117,33 @@ impl Session {
 
 impl NativeOperations for Session {
     #[cfg(test)]
+    fn retain_exit_browser(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
+        if !self.preload_fault_owners_retained()
+            || self.window.is_none()
+            || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+        {
+            return Err(());
+        }
+        let environment = self.environment_ref().map_err(|_| ())?;
+        self.denials.expect_browser(authority.browser().browser_pid);
+        super::process_fault::retain_exit_browser(&environment.raw, authority)
+    }
+
+    #[cfg(test)]
+    fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
+        if !self.exit_fault_owners_retained() {
+            return Err(());
+        }
+        super::process_fault::observe_retained_exit_membership(
+            &self.environment_ref().map_err(|_| ())?.raw,
+            handle,
+        )
+    }
+
+    #[cfg(test)]
     fn inject_process_fault(
         &self,
         authority: &crate::FaultAuthority,
@@ -158,16 +185,7 @@ impl NativeOperations for Session {
                     return Err(());
                 }
             }
-            crate::ProcessFaultLifecycle::AwaitingExitSuccess => {
-                if authority.target() != crate::ProcessFaultTarget::Browser
-                    || !self.exit_fault_owners_retained()
-                    || super::process_fault::browser_candidate(&environment.raw)?
-                        != authority.browser()
-                {
-                    return Err(());
-                }
-                self.denials.expect_browser(authority.browser().browser_pid);
-            }
+            crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
             crate::ProcessFaultLifecycle::PendingOpening => {
                 if authority.target() != crate::ProcessFaultTarget::Browser
                     || !self.pending_opening_owners_retained()
@@ -232,16 +250,9 @@ impl NativeOperations for Session {
     }
 
     #[cfg(test)]
-    fn exit_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
-        if !self.exit_fault_owners_retained() {
-            return Err(());
-        }
-        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
-    }
-
-    #[cfg(test)]
     fn exit_fault_owners_retained(&self) -> bool {
         self.check().is_ok()
+            && self.window.is_some()
             && self
                 .environment
                 .as_ref()

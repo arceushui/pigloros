@@ -1442,6 +1442,9 @@ def test_owned_process_fault_authority() -> None:
         ("self.surface.pending_opening_completion().is_none()", "true"),
         ("controller_held_before_exit(&crate::Native::callback_order())", "true"),
         ("Instant::now() >= self.deadline", "false"),
+        (".arm_exit_capture(", ".arm_exit_capture_disabled("),
+        ("self.observe_exit_control(deadline)?;", "self.evidence_complete = true;"),
+        ("!self.surface.matching_exit_event()", "false"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing ordered-evidence mutation target: {old}")
@@ -1767,7 +1770,6 @@ def test_recordless_and_release_authority() -> None:
         ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
         ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),
         ("src/adapter/surface/mod.rs", "inject_view_fault", "std::time::Instant::now() < deadline", "true"),
-        ("src/adapter/surface/mod.rs", "exit_fault_state", "self.native.exit_browser_candidate()? != browser", "self.native.exit_browser_candidate()? == browser"),
     )
     for relative, name, old, new in cases:
         source = (ROOT / SHIM / relative).read_text()
@@ -1857,6 +1859,7 @@ def test_private_fault_capability_construction() -> None:
         if not errors(changed):
             raise SystemExit(f"product capability was accepted: {marker}")
     for statement, expected in (
+        ("type Alias = crate::RetainedExitHandle;", "retained-exit capability belongs only in reviewed paths"),
         ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
         ("fn f() { let _seal = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
         ("fn f() { let _authority = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
@@ -1869,6 +1872,12 @@ def test_private_fault_capability_construction() -> None:
         changed["src/adapter/other.rs"] = CFG + statement
         if f"{SHIM}/src/adapter/other.rs: {expected}" not in errors(changed):
             raise SystemExit(f"capability construction bypass was accepted: {statement}")
+
+    resurrected = dict(sources)
+    resurrected[surface] += "\nfn inject_exit_fault() { let _ = crate::FaultAuthority {}; }\n"
+    expected = f"{SHIM}/{surface}: fault capability references belong only in reviewed authority paths"
+    if expected not in errors(resurrected):
+        raise SystemExit("removed exit authority could be resurrected by its old name")
 
     for statement in (
         "type Alias = crate::FaultAuthority; fn forge() -> Alias { Alias { browser, target, valid, trace } }",
@@ -2029,6 +2038,10 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !refused || !wiped || !native_wiped', 'if false'),
         (f"{SHIM}/src/adapter/surface/diagnostics.rs", 'if !keeper_held.get()', 'if false'),
         (f"{SHIM}/src/adapter/surface/exit_boundary.rs", '!self.events.matching_exit_at_boundary(browser.browser_pid)', 'false'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", 'capture.consumed = true;', 'capture.consumed = false;'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", 'self.native.retained_exit_membership(handle.as_ref())?;', ''),
+        (f"{SHIM}/src/ffi/process_fault.rs", 'entries.is_empty() || select(entries, COREWEBVIEW2_PROCESS_KIND_BROWSER)? == expected', 'true'),
+        (f"{SHIM}/src/ffi/process_fault.rs", '|| self.observe()?.is_some()', '|| false'),
         (f"{SHIM}/src/adapter/events.rs", '!self.exit_boundary_invalid.get()', 'true'),
         (f"{SHIM}/src/ffi/events/control_fixture.rs", 'MAX_OBSERVATIONS: usize = 2', 'MAX_OBSERVATIONS: usize = 1'),
         (f"{SHIM}/src/ffi/events/control_fixture.rs", 'last.overflowed = true;', 'last.overflowed = false;'),

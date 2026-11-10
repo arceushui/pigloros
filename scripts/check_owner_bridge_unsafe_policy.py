@@ -914,7 +914,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "afd2d9d7468b054935c32ca6af8daa14205ab8098491dc73a378156db925e579"
+    return hashlib.sha256(normalized).hexdigest() == "d9db6bd14582980c4645067eeccde4efd2f91c003d0fe0e646340faf07dcd46c"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1125,7 +1125,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "f17c761d33ea18f29f21596be414808d6d61f60bfd2edf668ad2ff6879184747":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "be11e5fad42eab9104a4dc467f2574a4fd5180f2fadf3b4a56f1eb3080218bbb":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
@@ -1173,24 +1173,20 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ('src/adapter/surface/mod.rs', 'awaiting_load_fault_state', 'fafcc4256742a7180c886b0166eab7eed95f994f5407cc0c763c72adbdc5d6dc'),
         ('src/adapter/surface/mod.rs', 'awaiting_load_fault_owners_retained', 'fe4c7bf1d40e90f372500ce3700d5955844d2ca432167590d31feee3df60bf66'),
         ('src/adapter/surface/mod.rs', 'inject_awaiting_load_fault', '45efb89f8c5c2b93a9d2c4a27f5d97e597334c65a6fe9d2356e6913bf89278c8'),
-        ("src/ffi/session.rs", "exit_browser_candidate", "7532fd44a7c1edaaf88c1a256c8c544b198d1e7572d774e01a9d4f4ab3fbbe3f"),
-        ("src/ffi/session.rs", "exit_fault_owners_retained", "ae49036aef686da2490d2183714887582f362bf7deebf771f7ea3c1f241dd149"),
+        ("src/ffi/session.rs", "exit_fault_owners_retained", "21eb731d926c21f1098162ac9b9b3a0f9eef03ed0a5a923c915b3debb885f4d1"),
         ("src/adapter/surface/mod.rs", "releasing_fault_state", "13227b1d97e85f6b4e67a55fbddd45ed434d2a2fdeccfc95cb00b757e23e4010"),
         ("src/adapter/surface/mod.rs", "inject_releasing_fault", "b595eec3a4611cfd5adc730043826329a78216878a1eff8d5c4539ae1fbc7abd"),
         ("src/adapter/surface/mod.rs", "inject_view_fault", "46e4f6c4a8743a011753cee29d8b18067e16f5c179946c347fd13c3dabdd1f47"),
         ("src/adapter/surface/mod.rs", "exit_fault_phase_reached", "3507e06bb9ab7006e1d3303184163c8f5466f34b560b8165f50f4ec8cf23d0dc"),
-        ("src/adapter/surface/mod.rs", "exit_fault_state", "94397e816db9d8b4ca3572852bf4fffa9961e301f5e68f676c6d93e2ba9dd332"),
-        ("src/adapter/surface/mod.rs", "inject_exit_fault", "73f36366a6281ff5cfaaaf4e988c7e55b08717c888dbb76dbf181499b673037e"),
         ("src/adapter/surface/mod.rs", "exit_fault_owners_retained", "0a3dbd358ff75e0d028d4f1e89f4867ef569cbbf074b8db0cdc9997306adaaad"),
         ("src/lib.rs", "recordless_controller_completion", "75e1e78404b4635cb121edd0d07834a5ffba8e7d05d018bc6b77d6c0192dcc2e"),
         ("src/lib.rs", "recordless_browser_candidate", "1ef7801db227ee0844983f1b22157a12d799d0d664c2e2d790120450a4039227"),
         ("src/lib.rs", "recordless_fault_owners_retained", "bc729d07de51de2ede38fdb6ffe64f9fb60168b194d33797c6eeb8289c564e06"),
-        ("src/lib.rs", "exit_browser_candidate", "d9da5090b88e1d0761ed8fbdaa83e3094e595a1a8db3bf61faad2610c2727c3b"),
         ("src/lib.rs", "exit_fault_owners_retained", "f7329128e67ce78852f1473ec3bf99ba958bb7a47b918bb4b36de536b5f2894a"),
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "86049a410d996ed475d1bd32a8b3797e8b69ad909a9e0b94031e5461c504f97f"),
+        ("src/ffi/session.rs", "inject_process_fault", "c9b5d8fe64468e80ddff0c69064aa0247b00baf2c62d0bd31b7c655111e52032"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1290,7 +1286,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     if (hashlib.sha256(re.sub(r"\s+", "", enum_body).encode()).hexdigest() != "9c39e796aa826523970cae61c061a219c7b0fb4a3f3ded23b586954bed10d395" or not surface_item or
             "cfg(test)" not in _outer_attributes_before(surface_text, surface_item[1], enum_start)):
         found.append(f"{SHIM}/src/adapter/surface/mod.rs: pre-environment retention type must be reviewed and test-only")
-    for relative, name, digest in (('src/adapter/surface/mod.rs', 'open', 'a66114d4bb87c4ee914d75cbb116ba90d6851d0442eaef60383fa2d53cb4a158'), ('src/ffi/session.rs', 'window', 'b25f4191690ca7a0aed740988fa01e94b213cc219a584c9111056ce155d1b79f'), ('src/ffi/window.rs', 'snapshot', 'a7ee6e1a5515f4cf82fd01e16a70cc5cf818c6fdf5016f4afcf3e554fd415727'),):
+    for relative, name, digest in (('src/adapter/surface/mod.rs', 'open', 'bc942d2b6005fe1aca77e76d3841df05e48bd99373b9481e782097cb84747439'), ('src/ffi/session.rs', 'window', 'b25f4191690ca7a0aed740988fa01e94b213cc219a584c9111056ce155d1b79f'), ('src/ffi/window.rs', 'snapshot', 'a7ee6e1a5515f4cf82fd01e16a70cc5cf818c6fdf5016f4afcf3e554fd415727'),):
         item = scans.get(relative)
         source = item[0].code if item else ""
         matches = list(re.finditer(rf"(?<!\w)fn\s+{name}\s*\(", source))
@@ -1311,7 +1307,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "b8fa0082216ce5411867c60a33fd1cfc26cbd76e1ae562245133788708d21a33":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "cb11adbafd4d2dfcc3edef944edf920cb4d2036462ef8e074b3bb7ff0c4eafb3":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1326,19 +1322,29 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
             found.append(f"{SHIM}/src/lib.rs: {marker} requires its private cfg(test) declaration")
     for relative, (scanned, _) in scans.items():
         source = scanned.code
+        retained_paths = {
+            "src/lib.rs", "src/ffi/process_fault.rs", "src/ffi/session.rs",
+            "src/adapter/surface/exit_boundary.rs", "src/adapter/surface/tests/native.rs",
+        }
+        if relative not in retained_paths and re.search(r"(?<!\w)RetainedExitHandle(?!\w)", source):
+            found.append(f"{SHIM}/{relative}: retained-exit capability belongs only in reviewed paths")
+        if re.search(r"(?<!\w)RetainedExitHandle\s+as\s", source):
+            found.append(f"{SHIM}/{relative}: retained-exit capability may not be aliased")
         # A named struct can also be constructed through a type alias. Confine
         # every reference to these types to already hash-bound source regions,
         # so imports, aliases, generic aliases and extra implementations cannot
         # introduce an unreviewed route around the literal constructor checks.
         regions = [(begin, end)] if relative == "src/lib.rs" else []
         reviewed_functions = {
-            "src/lib.rs": ("inject_process_fault",),
-            "src/ffi/session.rs": ("inject_process_fault",),
+            "src/lib.rs": ("inject_process_fault", "retain_exit_browser"),
+            "src/ffi/session.rs": ("inject_process_fault", "retain_exit_browser"),
+            "src/adapter/surface/tests/native.rs": ("retain_exit_browser", "terminate"),
+            "src/adapter/surface/exit_boundary.rs": ("acquire_exit_handle", "consume_exit_capture"),
             "src/adapter/surface/diagnostics.rs": ("inject_quarantined_fault",),
             "src/adapter/surface/tests.rs": ("quarantined_fault_refuses_missing_state_and_unheld_keeper",),
             "src/adapter/surface/mod.rs": (
                 "inject_posted_fault", "inject_recordless_browser", "inject_releasing_fault",
-                "inject_view_fault", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault", "inject_posted_consuming_fault", "inject_before_record_fault",
+                "inject_view_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault", "inject_posted_consuming_fault", "inject_before_record_fault",
             ),
         }.get(relative, ())
         for reviewed_function in reviewed_functions:
@@ -1373,14 +1379,18 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
         for match in re.finditer(r"(?<!\w)FaultAuthority\s*\{", source):
             root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
             surface_construction = relative == "src/adapter/surface/mod.rs" and any(
-                name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser", "inject_before_record_fault") and start < match.start() < stop
+                name in ("inject_view_fault", "inject_recordless_browser", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser", "inject_before_record_fault") and start < match.start() < stop
+                for name, start, stop in _function_spans(source)
+            )
+            exit_construction = relative == "src/adapter/surface/exit_boundary.rs" and any(
+                name in ("acquire_exit_handle", "consume_exit_capture") and start < match.start() < stop
                 for name, start, stop in _function_spans(source)
             )
             quarantined_construction = relative == "src/adapter/surface/diagnostics.rs" and any(
                 name == "inject_quarantined_fault" and start < match.start() < stop
                 for name, start, stop in _function_spans(source)
             )
-            if not root_declaration and not surface_construction and not quarantined_construction:
+            if not root_declaration and not surface_construction and not quarantined_construction and not exit_construction:
                 found.append(f"{SHIM}/{relative}: FaultAuthority construction belongs only in the validated Surface path")
 
 
@@ -1501,7 +1511,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "38065d8c2cc80804fcc03f5f55bea7eceb2ea6ecf47eb1b1a233b6dfea49f77b",
+        lib: "6abf1deb0f34220cab7c9cce37398b4b2cae0466a5daedd50c0414bd64e6b8a6",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
         prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
@@ -1551,21 +1561,22 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': 'be3bea164d3566e42edf9a4de5878e45eadb0056f670f7ffac133347cb5f81d6',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '325e26461e331f804c810140858791205246c09c118995e537f1d129340acfe5',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': 'b602b19fcffe9dd47c694737603ac5de0fe7f24370f402ac3c215694d75c0a31',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '2fd540f86b5bcf37a49f82c5b47b0013983b4a611b1f672a00bf506e1b208afc',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': 'e73b98d2fa4a1a752f2bb570786f8e70c04bcdc4a728b2d68fca40ce77ded702',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '9a2a7b60947a74fd87ed51847d2626db754bd1f7879aa39f4a5f67d3a0c9b8cf',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'a87fcd13d875548127097aa8e9869757d3fb9c7d3bc925df1a9fef293b545cdc',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '64d74f81a3f4da8d44f24d5aabe56604a98bbd53152cb8dfd7a3880656ada139',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '5c1c5089376e14d9d5567ef933c85595f406454559bc81476e832aad64f00789',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '1870eacfe734360e1fcaf3e5f330989db655083c5e01dc97990e0312ba41cb2f',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'b0df0dc97551baf37201329bae7362d33dc5e130a8d53f54fd9a65e57c5d4c81',
-    'crates/pos-owner-bridge-windows/src/lib.rs': '38065d8c2cc80804fcc03f5f55bea7eceb2ea6ecf47eb1b1a233b6dfea49f77b',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'ace2de26aa2f33320ced974c0016fc1a5ac1aa9b5678b05c4f7b60285daf1774',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '6abf1deb0f34220cab7c9cce37398b4b2cae0466a5daedd50c0414bd64e6b8a6',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '8e826240756a79be6a791869846edf305e5be147544a6c93ede9bbbe0fbb718b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',

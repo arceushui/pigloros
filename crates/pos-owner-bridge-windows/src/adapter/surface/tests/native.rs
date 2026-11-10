@@ -43,6 +43,7 @@ pub(in crate::adapter) struct Factory {
     pub(super) dpi: Cell<u32>,
     pub(super) window_exists: Cell<bool>,
     pub(super) close_requested: Cell<bool>,
+    pub(super) exit_code: Cell<Option<u32>>,
     pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
 }
@@ -67,6 +68,7 @@ impl Factory {
             dpi: Cell::new(96),
             window_exists: Cell::new(true),
             close_requested: Cell::new(false),
+            exit_code: Cell::new(None),
             client: Cell::new(ClientBounds {
                 left: 0,
                 top: 0,
@@ -115,6 +117,44 @@ struct Session {
     controller: bool,
 }
 
+struct ExitHandle {
+    factory: Rc<Factory>,
+    identity: pos_owner_bridge::ProcessIdentity,
+}
+
+impl crate::ProcessFaultHandle for ExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.identity
+    }
+    fn exit_code(&self) -> Result<Option<u32>, ()> {
+        Ok(self.factory.exit_code.get())
+    }
+}
+
+impl crate::RetainedExitHandle for ExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.identity
+    }
+    fn observe(&self) -> Result<Option<u32>, ()> {
+        if self.factory.failure.get() == Some("exit_observation") {
+            Err(())
+        } else {
+            Ok(self.factory.exit_code.get())
+        }
+    }
+    fn terminate(&mut self, authority: &crate::FaultAuthority) -> Result<(), ()> {
+        if !authority.valid() || self.factory.exit_code.get().is_some() {
+            return Err(());
+        }
+        self.factory.calls.borrow_mut().push("terminate_exit");
+        self.factory.exit_code.set(Some(0x535));
+        Ok(())
+    }
+    fn into_fault(self: Box<Self>) -> Box<dyn crate::ProcessFaultHandle> {
+        self
+    }
+}
+
 impl Session {
     fn call(&self, name: &'static str) {
         self.factory.calls.borrow_mut().push(name);
@@ -133,6 +173,33 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
+        if self.controller
+            || self.factory.failure.get() == Some("exit_membership")
+            || handle.identity().browser_pid != 42
+        {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn retain_exit_browser(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
+        if !self.controller
+            || !authority.valid()
+            || self.factory.failure.get() == Some("retain_exit")
+            || self.factory.exit_code.get().is_some()
+        {
+            return Err(());
+        }
+        Ok(Box::new(ExitHandle {
+            factory: Rc::clone(&self.factory),
+            identity: authority.browser(),
+        }))
+    }
     fn exit_fault_owners_retained(&self) -> bool {
         self.factory.sink.borrow().is_some()
             && !self.controller
@@ -331,6 +398,7 @@ impl NativeOperations for Session {
     fn close_controller(&mut self) -> NativeResult<()> {
         self.effect("close_controller")?;
         self.controller = false;
+        self.factory.exit_code.set(Some(0));
         Ok(())
     }
     fn unsubscribe_exit(&mut self) -> NativeResult<()> {

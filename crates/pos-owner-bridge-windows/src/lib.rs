@@ -610,6 +610,14 @@ pub(crate) trait ProcessFaultHandle {
 }
 
 #[cfg(test)]
+trait RetainedExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity;
+    fn observe(&self) -> Result<Option<u32>, ()>;
+    fn terminate(&mut self, authority: &FaultAuthority) -> Result<(), ()>;
+    fn into_fault(self: Box<Self>) -> Box<dyn ProcessFaultHandle>;
+}
+
+#[cfg(test)]
 type FaultTrace = Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>;
 
 /// A one-use test capability constructed only by the sealed fault fixture.
@@ -673,6 +681,18 @@ impl FaultAuthority {
 /// buffer offset, or caller-provided COM callback crosses this interface.
 pub(crate) trait NativeOperations {
     #[cfg(test)]
+    fn retain_exit_browser(
+        &self,
+        _authority: &FaultAuthority,
+    ) -> Result<Box<dyn RetainedExitHandle>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn retained_exit_membership(&self, _handle: &dyn RetainedExitHandle) -> Result<(), ()> {
+        Err(())
+    }
+    #[cfg(test)]
     fn inject_process_fault(
         &self,
         _authority: &FaultAuthority,
@@ -715,11 +735,6 @@ pub(crate) trait NativeOperations {
     #[cfg(test)]
     fn preload_fault_owners_retained(&self) -> bool {
         false
-    }
-
-    #[cfg(test)]
-    fn exit_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
-        Err(())
     }
 
     #[cfg(test)]

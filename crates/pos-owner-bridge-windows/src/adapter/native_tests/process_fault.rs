@@ -362,8 +362,14 @@ fn run() -> TestResult {
     }
     let control = run_success_exit(Path::new(&runtime), &root.0, 0x3b, false)?;
     let fault = run_success_exit(Path::new(&runtime), &root.0, 0x3c, true)?;
+    let state = |boundary| match boundary {
+        ExitBoundary::ActiveStatus(state)
+        | ExitBoundary::ObjectExitedAwaitingSdk(state)
+        | ExitBoundary::AlreadyExited(state) => state,
+    };
     assert_eq!(
-        control, fault,
+        state(control),
+        state(fault),
         "exit control and fault reached different states"
     );
     let control = run_awaiting_load(Path::new(&runtime), &root.0, 0x3d, false)?;
@@ -699,21 +705,41 @@ impl Fixture {
         target: ProcessFaultTarget,
         first: ProcessFaultMark,
     ) -> TestResult {
+        self.observe_fault_until(target, first, self.deadline)
+    }
+
+    fn observe_fault_until(
+        &mut self,
+        target: ProcessFaultTarget,
+        first: ProcessFaultMark,
+        deadline: Instant,
+    ) -> TestResult {
         // Progress the owning STA until its actual event; never wait on a process
         // handle or infer an exit from a PID. Query the retained handle once when
         // that event arrives; an indeterminate result fails this case.
         loop {
+            if Instant::now() >= deadline {
+                return Err("native fault event timed out".into());
+            }
             if let Some(event) = self
                 .surface
                 .posted_fault_event(target)
                 .map_err(|()| "unexpected native fault event")?
             {
+                if matches!(first, ProcessFaultMark::ReachedExit(_))
+                    && !self.surface.matching_exit_event()
+                {
+                    return Err("exit event was not the unique matching callback".into());
+                }
                 let held = self.handle.as_ref().ok_or("fault handle disappeared")?;
                 let identity = held.identity();
                 let code = held
                     .exit_code()
                     .map_err(|()| "exit query failed")?
                     .ok_or("exit still pending at native event")?;
+                if Instant::now() >= deadline {
+                    return Err("native fault event timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -734,9 +760,6 @@ impl Fixture {
                 }
                 self.evidence_complete = true;
                 return Ok(());
-            }
-            if Instant::now() >= self.deadline {
-                return Err("native fault event timed out".into());
             }
             readiness::pump(&self.surface)?;
         }
@@ -1386,6 +1409,18 @@ impl Fixture {
             // The transition to AwaitingExit occurs inside this driver step;
             // its start is a conservative lower bound for the real deadline.
             let step_started = Instant::now();
+            let deadline = self
+                .deadline
+                .min(step_started + pos_owner_bridge::ceremony::timing::EXIT_WINDOW);
+            if self.exit_reached.is_none() && has_synthetic_success_prf(driver) {
+                self.surface
+                    .arm_exit_capture(
+                        CeremonyId::from_bytes([self.number; 16]),
+                        Rc::clone(&self.trace),
+                        deadline,
+                    )
+                    .map_err(|()| "exit capture could not be armed")?;
+            }
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -1396,9 +1431,6 @@ impl Fixture {
                 && has_synthetic_success_prf(driver)
                 && self.surface.exit_fault_phase_reached()
             {
-                let deadline = self
-                    .deadline
-                    .min(step_started + pos_owner_bridge::ceremony::timing::EXIT_WINDOW);
                 self.at_success_exit(inject, deadline)?;
             }
             match step {
@@ -1419,34 +1451,49 @@ impl Fixture {
                     self.surface.fixture_progress()
                 )
             })?;
+        let cutpoint_remaining = deadline.saturating_duration_since(Instant::now());
         if Instant::now() >= deadline {
             return Err("successful exit fault point expired".into());
         }
         self.exit_reached = Some(boundary);
+        if !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            || !self.surface.exit_fault_owners_retained()
+        {
+            return Err("a competing exit-phase Surface opening was not blocked".into());
+        }
         match boundary {
-            ExitBoundary::Live(state) => {
+            ExitBoundary::ActiveStatus(state) => {
                 self.trace
                     .borrow_mut()
                     .push(ProcessFaultMark::ReachedExit(state));
                 if inject {
-                    let seal = crate::FaultSeal {
-                        trace: Rc::clone(&self.trace),
-                        deadline,
-                    };
                     self.handle = Some(
                         self.surface
-                            .inject_exit_fault(seal)
+                            .consume_exit_capture(deadline, true)
                             .map_err(|()| "successful exit fault refused")?,
                     );
-                    self.observe_fault_from(
+                    self.observe_fault_until(
                         ProcessFaultTarget::Browser,
                         ProcessFaultMark::ReachedExit(state),
+                        deadline,
                     )?;
                 } else {
-                    self.evidence_complete = true;
+                    self.handle = Some(
+                        self.surface
+                            .consume_exit_capture(deadline, false)
+                            .map_err(|()| "exit control capture refused")?,
+                    );
+                    self.observe_exit_control(deadline)?;
                 }
             }
-            ExitBoundary::AlreadyExited(_) => self.evidence_complete = true,
+            ExitBoundary::ObjectExitedAwaitingSdk(_) | ExitBoundary::AlreadyExited(_) => {
+                self.handle = Some(
+                    self.surface
+                        .consume_exit_capture(deadline, false)
+                        .map_err(|()| "exited object capture refused")?,
+                );
+                self.observe_exit_control(deadline)?;
+            }
         }
         if !self.evidence_complete || !self.surface.exit_fault_owners_retained() {
             return Err("successful exit owners or evidence missing".into());
@@ -1456,18 +1503,52 @@ impl Fixture {
         {
             return Err("a competing exit-phase Surface opening was not blocked".into());
         }
-        if matches!(boundary, ExitBoundary::AlreadyExited(_))
-            && self.surface.classify_exit_boundary(deadline) != Ok(boundary)
-        {
-            return Err("matching-exit boundary changed during competing admission".into());
-        }
         writeln!(
             std::io::stderr(),
-            "NATIVE_SUCCESS_EXIT boundary={boundary:?} requested_injection={inject} actual_injection={} trace={:?}",
-            inject && matches!(boundary, ExitBoundary::Live(_)),
+            "NATIVE_SUCCESS_EXIT case={} boundary={boundary:?} requested_injection={inject} actual_injection={} cutpoint_remaining_ms={} final_remaining_ms={} trace={:?}",
+            self.number,
+            inject && matches!(boundary, ExitBoundary::ActiveStatus(_)),
+            cutpoint_remaining.as_millis(),
+            deadline.saturating_duration_since(Instant::now()).as_millis(),
             self.trace.borrow()
         )?;
         Ok(())
+    }
+
+    fn observe_exit_control(&mut self, deadline: Instant) -> TestResult {
+        loop {
+            if Instant::now() >= deadline {
+                return Err("control exit timed out".into());
+            }
+            if self
+                .surface
+                .posted_fault_event(ProcessFaultTarget::Browser)
+                .map_err(|()| "control exit mismatched")?
+                .is_some()
+            {
+                if !self.surface.matching_exit_event() {
+                    return Err("control exit was not the unique matching callback".into());
+                }
+                let handle = self.handle.as_ref().ok_or("control handle missing")?;
+                if handle
+                    .exit_code()
+                    .map_err(|()| "control exit query failed")?
+                    != Some(0)
+                {
+                    return Err("control exit code was not zero".into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("control exit timed out".into());
+                }
+                self.trace.borrow_mut().extend([
+                    ProcessFaultMark::OwnBrowserExited,
+                    ProcessFaultMark::ExitCode(0),
+                ]);
+                self.evidence_complete = true;
+                return Ok(());
+            }
+            readiness::pump(&self.surface)?;
+        }
     }
 }
 
@@ -1500,7 +1581,7 @@ fn run_success_exit(
             .is_some_and(|reply| reply.before_nonzero == Some(true));
     fixture.retire(driver, result, None)?;
     let actual_fault =
-        inject && reached.is_some_and(|state| matches!(state, ExitBoundary::Live(_)));
+        inject && reached.is_some_and(|state| matches!(state, ExitBoundary::ActiveStatus(_)));
     check_final_process_failures(actual_fault.then_some(ProcessFaultTarget::Browser))?;
     if let Some(error) = failure {
         return Err(error);

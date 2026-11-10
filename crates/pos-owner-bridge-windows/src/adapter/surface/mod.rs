@@ -133,6 +133,8 @@ pub(super) struct Surface {
     initial_close: Option<CloseObservation>,
     #[cfg(test)]
     readiness_timing: diagnostics::ReadinessTiming,
+    #[cfg(test)]
+    exit_capture: Option<exit_boundary::ExitCapture>,
 }
 
 impl Surface {
@@ -179,6 +181,8 @@ impl Surface {
             initial_close: None,
             #[cfg(test)]
             readiness_timing: diagnostics::ReadinessTiming::default(),
+            #[cfg(test)]
+            exit_capture: None,
         })
     }
 
@@ -875,40 +879,6 @@ impl Surface {
     }
 
     #[cfg(test)]
-    pub(in crate::adapter) fn exit_fault_state(
-        &mut self,
-    ) -> std::result::Result<crate::ProcessExitState, ()> {
-        if !self.exit_fault_phase_reached()
-            || self.close != CloseState::Idle
-            || self.failed_open
-            || self.events.invalid()
-            || self.events.exited().is_some()
-            || self.buffers
-            || !self.native.exit_fault_owners_retained()
-            || !crate::Native::process_failure_observations().is_empty()
-        {
-            return Err(());
-        }
-        let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.exit_browser_candidate()? != browser
-        {
-            return Err(());
-        }
-        let state = crate::ProcessExitState {
-            generation: self.generation.ok_or(())?,
-            record_count: self.store.records().map_err(|_| ())?.len(),
-        };
-        if state.generation != 1 || state.record_count != 1 {
-            return Err(());
-        }
-        Ok(state)
-    }
-
-    #[cfg(test)]
     pub(in crate::adapter) fn exit_fault_owners_retained(&mut self) -> bool {
         self.exit_fault_phase_reached()
             && self.folder.is_some()
@@ -916,29 +886,6 @@ impl Surface {
             && !self.buffers
             && self.store.records().is_ok_and(|records| records.len() == 1)
             && self.native.exit_fault_owners_retained()
-    }
-
-    #[cfg(test)]
-    pub(in crate::adapter) fn inject_exit_fault(
-        &mut self,
-        seal: crate::FaultSeal,
-    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
-        self.exit_fault_state()?;
-        let browser = self.identity.ok_or(())?;
-        let events = Rc::clone(&self.events);
-        let (trace, deadline) = seal.into_parts();
-        let authority = crate::FaultAuthority {
-            browser,
-            target: crate::ProcessFaultTarget::Browser,
-            lifecycle: crate::ProcessFaultLifecycle::AwaitingExitSuccess,
-            valid: Rc::new(move || {
-                std::time::Instant::now() < deadline
-                    && !events.invalid()
-                    && events.exited().is_none()
-            }),
-            trace,
-        };
-        self.native.inject_process_fault(&authority)
     }
 
     #[cfg(test)]
@@ -1254,6 +1201,7 @@ impl OwnerWebSurface for Surface {
                 self.recordless_fault = None;
                 self.initial_buffer_close = None;
                 self.initial_close = None;
+                self.exit_capture = None;
             }
             self.generation = None;
             self.foreground_deadline = None;
@@ -1375,6 +1323,8 @@ impl OwnerWebSurface for Surface {
         #[cfg(test)]
         let observed_removed = removed;
         let removed = removed.map_err(unavailable);
+        #[cfg(test)]
+        self.capture_before_controller_close();
         #[cfg(test)]
         let had_controller = self.native.has_controller() == Ok(true);
         #[cfg(test)]

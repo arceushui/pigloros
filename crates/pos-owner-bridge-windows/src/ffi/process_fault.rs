@@ -33,6 +33,66 @@ struct Retained {
     identity: ProcessIdentity,
 }
 
+struct ExitRetained {
+    retained: Retained,
+    image: std::path::PathBuf,
+    attempted: bool,
+}
+
+impl ProcessFaultHandle for ExitRetained {
+    fn identity(&self) -> ProcessIdentity {
+        self.retained.identity
+    }
+
+    fn exit_code(&self) -> Result<Option<u32>, ()> {
+        if super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)?
+            != (self.retained.identity, self.image.clone())
+        {
+            return Err(());
+        }
+        self.retained.exit_code()
+    }
+}
+
+impl crate::RetainedExitHandle for ExitRetained {
+    fn identity(&self) -> ProcessIdentity {
+        self.retained.identity
+    }
+
+    fn observe(&self) -> Result<Option<u32>, ()> {
+        if super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)?
+            != (self.retained.identity, self.image.clone())
+        {
+            return Err(());
+        }
+        self.retained.exit_code()
+    }
+
+    fn terminate(&mut self, authority: &crate::FaultAuthority) -> Result<(), ()> {
+        if self.attempted
+            || !authority.valid()
+            || authority.browser() != self.retained.identity
+            || authority.target() != ProcessFaultTarget::Browser
+            || authority.lifecycle() != crate::ProcessFaultLifecycle::AwaitingExitSuccess
+            || self.observe()?.is_some()
+            || !authority.valid()
+        {
+            return Err(());
+        }
+        self.attempted = true;
+        authority.record(crate::ProcessFaultMark::Selected(self.retained.identity));
+        if !authority.valid() {
+            return Err(());
+        }
+        authority.record(crate::ProcessFaultMark::TerminationCall);
+        terminate_owned_process(self.retained.handle)
+    }
+
+    fn into_fault(self: Box<Self>) -> Box<dyn ProcessFaultHandle> {
+        self
+    }
+}
+
 impl Drop for Retained {
     fn drop(&mut self) {
         // SAFETY: this owner holds the one handle returned by OpenProcess.
@@ -103,6 +163,81 @@ fn select(
     kind: COREWEBVIEW2_PROCESS_KIND,
 ) -> Result<u32, ()> {
     select_optional(entries, kind)?.ok_or(())
+}
+
+fn retained_browser_membership(
+    entries: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
+    expected: u32,
+) -> Result<(), ()> {
+    if entries.is_empty() || select(entries, COREWEBVIEW2_PROCESS_KIND_BROWSER)? == expected {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub(super) fn observe_retained_exit_membership(
+    environment: &ICoreWebView2Environment,
+    handle: &dyn crate::RetainedExitHandle,
+) -> Result<(), ()> {
+    retained_browser_membership(&candidates(environment)?, handle.identity().browser_pid)
+}
+
+fn open_owned_process(pid: u32) -> Result<HANDLE, ()> {
+    // SAFETY: callers select PID from the current environment; the fixed rights
+    // and non-inheritable handle are solely for the declared unit-test fault.
+    unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            false,
+            pid,
+        )
+    }
+    .map_err(|_| ())
+}
+
+fn terminate_owned_process(handle: HANDLE) -> Result<(), ()> {
+    // SAFETY: the caller retains and revalidates the owned process object at
+    // the declared fault boundary, using the fixed non-active exit code.
+    unsafe { TerminateProcess(handle, FAULT_EXIT) }.map_err(|_| ())
+}
+
+pub(super) fn retain_exit_browser(
+    environment: &ICoreWebView2Environment,
+    authority: &crate::FaultAuthority,
+) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
+    if !authority.valid()
+        || authority.target() != ProcessFaultTarget::Browser
+        || authority.lifecycle() != crate::ProcessFaultLifecycle::AwaitingExitSuccess
+    {
+        return Err(());
+    }
+    let expected = authority.browser();
+    let first = candidates(environment)?;
+    if select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != expected.browser_pid {
+        return Err(());
+    }
+    let retained = Retained {
+        handle: open_owned_process(expected.browser_pid)?,
+        identity: expected,
+    };
+    let (identity, image) = super::process::read_identity(retained.handle, expected.browser_pid)?;
+    if identity != expected
+        || retained.exit_code()?.is_some()
+        || select(&candidates(environment)?, COREWEBVIEW2_PROCESS_KIND_BROWSER)?
+            != expected.browser_pid
+        || super::process::read_identity(retained.handle, expected.browser_pid)?
+            != (identity, image.clone())
+        || retained.exit_code()?.is_some()
+        || !authority.valid()
+    {
+        return Err(());
+    }
+    Ok(Box::new(ExitRetained {
+        retained,
+        image,
+        attempted: false,
+    }))
 }
 
 /// A successful, stable complete snapshot; no target or termination capability escapes.
@@ -298,15 +433,7 @@ pub(super) fn inject(
         ProcessFaultTarget::Renderer => COREWEBVIEW2_PROCESS_KIND_RENDERER,
     };
     let pid = select(&first, kind)?;
-    // SAFETY: PID was selected only from this environment; rights and inheritance are fixed.
-    let handle = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-            false,
-            pid,
-        )
-    }
-    .map_err(|_| ())?;
+    let handle = open_owned_process(pid)?;
     // Retain the handle on every subsequent failure path.
     let mut retained = Retained {
         handle,
@@ -354,18 +481,39 @@ pub(super) fn inject(
     }
     authority.record(crate::ProcessFaultMark::Selected(observed));
     authority.record(crate::ProcessFaultMark::TerminationCall);
-    // SAFETY: this is the retained, revalidated process object from the owned
-    // environment, at the declared fault point, with a fixed non-active code.
-    unsafe { TerminateProcess(handle, FAULT_EXIT) }.map_err(|_| ())?;
+    terminate_owned_process(handle)?;
     Ok(Box::new(retained))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        select, select_optional, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+        retained_browser_membership, select, select_optional, COREWEBVIEW2_PROCESS_KIND_BROWSER,
         COREWEBVIEW2_PROCESS_KIND_RENDERER,
     };
+
+    #[test]
+    fn retained_browser_requires_empty_or_unique_matching_membership() {
+        assert_eq!(retained_browser_membership(&[], 11), Ok(()));
+        assert_eq!(
+            retained_browser_membership(&[(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)], 11),
+            Ok(())
+        );
+        assert!(
+            retained_browser_membership(&[(12, COREWEBVIEW2_PROCESS_KIND_BROWSER)], 11).is_err()
+        );
+        assert!(
+            retained_browser_membership(&[(12, COREWEBVIEW2_PROCESS_KIND_RENDERER)], 11).is_err()
+        );
+        assert!(retained_browser_membership(
+            &[
+                (11, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+                (12, COREWEBVIEW2_PROCESS_KIND_BROWSER)
+            ],
+            11
+        )
+        .is_err());
+    }
 
     #[test]
     fn selection_refuses_absent_and_ambiguous_process_classes() {
