@@ -1066,9 +1066,8 @@ fn an_attempt_installed_through_fresh_sessions_reads_back_and_is_removed() -> Te
     let records = ForwardingRecords::in_directory(directory.path().join("forwarding"));
     let egress = egress_recording_in(records.clone());
     let attempt = attempt(1, 0, vec![ENDPOINT])?;
-    let table = create_table();
-    let rules = install_attempt(&attempt);
-    let after_rules = 10 + u32::try_from(rules.len())?;
+    let rules = || install_attempt(&attempt);
+    let after_rules = 10 + u32::try_from(rules().len())?;
     // Neither the egress device, link 7, nor the veth end, link 9,
     // forwards yet; both are turned on in one change.
     let route = vec![
@@ -1082,8 +1081,14 @@ fn an_attempt_installed_through_fresh_sessions_reads_back_and_is_removed() -> Te
         link_named(8, "piglor-h0", true),
     ];
     let netfilter = [
-        vec![done(1), done(2), done(3), acks(4, &table), acks(10, &rules)],
-        dumps_of(after_rules, &[table.clone(), rules.clone()]),
+        vec![
+            done(1),
+            done(2),
+            done(3),
+            acks(4, &create_table()),
+            acks(10, &rules()),
+        ],
+        dumps_of(after_rules, &[create_table(), rules()]),
     ]
     .concat();
     egress.install_through(
@@ -1093,7 +1098,7 @@ fn an_attempt_installed_through_fresh_sessions_reads_back_and_is_removed() -> Te
     assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
     // Removal deletes the attempt's rules, reads back the bare table and
     // turns the egress device's forwarding back off.
-    let installed = table_of(&[table.clone(), rules.clone()])?;
+    let installed = table_of(&[create_table(), rules()])?;
     let removal = remove_attempt(&installed, &attempt);
     let after_removal = 4 + u32::try_from(removal.len())?;
     let restoring = vec![
@@ -1102,9 +1107,9 @@ fn an_attempt_installed_through_fresh_sessions_reads_back_and_is_removed() -> Te
         link_named(3, "eth0", false),
     ];
     let netfilter = [
-        dumps_of(1, &[table.clone(), rules]),
+        dumps_of(1, &[create_table(), rules()]),
         vec![acks(4, &removal)],
-        dumps_of(after_removal, &[table]),
+        dumps_of(after_removal, &[create_table()]),
     ]
     .concat();
     egress.remove_through(
