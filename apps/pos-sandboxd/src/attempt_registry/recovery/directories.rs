@@ -1,6 +1,6 @@
 //! Correlation of registry claims with held, unmounted attempt directories.
 
-use rustix::fs::{openat2, Mode, OFlags};
+use rustix::fs::{openat2, Mode};
 
 use super::super::{open_directory, remove_empty, require_empty};
 use super::{
@@ -176,14 +176,6 @@ impl SystemdAttemptRecovery {
     }
 }
 
-/// A root entry is opened only as a directory path, never through a symlink.
-const ROOT_ENTRY_OPEN: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-/// It is resolved beneath the held attempt directory, across a mount.
-const ROOT_ENTRY_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
-
 /// The root entry of one recorded attempt directory, if it has one.
 fn root_entry(
     parent: &File,
@@ -210,9 +202,9 @@ fn root_entry(
             ["root"] => openat2(
                 &attempt,
                 "root",
-                ROOT_ENTRY_OPEN,
+                crate::ATTEMPT_ROOT_OPEN,
                 Mode::empty(),
-                ROOT_ENTRY_RESOLVE,
+                crate::ATTEMPT_ROOT_RESOLVE,
             )
             .map_err(|_| SystemdAttemptRegistryError::UnsafeRegistry)
             .map(|root| {
@@ -603,8 +595,9 @@ mod tests {
             assert_eq!((root.st_dev, root.st_ino), (expected.dev(), expected.ino()));
         }
         drop(entries);
-        // An unexpected child, a symlinked root, a replaced attempt directory,
-        // an unsafe attempt directory and a changed registry each refuse.
+        // An unexpected child, a symlinked root, a replaced attempt directory
+        // and an unsafe attempt directory each refuse as unsafe; a changed
+        // registry requires a new reconciliation.
         let changes: [Change; 5] = [
             |_, attempt| Ok(fs::write(attempt.join("extra"), b"")?),
             |_, attempt| {
@@ -622,12 +615,25 @@ mod tests {
                     fs::Permissions::from_mode(0o755),
                 )?)
             },
-            |runtime, _| Ok(fs::write(runtime.join("registry/unknown"), b"")?),
+            // Attempt 5's committed intent disappears.
+            |runtime, attempt| {
+                let key = attempt.file_name().ok_or("no attempt component")?;
+                Ok(fs::remove_file(runtime.join("registry").join(key))?)
+            },
         ];
-        for change in changes {
+        for (index, change) in changes.into_iter().enumerate() {
             let (directory, recovery) = fixture()?;
             change(directory.path(), &attempt(directory.path(), 5)?)?;
-            assert!(recovery.recorded_root_entries().is_err());
+            let result = recovery.recorded_root_entries();
+            let refused = if index == 4 {
+                matches!(
+                    result,
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                )
+            } else {
+                matches!(result, Err(SystemdAttemptRegistryError::UnsafeRegistry))
+            };
+            assert!(refused, "change {index}: {result:?}");
         }
         Ok(())
     }

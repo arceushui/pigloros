@@ -23,7 +23,7 @@ use tokio::time::{sleep, timeout_at, Instant};
 use super::{
     observe::{BlockIdentity, HostKernel, LoopDevice, Node, Observations, Slave},
     release::{before, DEVICE_POLL},
-    verify::{EROFS_MAGIC, VERITY_UUID_PREFIX},
+    verify::{private_root_entry, EROFS_MAGIC, VERITY_UUID_PREFIX},
     AttachmentKernel,
 };
 use crate::{
@@ -69,8 +69,10 @@ pub(super) async fn detach_with(
         attempt,
         root,
     } = entry;
-    // The attempt directory stands in for the covered root: both are on the
-    // mount that holds the attempt tree.
+    // `root` is held at the top-most mount on the attempt's root entry. The
+    // attempt directory is on the mount beneath it, so its mount ID is the
+    // parent a provider root must have, and the same as the root's when
+    // nothing is mounted there.
     let observed = kernel.observe(root.as_fd(), &attempt, &attempt, "");
     let (mount, parent) = observed
         .mount
@@ -124,14 +126,7 @@ fn provider_root(
     let private_root = observed.path == Some(mount)
         && observed.filesystem_magic == Some(EROFS_MAGIC)
         && observed.read_only == Some(true)
-        && entry.parent_id == parent
-        && entry.device == mount.device
-        && entry.root == "/"
-        && entry.mount_point == root_directory.as_str()
-        && entry.options.split(',').next() == Some("ro")
-        && entry.filesystem == "erofs"
-        // Any shared, master or propagate_from field is propagation.
-        && entry.optional.is_empty();
+        && private_root_entry(entry, &mount, Some(parent), root_directory);
     let verity = mapper_identity.device == mount.device
         && uuid.starts_with(VERITY_UUID_PREFIX)
         && mapper.read_only == Some(1);

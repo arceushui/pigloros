@@ -57,15 +57,23 @@ mod cases {
         ])
     }
 
-    /// Detach through the fake kernel, which ignores the image directory.
+    /// Detach through the fake kernel over the fixture image directory.
     async fn detach(
         kernel: &FakeKernel,
         entry: RecordedRootEntry,
         deadline: tokio::time::Instant,
     ) -> Result<(), ImageActivationError> {
+        detach_from(kernel, entry, Path::new(FIXTURE_IMAGES), deadline).await
+    }
+
+    async fn detach_from(
+        kernel: &FakeKernel,
+        entry: RecordedRootEntry,
+        images: &Path,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ImageActivationError> {
         let detached =
-            super::super::super::recovered::detach_with(kernel, entry, Path::new("/"), deadline)
-                .await;
+            super::super::super::recovered::detach_with(kernel, entry, images, deadline).await;
         detached
     }
 
@@ -185,6 +193,14 @@ mod cases {
             ),
             edit(
                 |observed| edit_entry(observed, |entry| entry.options = "rw,nosuid".to_owned()),
+                false,
+            ),
+            edit(
+                |observed| {
+                    edit_entry(observed, |entry| {
+                        entry.super_options = "rw,user_xattr,acl".to_owned();
+                    });
+                },
                 false,
             ),
             edit(
@@ -403,6 +419,16 @@ mod cases {
                 assert_eq!(result, expected, "edit {index}, recorded {recorded}");
                 assert_eq!(kernel.detached(), usize::from(accepted));
             }
+        }
+        // The image directory passed down is the provider's: any other
+        // refuses.
+        for recorded in [false, true] {
+            let (_runtime, entry) = recovered_entry(recorded)?;
+            let kernel = mounted_kernel(provider_root()?)?;
+            let result =
+                detach_from(&kernel, entry, Path::new("/elsewhere"), cleanup_deadline()).await;
+            assert_eq!(result, Err(ImageActivationError::EvidenceMismatch));
+            assert_eq!(kernel.detached(), 0);
         }
         // A loop that is not backed by a provider image, a root with a
         // submount, and an unreadable mount table.

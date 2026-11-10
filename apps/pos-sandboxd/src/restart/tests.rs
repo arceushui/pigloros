@@ -496,6 +496,18 @@ mod cases {
         Ok(())
     }
 
+    /// The public entry's sweep is deterministic only on a host without a
+    /// provider installation, as every test host is: the staged installation
+    /// fixtures refuse to adopt one.
+    fn assert_no_installation() {
+        assert!(
+            !Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+                .join("images")
+                .exists(),
+            "the test host carries a provider installation"
+        );
+    }
+
     fn deadline() -> Instant {
         Instant::now() + Duration::from_millis(500)
     }
@@ -587,13 +599,19 @@ mod cases {
             deadline(),
         )
         .await;
-        // The real host's loop sweep decides; a host without a provider
+        // The real host's loop sweep decides: a test host without a provider
         // installation cannot resolve the image directory and fails closed.
-        let reconciled = result
-            .as_ref()
-            .is_ok_and(|reconciled| reconciled.attempts().len() == 3);
-        let removed = count(&runtime.path().join("registry"))? == 1;
-        assert_eq!(removed, reconciled, "{result:?}");
+        assert_no_installation();
+        assert!(
+            matches!(
+                result,
+                Err(RestartReconciliationError::ProviderLoops(Some(
+                    ImageActivationError::ResourceAbsenceUnverified
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_untouched(runtime.path(), 4)?;
         Ok(())
     }
 
@@ -619,49 +637,23 @@ mod cases {
         .await;
         // The host reset the unit and observed it unloaded, and found the
         // recorded roots unmounted on the real kernel; the network was then
-        // cleaned. The real host's loop sweep decides the rest.
+        // cleaned. The real host's loop sweep then fails closed on a test host
+        // without a provider installation.
         assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
         assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
-        match &result {
-            Ok(reconciled) => {
-                assert_eq!(reconciled.attempts().len(), 3);
-                assert_eq!(count(&runtime.path().join("registry"))?, 1);
-            }
-            Err(RestartReconciliationError::ProviderLoops(_)) => {
-                assert_untouched(runtime.path(), 4)?;
-            }
-            Err(error) => return Err(format!("unexpected refusal: {error:?}").into()),
-        }
+        assert_no_installation();
+        assert!(
+            matches!(
+                result,
+                Err(RestartReconciliationError::ProviderLoops(Some(
+                    ImageActivationError::ResourceAbsenceUnverified
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_untouched(runtime.path(), 4)?;
         Ok(())
-    }
-
-    /// The host's surviving-resource steps over the fakes: each listed unit
-    /// goes through the systemd stop path against the fake manager, and each
-    /// recorded root through restart detachment over a fake kernel.
-    struct HostOverFakes<'a> {
-        transport: &'a SystemdTransientUnitTransport,
-        roots: FakeRecoveredRoots,
-    }
-
-    impl Survivors for HostOverFakes<'_> {
-        fn stop(
-            &self,
-            unit: &SystemdAttemptUnitObservation,
-            shutdown: AttemptShutdownDeadlines,
-            deadline: Instant,
-        ) -> impl std::future::Future<Output = Result<(), SystemdAttemptUnitTeardownError>> + Send
-        {
-            self.transport.stop_listed_unit(unit, shutdown, deadline)
-        }
-
-        fn detach(
-            &self,
-            entry: RecordedRootEntry,
-            deadline: Instant,
-        ) -> impl std::future::Future<Output = Result<(), ImageActivationError>> + Send {
-            self.roots.detach(entry, deadline)
-        }
     }
 
     #[tokio::test]
@@ -676,9 +668,13 @@ mod cases {
         // still mounted on its attempt directory.
         let runtime = seed(true)?;
         let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
-        let survivors = HostOverFakes {
+        // The public entry's host wiring, with restart detachment over a
+        // fake kernel in place of the host kernel.
+        let roots = FakeRecoveredRoots::mounted_on([ROOT_ATTEMPT; 16]);
+        let fake_roots = &roots;
+        let survivors = super::super::Host {
             transport: &host.transport,
-            roots: FakeRecoveredRoots::mounted_on([ROOT_ATTEMPT; 16]),
+            detach: move |entry, deadline| fake_roots.detach(entry, deadline),
         };
         let network = Network::new(Cleanup::Removes);
         let probed = Mutex::new(Vec::new());
@@ -718,7 +714,7 @@ mod cases {
         assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
         assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
         assert_eq!(
-            survivors.roots.detached()?,
+            roots.detached()?,
             vec![([2; 16], 0), ([ROOT_ATTEMPT; 16], 1)]
         );
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
@@ -744,14 +740,11 @@ mod cases {
     )? {
         return Ok(());
     }
-        for listing in [
-            Listing::Surviving,
-            Listing::Empty,
-            Listing::Fails,
-            Listing::Hangs,
-        ] {
+        // A listed recorded unit that cannot be bound is covered at the
+        // unit-teardown seam; here attempt 2's unit is still loaded but not
+        // listed, or the listing fails or hangs.
+        for listing in [Listing::Empty, Listing::Fails, Listing::Hangs] {
             let runtime = seed(true)?;
-            // Attempt 2's unit is still loaded; only `Surviving` lists it.
             let host = host(listing, vec![unit(2)?]).await?;
             let network = Network::new(Cleanup::Removes);
             let result = reconcile_restart(
@@ -762,15 +755,23 @@ mod cases {
                 deadline(),
             )
             .await;
-            let refused = match (listing, &result) {
-                // Attempt 2 is recorded, so the host binds the listed unit's
-                // cgroup, which the fake manager cannot report.
-                (Listing::Surviving, Err(RestartReconciliationError::UnitStop(_)))
-                | (Listing::Empty, Err(RestartReconciliationError::UnitAbsence(_)))
-                | (Listing::Fails, Err(RestartReconciliationError::Units(_)))
-                | (Listing::Hangs, Err(RestartReconciliationError::DeadlineElapsed)) => true,
-                _ => false,
-            };
+            let refused = matches!(
+                (listing, &result),
+                (
+                    Listing::Empty,
+                    Err(RestartReconciliationError::UnitAbsence(
+                        SystemdTransientUnitTransportError::UnitAbsenceDeadlineElapsed
+                    ))
+                ) | (
+                    Listing::Fails,
+                    Err(RestartReconciliationError::Units(
+                        SystemdTransientUnitTransportError::InventoryCall(_)
+                    ))
+                ) | (
+                    Listing::Hangs,
+                    Err(RestartReconciliationError::DeadlineElapsed)
+                )
+            );
             assert!(refused, "{result:?}");
             assert_eq!(network.calls.load(Ordering::SeqCst), 0);
             assert_untouched(runtime.path(), 5)?;
@@ -818,10 +819,18 @@ mod cases {
             .await;
             let refused = matches!(
                 (case, &result),
-                (0, Err(RestartReconciliationError::Network(_)))
-                    | (1, Err(RestartReconciliationError::DeadlineElapsed))
+                (0, Err(RestartReconciliationError::Network(error)))
+                    if error.is::<NetworkFailure>()
+            ) || matches!(
+                (case, &result),
+                (1, Err(RestartReconciliationError::DeadlineElapsed))
                     | (2, Err(RestartReconciliationError::Devices(None)))
-                    | (3, Err(RestartReconciliationError::Devices(Some(_))))
+                    | (
+                        3,
+                        Err(RestartReconciliationError::Devices(Some(
+                            ImageActivationError::ResourceAbsenceUnverified
+                        )))
+                    )
             );
             assert!(refused, "case {case}: {result:?}");
             assert_untouched(runtime.path(), 5)?;
@@ -885,11 +894,15 @@ mod cases {
             .await;
             let refused = matches!(
                 (outcome, &result),
-                (Outcome::Fails, Err(RestartReconciliationError::UnitStop(_)))
-                    | (
-                        Outcome::Hangs,
-                        Err(RestartReconciliationError::DeadlineElapsed)
-                    )
+                (
+                    Outcome::Fails,
+                    Err(RestartReconciliationError::UnitStop(
+                        SystemdAttemptUnitTeardownError::DeadlineElapsed
+                    )),
+                ) | (
+                    Outcome::Hangs,
+                    Err(RestartReconciliationError::DeadlineElapsed)
+                )
             );
             assert!(refused, "{outcome:?}: {result:?}");
             assert_eq!(survivors.stopped()?, vec![unit(ROOT_ATTEMPT)?]);
@@ -914,6 +927,96 @@ mod cases {
         assert_eq!(survivors.stopped()?, vec![unit(ROOT_ATTEMPT)?]);
         assert_eq!(count(&runtime.path().join("registry"))?, 1);
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_overall_deadline_caps_a_hanging_stop_or_detach() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::the_overall_deadline_caps_a_hanging_stop_or_detach",
+        )? {
+            return Ok(());
+        }
+        // The overall deadline comes before the cleanup's unit and release
+        // bounds (400 ms and 450 ms), so it ends a hanging stop or detach.
+        let runtime = seed_with(Some(started_without_cgroup))?;
+        for (stop, detach) in [
+            (Outcome::Hangs, Outcome::Succeeds),
+            (Outcome::Succeeds, Outcome::Hangs),
+        ] {
+            let host = host(Listing::Surviving, vec![unit(ROOT_ATTEMPT)?]).await?;
+            let survivors = FakeSurvivors::new(&host, stop, detach);
+            let network = Network::new(Cleanup::Removes);
+            let started = Instant::now();
+            let result = reconcile_with(
+                &host.transport,
+                recovery(runtime.path())?,
+                &network,
+                &survivors,
+                (cleanup()?, started + Duration::from_millis(100)),
+                (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(result, Err(RestartReconciliationError::DeadlineElapsed)),
+                "{stop:?}/{detach:?}: {result:?}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(100) && elapsed < Duration::from_millis(350),
+                "{stop:?}/{detach:?} ended after {elapsed:?}"
+            );
+            assert_eq!(survivors.stopped()?, vec![unit(ROOT_ATTEMPT)?]);
+            assert_eq!(network.calls.load(Ordering::SeqCst), 0);
+            assert_untouched(runtime.path(), 5)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_hanging_network_cleanup_has_the_overall_budget_after_a_fast_detach() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_hanging_network_cleanup_has_the_overall_budget_after_a_fast_detach",
+        )? {
+            return Ok(());
+        }
+        // The roots are released by 50 ms; the network cleanup then hangs and
+        // is ended only by the overall deadline at 300 ms.
+        let runtime = seed(true)?;
+        let host = host(Listing::Empty, Vec::new()).await?;
+        let survivors = FakeSurvivors::succeeding(&host);
+        let network = Network::new(Cleanup::Hangs);
+        let started = Instant::now();
+        let cleanup = AttemptCleanupDeadlines::new(
+            AttemptShutdownDeadlines::new(
+                started + Duration::from_millis(10),
+                started + Duration::from_millis(20),
+                started + Duration::from_millis(30),
+            )?,
+            started + Duration::from_millis(40),
+            started + Duration::from_millis(50),
+        )?;
+        let result = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            &network,
+            &survivors,
+            (cleanup, started + Duration::from_millis(300)),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{result:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "ended after {elapsed:?}"
+        );
+        assert_eq!(survivors.detached()?, vec![[2; 16], [ROOT_ATTEMPT; 16]]);
+        assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        assert_untouched(runtime.path(), 5)?;
         Ok(())
     }
 
@@ -984,11 +1087,15 @@ mod cases {
             .await;
             let refused = matches!(
                 (outcome, &result),
-                (Outcome::Fails, Err(RestartReconciliationError::Root(_)))
-                    | (
-                        Outcome::Hangs,
-                        Err(RestartReconciliationError::DeadlineElapsed)
-                    )
+                (
+                    Outcome::Fails,
+                    Err(RestartReconciliationError::Root(
+                        ImageActivationError::EvidenceMismatch
+                    )),
+                ) | (
+                    Outcome::Hangs,
+                    Err(RestartReconciliationError::DeadlineElapsed)
+                )
             );
             assert!(refused, "{outcome:?}: {result:?}");
             // Both recorded roots that are present are detached together,
@@ -1146,7 +1253,12 @@ mod cases {
         )
         .await;
         assert!(
-            matches!(result, Err(RestartReconciliationError::Registry(_))),
+            matches!(
+                result,
+                Err(RestartReconciliationError::Registry(
+                    SystemdAttemptRegistryError::UnsafeRegistry
+                ))
+            ),
             "{result:?}"
         );
         assert_eq!(count(&runtime.path().join("registry"))?, 6);

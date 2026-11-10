@@ -32,16 +32,21 @@ use super::{
     cmdline::vetoes_userspace_verity,
     observe::{
         has_mount_id, loop_of, mount_entry, BlockIdentity, ExecutableObservation, LoopDevice,
-        Mapper, MountEntry, Node, Slave, ATTACH_BY_DESCRIPTOR, ATTEMPT_ROOT_OPEN,
-        ATTEMPT_ROOT_RESOLVE, BACKING_OPEN, STATX_REQUEST,
+        Mapper, MountEntry, Node, Slave, ATTACH_BY_DESCRIPTOR, BACKING_OPEN, STATX_REQUEST,
     },
     verify::Extent,
 };
-use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry};
+use crate::{
+    PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry, ATTEMPT_ROOT_OPEN,
+    ATTEMPT_ROOT_RESOLVE,
+};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
 type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
+
+/// The image directory the fake kernel's provider loops are backed from.
+const FIXTURE_IMAGES: &str = "/fixture/images";
 
 mod absence;
 mod generations;
@@ -189,7 +194,8 @@ impl FakeRecoveredRoots {
             ..FakeKernel::accepting(observed)
         };
         let detached =
-            super::recovered::detach_with(&kernel, entry, Path::new("/"), deadline).await;
+            super::recovered::detach_with(&kernel, entry, Path::new(FIXTURE_IMAGES), deadline)
+                .await;
         self.detached
             .lock()
             .map_err(|_| ImageActivationError::Transport)?
@@ -683,12 +689,26 @@ impl AttachmentKernel for FakeKernel {
         self.observations.clone()
     }
 
-    fn provider_image(&self, _: &str, _: &Path) -> bool {
-        self.provider_image
+    /// Only the read-back loop over the fixture image directory can be a
+    /// provider loop.
+    fn provider_image(&self, loop_name: &str, images: &Path) -> bool {
+        let read_back = self
+            .observations
+            .mapper
+            .as_ref()
+            .and_then(|mapper| mapper.slaves.as_ref())
+            .and_then(|slaves| slaves.first())
+            .and_then(|slave| slave.loop_name.as_deref());
+        self.provider_image && read_back == Some(loop_name) && images == Path::new(FIXTURE_IMAGES)
     }
 
-    fn has_submounts(&self, _: u64) -> Option<bool> {
-        self.submounts
+    /// Any mount other than the read-back one counts as having submounts.
+    fn has_submounts(&self, mount_id: u64) -> Option<bool> {
+        if self.observations.mount.map(|mount| mount.mount_id) == Some(mount_id) {
+            self.submounts
+        } else {
+            Some(true)
+        }
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
@@ -1273,6 +1293,29 @@ fn symlinks_never_lead_to_the_backing_image_or_the_attempt_root() -> TestResult 
     let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     assert!(observed.mount.is_some());
     assert_eq!(observed.path, None);
+    Ok(())
+}
+
+#[test]
+fn an_unlinked_backing_image_has_no_readable_identity() -> TestResult {
+    // The kernel prints an unlinked backing file with " (deleted)" appended.
+    // No path then names the image, so its identity is unreadable and a
+    // restart refuses to detach the root (fail closed); reading it from the
+    // loop device itself would need an ioctl, which needs `unsafe`.
+    let sys = tempfile::tempdir()?;
+    let image = sys.path().join("held");
+    fs::write(&image, b"image")?;
+    let identity = fs::metadata(&image)?;
+    let backing_file = sys.path().join("class/block/loop9/loop/backing_file");
+    write(&backing_file, &format!("{}\n", image.display()))?;
+    let kernel = HostKernel::at(sys.path(), sys.path());
+    assert_eq!(
+        kernel.loop_device("loop9").backing,
+        Some((identity.dev(), identity.ino()))
+    );
+    fs::remove_file(&image)?;
+    write(&backing_file, &format!("{} (deleted)\n", image.display()))?;
+    assert_eq!(kernel.loop_device("loop9").backing, None);
     Ok(())
 }
 

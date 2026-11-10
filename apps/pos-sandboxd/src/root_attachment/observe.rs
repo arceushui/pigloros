@@ -23,20 +23,12 @@ use rustix::{
 };
 
 use super::{cmdline, AttachmentKernel};
-use crate::ImageActivationError;
+use crate::{ImageActivationError, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE};
 
 mod absence;
 
 /// The loop backing path is opened only as a path, never through a symlink.
 pub(super) const BACKING_OPEN: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
-/// The attempt root is reopened only as a directory path, beneath the held
-/// attempt directory and never through a symlink.
-pub(super) const ATTEMPT_ROOT_OPEN: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-pub(super) const ATTEMPT_ROOT_RESOLVE: ResolveFlags =
-    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 /// The admitted executable is opened read-only (`O_RDONLY` is zero) and
 /// non-blocking, so a FIFO cannot stall the open before the regular-file check.
 pub(super) const EXECUTABLE_OPEN: OFlags = OFlags::CLOEXEC.union(OFlags::NONBLOCK);

@@ -202,7 +202,10 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
         transport,
         recovery,
         network,
-        &Host(transport),
+        &Host {
+            transport,
+            detach: crate::RootResourceIdentity::detach_recovered,
+        },
         (cleanup, deadline),
         (
             crate::RootResourceIdentity::recorded_generations_absent,
@@ -233,17 +236,24 @@ trait Survivors: Sync {
     ) -> impl Future<Output = Result<(), ImageActivationError>> + Send;
 }
 
-/// The host's systemd manager and kernel.
-struct Host<'a>(&'a SystemdTransientUnitTransport);
+/// The host's systemd manager, and its kernel's restart detachment.
+struct Host<'a, D> {
+    transport: &'a SystemdTransientUnitTransport,
+    detach: D,
+}
 
-impl Survivors for Host<'_> {
+impl<D, F> Survivors for Host<'_, D>
+where
+    D: Fn(RecordedRootEntry, Instant) -> F + Sync,
+    F: Future<Output = Result<(), ImageActivationError>> + Send,
+{
     fn stop(
         &self,
         unit: &SystemdAttemptUnitObservation,
         shutdown: AttemptShutdownDeadlines,
         deadline: Instant,
     ) -> impl Future<Output = Result<(), SystemdAttemptUnitTeardownError>> + Send {
-        self.0.stop_listed_unit(unit, shutdown, deadline)
+        self.transport.stop_listed_unit(unit, shutdown, deadline)
     }
 
     fn detach(
@@ -251,7 +261,7 @@ impl Survivors for Host<'_> {
         entry: RecordedRootEntry,
         deadline: Instant,
     ) -> impl Future<Output = Result<(), ImageActivationError>> + Send {
-        crate::RootResourceIdentity::detach_recovered(entry, deadline)
+        (self.detach)(entry, deadline)
     }
 }
 

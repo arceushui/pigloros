@@ -172,6 +172,19 @@ pub(crate) struct RecordedRoot {
     pub(crate) loop_device: ((u32, u32), u64),
 }
 
+/// An attempt's `root` is opened only as a directory path, never through a
+/// symlink: the root readback and the restart root inventory share this.
+#[cfg(target_os = "linux")]
+pub(crate) const ATTEMPT_ROOT_OPEN: rustix::fs::OFlags = rustix::fs::OFlags::PATH
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .union(rustix::fs::OFlags::CLOEXEC);
+/// It is resolved beneath the held attempt directory, across a mount but
+/// never through a symlink.
+#[cfg(target_os = "linux")]
+pub(crate) const ATTEMPT_ROOT_RESOLVE: rustix::fs::ResolveFlags =
+    rustix::fs::ResolveFlags::BENEATH.union(rustix::fs::ResolveFlags::NO_SYMLINKS);
+
 #[cfg(target_os = "linux")]
 /// One recorded attempt directory and its `root` entry, held by path only
 /// and opened across a mount.
