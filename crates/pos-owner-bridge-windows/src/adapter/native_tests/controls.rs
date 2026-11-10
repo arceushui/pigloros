@@ -395,6 +395,8 @@ fn assert_denials(
     assert!(!before_exit.is_empty());
     assert_eq!(before_exit.len(), after_exit.len());
     for (before, after) in before_exit.iter().zip(after_exit) {
+        assert!(!before.overflowed);
+        assert!(!after.overflowed);
         assert_eq!(before.kind, kind);
         assert_eq!(before.readback, Some(true));
         assert_eq!(
@@ -418,10 +420,47 @@ fn assert_denials(
 
 #[cfg(test)]
 mod tests {
-    use super::{Events, ExternalAllowance, Probe, EXTERNAL_URI};
-    use crate::{EventKind, EventSink, NativeAction, NativeEvent, NativeText, OWNER_URL};
+    use super::{assert_denials, Events, ExternalAllowance, Probe, EXTERNAL_URI};
+    use crate::{
+        ControlFault, ControlObservation, EventKind, EventSink, NativeAction, NativeEvent,
+        NativeText, OWNER_URL,
+    };
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    #[test]
+    fn denial_oracle_rejects_overflow_even_when_both_snapshots_have_two_entries() {
+        let valid = ControlObservation {
+            kind: EventKind::Navigation,
+            deferred: false,
+            attempts: 1,
+            readback: Some(true),
+            completions: 0,
+            retired: true,
+            overflowed: false,
+        };
+        let before = [valid; 2];
+        let after = [valid; 2];
+        assert_denials(&before, &after, EventKind::Navigation, ControlFault::Normal);
+        for overflow_before in [false, true] {
+            let mut changed_before = before;
+            let mut changed_after = after;
+            if overflow_before {
+                changed_before[1].overflowed = true;
+            } else {
+                changed_after[1].overflowed = true;
+            }
+            assert!(std::panic::catch_unwind(|| {
+                assert_denials(
+                    &changed_before,
+                    &changed_after,
+                    EventKind::Navigation,
+                    ControlFault::Normal,
+                );
+            })
+            .is_err());
+        }
+    }
 
     fn probe() -> Probe {
         let events = Rc::new(Events::default());

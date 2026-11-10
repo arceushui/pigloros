@@ -391,6 +391,7 @@ pub(crate) struct ControlObservation {
     pub(crate) readback: Option<bool>,
     pub(crate) completions: u32,
     pub(crate) retired: bool,
+    pub(crate) overflowed: bool,
 }
 
 #[cfg(test)]

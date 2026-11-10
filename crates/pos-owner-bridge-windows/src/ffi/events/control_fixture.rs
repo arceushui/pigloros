@@ -59,7 +59,10 @@ pub(super) fn begin(kind: EventKind) -> usize {
     OBSERVATIONS.with(|observations| {
         let mut observations = observations.borrow_mut();
         let id = observations.len();
-        if id == MAX_OBSERVATIONS {
+        if id >= MAX_OBSERVATIONS {
+            if let Some(last) = observations.last_mut() {
+                last.overflowed = true;
+            }
             return usize::MAX;
         }
         observations.push(ControlObservation {
@@ -69,6 +72,7 @@ pub(super) fn begin(kind: EventKind) -> usize {
             readback: None,
             completions: 0,
             retired: false,
+            overflowed: false,
         });
         id
     })
@@ -184,8 +188,9 @@ impl crate::Native {
     }
 }
 
-// Every qualification consumer accepts at most one observation. Retaining the
-// second preserves duplicate-event failure evidence while bounding callback storms.
+// Process-failure and renderer-state consumers accept at most one observation.
+// Control observations can use both slots; further callbacks set an overflow
+// flag so a bounded snapshot cannot hide an extra control callback.
 const MAX_OBSERVATIONS: usize = 2;
 
 fn push_observation<T>(observations: &RefCell<Vec<T>>, value: T) {
@@ -215,6 +220,10 @@ fn repeated_callbacks_remain_failed_evidence_without_unbounded_storage() {
     let controls = Native::control_observations();
     assert_eq!(controls.len(), MAX_OBSERVATIONS);
     assert!(controls.iter().all(|record| record.attempts == 1));
+    assert!(!controls[0].overflowed);
+    assert!(controls[1].overflowed);
+    update(1, |record| record.retired = true);
+    assert!(Native::control_observations()[1].overflowed);
     assert_eq!(
         Native::classified_process_failure_observations(),
         [NativeProcessFailure::Unavailable; MAX_OBSERVATIONS]
