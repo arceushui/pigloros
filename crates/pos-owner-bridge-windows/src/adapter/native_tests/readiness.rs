@@ -181,7 +181,7 @@ impl ProgressTiming {
         let before = &self.before_receipt;
         let after = &self.after_receipt;
         let _logged = writeln!(std::io::stderr(),
-            "NATIVE_G3_CALL_TIMING case={case} before_steps={}/{} before_pumps={}/{} before_max_step={:?} before_max_pump={:?} before_max_interstep={:?} after_steps={}/{} after_pumps={}/{} after_max_step={:?} after_max_pump={:?} after_max_interstep={:?}",
+            "NATIVE_G3_CALL_TIMING case={case} before_step_entered={} before_step_returned={} before_pump_entered={} before_pump_returned={} before_max_step={:?} before_max_pump={:?} before_max_interstep={:?} after_step_entered={} after_step_returned={} after_pump_entered={} after_pump_returned={} after_max_step={:?} after_max_pump={:?} after_max_interstep={:?}",
             before.step_entered, before.step_returned, before.pump_entered, before.pump_returned,
             before.max_step, before.max_pump, before.max_interstep,
             after.step_entered, after.step_returned, after.pump_entered, after.pump_returned,
@@ -227,6 +227,10 @@ fn run_ceremony(
                         // one consumed/wiped within that same step. Host release
                         // states and invalid values cannot satisfy this oracle.
                         receipt = Some(observed);
+                        // Include the boundary between this return and the first
+                        // step entered after observing the receipt.
+                        timing.after_receipt.last_step_return =
+                            timing.before_receipt.last_step_return;
                         surface.controller_lost();
                     }
                 }
