@@ -37,7 +37,7 @@ pub enum CommunityInitializationSourceV1 {
 /// Untrusted CGI1 fields, preserving the installed roster's original order.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityInitializationRequestInputV1<'a> {
-    /// Stable nonzero initialization/transition identity, never a PassKey.
+    /// Stable nonzero initialization/transition identity, never a `PassKey`.
     pub operation_id: [u8; 16],
     /// Target Timeline.
     pub timeline: TimelineId,
