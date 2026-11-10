@@ -29,6 +29,8 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 mod local_network;
 #[cfg(target_os = "linux")]
+mod namespace_network;
+#[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod release_barrier;
@@ -166,6 +168,14 @@ pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
     ServedProxy,
+};
+#[cfg(target_os = "linux")]
+pub use namespace_network::{
+    establish_namespace, EstablishError, EstablishFailure, ExpectedNamespace, FirewallBaseChain,
+    FirewallChain, FirewallHook, FirewallRule, FirewallTableFamily, FirewallVerdict,
+    InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceControl, NamespaceName, NamespaceRoute,
+    ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
+    ReadbackMismatch,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{
