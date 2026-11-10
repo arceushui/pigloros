@@ -468,7 +468,7 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
 /// A network whose removals wait until the returned sender lets them
 /// proceed, and the receiver that reports each removal starting.
 type GatedNetwork = (
-    NamespacedLocalNetwork<FakeControl>,
+    NamespacedLocalNetwork<FakeControl, FakeEgress>,
     Arc<Mutex<Journal>>,
     std::sync::mpsc::Receiver<()>,
     std::sync::mpsc::Sender<()>,
