@@ -211,3 +211,39 @@ fn pending_creation_models_late_success_and_failure_after_abandonment_and_timeou
     }
     Ok(())
 }
+
+#[test]
+fn immediate_precontroller_failure_blocks_admission_until_recordless_retirement() -> TestResult {
+    for failure in ["create_window", "create_environment"] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        let selected = spec(120);
+        let competing = spec(121);
+        fixture.factory.failure.set(Some(failure));
+        assert!(matches!(
+            fixture.surface.open(&selected),
+            Poll::Ready(Err(_))
+        ));
+        assert!(!fixture.surface.idle());
+        competing_open_is_refused(&mut fixture, &competing);
+        fixture.assert_no_ceremony_data();
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        fixture.factory.failure.set(None);
+        assert!(fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(fixture.surface.idle());
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        assert_eq!(
+            fixture
+                .open(&competing)
+                .map_err(pos_owner_bridge::SurfaceError::error)?
+                .browser_pid,
+            42
+        );
+        fixture.assert_no_ceremony_data();
+        fixture.finish()?;
+    }
+    Ok(())
+}

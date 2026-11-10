@@ -35,6 +35,7 @@ pub(in crate::adapter) struct Factory {
     pub(super) foreground: Cell<bool>,
     pub(super) navigation_succeeds: Cell<bool>,
     pub(super) failure: Cell<Option<&'static str>>,
+    pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
     pub(super) source: RefCell<String>,
     pub(super) state: Cell<u32>,
     pub(super) invalidate_request: Cell<bool>,
@@ -58,6 +59,7 @@ impl Factory {
             foreground: Cell::new(true),
             navigation_succeeds: Cell::new(false),
             failure: Cell::new(None),
+            mismatched_setting: Cell::new(None),
             source: RefCell::new(crate::OWNER_URL.to_owned()),
             state: Cell::new(0),
             invalidate_request: Cell::new(false),
@@ -269,7 +271,8 @@ impl NativeOperations for Session {
     }
     fn get_bool(&self, property: BoolProperty) -> NativeResult<bool> {
         self.check("get_bool")?;
-        Ok(property == BoolProperty::Script)
+        Ok((property == BoolProperty::Script)
+            != (self.factory.mismatched_setting.get() == Some(property)))
     }
     fn navigate_owner(&self) -> NativeResult<()> {
         self.call("navigate");

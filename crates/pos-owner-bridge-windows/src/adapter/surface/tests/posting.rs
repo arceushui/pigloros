@@ -430,6 +430,55 @@ fn failed_native_preparation_returns_identity_before_refusing_navigation() -> Te
 }
 
 #[test]
+fn foreground_deadline_refuses_navigation_and_preserves_ownership() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.foreground.set(false);
+    fixture.factory.navigation_succeeds.set(true);
+    fixture
+        .open(&super::spec(122))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.clock.advance(std::time::Duration::from_millis(999));
+    assert!(fixture.surface.navigate().is_pending());
+    fixture.clock.advance(std::time::Duration::from_millis(1));
+    assert!(
+        matches!(fixture.surface.navigate(), std::task::Poll::Ready(Err(error))
+        if error.error() == BridgeError::Lifecycle(LifecycleCode::ForegroundUnavailable))
+    );
+    assert!(matches!(
+        fixture.surface.open(&super::spec(123)),
+        std::task::Poll::Ready(Err(_))
+    ));
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture.surface.idle());
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
+fn incorrect_successful_setting_readback_refuses_navigation() -> TestResult {
+    for property in [crate::BoolProperty::Script, crate::BoolProperty::WebMessage] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.mismatched_setting.set(Some(property));
+        let identity = fixture
+            .open(&super::spec(124))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert_eq!(identity.browser_pid, 42);
+        assert!(
+            matches!(fixture.surface.navigate(), std::task::Poll::Ready(Err(error))
+            if error.error() == unavailable())
+        );
+        assert!(matches!(
+            fixture.surface.open(&super::spec(125)),
+            std::task::Poll::Ready(Err(_))
+        ));
+        fixture.assert_no_ceremony_data();
+        assert!(!fixture.surface.idle());
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn finish_requires_matching_exit_and_retries_each_failed_cleanup_effect() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
