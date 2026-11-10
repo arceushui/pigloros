@@ -138,7 +138,8 @@ mod cases {
             let deadline = Instant::now() + Duration::from_millis(50);
             let observed = Release::new(root, &tree.prepared, deadline)
                 .finish(&kernel)
-                .await;
+                .await
+                .map(drop);
             assert_eq!(
                 observed,
                 if delay == Duration::from_millis(40) {
