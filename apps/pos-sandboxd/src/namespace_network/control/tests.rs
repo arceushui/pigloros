@@ -45,18 +45,18 @@ fn only_prefixed_veth_ends_are_the_providers_and_nothing_may_remain() {
 }
 
 #[test]
-fn the_sweep_reports_a_failed_restore_as_netlink_or_residue() {
-    use super::super::host_egress::HostEgressError;
-    assert!(matches!(
-        residual(HostEgressError::Netlink(NetlinkError::Truncated)),
-        NetlinkError::Truncated
-    ));
-    for error in [
-        HostEgressError::Forwarding,
-        HostEgressError::State(std::io::ErrorKind::NotFound.into()),
-    ] {
-        assert!(matches!(residual(error), NetlinkError::Residual));
-    }
+fn sweep_errors_say_what_failed() {
+    let forwarding =
+        OrphanSweepError::Forwarding(super::super::host_egress::HostEgressError::Forwarding);
+    assert_eq!(
+        forwarding.to_string(),
+        "a recorded egress device's forwarding could not be restored, so the host egress table stays"
+    );
+    assert!(std::error::Error::source(&forwarding).is_some());
+    assert_eq!(
+        OrphanSweepError::from(NetlinkError::Residual).to_string(),
+        "orphaned provider network state could not be removed"
+    );
 }
 
 #[test]

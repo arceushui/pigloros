@@ -180,7 +180,8 @@ pub use namespace_network::{
     LinkKind, LinkName, NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute,
     NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError,
     NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
-    ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
+    OrphanSweepError, ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE,
+    NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{

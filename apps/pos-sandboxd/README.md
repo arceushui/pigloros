@@ -333,9 +333,15 @@ that attempt's own chain, which accepts TCP to exactly its endpoints, and
 then drops anything else from any `piglor-h*` end; its `postrouting` chain
 (nat) masquerades exactly that traffic. IPv4 forwarding is turned on only for
 the devices attempt traffic enters by: each attempt's veth end and the device
-each off-host endpoint's replies return on. The table and the forwarding are
-read back after every change, and restart reconciliation deletes the table
-with the other orphaned state. The provider never reads another table for
+each off-host endpoint's replies return on, and only where it is off: a
+device that already forwards is never written to. The provider records each
+egress device it turns forwarding on for under
+`/run/pigloros/sandbox/egress-forwarding` before turning it on, and turns it
+back off when the last attempt using it leaves. The table and the forwarding
+are read back after every change. Restart reconciliation first restores every
+recorded device, and only then deletes the table, whose rule drops unmatched
+sandbox traffic, with the other orphaned state; if a device cannot be
+restored, the table stays and the sweep fails. The provider never reads another table for
 policy and never changes one.
 
 Installation requirement: no other host firewall (Docker's, ufw's, an

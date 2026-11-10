@@ -786,7 +786,7 @@ fn install_against(
 
 #[test]
 fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
-    let (_directory, records) = eth0_recorded()?;
+    let (directory, records) = eth0_recorded()?;
     let leaves = || route_found(1, RouteType::Unicast, 7);
     let absent = || vec![done(1), done(2), done(3)];
     let present =
@@ -798,8 +798,29 @@ fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
         (vec![leaves()], Vec::new()),
         // The table cannot be created.
         (vec![leaves()], absent()),
-        // The table is there; forwarding cannot be turned on.
+        // The table is there; a device cannot be read.
         (vec![leaves(), link_named(2, "eth0", true)], present()?),
+        // Forwarding cannot be turned on for the devices that lack it.
+        (
+            vec![
+                leaves(),
+                link_named(2, "eth0", false),
+                link_named(3, "piglor-h0", false),
+            ],
+            present()?,
+        ),
+        // Every device already forwards, so none is written to; the
+        // attempt's rules then cannot be installed.
+        (
+            vec![
+                leaves(),
+                link_named(2, "eth0", true),
+                link_named(3, "piglor-h0", true),
+                link_named(4, "eth0", true),
+                link_named(5, "piglor-h0", true),
+            ],
+            present()?,
+        ),
     ];
     for (route, netfilter) in failures {
         assert!(matches!(
@@ -807,17 +828,31 @@ fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
             Err(HostEgressError::Netlink(_))
         ));
     }
-    // Forwarding was turned on, but the egress device reads back without it.
+    // Only the egress device was recorded; the veth end leaves with its
+    // attempt.
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // Forwarding was turned on for the veth end alone, but the egress device
+    // reads back without it.
     let unforwarded = vec![
         leaves(),
         link_named(2, "eth0", true),
-        ack(3, 0),
+        link_named(3, "piglor-h0", false),
         ack(4, 0),
         link_named(5, "eth0", false),
     ];
     assert!(matches!(
         install_against(&records, unforwarded, present()?)?,
         Err(HostEgressError::Forwarding)
+    ));
+    // A device whose forwarding cannot be recorded is not turned on.
+    let unrecordable = ForwardingRecords::in_directory(directory.path().join("forwarding/7"));
+    assert!(matches!(
+        install_against(
+            &unrecordable,
+            vec![leaves(), link_named(2, "eth0", false)],
+            present()?
+        )?,
+        Err(HostEgressError::State(_))
     ));
     Ok(())
 }

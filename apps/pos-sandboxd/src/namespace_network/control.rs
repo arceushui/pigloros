@@ -291,13 +291,17 @@ fn is_attempt_host_link(link: &ObservedLink) -> bool {
     link.name.starts_with(HOST_LINK_PREFIX) && matches!(link.kind, LinkKind::Veth { .. })
 }
 
-/// `error` as the sweep reports it: a netlink failure as itself, and any
-/// other as residue left behind.
-fn residual(error: super::host_egress::HostEgressError) -> NetlinkError {
-    match error {
-        super::host_egress::HostEgressError::Netlink(error) => error,
-        _ => NetlinkError::Residual,
-    }
+/// Why [`NetlinkNamespaceControl::remove_orphans`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum OrphanSweepError {
+    /// A recorded egress device's IPv4 forwarding could not be restored. The
+    /// host egress table, whose rule drops unmatched sandbox traffic, stays.
+    #[error("a recorded egress device's forwarding could not be restored, so the host egress table stays")]
+    Forwarding(#[source] super::host_egress::HostEgressError),
+    /// The host egress table, a host link or a namespace could not be
+    /// removed, or remained afterwards.
+    #[error("orphaned provider network state could not be removed")]
+    Netlink(#[from] NetlinkError),
 }
 
 /// `Ok` if neither `names` nor `links` remain.
@@ -317,31 +321,45 @@ const fn already_gone(deleted: Result<(), NetlinkError>) -> Result<(), NetlinkEr
 }
 
 impl NetlinkNamespaceControl {
-    /// Remove the host egress table, every host veth end named `piglor-h…`
-    /// and every attempt namespace pinned in this adapter's directory,
-    /// whichever attempt owned them, and read their absence back.
+    /// Restore every egress device's recorded forwarding, then remove the
+    /// host egress table, every host veth end named `piglor-h…` and every
+    /// attempt namespace pinned in this adapter's directory, whichever
+    /// attempt owned them, and read their absence back.
     ///
     /// Only restart reconciliation may call this, before admission opens and
     /// once every attempt unit is known to be gone: it removes the network of
     /// any attempt, live or not.
     ///
-    /// The host links go first. Unpinning a namespace lets the kernel destroy
+    /// Forwarding goes first, so a device whose forwarding cannot be
+    /// restored keeps the table's drop rule for unmatched sandbox traffic.
+    /// Then the host links go. Unpinning a namespace lets the kernel destroy
     /// it, and its veth pair with it, asynchronously; a link that is already
     /// gone when its deletion arrives counts as removed.
     ///
     /// # Errors
-    /// Fails if any of them cannot be removed, or remains afterwards.
-    pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
-        super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
-            .and_then(|()| {
-                NetlinkSession::open(ROUTE).and_then(|route| {
-                    super::host_egress::restore_forwarding(
-                        &route,
-                        &super::host_egress::ForwardingRecords::default(),
-                    )
-                    .map_err(residual)
-                })
+    /// Fails with [`OrphanSweepError::Forwarding`] if a recorded device's
+    /// forwarding cannot be restored, and otherwise if any of them cannot be
+    /// removed, or remains afterwards.
+    pub fn remove_orphans(&self) -> Result<(), OrphanSweepError> {
+        NetlinkSession::open(ROUTE)
+            .map_err(OrphanSweepError::from)
+            .and_then(|route| {
+                super::host_egress::restore_forwarding(
+                    &route,
+                    &super::host_egress::ForwardingRecords::default(),
+                )
+                .map_err(OrphanSweepError::Forwarding)
             })
+            .and_then(|()| {
+                self.remove_orphaned_network()
+                    .map_err(OrphanSweepError::from)
+            })
+    }
+
+    /// The host egress table, then the host links and namespaces of
+    /// [`Self::remove_orphans`], read back as absent.
+    fn remove_orphaned_network(&self) -> Result<(), NetlinkError> {
+        super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
             .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
             .and_then(|orphans| {
                 orphans.iter().try_for_each(|link| {
