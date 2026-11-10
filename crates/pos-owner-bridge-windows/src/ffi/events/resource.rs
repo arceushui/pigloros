@@ -81,7 +81,7 @@ impl ResourceTrace {
         }
     }
 
-    fn returned(&self, report: Option<u8>, success: bool) {
+    fn returning(&self, report: Option<u8>, success: bool) {
         let Some(callback) = report else {
             return;
         };
@@ -89,7 +89,7 @@ impl ResourceTrace {
             use std::io::Write as _;
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
-                "{} case={case} elapsed={:?} callback={callback} stage=returned success={success}",
+                "{} case={case} elapsed={:?} callback={callback} stage=returning success={success}",
                 self.prefix,
                 started.elapsed()
             );
@@ -115,7 +115,7 @@ fn resource_trace_retains_its_case_and_bounds_callback_output() {
     assert!(trace.begin().is_none());
     assert_eq!(trace.callbacks.get(), 9);
     trace.decision(Some(1), Some(true), NativeAction::Allow);
-    trace.returned(Some(1), true);
+    trace.returning(Some(1), true);
     let disabled = ResourceTrace {
         prefix: "NATIVE_RESOURCE_UNIT",
         case: None,
@@ -173,16 +173,16 @@ pub(super) fn install(
             if DENIAL_FIXTURE
                 .with(|mode| mode.get() == crate::ResourceDenialFixture::SwallowFailure)
             {
-                trace.returned(reporting, true);
+                trace.returning(reporting, true);
                 return Ok(());
             }
             cancellation.deny(args, intercepted.clone(), Rc::clone(&observed));
             #[cfg(test)]
-            trace.returned(reporting, false);
+            trace.returning(reporting, false);
             return Err(windows::core::Error::from_hresult(E_ABORT));
         }
         #[cfg(test)]
-        trace.returned(reporting, true);
+        trace.returning(reporting, true);
         Ok(())
     }));
     subscriptions.register(

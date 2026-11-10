@@ -1997,6 +1997,7 @@ def test_external_qualification_is_sealed() -> None:
     controls = f"{SHIM}/src/adapter/native_tests/controls.rs"
     assets = "scripts/owner_bridge_assets.py"
     navigation = f"{SHIM}/src/ffi/events/navigation.rs"
+    resource = f"{SHIM}/src/ffi/events/resource.rs"
     fixture = f"{SHIM}/src/ffi/events/control_fixture.rs"
     helper = f"{SHIM}/src/lib.rs"
 
@@ -2007,7 +2008,14 @@ def test_external_qualification_is_sealed() -> None:
 
     if errors(sources):
         raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
+    if resource not in CHECKER.EXTERNAL_FIXTURE_SOURCES:
+        raise SystemExit("resource callback diagnostic source binding was removed")
     mutations = (
+        (resource, 'if count >= 9', 'if false'),
+        (resource, 'case: super::navigation::readiness_context(),', 'case: None,'),
+        (resource, 'prefix: "NATIVE_RESOURCE",', 'prefix: "NATIVE_RESOURCE_UNIT",'),
+        (resource, 'trace.returning(reporting, false);', 'trace.returning(reporting, true);'),
+        (resource, 'let selected = observe(signals, EventKind::Resource, request);', 'let selected = NativeAction::Allow;'),
         (f"{SHIM}/src/adapter/surface/controller_qualification.rs", '!self.native.pending_opening_owners_retained()', 'false'),
         (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", '.share_mode(0)', '.share_mode(7)'),
         (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !polled.remaining', 'if false'),
@@ -2063,6 +2071,10 @@ def test_external_qualification_is_sealed() -> None:
             raise SystemExit(f"External mutation anchor missing: {old}")
         if not errors(dict(sources, **{path: sources[path].replace(old, new, 1)})):
             raise SystemExit(f"External fixture accepted mutation: {old}")
+    missing_resource = dict(sources)
+    del missing_resource[resource]
+    if f"{resource}: External URI qualification differs from reviewed source" not in errors(missing_resource):
+        raise SystemExit("missing resource callback diagnostic source was accepted")
     if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
         raise SystemExit("External allowance escaped into product source")
     for escaped in (
