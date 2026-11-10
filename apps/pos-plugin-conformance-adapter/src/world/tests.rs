@@ -1082,7 +1082,7 @@ fn check_historical_outcome_fields(retained: &[u8]) -> TestResult {
     Ok(())
 }
 
-/// The original R13 NotRun POB1 v2 golden remains opaque outcome evidence when scanned.
+/// The original R13 `NotRun` POB1 v2 golden remains opaque outcome evidence when scanned.
 #[test]
 fn historical_pob1_outcome_is_scanned_without_reencoding() -> TestResult {
     let historical = historical_outcome_piece()?;
