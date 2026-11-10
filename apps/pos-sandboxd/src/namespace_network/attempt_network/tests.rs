@@ -30,7 +30,15 @@ struct FakeControl {
     pins: Option<std::path::PathBuf>,
     refuse: bool,
     refuse_removal: bool,
+    gate: Option<RemovalGate>,
     current: Mutex<Option<ExpectedNamespace>>,
+}
+
+/// Holds a removal until another task lets it proceed.
+#[derive(Debug)]
+struct RemovalGate {
+    started: std::sync::mpsc::Sender<()>,
+    proceed: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 fn entries(journal: &Mutex<Journal>) -> MutexGuard<'_, Journal> {
@@ -126,7 +134,14 @@ impl NamespaceControl for FakeControl {
             // A pin that was never made is not there to remove.
             std::fs::remove_file(pins.join(name.as_str())).ok();
         }
-        (!self.refuse_removal)
+        let released = self.gate.as_ref().map_or(Ok(()), |gate| {
+            gate.started.send(()).ok();
+            gate.proceed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv_timeout(Duration::from_secs(2))
+        });
+        (!self.refuse_removal && released.is_ok())
             .then_some(())
             .ok_or(NetlinkError::Kernel(-16))
     }
@@ -285,6 +300,37 @@ async fn a_connector_dropped_on_a_runtime_worker_is_removed() -> TestResult {
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
     drop(network.establish([1; 16], &[ENDPOINT]));
     assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    Ok(())
+}
+
+// A removal on the runtime's only worker hands the worker's other tasks to
+// another thread, so the task that lets the removal finish still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_blocked_removal_leaves_the_worker_to_other_tasks() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (started, removal_started) = std::sync::mpsc::channel();
+    let (let_proceed, proceed) = std::sync::mpsc::channel();
+    let control = FakeControl {
+        gate: Some(RemovalGate {
+            started,
+            proceed: Mutex::new(proceed),
+        }),
+        ..pinning(directory.path())
+    };
+    let (network, journal) = network(directory.path(), control, 24)?;
+    let established = network.establish([1; 16], &[ENDPOINT])?;
+    let removal = tokio::spawn(async move { drop(established) });
+    let release = tokio::spawn(async move {
+        while removal_started.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let_proceed.send(()).ok();
+    });
+    removal.await?;
+    release.await?;
+    // The removal succeeded, so the slot is free, not quarantined.
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    assert!(network.establish([2; 16], &[ENDPOINT]).is_ok());
     Ok(())
 }
 
