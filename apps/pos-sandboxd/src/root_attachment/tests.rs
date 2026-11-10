@@ -1754,6 +1754,60 @@ async fn retry_and_clean(
     Ok(())
 }
 
+/// Prepare `planned` for `admission` after an admission of another SIM1
+/// prepared nothing, and check that PAI2 records the held image's device and
+/// inode after the directories'.
+fn prepare_for_admission(
+    registry: &SystemdAttemptRegistry,
+    admission: &HeldImageAdmission<'_>,
+    planned: &PlannedAttemptIntent,
+) -> Result<PreparedAttemptDirectory, BoxError> {
+    let other_image = PlannedAttemptIntent::new([0x45; 16], [0x78; 32])?;
+    assert!(matches!(
+        registry
+            .commit_planned(&other_image)?
+            .prepare_directory(admission),
+        Err(crate::SystemdAttemptRegistryError::InvalidIntent)
+    ));
+    assert!(!Path::new("/run/pigloros/sandbox/attempts")
+        .join(other_image.unit_name().attempt_component())
+        .exists());
+    let prepared = registry
+        .commit_planned(planned)?
+        .prepare_directory(admission)?;
+    let held = rustix::fs::fstat(admission)?;
+    let record = fs::read(Path::new("/run/pigloros/sandbox/registry").join(component(&prepared)))?;
+    assert_eq!(record.len(), 100);
+    assert_eq!(&record[..4], b"PAI2");
+    assert_eq!(
+        record[84..].to_vec(),
+        [held.st_dev.to_le_bytes(), held.st_ino.to_le_bytes()].concat()
+    );
+    Ok(prepared)
+}
+
+/// A directory whose PAI2 record names another image is never activated.
+async fn another_recorded_image_is_never_activated(
+    kernel: &FakeKernel,
+    registry: &SystemdAttemptRegistry,
+    admission: &HeldImageAdmission<'_>,
+    snapshot: &ProviderImageSnapshot,
+) -> TestResult {
+    let fixture = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x46; 16],
+            snapshot.request().authority.sim1_digest,
+        )?)?
+        .prepare_fixture_directory()?;
+    assert_eq!(
+        activate(kernel, admission, &fixture, MountfsdImageActivator::connect)
+            .await
+            .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> TestResult {
     if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
@@ -1770,30 +1824,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         snapshot.request().attempt_id,
         snapshot.request().authority.sim1_digest,
     )?;
-    // An admission of another SIM1 prepares nothing.
-    let other_image = PlannedAttemptIntent::new([0x45; 16], [0x78; 32])?;
-    assert!(matches!(
-        registry
-            .commit_planned(&other_image)?
-            .prepare_directory(&admission),
-        Err(crate::SystemdAttemptRegistryError::InvalidIntent)
-    ));
-    let other_key = other_image.unit_name().attempt_component().to_owned();
-    assert!(!Path::new("/run/pigloros/sandbox/attempts")
-        .join(&other_key)
-        .exists());
-    let prepared = registry
-        .commit_planned(&planned)?
-        .prepare_directory(&admission)?;
-    // PAI2 records the held image's device and inode after the directories'.
-    let held = rustix::fs::fstat(&admission)?;
-    let record = fs::read(Path::new("/run/pigloros/sandbox/registry").join(component(&prepared)))?;
-    assert_eq!(record.len(), 100);
-    assert_eq!(&record[..4], b"PAI2");
-    assert_eq!(
-        record[84..].to_vec(),
-        [held.st_dev.to_le_bytes(), held.st_ino.to_le_bytes()].concat()
-    );
+    let prepared = prepare_for_admission(&registry, &admission, &planned)?;
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
     let expected = Expected::for_admission(&admission, root_directory.clone())
         .ok_or("the held image identity")?;
@@ -1835,24 +1866,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // the released root alone lets terminal cleanup delete intent last.
     retry_and_clean(&kernel, &admission, prepared).await?;
     assert_request_recorded()?;
-    // A directory whose PAI2 record names another image is never activated.
-    let fixture = registry
-        .commit_planned(&PlannedAttemptIntent::new(
-            [0x46; 16],
-            snapshot.request().authority.sim1_digest,
-        )?)?
-        .prepare_fixture_directory()?;
-    assert_eq!(
-        activate(
-            &kernel,
-            &admission,
-            &fixture,
-            MountfsdImageActivator::connect
-        )
-        .await
-        .err(),
-        Some(ImageActivationError::AttachFailure)
-    );
+    another_recorded_image_is_never_activated(&kernel, &registry, &admission, &snapshot).await?;
     let prepared = registry
         .commit_planned(&planned)?
         .prepare_directory(&admission)?;

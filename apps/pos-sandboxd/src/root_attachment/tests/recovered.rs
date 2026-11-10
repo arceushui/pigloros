@@ -320,21 +320,21 @@ mod cases {
                 |observed| edit_loop(observed, |device| device.read_only = Some(0)),
                 false,
             ),
-            // The loop is backed by another image than the one PAI2 recorded
-            // from the admission, or its backing file cannot be read.
-            edit(
-                |observed| edit_loop(observed, |device| device.backing = Some((5, 7))),
-                false,
-            ),
-            edit(
-                |observed| edit_loop(observed, |device| device.backing = Some((4, 6))),
-                false,
-            ),
-            edit(
-                |observed| edit_loop(observed, |device| device.backing = None),
-                false,
-            ),
         ]
+    }
+
+    /// The loop is backed by another image than the one PAI2 recorded from
+    /// the admission, or its backing file cannot be read.
+    fn backing_edits() -> Vec<Edit> {
+        [Some((5, 7)), Some((4, 6)), None]
+            .into_iter()
+            .map(|backing| {
+                edit(
+                    move |observed| edit_loop(observed, |device| device.backing = backing),
+                    false,
+                )
+            })
+            .collect()
     }
 
     /// Edits of only the PAI3 record's identities: another activation of the
@@ -402,6 +402,7 @@ mod cases {
         let edits = mount_edits()?
             .into_iter()
             .chain(device_edits())
+            .chain(backing_edits())
             .chain(recorded_edits());
         for (index, (change, pai2_accepts)) in edits.enumerate() {
             for recorded in [false, true] {
