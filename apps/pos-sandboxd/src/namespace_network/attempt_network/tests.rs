@@ -348,16 +348,14 @@ fn gated(directory: &std::path::Path) -> TestResult<GatedNetwork> {
 }
 
 /// Let a removal proceed once it has started, from another task.
-fn release(
+async fn release(
     removal_started: std::sync::mpsc::Receiver<()>,
     let_proceed: std::sync::mpsc::Sender<()>,
-) -> impl std::future::Future<Output = ()> {
-    async move {
-        while removal_started.try_recv().is_err() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        let_proceed.send(()).ok();
+) {
+    while removal_started.try_recv().is_err() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
+    let_proceed.send(()).ok();
 }
 
 // A removal on the runtime's only worker hands the worker's other tasks to
