@@ -17,6 +17,7 @@ use pos_owner_bridge::{BridgeError, CleanupStore, OwnerWebSurface, SurfaceSpec, 
 use pos_owner_bridge_codec::{CeremonyId, ControlState};
 
 use super::{readiness, retirement, FixtureRoot, TestResult};
+use crate::adapter::surface::ExitBoundary;
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::{
     BufferSlot, NativeFactory, NativeZeroObservation, ProcessExitState, ProcessFaultHandle,
@@ -421,7 +422,7 @@ struct Fixture {
     trace: Trace,
     handle: Option<Box<dyn ProcessFaultHandle>>,
     reached: Option<ProcessFaultState>,
-    exit_reached: Option<ProcessExitState>,
+    exit_reached: Option<ExitBoundary>,
     evidence_complete: bool,
     early_presence: Option<crate::RendererPresence>,
     prior_native_wipe: bool,
@@ -1398,33 +1399,43 @@ impl Fixture {
     }
 
     fn at_success_exit(&mut self, inject: bool, deadline: Instant) -> TestResult {
-        let state = self
+        let boundary = self
             .surface
-            .exit_fault_state()
-            .map_err(|()| "owned live browser in AwaitingExit was not established")?;
+            .classify_exit_boundary(deadline)
+            .map_err(|()| {
+                format!(
+                    "AwaitingExit live target or already-delivered matching exit was not established: {}",
+                    self.surface.fixture_progress()
+                )
+            })?;
         if Instant::now() >= deadline {
             return Err("successful exit fault point expired".into());
         }
-        self.exit_reached = Some(state);
-        self.trace
-            .borrow_mut()
-            .push(ProcessFaultMark::ReachedExit(state));
-        if inject {
-            let seal = crate::FaultSeal {
-                trace: Rc::clone(&self.trace),
-                deadline,
-            };
-            self.handle = Some(
-                self.surface
-                    .inject_exit_fault(seal)
-                    .map_err(|()| "successful exit fault refused")?,
-            );
-            self.observe_fault_from(
-                ProcessFaultTarget::Browser,
-                ProcessFaultMark::ReachedExit(state),
-            )?;
-        } else {
-            self.evidence_complete = true;
+        self.exit_reached = Some(boundary);
+        match boundary {
+            ExitBoundary::Live(state) => {
+                self.trace
+                    .borrow_mut()
+                    .push(ProcessFaultMark::ReachedExit(state));
+                if inject {
+                    let seal = crate::FaultSeal {
+                        trace: Rc::clone(&self.trace),
+                        deadline,
+                    };
+                    self.handle = Some(
+                        self.surface
+                            .inject_exit_fault(seal)
+                            .map_err(|()| "successful exit fault refused")?,
+                    );
+                    self.observe_fault_from(
+                        ProcessFaultTarget::Browser,
+                        ProcessFaultMark::ReachedExit(state),
+                    )?;
+                } else {
+                    self.evidence_complete = true;
+                }
+            }
+            ExitBoundary::AlreadyExited(_) => self.evidence_complete = true,
         }
         if !self.evidence_complete || !self.surface.exit_fault_owners_retained() {
             return Err("successful exit owners or evidence missing".into());
@@ -1434,9 +1445,15 @@ impl Fixture {
         {
             return Err("a competing exit-phase Surface opening was not blocked".into());
         }
+        if matches!(boundary, ExitBoundary::AlreadyExited(_))
+            && self.surface.classify_exit_boundary(deadline) != Ok(boundary)
+        {
+            return Err("matching-exit boundary changed during competing admission".into());
+        }
         writeln!(
             std::io::stderr(),
-            "NATIVE_SUCCESS_EXIT injected={inject} trace={:?}",
+            "NATIVE_SUCCESS_EXIT boundary={boundary:?} requested_injection={inject} actual_injection={} trace={:?}",
+            inject && matches!(boundary, ExitBoundary::Live(_)),
             self.trace.borrow()
         )?;
         Ok(())
@@ -1448,7 +1465,7 @@ fn run_success_exit(
     root: &Path,
     number: u8,
     inject: bool,
-) -> Result<ProcessExitState, Box<dyn std::error::Error>> {
+) -> Result<ExitBoundary, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(
         runtime,
@@ -1471,7 +1488,9 @@ fn run_success_exit(
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
     fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
+    let actual_fault =
+        inject && reached.is_some_and(|state| matches!(state, ExitBoundary::Live(_)));
+    check_final_process_failures(actual_fault.then_some(ProcessFaultTarget::Browser))?;
     if let Some(error) = failure {
         return Err(error);
     }
