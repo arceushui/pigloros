@@ -76,7 +76,7 @@ fn independent_hash(domain: &[u8], value: &Value) -> Fallible<Hash> {
 }
 
 #[test]
-fn producer_binds_actual_tuple_member_request_and_canonical_initial_state() -> TestResult {
+fn producer_binds_tuple_member_request_and_supplied_state_reference() -> TestResult {
     let profile = profile(Mode::Local)?;
     let negotiated = negotiated(&profile)?;
     let tuple = Tuple::new(&negotiated, &profile)?;
