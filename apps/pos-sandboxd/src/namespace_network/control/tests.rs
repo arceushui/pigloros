@@ -48,6 +48,21 @@ fn only_attempt_and_probe_veth_ends_are_the_providers_and_nothing_may_remain() {
 }
 
 #[test]
+fn the_sweep_reports_a_failed_restore_as_netlink_or_residue() {
+    use super::super::host_egress::HostEgressError;
+    assert!(matches!(
+        residual(HostEgressError::Netlink(NetlinkError::Truncated)),
+        NetlinkError::Truncated
+    ));
+    for error in [
+        HostEgressError::Forwarding,
+        HostEgressError::State(std::io::ErrorKind::NotFound.into()),
+    ] {
+        assert!(matches!(residual(error), NetlinkError::Residual));
+    }
+}
+
+#[test]
 fn a_link_already_gone_counts_as_deleted() {
     assert!(already_gone(Ok(())).is_ok());
     assert!(already_gone(Err(NetlinkError::Kernel(-19))).is_ok());

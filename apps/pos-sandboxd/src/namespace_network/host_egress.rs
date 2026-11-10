@@ -895,16 +895,19 @@ fn restore<T: NetlinkTransport>(
     records.forget(index).map_err(HostEgressError::State)
 }
 
-/// Restore every recorded device's forwarding and forget its record.
+/// Restore every recorded device's forwarding through `route` and forget
+/// its record.
 /// Restart reconciliation calls this with the other orphan removals.
 ///
 /// # Errors
 /// Fails if a record cannot be read or removed, or a device cannot be
 /// restored.
-pub(super) fn restore_forwarding(records: &ForwardingRecords) -> Result<(), HostEgressError> {
-    let route = NetlinkSession::open(ROUTE)?;
+pub(super) fn restore_forwarding<T: NetlinkTransport>(
+    route: &NetlinkSession<T>,
+    records: &ForwardingRecords,
+) -> Result<(), HostEgressError> {
     for (index, name) in records.recorded().map_err(HostEgressError::State)? {
-        restore(&route, records, index, &name)?;
+        restore(route, records, index, &name)?;
     }
     Ok(())
 }
@@ -959,15 +962,6 @@ impl HostEgress {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// No attempt has egress yet; forwarding is recorded in `records`.
-    #[must_use]
-    pub fn recording_in(records: ForwardingRecords) -> Self {
-        Self {
-            installed: Mutex::default(),
-            records,
-        }
     }
 
     /// Give `attempt`, whose host veth end has index `host_link`, egress

@@ -5,7 +5,10 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
-use netlink_packet_core::{NetlinkHeader, NetlinkMessage, NetlinkPayload};
+use netlink_packet_core::{
+    DoneMessage, ErrorMessage, NetlinkHeader, NetlinkMessage, NetlinkPayload, NetlinkSerializable,
+    NLM_F_MULTIPART,
+};
 use netlink_packet_netfilter::nftables::{ChainFlags, TableFlags};
 use netlink_packet_route::link::InetDevConf;
 
@@ -609,4 +612,284 @@ fn host_egress_errors_say_what_failed() {
     ] {
         assert_eq!(error.to_string(), message);
     }
+}
+
+/// One reply message answering request `sequence`, with `flags`.
+fn message<I: NetlinkSerializable>(
+    sequence: u32,
+    flags: u16,
+    payload: NetlinkPayload<I>,
+) -> Vec<u8> {
+    let mut header = NetlinkHeader::default();
+    header.sequence_number = sequence;
+    header.flags = flags;
+    let mut message = NetlinkMessage::new(header, payload);
+    message.finalize();
+    let mut bytes = vec![0; message.buffer_len()];
+    message.serialize(&mut bytes);
+    bytes
+}
+
+/// The kernel's acknowledgement of request `sequence`, or its refusal with
+/// `code`.
+fn ack(sequence: u32, code: i32) -> Vec<u8> {
+    let mut error = ErrorMessage::default();
+    error.code = std::num::NonZeroI32::new(code);
+    message::<RouteNetlinkMessage>(sequence, 0, NetlinkPayload::Error(error))
+}
+
+/// The end of dump `sequence`.
+fn done(sequence: u32) -> Vec<u8> {
+    message::<RouteNetlinkMessage>(
+        sequence,
+        NLM_F_MULTIPART,
+        NetlinkPayload::Done(DoneMessage::default()),
+    )
+}
+
+/// The host table, as dump `sequence` reports it.
+fn our_table(sequence: u32) -> TestResult<Vec<u8>> {
+    let table = create_table()
+        .iter()
+        .find_map(|request| dumped_table(&request.message))
+        .ok_or("no table")?;
+    Ok(message(
+        sequence,
+        NLM_F_MULTIPART,
+        NetlinkPayload::InnerMessage(table),
+    ))
+}
+
+/// Link `name`'s reply to request `sequence`, forwarding or not. Its device
+/// configuration comes before its name.
+fn link_named(sequence: u32, name: &str, forwarding: bool) -> Vec<u8> {
+    let mut conf = InetDevConf::default();
+    conf.forwarding = i32::from(forwarding);
+    let mut link = LinkMessage::default();
+    link.attributes = vec![
+        LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![AfSpecInet::DevConf(conf)])]),
+        LinkAttribute::IfName(name.to_owned()),
+    ];
+    message(
+        sequence,
+        0,
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)),
+    )
+}
+
+/// Records in a new directory, holding link 7 as `eth0`.
+fn eth0_recorded() -> TestResult<(tempfile::TempDir, ForwardingRecords)> {
+    let directory = tempfile::tempdir()?;
+    let records = ForwardingRecords::in_directory(directory.path().join("forwarding"));
+    records.record(7, "eth0")?;
+    Ok((directory, records))
+}
+
+/// Restore recorded link 7, `eth0`, against `replies`, and whether its
+/// record remains.
+fn restored(replies: Vec<Vec<u8>>) -> TestResult<(Result<(), HostEgressError>, bool)> {
+    let (_directory, records) = eth0_recorded()?;
+    let outcome = restore(&scripted(replies), &records, 7, "eth0");
+    Ok((outcome, !records.recorded()?.is_empty()))
+}
+
+#[test]
+fn a_record_is_forgotten_once_its_device_is_restored_or_gone() -> TestResult {
+    // Gone, or the index now names another device: nothing to restore.
+    for replies in [
+        vec![ack(1, super::super::route::NO_SUCH_LINK)],
+        vec![link_named(1, "other", true)],
+    ] {
+        assert!(matches!(restored(replies)?, (Ok(()), false)));
+    }
+    let restoring = vec![
+        link_named(1, "eth0", true),
+        ack(2, 0),
+        link_named(3, "eth0", false),
+    ];
+    assert!(matches!(restored(restoring)?, (Ok(()), false)));
+    Ok(())
+}
+
+#[test]
+fn a_record_stays_while_its_device_cannot_be_restored() -> TestResult {
+    let unreadable = vec![ack(1, -1)];
+    let refused = vec![link_named(1, "eth0", true)];
+    let unverified = vec![link_named(1, "eth0", true), ack(2, 0)];
+    for replies in [unreadable, refused, unverified] {
+        assert!(matches!(
+            restored(replies)?,
+            (Err(HostEgressError::Netlink(_)), true)
+        ));
+    }
+    let still_forwarding = vec![
+        link_named(1, "eth0", true),
+        ack(2, 0),
+        link_named(3, "eth0", true),
+    ];
+    assert!(matches!(
+        restored(still_forwarding)?,
+        (Err(HostEgressError::Forwarding), true)
+    ));
+    Ok(())
+}
+
+#[test]
+fn restoring_every_record_fails_on_the_first_that_cannot_be_read_or_restored() -> TestResult {
+    let (directory, records) = eth0_recorded()?;
+    assert!(matches!(
+        restore_forwarding(&scripted(Vec::new()), &records),
+        Err(HostEgressError::Netlink(_))
+    ));
+    let file = ForwardingRecords::in_directory(directory.path().join("forwarding/7"));
+    assert!(matches!(
+        restore_forwarding(&scripted(Vec::new()), &file),
+        Err(HostEgressError::State(_))
+    ));
+    restore_forwarding(
+        &scripted(vec![ack(1, super::super::route::NO_SUCH_LINK)]),
+        &records,
+    )?;
+    assert!(records.recorded()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn failed_route_lookups_fail_admission_and_ingress() {
+    let ipv6 = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443));
+    assert!(matches!(
+        admit_on(&scripted(Vec::new()), &[ipv6]),
+        Err(HostEgressError::Netlink(_))
+    ));
+    assert!(matches!(
+        ingress_links(&scripted(Vec::new()), 9, &[ENDPOINT]),
+        Err(HostEgressError::Netlink(_))
+    ));
+}
+
+/// Install an attempt through link 9 to [`ENDPOINT`], which leaves by link
+/// 7, against `route` and `netfilter` replies, recording in `records`.
+fn install_against(
+    records: &ForwardingRecords,
+    route: Vec<Vec<u8>>,
+    netfilter: Vec<Vec<u8>>,
+) -> TestResult<Result<(), HostEgressError>> {
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    Ok(install_locked(
+        &mut Installed::default(),
+        records,
+        (&scripted(route), &scripted(netfilter)),
+        9,
+        &attempt,
+    ))
+}
+
+#[test]
+fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
+    let (_directory, records) = eth0_recorded()?;
+    let leaves = || route_found(1, RouteType::Unicast, 7);
+    let absent = || vec![done(1), done(2), done(3)];
+    let present =
+        || -> TestResult<Vec<Vec<u8>>> { Ok(vec![our_table(1)?, done(1), done(2), done(3)]) };
+    let failures = [
+        // No route to the endpoint.
+        (Vec::new(), Vec::new()),
+        // The table cannot be read.
+        (vec![leaves()], Vec::new()),
+        // The table cannot be created.
+        (vec![leaves()], absent()),
+        // The table is there; forwarding cannot be turned on.
+        (vec![leaves(), link_named(2, "eth0", true)], present()?),
+    ];
+    for (route, netfilter) in failures {
+        assert!(matches!(
+            install_against(&records, route, netfilter)?,
+            Err(HostEgressError::Netlink(_))
+        ));
+    }
+    // Forwarding was turned on, but the egress device reads back without it.
+    let unforwarded = vec![
+        leaves(),
+        link_named(2, "eth0", true),
+        ack(3, 0),
+        ack(4, 0),
+        link_named(5, "eth0", false),
+    ];
+    assert!(matches!(
+        install_against(&records, unforwarded, present()?)?,
+        Err(HostEgressError::Forwarding)
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_removal_leaves_other_records_and_a_table_without_the_attempt_alone() -> TestResult {
+    let (_directory, records) = eth0_recorded()?;
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    let route = scripted(Vec::new());
+    // No table: nothing to remove, and link 7 is not this attempt's.
+    let absent = scripted((1..=6).map(done).collect());
+    remove_locked(
+        &mut Installed::default(),
+        &records,
+        (&route, &absent),
+        &attempt,
+    )?;
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // A table without the attempt's chain is left as it is, and then reads
+    // back without the host's chains.
+    let bare = scripted(vec![
+        our_table(1)?,
+        done(1),
+        done(2),
+        done(3),
+        our_table(4)?,
+        done(4),
+        done(5),
+        done(6),
+    ]);
+    assert!(matches!(
+        remove_locked(
+            &mut Installed::default(),
+            &records,
+            (&route, &bare),
+            &attempt
+        ),
+        Err(HostEgressError::Readback)
+    ));
+    Ok(())
+}
+
+#[test]
+fn foreign_chains_and_rules_beside_the_host_table_are_skipped() -> TestResult {
+    let tables = vec![inet(NfTablesMessage::NewTable(TableMessage {
+        attributes: vec![
+            TableAttribute::Flags(TableFlags::empty()),
+            TableAttribute::Name(HOST_TABLE.to_owned()),
+        ],
+    }))];
+    let chains = vec![inet(NfTablesMessage::NewChain(ChainMessage {
+        attributes: vec![
+            ChainAttribute::Table("docker".to_owned()),
+            ChainAttribute::Name(FORWARD.to_owned()),
+        ],
+    }))];
+    let rules = vec![inet(NfTablesMessage::NewRule(RuleMessage {
+        attributes: vec![RuleAttribute::Table("docker".to_owned())],
+    }))];
+    assert_eq!(
+        read_table(tables, chains, rules)?,
+        Some(ReadTable {
+            flags: 0,
+            chains: BTreeMap::new(),
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn an_expression_that_is_not_one_named_element_has_no_canonical_form() {
+    let unnamed = ListAttribute::Element(vec![ExpressionAttribute::Name("masq".to_owned())]);
+    assert_eq!(canonical(&[unnamed]), None);
+    assert_eq!(canonical(&[ListAttribute::Unspec]), None);
 }
