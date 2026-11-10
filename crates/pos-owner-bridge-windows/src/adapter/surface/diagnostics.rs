@@ -12,6 +12,7 @@ use super::{CloseState, Ownership, Surface};
 use std::rc::Rc;
 
 impl Surface {
+    #[cfg(test)]
     pub(in crate::adapter) fn quarantined_fault_state(
         &mut self,
     ) -> Result<crate::ProcessExitState, ()> {
@@ -50,6 +51,7 @@ impl Surface {
         Ok(state)
     }
 
+    #[cfg(test)]
     pub(in crate::adapter) fn inject_quarantined_fault(
         &mut self,
         target: crate::ProcessFaultTarget,

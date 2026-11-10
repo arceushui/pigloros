@@ -259,6 +259,7 @@ fn reused_surface_observes_only_the_admitted_opening() -> TestResult {
 }
 
 #[test]
+#[cfg(test)]
 fn quarantined_fault_refuses_missing_state_and_unheld_keeper() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;

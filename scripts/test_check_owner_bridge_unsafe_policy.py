@@ -2009,6 +2009,12 @@ def test_external_qualification_is_sealed() -> None:
         raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
     mutations = (
         (f"{SHIM}/src/adapter/surface/controller_qualification.rs", '!self.native.pending_opening_owners_retained()', 'false'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", '.share_mode(0)', '.share_mode(7)'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !polled.remaining', 'if false'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !refused || !wiped || !native_wiped', 'if false'),
+        (f"{SHIM}/src/adapter/surface/diagnostics.rs", 'if !keeper_held.get()', 'if false'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", '!self.events.matching_exit_at_boundary(browser.browser_pid)', 'false'),
+        (f"{SHIM}/src/adapter/events.rs", '!self.exit_boundary_invalid.get()', 'true'),
         (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'self.native.recordless_controller_completion().is_some()', 'false'),
         (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),

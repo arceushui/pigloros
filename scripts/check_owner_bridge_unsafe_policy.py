@@ -1125,13 +1125,16 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "ff52e736dfb173f52af1ca90ea4d14012a745bb204ba0351d967883dc3ad2ff3":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "63dae2baa6c61e76a59bdc6c3592ef45ddaa95841994eff6e78e772da2b89819":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ("src/adapter/surface/diagnostics.rs", "quarantined_fault_state", "ab2738e15f12084ff78850a991e3a4bf09edac95d07c4063e63e4fa1f60c15c1"),
+        ("src/adapter/surface/diagnostics.rs", "inject_quarantined_fault", "02303635aa711fc81e6e8843cc54cf0d75c1fd7b888d61a28358f9d9ee52131b"),
+        ("src/adapter/surface/tests.rs", "quarantined_fault_refuses_missing_state_and_unheld_keeper", "97982abb08ee1c4067d6d0674684af4c6636dfb4421e0af194595c290150070f"),
         ('src/adapter/surface/mod.rs', 'pre_environment_retention', '1cb427754f0a7c3675063890f5fac1eeea50f342ff3988bfe2f6532c65e5bc6d'),
         ('src/adapter/surface/mod.rs', 'early_renderer_presence', '1f0f23a60d23aa258a7c4b2ddf7079540d4f841ee87719c1474d7ad1759b0f6f'),
         ('src/adapter/surface/mod.rs', 'pre_environment_completion', '3566802f65e63c69f642d7b4b5a070e0b802945847e0a24d8a0637b08f8a3fd7'),
@@ -1187,7 +1190,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "629162d1afb9d130fcf664a51553d7d9327cd318095950221054475968ef83e6"),
+        ("src/ffi/session.rs", "inject_process_fault", "86049a410d996ed475d1bd32a8b3797e8b69ad909a9e0b94031e5461c504f97f"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1308,7 +1311,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "5b4f965ef6766564c285741406a8e24359de14838b96215d9c8538014bf43e47":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "7f6c9e75944d7578fa016c4b3a9736f41a29cf0e23764294fdb4c150f1a46f29":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1331,6 +1334,8 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
         reviewed_functions = {
             "src/lib.rs": ("inject_process_fault",),
             "src/ffi/session.rs": ("inject_process_fault",),
+            "src/adapter/surface/diagnostics.rs": ("inject_quarantined_fault",),
+            "src/adapter/surface/tests.rs": ("quarantined_fault_refuses_missing_state_and_unheld_keeper",),
             "src/adapter/surface/mod.rs": (
                 "inject_posted_fault", "inject_recordless_browser", "inject_releasing_fault",
                 "inject_view_fault", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault", "inject_posted_consuming_fault", "inject_before_record_fault",
@@ -1341,7 +1346,8 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
                 opening = source.find("{", function.end())
                 if opening >= 0:
                     regions.append((function.start(), _matching_brace(source, opening) + 1))
-        if relative in ("src/ffi/process_fault.rs", "src/adapter/native_tests/process_fault.rs"):
+        if relative in ("src/ffi/process_fault.rs", "src/adapter/native_tests/process_fault.rs",
+                        "src/adapter/native_tests/process_fault/quarantined.rs"):
             regions.append((0, len(source)))
         for reference in re.finditer(r"(?<!\w)(?:FaultSeal|FaultAuthority)(?!\w)", source):
             if not any(start <= reference.start() < stop for start, stop in regions):
@@ -1353,7 +1359,16 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
                 found.append(f"{SHIM}/{relative}: fault capability implementations belong only in the reviewed root types")
         for match in re.finditer(r"(?<!\w)FaultSeal\s*[(\{]", source):
             root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
-            if not root_declaration and relative != "src/adapter/native_tests/process_fault.rs":
+            sealed_fixture = relative in (
+                "src/adapter/native_tests/process_fault.rs",
+                "src/adapter/native_tests/process_fault/quarantined.rs",
+            )
+            negative_fixture = relative == "src/adapter/surface/tests.rs" and any(
+                name == "quarantined_fault_refuses_missing_state_and_unheld_keeper"
+                and start < match.start() < stop
+                for name, start, stop in _function_spans(source)
+            )
+            if not root_declaration and not sealed_fixture and not negative_fixture:
                 found.append(f"{SHIM}/{relative}: FaultSeal construction belongs only in the sealed fixture")
         for match in re.finditer(r"(?<!\w)FaultAuthority\s*\{", source):
             root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
@@ -1361,7 +1376,11 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
                 name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser", "inject_before_record_fault") and start < match.start() < stop
                 for name, start, stop in _function_spans(source)
             )
-            if not root_declaration and not surface_construction:
+            quarantined_construction = relative == "src/adapter/surface/diagnostics.rs" and any(
+                name == "inject_quarantined_fault" and start < match.start() < stop
+                for name, start, stop in _function_spans(source)
+            )
+            if not root_declaration and not surface_construction and not quarantined_construction:
                 found.append(f"{SHIM}/{relative}: FaultAuthority construction belongs only in the validated Surface path")
 
 
@@ -1482,7 +1501,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "3a94a8220aa3f5d7a31ea0a57a7fb62e424be7199eba4efb73292893b745b340",
+        lib: "2fdfc05b5f438443eaa1bbb2ceb34930dacc2e53c9da23086982764292611edf",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
         prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
@@ -1532,17 +1551,21 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '18f29ddb06b619224482fc41adbd2bf630eee95060ec9f73be4a46036f68d07d',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': 'e73b98d2fa4a1a752f2bb570786f8e70c04bcdc4a728b2d68fca40ce77ded702',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': '01b92261cea3c9e1224f865471a42a5129e4ecbb109bcae5950e4f0bc187f202',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': 'f202b219f76320a192fe28abd31702f4ecad45272d1eea8e454340f8d32c30f5',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '64d74f81a3f4da8d44f24d5aabe56604a98bbd53152cb8dfd7a3880656ada139',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'bac10398c6a03974fa061b5752cc616362aa7d0de1e508a127f8810c560f842c',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '8e3e02a1663cee361e3135b776770e95e3230d3fd34026211c895019ed67df78',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': '0fc24075b7d182b3fb6ec5605737237c001bfcc56fa7c961bd8b2204a1470cf0',
-    'crates/pos-owner-bridge-windows/src/lib.rs': '3a94a8220aa3f5d7a31ea0a57a7fb62e424be7199eba4efb73292893b745b340',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'c1752082929bbf3d2edea82a46f10e542a2863e182c819027bc512e1e8b46e03',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '2fdfc05b5f438443eaa1bbb2ceb34930dacc2e53c9da23086982764292611edf',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': 'aba89304f72a45a9abc2d7bba58e20161c2019a5db053988214640e342332c10',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
-    'crates/pos-owner-bridge-windows/src/adapter/events.rs': '7500dd634adfe7b3cd6b53ed92175749fd02e144d7f3b4b99957727761159f3a',
+    'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'caa25c26de54562099e3d11fa762fc1f55e93a21249fe5eff1ac881bd5b14a1d',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '3f461807a6362e771c37015b42d3e33bfdb1ba911b408f35dddd98f4286b0f79',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '9c29db3c19998534c3b80c71f31afd0977106b574de062cc93f6cc291c4d9dc7',

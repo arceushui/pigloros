@@ -34,6 +34,9 @@ mod retirement;
 mod diagnostics;
 
 #[cfg(test)]
+mod controller_qualification;
+
+#[cfg(test)]
 mod exit_boundary;
 
 #[cfg(test)]
