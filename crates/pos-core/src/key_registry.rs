@@ -164,7 +164,7 @@ impl OwnerIdV1 {
         }
     }
 
-    fn from_borrowed(value: &str) -> Result<Self, KeyRegistryErrorV1> {
+    pub(crate) fn from_borrowed(value: &str) -> Result<Self, KeyRegistryErrorV1> {
         Self::validate_text(value)?;
         let length = value.len();
         let mut bytes = [0; 128];
