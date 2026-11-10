@@ -166,7 +166,8 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
             )
 
 
-RUNNER_PATH = "readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+RUNNER_PATH = f"readonly RUNNER_PATH={SYSTEM_PATH}\n"
 
 
 def fake_docker(root: Path) -> Path:
@@ -198,7 +199,7 @@ def fake_docker(root: Path) -> Path:
     if text.count(RUNNER_PATH) != 1:
         raise SystemExit(f"{NET_ADMIN_RUNNER} does not fix its PATH: {RUNNER_PATH}")
     runner.write_text(
-        text.replace(RUNNER_PATH, f"readonly RUNNER_PATH={fake}:/usr/sbin:/usr/bin:/sbin:/bin\n"),
+        text.replace(RUNNER_PATH, f"readonly RUNNER_PATH={fake}:{SYSTEM_PATH}\n"),
         encoding="utf-8",
     )
     return fake
@@ -244,18 +245,49 @@ def check_net_admin_runner_environment(root: Path, harness: Path, named: str) ->
     )
     if marker.exists():
         raise SystemExit("the NET_ADMIN runner ran something its caller's environment named")
+    expected = {
+        "PATH": f"{fake}:{SYSTEM_PATH}",
+        "HOME": "/nonexistent",
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+    }
+    if docker_environment(root) != expected:
+        raise SystemExit(f"Docker ran under an environment other than its own: {docker_environment(root)}")
+    # The runner's own override names a rootless daemon's unix socket.
+    rootless = "unix:///run/user/1000/docker.sock"
+    docker_run_arguments(root, harness, named, {"PIGLOR_ISOLATED_DOCKER_HOST": rootless})
+    if docker_environment(root) != {**expected, "DOCKER_HOST": rootless}:
+        raise SystemExit(f"Docker ignored the runner's socket override: {docker_environment(root)}")
+    # Anything but a unix socket at an absolute path is refused before Docker.
+    for invalid in (
+        "tcp://192.0.2.1:2375",
+        "ssh://host",
+        "unix://run/docker.sock",
+        "unix:///run/../tmp/docker.sock",
+        "unix:///run/docker.sock extra",
+        "unix:///run/docker.sock\nunix:///x",
+    ):
+        (root / "docker-arguments").unlink(missing_ok=True)
+        result = run_runner(root, harness, named, {"PIGLOR_ISOLATED_DOCKER_HOST": invalid})
+        refused = "PIGLOR_ISOLATED_DOCKER_HOST must be unix:// and an absolute socket path"
+        if (
+            result.returncode != 2
+            or refused not in result.stderr
+            or (root / "docker-arguments").exists()
+        ):
+            raise SystemExit(
+                f"the runner accepted the Docker socket override {invalid!r}:"
+                f" exit {result.returncode}: {result.stderr}"
+            )
+
+
+def docker_environment(root: Path) -> dict[str, str]:
+    """The environment the fake `docker` in `root` last ran under."""
     seen = dict(
         line.split("=", 1)
         for line in (root / "docker-environment").read_text(encoding="utf-8").splitlines()
     )
     seen.pop("PWD", None)
-    expected = {
-        "PATH": f"{fake}:/usr/sbin:/usr/bin:/sbin:/bin",
-        "HOME": "/nonexistent",
-        "DOCKER_HOST": "unix:///var/run/docker.sock",
-    }
-    if seen != expected:
-        raise SystemExit(f"Docker ran under an environment other than its own: {seen}")
+    return seen
 
 
 def check_read_only_probe(temporary: Path) -> None:
@@ -446,10 +478,12 @@ def check_repinned_runners(temporary: Path) -> None:
         (PRIMARY_RUNNER, "set -euo pipefail\nreadonly", "set -euo pipefail\nsource \"$BASH_ENV\"\nreadonly"),
         (
             PRIMARY_RUNNER,
-            'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \\\n',
+            'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent "DOCKER_HOST=$DOCKER_SOCKET" \\\n',
             "",
         ),
-        (PRIMARY_RUNNER, "DOCKER_HOST=unix:///var/run/docker.sock", 'DOCKER_HOST="$DOCKER_HOST"'),
+        (PRIMARY_RUNNER, '"DOCKER_HOST=$DOCKER_SOCKET"', 'DOCKER_HOST="$DOCKER_HOST"'),
+        (PRIMARY_RUNNER, " || $DOCKER_SOCKET == *..* ]]", " ]]"),
+        (PRIMARY_RUNNER, "^unix:///[A-Za-z0-9._/-]+$", "^[a-z]+://.+$"),
         (PRIMARY_RUNNER, "set +e\n", 'set +e\ndocker run --rm "$ISOLATION_IMAGE" true\n'),
         (PRIMARY_RUNNER, "source=$REPOSITORY_ROOT,", "source=/,"),
         (NET_ADMIN_RUNNER, "  --cap-drop ALL\n", "  --cap-add ALL\n"),
@@ -493,6 +527,16 @@ def check_runner_name_pieces(temporary: Path) -> None:
             allowed,
             'const RUNNER: &str = concat!("../../scripts/run-", "isolated-test.sh");\n',
         ),
+        "a NET_ADMIN fragment spelled as a char array": (
+            Path("crates/pieces/src/lib.rs"),
+            "const PIECE: [char; 8] = ['n', 'e', 't', '-', 'a', 'd', 'm', 'i'];\n"
+            "const REST: [u8; 1] = [b'n'];\n",
+        ),
+        "a runner spelled as a char array": (
+            Path("apps/pos-sandboxd/src/pieces.rs"),
+            "const NAME: [char; 11] = ['r', 'u', 'n', '-', 'i', 's', 'o', 'l', 'a', 't', 'e'];\n"
+            "const END: char = 'd';\n",
+        ),
         "an undiscovered runner in apps": (
             Path("apps/pos-sandboxd/src/pieces.rs"),
             'fn f(p: &Path) -> PathBuf { p.join("../../scripts/run-isolated-other-test.sh") }\n',
@@ -505,6 +549,13 @@ def check_runner_name_pieces(temporary: Path) -> None:
             "/* run-isolated-test.sh */\n"
             "const QUOTE: char = '\"'; const LABEL: &str = \"net\"; fn f<'a>(_: &'a str) {}\n"
             "const OTHER: char = '\"'; const ADMINISTRATOR: &str = \"x\";\n",
+        ),
+        # A known gap of this best-effort lint: format! may reorder the pieces
+        # of a name. The runner's own harness and test-name guards still
+        # refuse any test it was not written for.
+        "a runner whose pieces format! reorders": (
+            Path("crates/pieces/src/lib.rs"),
+            'fn runner() -> String { format!("run-{}-test.sh", "isolated") }\n',
         ),
         "the adapter naming its own runner's capability": (
             allowed,
