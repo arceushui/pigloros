@@ -3,6 +3,7 @@ use std::{
     collections::VecDeque,
     error::Error,
     net::{Ipv4Addr, Ipv6Addr},
+    rc::Rc,
 };
 
 use netlink_packet_core::{
@@ -419,10 +420,13 @@ fn removal_deletes_the_attempts_rules_by_handle_then_its_chain() -> TestResult {
     Ok(())
 }
 
+/// The replies a [`Scripted`] transport has not given yet.
+type Unread = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
 /// A transport that replies with scripted datagrams.
 #[derive(Default)]
 struct Scripted {
-    replies: RefCell<VecDeque<Vec<u8>>>,
+    replies: Unread,
 }
 
 impl NetlinkTransport for Scripted {
@@ -458,9 +462,16 @@ fn route_found(sequence: u32, kind: RouteType, index: u32) -> Vec<u8> {
 
 /// A session that answers each request with the next of `replies`.
 fn scripted(replies: Vec<Vec<u8>>) -> NetlinkSession<Scripted> {
-    NetlinkSession::new(Scripted {
-        replies: RefCell::new(VecDeque::from(replies)),
-    })
+    scripted_with_unread(replies).0
+}
+
+/// [`scripted`], and the replies it has not given yet.
+fn scripted_with_unread(replies: Vec<Vec<u8>>) -> (NetlinkSession<Scripted>, Unread) {
+    let unread = Rc::new(RefCell::new(VecDeque::from(replies)));
+    let session = NetlinkSession::new(Scripted {
+        replies: Rc::clone(&unread),
+    });
+    (session, unread)
 }
 
 #[test]
@@ -1159,12 +1170,28 @@ fn a_removal_stops_at_the_first_exchange_that_fails() -> TestResult {
     let with_attempt = dumps_of(1, &[create_table(), install_attempt(&attempt)]);
     let absent: Vec<Vec<u8>> = (1..=6).map(done).collect();
     // The table cannot be read, the attempt's rules cannot be deleted, or
-    // the table cannot be read back.
-    for netfilter in [Vec::new(), with_attempt, absent[..3].to_vec()] {
-        assert!(matches!(
-            remove_against(&mut Installed::default(), &records, Vec::new(), netfilter)?,
-            Err(HostEgressError::Netlink(_))
-        ));
+    // the table cannot be read back: each refusal ends the removal, and the
+    // reply after it is never read.
+    for (netfilter, code) in [
+        (vec![ack(1, -1)], -1),
+        ([with_attempt, vec![ack(4, -2)]].concat(), -2),
+        ([absent[..3].to_vec(), vec![ack(4, -3)]].concat(), -3),
+    ] {
+        let (session, unread) = scripted_with_unread([netfilter, vec![done(99)]].concat());
+        let removed = remove_locked(
+            &mut Installed::default(),
+            &records,
+            (&scripted(Vec::new()), &session),
+            &attempt,
+        );
+        assert!(
+            matches!(
+                removed,
+                Err(HostEgressError::Netlink(NetlinkError::Kernel(refused))) if refused == code
+            ),
+            "{removed:?}"
+        );
+        assert_eq!(*unread.borrow(), [done(99)]);
     }
     // The records cannot be read.
     let unreadable = ForwardingRecords::in_directory(directory.path().join("forwarding/7"));
@@ -1193,6 +1220,31 @@ fn a_removal_stops_at_the_first_exchange_that_fails() -> TestResult {
     remove_against(&mut shared, &records, Vec::new(), absent)??;
     assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
     assert_eq!(shared.devices.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_removal_whose_restore_failed_restores_the_device_when_retried() -> TestResult {
+    let (_directory, records) = eth0_recorded()?;
+    let absent = || (1..=6).map(done).collect::<Vec<_>>();
+    let mut installed = returning_by_link_7(false)?;
+    // Link 7 cannot be read, so its forwarding stays on: the attempt keeps
+    // the device it returns by, and its record stays.
+    assert!(matches!(
+        remove_against(&mut installed, &records, Vec::new(), absent())?,
+        Err(HostEgressError::Netlink(NetlinkError::Truncated))
+    ));
+    assert_eq!(installed.devices, returning_by_link_7(false)?.devices);
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // The retry restores it, and only then forgets the device.
+    let restoring = vec![
+        link_named(1, "eth0", true),
+        ack(2, 0),
+        link_named(3, "eth0", false),
+    ];
+    remove_against(&mut installed, &records, restoring, absent())??;
+    assert!(records.recorded()?.is_empty());
+    assert!(installed.devices.is_empty());
     Ok(())
 }
 

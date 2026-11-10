@@ -341,25 +341,42 @@ impl NetlinkNamespaceControl {
     /// forwarding cannot be restored, and otherwise if any of them cannot be
     /// removed, or remains afterwards.
     pub fn remove_orphans(&self) -> Result<(), OrphanSweepError> {
-        NetlinkSession::open(ROUTE)
+        self.remove_orphans_through(
+            || NetlinkSession::open(ROUTE),
+            || NetlinkSession::open(NETFILTER),
+            &super::host_egress::ForwardingRecords::default(),
+        )
+    }
+
+    /// [`Self::remove_orphans`], restoring the forwarding `records` hold
+    /// through a session from `route_session` before the host egress table
+    /// goes through sessions from `netfilter_session`.
+    fn remove_orphans_through<R: NetlinkTransport, N: NetlinkTransport>(
+        &self,
+        route_session: impl FnOnce() -> Result<NetlinkSession<R>, NetlinkError>,
+        netfilter_session: impl Fn() -> Result<NetlinkSession<N>, NetlinkError>,
+        records: &super::host_egress::ForwardingRecords,
+    ) -> Result<(), OrphanSweepError> {
+        route_session()
             .map_err(OrphanSweepError::from)
             .and_then(|route| {
-                super::host_egress::restore_forwarding(
-                    &route,
-                    &super::host_egress::ForwardingRecords::default(),
-                )
-                .map_err(OrphanSweepError::Forwarding)
+                super::host_egress::restore_forwarding(&route, records)
+                    .map_err(OrphanSweepError::Forwarding)
             })
             .and_then(|()| {
-                self.remove_orphaned_network()
+                self.remove_orphaned_network(netfilter_session)
                     .map_err(OrphanSweepError::from)
             })
     }
 
-    /// The host egress table, then the host links and namespaces of
-    /// [`Self::remove_orphans`], read back as absent.
-    fn remove_orphaned_network(&self) -> Result<(), NetlinkError> {
-        super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
+    /// The host egress table, through sessions from `netfilter_session`,
+    /// then the host links and namespaces of [`Self::remove_orphans`], read
+    /// back as absent.
+    fn remove_orphaned_network<N: NetlinkTransport>(
+        &self,
+        netfilter_session: impl Fn() -> Result<NetlinkSession<N>, NetlinkError>,
+    ) -> Result<(), NetlinkError> {
+        super::host_egress::remove_table(netfilter_session)
             .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
             .and_then(|orphans| {
                 orphans.iter().try_for_each(|link| {
