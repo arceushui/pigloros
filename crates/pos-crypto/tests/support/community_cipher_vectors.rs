@@ -5,19 +5,19 @@ use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct KnownAnswer {
-    pub id: String,
+pub(super) struct KnownAnswer {
+    pub(super) id: String,
     reference: String,
-    pub key: [u8; 32],
-    pub nonce: [u8; 12],
-    pub aad: Vec<u8>,
-    pub plaintext: Vec<u8>,
-    pub ciphertext_and_tag: Vec<u8>,
+    pub(super) key: [u8; 32],
+    pub(super) nonce: [u8; 12],
+    pub(super) aad: Vec<u8>,
+    pub(super) plaintext: Vec<u8>,
+    pub(super) ciphertext_and_tag: Vec<u8>,
 }
 
 /// Pin the independent values, exact case inventory and upstream provenance.
 /// The corpus is test input, never a production key/nonce configuration.
-pub fn load() -> Result<[KnownAnswer; 3], Box<dyn std::error::Error>> {
+pub(super) fn load() -> Result<[KnownAnswer; 3], Box<dyn std::error::Error>> {
     let encoded = include_bytes!("../vectors/community-aes-gcm-siv.json");
     let cases: [KnownAnswer; 3] = serde_json::from_slice(encoded)?;
     // Pin values independently of JSON whitespace or formatting.
