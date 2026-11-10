@@ -1,0 +1,65 @@
+{
+  "name": "draft-ensemble-dependency-graph-incomplete",
+  "operation_id": "createEnsemble",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {
+      "Idempotency-Key": "client-1-11",
+      "content-type": "application/json"
+    },
+    "body": {
+      "parent_cut": {
+        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+        "seq": 3
+      },
+      "horizon_ticks": 120,
+      "profile_id": "deterministic-local-v1",
+      "forks": [
+        {
+          "label": "Ordinary alternative",
+          "condition": "ordinary",
+          "interventions": [
+            {
+              "ordinal": 0,
+              "effective_tick": 4,
+              "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+              "field": "trust",
+              "operation": "set",
+              "value": 0.4
+            }
+          ]
+        },
+        {
+          "label": "Adversarial trust shock",
+          "condition": "adversarial",
+          "interventions": [
+            {
+              "ordinal": 0,
+              "effective_tick": 4,
+              "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+              "field": "trust",
+              "operation": "add",
+              "value": -0.5
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:dependency-graph-incomplete",
+      "title": "Dependency graph incomplete",
+      "status": 409,
+      "detail": "a dependency edge is missing",
+      "instance": "/v1/decision-previews/{preview_id}/ensembles",
+      "code": "dependency-graph-incomplete",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

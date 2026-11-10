@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Rejection tests of `check_gateway_contract.py`: drift in each checked input fails (#1312)."""
+"""Rejection tests of `check_gateway_contract.py`: drift in each input fails (#1312, #1313)."""
 
 from __future__ import annotations
 
 import copy
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +27,11 @@ def contract(document: dict | None = None, registry: dict | None = None) -> chec
 
 TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
+PREVIEWS = "/v1/decision-previews"
+
+
+def example(name: str) -> dict:
+    return checker.load(checker.EXAMPLES / f"{name}.json")  # type: ignore[return-value]
 
 
 def problem(status: int, code: str, instance: str = TIMELINES) -> dict:
@@ -157,6 +164,207 @@ class CheckGatewayContractTest(unittest.TestCase):
         subject = contract()
         operation = self.operation(subject, "GET", f"/v1/timelines/{checker.SAMPLE_ULID}/events")
         self.assertTrue(checker.parameter_errors(operation, subject, "query", {"page": 1}))
+
+    def test_the_checked_in_contract_has_draft_families_and_limits(self) -> None:
+        subject = contract()
+        drafts = [
+            op for op in subject.operations().values() if op["x-pigloros-status"] == "draft"
+        ]
+        self.assertGreater(len(drafts), 0)
+        self.assertGreater(len(checker.check_limits(subject)), 0)
+
+    def test_a_served_exchange_cannot_reach_a_draft_operation(self) -> None:
+        with self.assertRaisesRegex(checker.ContractError, "Draft operation getSession"):
+            contract().operation_for("GET", "/v1/session")
+        exchange = {
+            "router": "loopback",
+            "method": "GET",
+            "path": "/v1/session",
+            "expect": {"status": 401, "body": {"json": problem(401, "unauthenticated")}},
+        }
+        payload = {"subcases": [{"id": "draft.1", "exchanges": [exchange]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "draft.json").write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(checker.ContractError, "Draft operation"):
+                checker.check_fixtures(contract(), Path(directory))
+
+    def test_a_draft_operation_without_an_example_is_rejected(self) -> None:
+        examples = [
+            (name, item)
+            for name, item in checker.load_examples()
+            if item["operation_id"] != "getErasure"
+        ]
+        with self.assertRaisesRegex(checker.ContractError, "getErasure has no golden example"):
+            checker.check_examples(contract(), examples)
+
+    def test_a_draft_family_without_a_fail_closed_example_is_rejected(self) -> None:
+        examples = [
+            (name, item)
+            for name, item in checker.load_examples()
+            if item["operation_id"] != "getSession" or item["response"]["status"] < 400
+        ]
+        with self.assertRaisesRegex(checker.ContractError, "family session"):
+            checker.check_examples(contract(), examples)
+
+    def test_a_draft_mutation_without_an_idempotency_key_is_rejected(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        document["paths"][PREVIEWS]["post"]["parameters"] = []
+        with self.assertRaisesRegex(checker.ContractError, "requires Idempotency-Key"):
+            checker.check_description(contract(document=document))
+
+    def test_an_admission_that_does_not_answer_the_receipt_is_rejected(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        answer = document["paths"][PREVIEWS]["post"]["responses"]["202"]["content"]
+        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/DecisionPreview"}
+        with self.assertRaisesRegex(checker.ContractError, "admission receipt"):
+            checker.check_description(contract(document=document))
+
+    def test_a_draft_operation_must_be_structurally_draft(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        del document["paths"]["/v1/session"]["get"]["x-pigloros-owner"]
+        with self.assertRaisesRegex(checker.ContractError, "owner ticket"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        document["paths"]["/v1/session"]["get"]["description"] = "Read the session."
+        with self.assertRaisesRegex(checker.ContractError, "does not start with Draft"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        document["paths"]["/v1/session"]["get"]["tags"] = []
+        with self.assertRaisesRegex(checker.ContractError, "one family tag"):
+            checker.check_description(contract(document=document))
+
+    def test_a_served_operation_has_no_draft_owner(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        document["paths"]["/health"]["get"]["x-pigloros-owner"] = "#302"
+        with self.assertRaisesRegex(checker.ContractError, "no Draft owner"):
+            checker.check_description(contract(document=document))
+
+    def test_a_draft_read_answers_an_enveloped_resource(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        answer = document["paths"]["/v1/session"]["get"]["responses"]["200"]["content"]
+        answer["application/json"]["schema"] = {
+            "$ref": "#/components/schemas/CommittedEventReceipt"
+        }
+        with self.assertRaisesRegex(checker.ContractError, "enveloped resource"):
+            checker.check_description(contract(document=document))
+
+    def test_a_served_operation_reaching_a_draft_schema_is_rejected(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        answer = document["paths"]["/health"]["get"]["responses"]["200"]["content"]
+        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/Session"}
+        with self.assertRaisesRegex(checker.ContractError, "served operations reach the Draft"):
+            checker.check_description(contract(document=document))
+
+    def test_a_draft_operation_reaching_an_unmarked_schema_is_rejected(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        del document["components"]["schemas"]["Session"]["x-pigloros-maturity"]
+        with self.assertRaisesRegex(checker.ContractError, "neither Draft nor served"):
+            checker.check_description(contract(document=document))
+
+    def test_a_limit_must_equal_its_schema_bound(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        plugins = document["components"]["schemas"]["ScenarioRoomInput"]["properties"]["plugins"]
+        plugins["maxItems"] = 33
+        with self.assertRaisesRegex(checker.ContractError, "does not equal 32"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        document["x-pigloros-limits"]["room_plugins"]["value"] = 0
+        with self.assertRaisesRegex(checker.ContractError, "positive integer"):
+            checker.check_description(contract(document=document))
+
+    def test_a_limit_must_name_its_enforcement(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        limits = document["x-pigloros-limits"]
+        limits["request_body_bytes"]["enforced_by"]["runtime"]["status"] = 418
+        with self.assertRaisesRegex(checker.ContractError, "not registered"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        rules = document["x-pigloros-limits"]["room_rules"]["enforced_by"]["schema"]
+        rules.append("/components/schemas/Missing/maxItems")
+        with self.assertRaisesRegex(checker.ContractError, "does not resolve"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        document["x-pigloros-limits"]["room_rules"]["enforced_by"] = {}
+        with self.assertRaisesRegex(checker.ContractError, "neither schema nor runtime"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        del document["x-pigloros-limits"]
+        with self.assertRaisesRegex(checker.ContractError, "no x-pigloros-limits"):
+            checker.check_description(contract(document=document))
+
+    def test_every_draft_array_bound_is_a_stated_limit(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        document["x-pigloros-limits"]["room_rules"]["enforced_by"]["schema"].pop()
+        with self.assertRaisesRegex(checker.ContractError, "is not a stated limit"):
+            checker.check_description(contract(document=document))
+
+    def test_every_draft_array_string_and_map_is_bounded(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        schemas = document["components"]["schemas"]
+        del schemas["Erasure"]["properties"]["retained_classes"]["maxItems"]
+        with self.assertRaisesRegex(checker.ContractError, "unbounded array"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        schemas = document["components"]["schemas"]
+        del schemas["ResourceEnvelope"]["properties"]["schema_id"]["maxLength"]
+        with self.assertRaisesRegex(checker.ContractError, "unbounded string"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        schemas = document["components"]["schemas"]
+        del schemas["AdmissionReceipt"]["properties"]["bound_inputs"]["maxProperties"]
+        del document["x-pigloros-limits"]["admission_bound_inputs"]
+        with self.assertRaisesRegex(checker.ContractError, "unbounded map"):
+            checker.check_description(contract(document=document))
+
+    def test_local_mode_never_claims_an_air_gapped_profile(self) -> None:
+        subject = contract()
+        schema = {"$ref": "urn:pigloros:gateway:v1:schema:execution-profile"}
+        air = {
+            "mode": "air-gapped",
+            "profile_id": "deterministic-air-gapped-v1",
+            "profile_digest": "0" * 64,
+            "network": "absent",
+        }
+        self.assertEqual(subject.schema_errors(air, schema), [])
+        self.assertTrue(subject.schema_errors({**air, "network": "denied"}, schema))
+        self.assertTrue(subject.schema_errors({**air, "mode": "local"}, schema))
+
+    def test_a_resource_has_exactly_one_ordinal_and_no_unknown_member(self) -> None:
+        subject = contract()
+        session = example("draft-session-local")["response"]["body"]
+        schema = {"$ref": "#/components/schemas/Session"}
+        self.assertEqual(subject.schema_errors(session, schema), [])
+        self.assertTrue(subject.schema_errors({**session, "revision": 1}, schema))
+        self.assertTrue(subject.schema_errors({**session, "extra": 1}, schema))
+        withheld = {"state": "available", "withheld": [{"member": "/x", "reason": "deleted"}]}
+        self.assertTrue(subject.schema_errors({**session, "availability": withheld}, schema))
+
+    def test_an_admission_receipt_never_claims_a_commit(self) -> None:
+        subject = contract()
+        receipt = example("draft-decision-preview-admitted")["response"]["body"]
+        schema = {"$ref": "#/components/schemas/AdmissionReceipt"}
+        self.assertEqual(subject.schema_errors(receipt, schema), [])
+        self.assertTrue(subject.schema_errors({**receipt, "state": "committed"}, schema))
+        self.assertTrue(subject.schema_errors({**receipt, "seq": 1}, schema))
+
+    def test_an_incomplete_fork_exposes_no_suffix(self) -> None:
+        subject = contract()
+        ensemble = example("draft-ensemble-incomplete")["response"]["body"]
+        schema = {"$ref": "#/components/schemas/Ensemble"}
+        self.assertEqual(subject.schema_errors(ensemble, schema), [])
+        partial = copy.deepcopy(ensemble)
+        partial["forks"][1]["suffix_digest"] = "0" * 64
+        self.assertTrue(subject.schema_errors(partial, schema))
+
+    def test_path_parameters_of_an_example_are_validated(self) -> None:
+        subject = contract()
+        operation = self.operation(subject, "GET", "/v1/timelines/x/events")
+        path = {"timeline_id": checker.SAMPLE_ULID}
+        self.assertEqual(checker.parameter_errors(operation, subject, "path", path), [])
+        self.assertTrue(checker.parameter_errors(operation, subject, "path", {}))
+        self.assertTrue(
+            checker.parameter_errors(operation, subject, "path", {**path, "revision": 1})
+        )
 
     def test_the_normalization_is_undone_with_valid_samples(self) -> None:
         restored = checker.restore(

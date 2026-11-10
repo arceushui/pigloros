@@ -1,0 +1,58 @@
+{
+  "name": "draft-preference-create",
+  "operation_id": "createPreference",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json"
+    },
+    "body": {
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight": 0.8
+        },
+        {
+          "dimension": "cost",
+          "weight": -0.4
+        }
+      ]
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:preference-revision",
+      "id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "principal-authored"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "subject_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight": 0.8
+        },
+        {
+          "dimension": "cost",
+          "weight": -0.4
+        }
+      ],
+      "parent_revision": null,
+      "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+    }
+  }
+}

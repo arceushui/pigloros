@@ -1,0 +1,37 @@
+{
+  "name": "draft-option-spec-single-option",
+  "operation_id": "createOptionSpec",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json"
+    },
+    "body": {
+      "options": [
+        {
+          "key": "coast",
+          "label": "Move to the coast",
+          "tags": [
+            "nature",
+            "quiet"
+          ],
+          "lean_hint": 0.2
+        }
+      ]
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "at least two options",
+      "instance": "/v1/option-specs",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

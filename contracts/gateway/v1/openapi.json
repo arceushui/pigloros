@@ -5,7 +5,7 @@
     "title": "PiglorOS Gateway",
     "version": "1.0.0-draft",
     "summary": "The sole public application boundary of PiglorOS (ADR-022).",
-    "description": "Canonical v1 contract of the Gateway (#301). Draft until Wave 9 acceptance: before then Draft fixtures may be replaced without compatibility code. Every failure is an RFC 9457 `application/problem+json` body whose `code` is one of `problem-types.json`. Every mutation that is retry-safe carries an `Idempotency-Key` header. Events are ordered by Timeline sequence, never by wall time. Response schemas are closed so that this revision detects drift; clients must ignore unknown members, because later v1 revisions may add optional ones. No operation creates a real-world effect.",
+    "description": "Canonical v1 contract of the Gateway (#301). Draft until Wave 9 acceptance: before then Draft fixtures may be replaced without compatibility code. Every failure is an RFC 9457 `application/problem+json` body whose `code` is one of `problem-types.json`. Every mutation that is retry-safe carries an `Idempotency-Key` header. Events are ordered by Timeline sequence, never by wall time. Response schemas are closed so that this revision detects drift; clients must ignore unknown members, because later v1 revisions may add optional ones. No operation creates a real-world effect. Operations marked `x-pigloros-status: draft` (owner `x-pigloros-owner`) are the Wave 9 resource families of #1313: they are not served, only their golden examples validate, and no served-response fixture may exercise them. `x-pigloros-limits` states the normative request and response limits (spec section 10); a `schema` limit is enforced by the named schema keywords and a `runtime` limit by the named problem.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -531,6 +531,2137 @@
                 }
               }
             },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#302",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "session"
+        ],
+        "description": "Draft (#302): Read the authenticated Principal, effective grants and consent, execution mode, profile and safe availability. Authority is server-derived. Not served yet; only its golden examples validate. #302 turns it into a served, drift-checked operation.",
+        "responses": {
+          "200": {
+            "description": "The caller's own session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`revoked`: the session authority was revoked.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms": {
+      "post": {
+        "operationId": "createScenarioRoom",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#303",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "scenario-room"
+        ],
+        "description": "Draft (#303): Create revision 1 of a Scenario Room from a declarative descriptor (ADR-041 validation, bounds, governance, consent and composition). Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScenarioRoomRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed first revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`: governance, composition or Plugin admission failed.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions": {
+      "post": {
+        "operationId": "deriveScenarioRoomRevision",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#303",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "scenario-room"
+        ],
+        "description": "Draft (#303): Derive the next immutable revision of a Scenario Room from a parent revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeriveScenarioRoomRevisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, `append-conflict` (stale parent) or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/scenario-rooms/{room_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getScenarioRoomRevision",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#303",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "scenario-room"
+        ],
+        "description": "Draft (#303): Inspect one immutable Scenario Room revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioRoomRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/preferences": {
+      "post": {
+        "operationId": "createPreference",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#304",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "preference"
+        ],
+        "description": "Draft (#304): Create a subject-scoped immutable Preference revision. Not served yet; only its golden examples validate. #304 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePreferenceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the original revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the parent is unknown or protected.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/preferences/{preference_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getPreferenceRevision",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#304",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "preference"
+        ],
+        "description": "Draft (#304): Inspect one immutable Preference revision with a deletion-aware view. Not served yet; only its golden examples validate. #304 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreferenceId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "`deleted`: erased, answered only to its subject.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/option-specs": {
+      "post": {
+        "operationId": "createOptionSpec",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#304",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "option-spec"
+        ],
+        "description": "Draft (#304): Create an immutable OptionSpec revision of typed alternatives. Not served yet; only its golden examples validate. #304 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOptionSpecRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the original revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the parent is unknown or protected.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/option-specs/{option_spec_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getOptionSpecRevision",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#304",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "option-spec"
+        ],
+        "description": "Draft (#304): Inspect one immutable OptionSpec revision. Not served yet; only its golden examples validate. #304 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OptionSpecId"
+          },
+          {
+            "$ref": "#/components/parameters/Revision"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionSpecRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/decision-previews": {
+      "post": {
+        "operationId": "createDecisionPreview",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#305",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "decision-preview"
+        ],
+        "description": "Draft (#305): Admit one inert Decision Preview bound to exact input revisions and a profile. Not served yet; only its golden examples validate. #305 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDecisionPreviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, `incompatible-profile` or `artifact-untrusted`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: an input revision is unknown or protected.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/decision-previews/{preview_id}": {
+      "get": {
+        "operationId": "getDecisionPreview",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#305",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "decision-preview"
+        ],
+        "description": "Draft (#305): Observe one Decision Preview and its lifecycle state. Not served yet; only its golden examples validate. #305 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreviewId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/decision-previews/{preview_id}/actions": {
+      "post": {
+        "operationId": "submitSimulatedAction",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#306",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "simulated-action"
+        ],
+        "description": "Draft (#306): Submit one typed simulated ProposedAction: Principal decision, host-owned ActionApprover, then an atomic commit. No Actuation. Not served yet; only its golden examples validate. #306 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreviewId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatedActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed Event receipt with its next Projection cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommittedEventReceipt"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the original receipt; approval is not re-run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommittedEventReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `append-conflict`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected` or `approval-rejected`: nothing committed.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: commit indeterminate; retry with the same key to resolve the original outcome.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/timelines/{timeline_id}/projection": {
+      "get": {
+        "operationId": "getProjection",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#306",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "projection"
+        ],
+        "description": "Draft (#306): Observe the capability-filtered Projection of a Timeline at a sequence, in Timeline Order, with a resumable cursor. Not served yet; only its golden examples validate. #306 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TimelineId"
+          },
+          {
+            "name": "at_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The Projection Cut to read; the latest when absent."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "$ref": "#/components/parameters/PageCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One Projection page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`append-conflict` (stale cursor) or `mixed-fork-generation`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/decision-previews/{preview_id}/ensembles": {
+      "post": {
+        "operationId": "createEnsemble",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#307",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "ensemble"
+        ],
+        "description": "Draft (#307): Admit an ordered ensemble of Forks including an explicitly labelled adversarial condition (ADR-064). Not served yet; only its golden examples validate. #307 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreviewId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnsembleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, `incompatible-profile`, `dependency-graph-incomplete` or `mixed-fork-generation`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`admission-rejected`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/ensembles/{ensemble_id}": {
+      "get": {
+        "operationId": "getEnsemble",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#307",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "ensemble"
+        ],
+        "description": "Draft (#307): Observe an ensemble and its generation-isolated Forks. Not served yet; only its golden examples validate. #307 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EnsembleId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ensemble.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ensemble"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/replays": {
+      "post": {
+        "operationId": "createReplay",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#307",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "replay"
+        ],
+        "description": "Draft (#307): Admit a Replay of a named immutable closure. Not served yet; only its golden examples validate. #307 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReplayRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, `incompatible-profile`, `artifact-untrusted` or `replay-claim-insufficient`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`artifact-missing` or `not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/replays/{replay_id}": {
+      "get": {
+        "operationId": "getReplay",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#307",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "replay"
+        ],
+        "description": "Draft (#307): Observe a Replay outcome and its ReplayClaim. Not served yet; only its golden examples validate. #307 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ReplayId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Replay"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/decision-previews/{preview_id}/evidence": {
+      "get": {
+        "operationId": "getPreviewEvidence",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#308",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "evidence"
+        ],
+        "description": "Draft (#308): Read reactions, trace, uncertainty, Calibration Report status, provenance and claim strength. Not served yet; only its golden examples validate. #308 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PreviewId"
+          },
+          {
+            "$ref": "#/components/parameters/PageCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The evidence page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewEvidence"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`counterfactual-incomplete` or `append-conflict` (stale cursor).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/exports": {
+      "post": {
+        "operationId": "createExport",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#309",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "export"
+        ],
+        "description": "Draft (#309): Admit a minimized subject-authorized export and ReproManifest closure. The request acknowledges that external copies cannot be recalled. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`, `mixed-fork-generation` or `counterfactual-incomplete`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/exports/{export_id}": {
+      "get": {
+        "operationId": "getExport",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#309",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "export"
+        ],
+        "description": "Draft (#309): Retrieve an export page; resumable through `cursor`. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExportId"
+          },
+          {
+            "$ref": "#/components/parameters/PageCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The export.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Export"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`append-conflict`: stale cursor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/me/consent-revocations": {
+      "post": {
+        "operationId": "revokeConsent",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#309",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "consent"
+        ],
+        "description": "Draft (#309): Revoke one of the authenticated subject's consents; future protected work stops. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentRevocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The recorded revocation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry or an already revoked consent: the original revocation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: not the subject's consent.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/me/erasures": {
+      "post": {
+        "operationId": "requestErasure",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#309",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "erasure"
+        ],
+        "description": "Draft (#309): Request monotonic erasure of the authenticated subject's data. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErasureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Admitted for execution. The receipt never claims that an Event committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` (including a missing `Idempotency-Key`) or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` or `consent-invalid`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: a request bound of `x-pigloros-limits`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/me/erasures/{erasure_id}": {
+      "get": {
+        "operationId": "getErasure",
+        "x-pigloros-status": "draft",
+        "x-pigloros-owner": "#309",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "erasure"
+        ],
+        "description": "Draft (#309): Observe the subject's own erasure; another Principal's identifier is not enumerable. Not served yet; only its golden examples validate. #309 turns it into a served, drift-checked operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ErasureId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The erasure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Erasure"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: identical for a missing and a protected resource; it never enumerates.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1084,18 +3215,22 @@
           },
           "operation_url": {
             "type": "string",
-            "pattern": "^/v1/"
+            "pattern": "^/v1/",
+            "maxLength": 256
           },
           "idempotency_key_digest": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$",
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
             "description": "BLAKE3 of the idempotency key; the raw key is never echoed."
           },
           "bound_inputs": {
             "type": "object",
+            "minProperties": 1,
+            "maxProperties": 8,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z_]{0,31}$"
+            },
             "additionalProperties": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
+              "$ref": "urn:pigloros:gateway:v1:schema:digest"
             },
             "description": "The digests of the input revisions and profile the admission binds."
           }
@@ -1131,7 +3266,8 @@
           },
           "event_schema_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 256
           },
           "next_cursor": {
             "oneOf": [
@@ -1144,6 +3280,2602 @@
             ]
           }
         }
+      },
+      "Digest": {
+        "$id": "urn:pigloros:gateway:v1:schema:digest",
+        "x-pigloros-maturity": "draft",
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "A BLAKE3-256 digest in lower-case hex."
+      },
+      "PageCursor": {
+        "$id": "urn:pigloros:gateway:v1:schema:page-cursor",
+        "x-pigloros-maturity": "draft",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^[!-~]+$",
+        "description": "An opaque resumable cursor. Clients pass it back unchanged; a cursor of another resource, generation or inventory is `append-conflict`."
+      },
+      "DomainKey": {
+        "$id": "urn:pigloros:gateway:v1:schema:domain-key",
+        "x-pigloros-maturity": "draft",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z][a-z0-9_.-]*$",
+        "description": "A canonical lower-case identifier: a capability, dimension, Plugin, rule or option key."
+      },
+      "Label": {
+        "$id": "urn:pigloros:gateway:v1:schema:label",
+        "x-pigloros-maturity": "draft",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+        "description": "Participant-authored display text without control characters."
+      },
+      "ExecutionProfileId": {
+        "$id": "urn:pigloros:gateway:v1:schema:execution-profile-id",
+        "x-pigloros-maturity": "draft",
+        "enum": [
+          "replay-v1",
+          "deterministic-local-v1",
+          "deterministic-air-gapped-v1",
+          "live-local-v1"
+        ],
+        "description": "An ADR-058 execution profile family."
+      },
+      "ExecutionProfile": {
+        "$id": "urn:pigloros:gateway:v1:schema:execution-profile",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The execution identity under which a resource was produced. `mode` is explicit: an Air-Gapped resource names an Air-Gapped or Replay profile and has no network path; Local never claims Air-Gapped.",
+        "required": [
+          "mode",
+          "profile_id",
+          "profile_digest",
+          "network"
+        ],
+        "properties": {
+          "mode": {
+            "enum": [
+              "local",
+              "air-gapped"
+            ]
+          },
+          "profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:execution-profile-id"
+          },
+          "profile_digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "network": {
+            "enum": [
+              "denied",
+              "capability-granted",
+              "absent"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "air-gapped"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "profile_id": {
+                  "enum": [
+                    "replay-v1",
+                    "deterministic-air-gapped-v1"
+                  ]
+                },
+                "network": {
+                  "const": "absent"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "local"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "profile_id": {
+                  "enum": [
+                    "replay-v1",
+                    "deterministic-local-v1",
+                    "live-local-v1"
+                  ]
+                },
+                "network": {
+                  "enum": [
+                    "denied",
+                    "capability-granted"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ProvenanceReference": {
+        "$id": "urn:pigloros:gateway:v1:schema:provenance-reference",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The digest of the resource's provenance record and its origin class. Provenance describes lineage only; it is not a signature, conformance or calibration claim.",
+        "required": [
+          "digest",
+          "origin"
+        ],
+        "properties": {
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "origin": {
+            "enum": [
+              "principal-authored",
+              "host-derived",
+              "imported-artifact"
+            ]
+          }
+        }
+      },
+      "Availability": {
+        "$id": "urn:pigloros:gateway:v1:schema:availability",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Capability-filtered availability. Each withheld member names why it is absent, so unknown, unauthorized, deleted and unavailable stay distinct; an `available` resource withholds nothing.",
+        "required": [
+          "state",
+          "withheld"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "withheld": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "member",
+                "reason"
+              ],
+              "properties": {
+                "member": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^/"
+                },
+                "reason": {
+                  "enum": [
+                    "unknown",
+                    "unauthorized",
+                    "deleted",
+                    "unavailable"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "state": {
+              "const": "available"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "withheld": {
+              "maxItems": 0
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "withheld": {
+              "minItems": 1
+            }
+          }
+        }
+      },
+      "ResourceEnvelope": {
+        "$id": "urn:pigloros:gateway:v1:schema:resource-envelope",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The members every Draft resource carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the execution profile and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
+        "required": [
+          "schema_id",
+          "id",
+          "provenance",
+          "execution_profile",
+          "availability"
+        ],
+        "properties": {
+          "schema_id": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^urn:pigloros:gateway:v1:schema:[a-z0-9-]+$"
+          },
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "An immutable revision; a change is a new revision."
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "A monotonic generation; it never decreases."
+          },
+          "provenance": {
+            "$ref": "urn:pigloros:gateway:v1:schema:provenance-reference"
+          },
+          "execution_profile": {
+            "$ref": "urn:pigloros:gateway:v1:schema:execution-profile"
+          },
+          "availability": {
+            "$ref": "urn:pigloros:gateway:v1:schema:availability"
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "revision"
+            ]
+          },
+          {
+            "required": [
+              "generation"
+            ]
+          }
+        ]
+      },
+      "LifecycleState": {
+        "$id": "urn:pigloros:gateway:v1:schema:lifecycle-state",
+        "x-pigloros-maturity": "draft",
+        "enum": [
+          "submitted",
+          "rejected",
+          "admitted",
+          "committed",
+          "failed",
+          "projected",
+          "forking",
+          "complete",
+          "incomplete",
+          "exported",
+          "degraded"
+        ],
+        "description": "The Wave 9 state machine (spec section 7). No response collapses these states; a resource names the subset it can reach. `submitted` and `rejected` are answered synchronously: a rejection is a problem body."
+      },
+      "ReplayClaim": {
+        "$id": "urn:pigloros:gateway:v1:schema:replay-claim",
+        "x-pigloros-maturity": "draft",
+        "enum": [
+          "exact",
+          "exact-authoritative-with-redacted-views",
+          "structural-only",
+          "unverifiable-artifacts-missing",
+          "incompatible-profile"
+        ],
+        "description": "The ADR-060 ReplayClaim. Erasure and revocation only preserve or weaken it; a later generation never presents a stronger claim."
+      },
+      "RevisionRef": {
+        "$id": "urn:pigloros:gateway:v1:schema:revision-ref",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One exact immutable input revision and the digest of its canonical bytes.",
+        "required": [
+          "id",
+          "revision",
+          "digest"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        }
+      },
+      "RevisionParent": {
+        "$id": "urn:pigloros:gateway:v1:schema:revision-parent",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The revision a new revision of the same resource derives from.",
+        "required": [
+          "id",
+          "revision"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "Session": {
+        "$id": "urn:pigloros:gateway:v1:schema:session",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The authenticated Principal's own session: effective grants, consent, execution mode and profile. `generation` is the authority generation; it advances on every grant, consent or revocation change.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "principal",
+          "grants",
+          "consents",
+          "contract"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:session"
+          },
+          "principal": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "principal_id",
+              "entity_ids"
+            ],
+            "properties": {
+              "principal_id": {
+                "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+              },
+              "entity_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                }
+              }
+            }
+          },
+          "grants": {
+            "type": "array",
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+            },
+            "description": "The effective capabilities derived by the Gateway; a client never supplies a trusted capability."
+          },
+          "consents": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "consent_ref",
+                "state",
+                "export_permitted"
+              ],
+              "properties": {
+                "consent_ref": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "state": {
+                  "enum": [
+                    "granted",
+                    "revoked"
+                  ]
+                },
+                "export_permitted": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "contract": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "api_major",
+              "contract_version"
+            ],
+            "properties": {
+              "api_major": {
+                "const": "v1"
+              },
+              "contract_version": {
+                "const": "1.0.0-draft"
+              }
+            }
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ScenarioRoomInput": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-input",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the correlation ID and hashes are server-owned and cannot be supplied. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`).",
+        "required": [
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
+      },
+      "CreateScenarioRoomRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-scenario-room-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "descriptor"
+        ],
+        "properties": {
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "DeriveScenarioRoomRevisionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:derive-scenario-room-revision-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A complete new descriptor derived from `parent_revision`; there is no automatic merge.",
+        "required": [
+          "parent_revision",
+          "descriptor"
+        ],
+        "properties": {
+          "parent_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
+          }
+        }
+      },
+      "ScenarioRoomDescriptor": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The admitted ADR-041 descriptor, the payload of one `room.revision.v1` Event.",
+        "required": [
+          "room_id",
+          "revision",
+          "schema_version",
+          "tick_duration_ms",
+          "max_ticks",
+          "scheduler_seed",
+          "scheduler_policy",
+          "intervention_policy",
+          "plugins",
+          "rules",
+          "participants",
+          "initial_conditions",
+          "governance_ref",
+          "privacy_export_ref",
+          "correlation_id",
+          "plugin_composition_hash",
+          "rule_set_hash",
+          "descriptor_hash"
+        ],
+        "properties": {
+          "room_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "tick_duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "max_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheduler_seed": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest",
+            "description": "32 seed bytes in hex (ADR-041)."
+          },
+          "scheduler_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "intervention_policy": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                }
+              }
+            },
+            "description": "Plugins already admitted and bundled by the deployment trust policy; a room cannot discover, install or retrieve a Plugin."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "value"
+              ],
+              "properties": {
+                "rule_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "kind"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "persona",
+                    "agent",
+                    "society",
+                    "world-body"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entity_id",
+                "dimension",
+                "value"
+              ],
+              "properties": {
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "governance_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "privacy_export_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "correlation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "pattern": "^(?!0{32})[0-9a-f]{32}$",
+            "description": "16 runtime-generated non-zero bytes; never caller supplied."
+          },
+          "plugin_composition_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "rule_set_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "descriptor_hash": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        }
+      },
+      "ScenarioRoomRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. An identical descriptor is deduplicated to the existing revision.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "descriptor",
+          "parent_revision",
+          "commit"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:scenario-room-revision"
+          },
+          "descriptor": {
+            "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor"
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "commit": {
+            "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CreatePreferenceRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-preference-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Without `parent` it creates revision 1 of a new Preference set; with `parent` it creates the next revision of that set.",
+        "required": [
+          "weights"
+        ],
+        "properties": {
+          "weights": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "dimension",
+                "weight"
+              ],
+              "properties": {
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "weight": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                }
+              }
+            },
+            "description": "Named dimension weights in [-1, 1]; a dimension appears once."
+          },
+          "parent": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-parent"
+          }
+        }
+      },
+      "PreferenceRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:preference-revision",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One immutable subject-scoped Preference revision. A revision whose subject erased it answers `deleted` to that subject and `not-found-or-unavailable` to everyone else.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "subject_entity_id",
+          "weights",
+          "parent_revision",
+          "digest"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:preference-revision"
+          },
+          "subject_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "weights": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "dimension",
+                "weight"
+              ],
+              "properties": {
+                "dimension": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "weight": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                }
+              }
+            },
+            "description": "Named dimension weights in [-1, 1]; a dimension appears once."
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CreateOptionSpecRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-option-spec-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "options"
+        ],
+        "properties": {
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "label",
+                "tags"
+              ],
+              "properties": {
+                "key": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                  }
+                },
+                "lean_hint": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                },
+                "coordinates": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "x",
+                    "z"
+                  ],
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "z": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The user-supplied alternatives; a key appears once."
+          },
+          "parent": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-parent"
+          }
+        }
+      },
+      "OptionSpecRevision": {
+        "$id": "urn:pigloros:gateway:v1:schema:option-spec-revision",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One immutable OptionSpec revision.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "revision",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "options",
+          "parent_revision",
+          "digest"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:option-spec-revision"
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "label",
+                "tags"
+              ],
+              "properties": {
+                "key": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                  }
+                },
+                "lean_hint": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                },
+                "coordinates": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "x",
+                    "z"
+                  ],
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "z": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The user-supplied alternatives; a key appears once."
+          },
+          "parent_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CreateDecisionPreviewRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-decision-preview-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Binds one inert preview to exact input revisions and one execution profile.",
+        "required": [
+          "scenario_room",
+          "preference",
+          "option_spec",
+          "profile_id"
+        ],
+        "properties": {
+          "scenario_room": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+          },
+          "preference": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+          },
+          "option_spec": {
+            "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+          },
+          "profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:execution-profile-id"
+          }
+        }
+      },
+      "DecisionPreview": {
+        "$id": "urn:pigloros:gateway:v1:schema:decision-preview",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One Decision Preview. Admission (`admitted`) is never a commit claim; only `committed` names an Event sequence. Every proposal is inert and no route creates a real-world effect.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "state",
+          "inputs",
+          "factual_timeline_id",
+          "recommendation",
+          "committed",
+          "proposals",
+          "actuation"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:decision-preview"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:lifecycle-state"
+              }
+            ],
+            "enum": [
+              "admitted",
+              "failed",
+              "committed",
+              "projected",
+              "forking",
+              "complete",
+              "incomplete",
+              "exported",
+              "degraded"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scenario_room",
+              "preference",
+              "option_spec"
+            ],
+            "properties": {
+              "scenario_room": {
+                "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+              },
+              "preference": {
+                "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+              },
+              "option_spec": {
+                "$ref": "urn:pigloros:gateway:v1:schema:revision-ref"
+              }
+            }
+          },
+          "factual_timeline_id": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recommendation": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "pending"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "insufficient-evidence"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status",
+                  "option_key",
+                  "toss_up",
+                  "margin_micro",
+                  "scores"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "computed"
+                  },
+                  "option_key": {
+                    "oneOf": [
+                      {
+                        "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Null for a Toss-up."
+                  },
+                  "toss_up": {
+                    "type": "boolean",
+                    "description": "True when the margin is below 0.02."
+                  },
+                  "margin_micro": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2000000
+                  },
+                  "scores": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "option_key",
+                        "match_score_micro"
+                      ],
+                      "properties": {
+                        "option_key": {
+                          "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                        },
+                        "match_score_micro": {
+                          "type": "integer",
+                          "minimum": -1000000,
+                          "maximum": 1000000
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "committed": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The committed simulated action, once its Event has a sequence."
+          },
+          "proposals": {
+            "const": "inert"
+          },
+          "actuation": {
+            "const": "none"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "SimulatedActionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:simulated-action-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One typed simulated ProposedAction of the preview's factual Timeline. It is authorized, approved by the host-owned ActionApprover and only then committed; it mutates simulation state only. The canonical payload is at most 4,096 bytes.",
+        "required": [
+          "entity_id",
+          "event_type",
+          "capability",
+          "payload",
+          "observed_seq"
+        ],
+        "properties": {
+          "entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_type": {
+            "const": "world.action.v1"
+          },
+          "capability": {
+            "const": "world.action.v1.submit"
+          },
+          "payload": {
+            "$ref": "urn:pigloros:gateway:v1:schema:world-action-v1"
+          },
+          "observed_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The Logical Head the client observed; a moved head is `append-conflict`."
+          }
+        }
+      },
+      "ProjectionView": {
+        "$id": "urn:pigloros:gateway:v1:schema:projection",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One page of a capability-filtered Projection at a Projection Cut. `id` is the Timeline ID and `generation` its Fork generation (0 for a factual Timeline); a quarantined generation is never served.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "timeline_id",
+          "at_seq",
+          "fold_cursor",
+          "entries",
+          "next_cursor"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:projection"
+          },
+          "timeline_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "at_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fold_cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The Projection Cut: the last sequence folded."
+          },
+          "entries": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "owner",
+                "entity_id",
+                "state_schema_id",
+                "state_digest"
+              ],
+              "properties": {
+                "owner": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "state_schema_id": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^[a-z][a-z0-9_.:-]*$"
+                },
+                "state_digest": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                },
+                "value": {
+                  "description": "The capability-filtered state value; absent when withheld."
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:page-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "Intervention": {
+        "$id": "urn:pigloros:gateway:v1:schema:intervention",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One ordered ADR-064 Intervention. Ordinals are contiguous from 0; an Intervention cannot target consent, capability, trust, erasure or audit state.",
+        "required": [
+          "ordinal",
+          "effective_tick",
+          "target_entity_id",
+          "field",
+          "operation",
+          "value"
+        ],
+        "properties": {
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1023
+          },
+          "effective_tick": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "field": {
+            "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+          },
+          "operation": {
+            "enum": [
+              "set",
+              "add"
+            ]
+          },
+          "value": {
+            "type": "number"
+          }
+        }
+      },
+      "CreateEnsembleRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-ensemble-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "parent_cut",
+          "horizon_ticks",
+          "profile_id",
+          "forks"
+        ],
+        "properties": {
+          "parent_cut": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "timeline_id",
+              "seq"
+            ],
+            "properties": {
+              "timeline_id": {
+                "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "horizon_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:execution-profile-id"
+          },
+          "forks": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "label",
+                "condition",
+                "interventions"
+              ],
+              "properties": {
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "condition": {
+                  "enum": [
+                    "ordinary",
+                    "adversarial"
+                  ]
+                },
+                "interventions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1024,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:intervention"
+                  }
+                }
+              }
+            },
+            "contains": {
+              "properties": {
+                "condition": {
+                  "const": "adversarial"
+                }
+              }
+            },
+            "minContains": 1,
+            "description": "Ordered Forks; at least one is the explicitly labelled adversarial condition."
+          }
+        }
+      },
+      "Ensemble": {
+        "$id": "urn:pigloros:gateway:v1:schema:ensemble",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "An ordered ensemble of generation-isolated Forks with complete endogenous suffix recomputation (ADR-064). A Fork that is not `complete` exposes no suffix digest: no partial suffix is authoritative.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "preview_id",
+          "state",
+          "parent_cut",
+          "horizon_ticks",
+          "forks",
+          "replay_claim"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:ensemble"
+          },
+          "preview_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:lifecycle-state"
+              }
+            ],
+            "enum": [
+              "forking",
+              "complete",
+              "incomplete",
+              "degraded"
+            ]
+          },
+          "parent_cut": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "timeline_id",
+              "seq"
+            ],
+            "properties": {
+              "timeline_id": {
+                "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "horizon_ticks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "forks": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ordinal",
+                "label",
+                "condition",
+                "timeline_id",
+                "fork_generation",
+                "state",
+                "suffix_digest",
+                "recomputed_through_tick",
+                "failure_code"
+              ],
+              "properties": {
+                "ordinal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 15
+                },
+                "label": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                },
+                "condition": {
+                  "enum": [
+                    "ordinary",
+                    "adversarial"
+                  ]
+                },
+                "timeline_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "fork_generation": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "state": {
+                  "enum": [
+                    "forking",
+                    "complete",
+                    "incomplete"
+                  ]
+                },
+                "suffix_digest": {
+                  "oneOf": [
+                    {
+                      "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recomputed_through_tick": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "failure_code": {
+                  "enum": [
+                    null,
+                    "counterfactual-incomplete",
+                    "dependency-graph-incomplete",
+                    "resource-limit-exceeded"
+                  ]
+                }
+              },
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "complete"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "suffix_digest": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                  },
+                  "failure_code": {
+                    "const": null
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "suffix_digest": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            "contains": {
+              "properties": {
+                "condition": {
+                  "const": "adversarial"
+                }
+              }
+            },
+            "minContains": 1
+          },
+          "replay_claim": {
+            "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CreateReplayRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-replay-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Replays one named immutable closure. A closure whose ReplayClaim is weaker than `minimum_replay_claim` is `replay-claim-insufficient`.",
+        "required": [
+          "manifest_digest",
+          "reproducibility_class",
+          "profile_id",
+          "minimum_replay_claim"
+        ],
+        "properties": {
+          "manifest_digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "reproducibility_class": {
+            "enum": [
+              "recorded-replay",
+              "profile-recomputation",
+              "cross-profile-conformance"
+            ]
+          },
+          "profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:execution-profile-id"
+          },
+          "minimum_replay_claim": {
+            "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+          }
+        }
+      },
+      "Replay": {
+        "$id": "urn:pigloros:gateway:v1:schema:replay",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "One Replay: the ADR-058 class and outcome with its ADR-060 ReplayClaim. A computational match never strengthens the claim.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "state",
+          "manifest_digest",
+          "reproducibility_class",
+          "verification_outcome",
+          "replay_claim",
+          "divergence_report_digest",
+          "result_digest"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:replay"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:lifecycle-state"
+              }
+            ],
+            "enum": [
+              "admitted",
+              "complete",
+              "failed",
+              "degraded"
+            ]
+          },
+          "manifest_digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "reproducibility_class": {
+            "enum": [
+              "recorded-replay",
+              "profile-recomputation",
+              "cross-profile-conformance"
+            ]
+          },
+          "verification_outcome": {
+            "enum": [
+              null,
+              "verified-exact",
+              "diverged",
+              "invalid-manifest",
+              "unverifiable-artifacts-missing",
+              "incompatible-profile",
+              "resource-limit-exceeded"
+            ]
+          },
+          "replay_claim": {
+            "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+          },
+          "divergence_report_digest": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result_digest": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CalibrationStatus": {
+        "$id": "urn:pigloros:gateway:v1:schema:calibration-status",
+        "x-pigloros-maturity": "draft",
+        "description": "Calibration Report status: explicitly `unavailable` or `insufficient-evidence`, otherwise a report naming its population, method and limitations. It is named empirical evidence, never general truth.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason"
+            ],
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              },
+              "reason": {
+                "enum": [
+                  "no-resolved-predictions",
+                  "erased",
+                  "profile-excludes-calibration"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "minimum_samples",
+              "observed_samples"
+            ],
+            "properties": {
+              "status": {
+                "const": "insufficient-evidence"
+              },
+              "minimum_samples": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "observed_samples": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "population",
+              "method",
+              "limitations",
+              "report_digest",
+              "brier_micro",
+              "ece_micro",
+              "replay_claim"
+            ],
+            "properties": {
+              "status": {
+                "const": "reported"
+              },
+              "population": {
+                "$ref": "urn:pigloros:gateway:v1:schema:label"
+              },
+              "method": {
+                "$ref": "urn:pigloros:gateway:v1:schema:label"
+              },
+              "limitations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:label"
+                }
+              },
+              "report_digest": {
+                "$ref": "urn:pigloros:gateway:v1:schema:digest"
+              },
+              "brier_micro": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "ece_micro": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "replay_claim": {
+                "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+              }
+            }
+          }
+        ]
+      },
+      "PreviewEvidence": {
+        "$id": "urn:pigloros:gateway:v1:schema:preview-evidence",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "Reactions, trace, uncertainty, Calibration Report status, provenance and claim strength of one preview. Evidence classes are separate members and never substitute for one another; Plugin metadata is digest-bound disclosure without Plugin authority.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "preview_id",
+          "ensemble_id",
+          "reactions",
+          "trace",
+          "trace_next_cursor",
+          "uncertainty",
+          "calibration",
+          "claims",
+          "plugins",
+          "plugin_metadata"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:preview-evidence"
+          },
+          "preview_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "ensemble_id": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reactions": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fork_ordinal",
+                "timeline_id",
+                "seq",
+                "event_id",
+                "entity_id",
+                "kind",
+                "event_schema_id"
+              ],
+              "properties": {
+                "fork_ordinal": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 15
+                },
+                "timeline_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "seq": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "event_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "entity_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "kind": {
+                  "enum": [
+                    "agent-reaction",
+                    "society-signal"
+                  ]
+                },
+                "event_schema_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            },
+            "description": "Committed reactions in Timeline Order; `fork_ordinal` is null on the factual Timeline."
+          },
+          "trace": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ordinal",
+                "kind",
+                "timeline_id",
+                "seq",
+                "node_digest",
+                "input_digests"
+              ],
+              "properties": {
+                "ordinal": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "authorization",
+                    "knowledge",
+                    "derivation"
+                  ]
+                },
+                "timeline_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                },
+                "seq": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "node_digest": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                },
+                "input_digests": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                  }
+                }
+              }
+            },
+            "description": "The ADR-059 structured trace page, ordered by `ordinal`."
+          },
+          "trace_next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:page-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "uncertainty": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "unavailable",
+                      "insufficient-evidence"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status",
+                  "method",
+                  "ensemble_size",
+                  "spread_micro"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "reported"
+                  },
+                  "method": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                  },
+                  "ensemble_size": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 16
+                  },
+                  "spread_micro": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2000000
+                  }
+                }
+              }
+            ]
+          },
+          "calibration": {
+            "$ref": "urn:pigloros:gateway:v1:schema:calibration-status"
+          },
+          "claims": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "replay_claim",
+              "reproducibility_class"
+            ],
+            "properties": {
+              "replay_claim": {
+                "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+              },
+              "reproducibility_class": {
+                "enum": [
+                  "recorded-replay",
+                  "profile-recomputation",
+                  "cross-profile-conformance",
+                  "live-unverified"
+                ]
+              }
+            }
+          },
+          "plugins": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plugin_id",
+                "version",
+                "release_digest",
+                "trust_state"
+              ],
+              "properties": {
+                "plugin_id": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
+                "release_digest": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                },
+                "trust_state": {
+                  "enum": [
+                    "admitted",
+                    "revoked"
+                  ]
+                }
+              }
+            }
+          },
+          "plugin_metadata": {
+            "const": "disclosure-only"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "CreateExportRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-export-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "preview_id",
+          "include",
+          "external_copy_acknowledged"
+        ],
+        "properties": {
+          "preview_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "include": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "repro-manifest",
+                "events",
+                "projections",
+                "trace",
+                "calibration",
+                "ensemble"
+              ]
+            }
+          },
+          "external_copy_acknowledged": {
+            "const": true,
+            "description": "The subject acknowledges that an authorized copy outside PiglorOS cannot be recalled."
+          }
+        }
+      },
+      "Export": {
+        "$id": "urn:pigloros:gateway:v1:schema:export",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "A minimized, content-addressed, subject-authorized export and its ReproManifest closure, paged by `next_cursor`. Later erasure redacts managed records and weakens the ReplayClaim; it does not claim that external copies vanished.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "preview_id",
+          "state",
+          "repro_manifest",
+          "member_count",
+          "members",
+          "next_cursor",
+          "replay_claim",
+          "external_copy_disclosure"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:export"
+          },
+          "preview_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:lifecycle-state"
+              }
+            ],
+            "enum": [
+              "admitted",
+              "exported",
+              "failed",
+              "degraded"
+            ]
+          },
+          "repro_manifest": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "digest",
+                  "byte_size",
+                  "signature",
+                  "replay_claim"
+                ],
+                "properties": {
+                  "digest": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                  },
+                  "byte_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16384
+                  },
+                  "signature": {
+                    "enum": [
+                      "signed",
+                      "unsigned"
+                    ]
+                  },
+                  "replay_claim": {
+                    "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "member_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "members": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "class",
+                "media_type",
+                "digest",
+                "byte_size",
+                "redaction"
+              ],
+              "properties": {
+                "class": {
+                  "enum": [
+                    "repro-manifest",
+                    "events",
+                    "projections",
+                    "trace",
+                    "calibration",
+                    "ensemble"
+                  ]
+                },
+                "media_type": {
+                  "enum": [
+                    "application/cbor",
+                    "application/json"
+                  ]
+                },
+                "digest": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                },
+                "byte_size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777216
+                },
+                "redaction": {
+                  "enum": [
+                    "none",
+                    "redacted"
+                  ]
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:page-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replay_claim": {
+            "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+          },
+          "external_copy_disclosure": {
+            "const": "copies-outside-pigloros-cannot-be-recalled"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ConsentRevocationRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "consent_ref"
+        ],
+        "properties": {
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
+      },
+      "ConsentRevocation": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "A recorded consent revocation. `generation` is the authority generation from which it is effective; it stops future protected work and is distinct from erasure.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "consent_ref",
+          "state",
+          "future_protected_work"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:consent-revocation"
+          },
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "const": "revoked"
+          },
+          "future_protected_work": {
+            "const": "denied"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ErasureRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:erasure-request",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scopes",
+          "impact_acknowledged"
+        ],
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "private-subject-data",
+                "consented-shared-data",
+                "public-record",
+                "aggregate",
+                "structural-audit-metadata"
+              ]
+            }
+          },
+          "impact_acknowledged": {
+            "const": true,
+            "description": "The subject saw the retained classes and the ReplayClaim impact."
+          }
+        }
+      },
+      "Erasure": {
+        "$id": "urn:pigloros:gateway:v1:schema:erasure",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The authenticated subject's own monotonic erasure. Destroyed values are never reconstructed and the ReplayClaim never strengthens.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "execution_profile",
+          "availability",
+          "state",
+          "scopes",
+          "replay_claim",
+          "retained_classes",
+          "acknowledgements",
+          "external_copies"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:erasure"
+          },
+          "state": {
+            "enum": [
+              "submitted",
+              "authorized",
+              "access-frozen",
+              "destruction-dispatched",
+              "awaiting-acknowledgements",
+              "complete",
+              "partial-failure",
+              "rejected"
+            ],
+            "description": "The ADR-060 lifecycle; no edge is backward."
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "private-subject-data",
+                "consented-shared-data",
+                "public-record",
+                "aggregate",
+                "structural-audit-metadata"
+              ]
+            }
+          },
+          "replay_claim": {
+            "$ref": "urn:pigloros:gateway:v1:schema:replay-claim"
+          },
+          "retained_classes": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "public-record",
+                "aggregate",
+                "structural-audit-metadata"
+              ]
+            }
+          },
+          "acknowledgements": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "required",
+              "positive"
+            ],
+            "properties": {
+              "required": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16384
+              },
+              "positive": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16384
+              }
+            }
+          },
+          "external_copies": {
+            "const": "not-covered"
+          }
+        },
+        "unevaluatedProperties": false
       }
     },
     "parameters": {
@@ -1162,6 +5894,88 @@
         "schema": {
           "$ref": "#/components/schemas/IdempotencyKey"
         }
+      },
+      "RoomId": {
+        "name": "room_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "PreferenceId": {
+        "name": "preference_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "OptionSpecId": {
+        "name": "option_spec_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "PreviewId": {
+        "name": "preview_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "EnsembleId": {
+        "name": "ensemble_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "ReplayId": {
+        "name": "replay_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "ExportId": {
+        "name": "export_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "ErasureId": {
+        "name": "erasure_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "Revision": {
+        "name": "revision",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "PageCursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/PageCursor"
+        },
+        "description": "Continuation from the previous page's cursor."
       }
     },
     "responses": {
@@ -1180,6 +5994,493 @@
       "ownTracksBasic": {
         "type": "http",
         "scheme": "basic"
+      }
+    }
+  },
+  "x-pigloros-limits": {
+    "request_body_bytes": {
+      "value": 1048576,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_HTTP_BODY_BYTES",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "response_body_bytes": {
+      "value": 1048576,
+      "unit": "bytes",
+      "scope": "per-phase",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_RESPONSE_BYTES",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "page_items": {
+      "value": 100,
+      "unit": "items",
+      "scope": "per-phase",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_PER_POLL",
+      "enforced_by": {
+        "schema": [
+          "/paths/~1v1~1timelines~1{timeline_id}~1events/get/parameters/2/schema/maximum",
+          "/components/schemas/EventPage/properties/events/maxItems",
+          "/paths/~1v1~1timelines~1{timeline_id}~1projection/get/parameters/2/schema/maximum",
+          "/components/schemas/ProjectionView/properties/entries/maxItems",
+          "/components/schemas/Export/properties/members/maxItems"
+        ]
+      }
+    },
+    "event_payload_bytes": {
+      "value": 262144,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENT_PAYLOAD_BYTES",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "proposed_action_payload_bytes": {
+      "value": 4096,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "pos-core MAX_PROPOSED_ACTION_PAYLOAD_BYTES (ADR-057 section 1)",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "room_descriptor_bytes": {
+      "value": 4096,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "room_plugins": {
+      "value": 32,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1; pos-runtime MAX_REQUIRED_PLUGINS_V1",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/plugins/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/plugins/maxItems",
+          "/components/schemas/PreviewEvidence/properties/plugins/maxItems"
+        ]
+      }
+    },
+    "room_rules": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "adr",
+      "source": "ADR-041 section 1",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/rules/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/rules/maxItems"
+        ]
+      }
+    },
+    "room_participants": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/participants/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/participants/maxItems"
+        ]
+      }
+    },
+    "room_initial_conditions": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/initial_conditions/maxItems",
+          "/components/schemas/ScenarioRoomDescriptor/properties/initial_conditions/maxItems"
+        ]
+      }
+    },
+    "horizon_ticks": {
+      "value": 65535,
+      "unit": "ticks",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "pos-runtime counterfactual MAX_SUFFIX_TICK_SPAN",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/ScenarioRoomInput/properties/max_ticks/maximum",
+          "/components/schemas/ScenarioRoomDescriptor/properties/max_ticks/maximum",
+          "/components/schemas/CreateEnsembleRequest/properties/horizon_ticks/maximum",
+          "/components/schemas/Ensemble/properties/horizon_ticks/maximum"
+        ]
+      }
+    },
+    "interventions_per_fork": {
+      "value": 1024,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "adr",
+      "source": "ADR-041 section 1 and ADR-064 InterventionV1; pos-core MAX_FORK_MANIFEST_INTERVENTIONS_V1",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateEnsembleRequest/properties/forks/items/properties/interventions/maxItems"
+        ]
+      }
+    },
+    "ensemble_forks": {
+      "value": 16,
+      "unit": "items",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "chosen by #1313; the acceptance ensemble is 2 (spec section 1)",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateEnsembleRequest/properties/forks/maxItems",
+          "/components/schemas/Ensemble/properties/forks/maxItems",
+          "/components/schemas/PreviewEvidence/properties/uncertainty/oneOf/1/properties/ensemble_size/maximum"
+        ]
+      }
+    },
+    "fork_depth": {
+      "value": 64,
+      "unit": "parent links",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_FORK_DEPTH",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "preference_dimensions": {
+      "value": 64,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreatePreferenceRequest/properties/weights/maxItems",
+          "/components/schemas/PreferenceRevision/properties/weights/maxItems"
+        ]
+      }
+    },
+    "options_per_spec": {
+      "value": 16,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateOptionSpecRequest/properties/options/maxItems",
+          "/components/schemas/OptionSpecRevision/properties/options/maxItems",
+          "/components/schemas/DecisionPreview/properties/recommendation/oneOf/2/properties/scores/maxItems"
+        ]
+      }
+    },
+    "option_tags": {
+      "value": 16,
+      "unit": "items",
+      "scope": "per-input",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CreateOptionSpecRequest/properties/options/items/properties/tags/maxItems",
+          "/components/schemas/OptionSpecRevision/properties/options/items/properties/tags/maxItems"
+        ]
+      }
+    },
+    "identifier_length": {
+      "value": 128,
+      "unit": "characters",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-core MAX_AUTHORITY_TEXT_BYTES; ADR-064 owner IDs 1-128 bytes",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/DomainKey/maxLength"
+        ]
+      }
+    },
+    "label_length": {
+      "value": 128,
+      "unit": "characters",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-crypto plugin_manifest MAX_LABEL_BYTES",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Label/maxLength"
+        ]
+      }
+    },
+    "idempotency_key_length": {
+      "value": 128,
+      "unit": "characters",
+      "scope": "structural",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_IDEMPOTENCY_KEY_BYTES",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/IdempotencyKey/maxLength"
+        ]
+      }
+    },
+    "cursor_length": {
+      "value": 512,
+      "unit": "characters",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/PageCursor/maxLength"
+        ]
+      }
+    },
+    "principal_entities": {
+      "value": 32,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-core MAX_AUTHORITY_SCOPE_MEMBERS",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Session/properties/principal/properties/entity_ids/maxItems"
+        ]
+      }
+    },
+    "session_grants": {
+      "value": 128,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-core MAX_AUTHORITY_SELECTORS",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Session/properties/grants/maxItems"
+        ]
+      }
+    },
+    "session_consents": {
+      "value": 32,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "code",
+      "source": "pos-core MAX_CAPABILITY_CONSENT_REFERENCES",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Session/properties/consents/maxItems"
+        ]
+      }
+    },
+    "withheld_members": {
+      "value": 64,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Availability/properties/withheld/maxItems"
+        ]
+      }
+    },
+    "admission_bound_inputs": {
+      "value": 8,
+      "unit": "members",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/AdmissionReceipt/properties/bound_inputs/maxProperties"
+        ]
+      }
+    },
+    "reaction_items": {
+      "value": 1024,
+      "unit": "items",
+      "scope": "per-phase",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/PreviewEvidence/properties/reactions/maxItems"
+        ]
+      }
+    },
+    "trace_items": {
+      "value": 1024,
+      "unit": "items",
+      "scope": "per-phase",
+      "origin": "new",
+      "source": "chosen by #1313; equals pos-plugin-host MAX_TRACE_ANNOTATIONS",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/PreviewEvidence/properties/trace/maxItems"
+        ]
+      }
+    },
+    "trace_inputs": {
+      "value": 16,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/PreviewEvidence/properties/trace/items/properties/input_digests/maxItems"
+        ]
+      }
+    },
+    "calibration_limitations": {
+      "value": 16,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1313",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/CalibrationStatus/oneOf/2/properties/limitations/maxItems"
+        ]
+      }
+    },
+    "export_members": {
+      "value": 4096,
+      "unit": "items",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "pos-core MAX_WORLD_REPLAY_ARTIFACTS_V1",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Export/properties/member_count/maximum"
+        ]
+      }
+    },
+    "export_member_bytes": {
+      "value": 16777216,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "pos-core MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1 (evaluator artifact size)",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Export/properties/members/items/properties/byte_size/maximum"
+        ]
+      }
+    },
+    "repro_manifest_bytes": {
+      "value": 16384,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "pos-core MAX_FORK_REPRO_MANIFEST_BYTES_V1",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Export/properties/repro_manifest/oneOf/0/properties/byte_size/maximum"
+        ]
+      }
+    },
+    "erasure_acknowledgements": {
+      "value": 16384,
+      "unit": "items",
+      "scope": "per-phase",
+      "origin": "code",
+      "source": "pos-core ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Erasure/properties/acknowledgements/properties/required/maximum",
+          "/components/schemas/Erasure/properties/acknowledgements/properties/positive/maximum"
+        ]
+      }
+    },
+    "root_timelines": {
+      "value": 64,
+      "unit": "Timelines",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_TIMELINES",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
+    "events_per_timeline": {
+      "value": 10000,
+      "unit": "Events",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_PER_TIMELINE",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 409
+        }
+      }
+    },
+    "principal_concurrent_operations": {
+      "value": 4,
+      "unit": "operations",
+      "scope": "per-principal",
+      "origin": "new",
+      "source": "chosen by #1313; admitted operations not yet terminal",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
+    "principal_admissions_per_minute": {
+      "value": 32,
+      "unit": "admissions",
+      "scope": "per-principal",
+      "origin": "new",
+      "source": "chosen by #1313; an operational wall-clock quota that never decides an authoritative result",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
       }
     }
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Gateway v1 contract against its examples and the served-response fixtures (#1312).
+"""Check the Gateway v1 contract, its examples and the served-response fixtures (#1312, #1313).
 
 The canonical contract is `contracts/gateway/v1/openapi.json` (OpenAPI 3.1.1, JSON Schema
 2020-12 dialect) with its RFC 9457 problem-type registry `problem-types.json`. This check fails
@@ -12,12 +12,26 @@ fixtures disagree:
    problem+json content, and every 4xx/5xx answer is a problem;
 2. the registry codes, types and titles are unique, follow the URN rule and equal the `code`
    enumeration of the `Problem` schema in order;
-3. every golden example under `contracts/gateway/v1/examples/` names a served operation, its
-   request is valid exactly when the example says so, and its response is valid for its status;
+3. every golden example under `contracts/gateway/v1/examples/` names an operation, its request
+   (headers, query and path) is valid exactly when the example says so, and its response is
+   valid for its status;
 4. every expected exchange of `fixtures/conformance/inputs/gateway-client-conformance/` is a
-   JSON response valid for its operation and status. Those fixtures are executed against the
-   served routers by `apps/pos-gateway-conformance-adapter`, so a served response that drifts
-   from the description fails one of the two checks.
+   JSON response valid for its served operation and status. Those fixtures are executed against
+   the served routers by `apps/pos-gateway-conformance-adapter`, so a served response that
+   drifts from the description fails one of the two checks. An exchange that reaches a Draft
+   operation fails: a Draft operation is never mistaken for a served one;
+5. a Draft operation (`x-pigloros-status: draft`) names its owning ticket in
+   `x-pigloros-owner` and in its description, has exactly one family tag and at least one
+   golden example, and every Draft family has a positive and a fail-closed example. A Draft
+   mutation requires `Idempotency-Key`, a Draft read answers a resource that composes the
+   resource envelope, and every `202` answers the admission receipt;
+6. every schema a Draft operation reaches is `x-pigloros-maturity: draft` or shared with a
+   served operation, and no served operation reaches a Draft schema. Every array, string and
+   map of a Draft schema is bounded;
+7. every `x-pigloros-limits` entry has a value, unit, scope, origin and source, and is enforced
+   either by the schema keywords it names (each equal to its value) or by a registered
+   problem. Every array bound of a Draft schema is a stated limit unless it is the size of its
+   own unique enumeration.
 
 Every problem body must use a status its registry entry permits.
 
@@ -57,6 +71,14 @@ DIALECT = "https://json-schema.org/draft/2020-12/schema"
 MEDIA_TYPES = {"application/json", "application/problem+json"}
 METHODS = ("get", "put", "post", "delete", "patch")
 STATUSES = {"served", "draft"}
+MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
+DRAFT_OWNER = re.compile(r"^#30[2-9]$")
+ENVELOPE_ID = SCHEMA_ID_PREFIX + "resource-envelope"
+ADMISSION_ID = SCHEMA_ID_PREFIX + "admission-receipt"
+LIMIT_MEMBERS = {"value", "unit", "scope", "origin", "source", "enforced_by"}
+LIMIT_SCOPES = {"structural", "per-input", "per-phase", "operation-wide", "per-principal"}
+LIMIT_ORIGINS = {"code", "adr", "new"}
+LIMIT_KEYWORDS = {"maxItems", "maxLength", "maximum", "maxProperties"}
 
 # Values the conformance normalization replaces, restored to valid samples before validation.
 SAMPLE_ULID = "01JC0GATEWAYF1XTVRESAMP1E0"
@@ -79,6 +101,7 @@ class Contract:
         self.document = document
         self.problem_types = problem_types
         self.schemas: dict[str, dict] = document["components"]["schemas"]
+        self.names = {schema["$id"]: name for name, schema in self.schemas.items()}
         self.registry = Registry().with_resources(
             (schema["$id"], Resource(contents=schema, specification=DRAFT202012))
             for schema in self.schemas.values()
@@ -122,8 +145,40 @@ class Contract:
         for (op_method, template), operation in self.operations().items():
             pattern = "^" + re.sub(r"\\\{[a-z_]+\\\}", "[^/]+", re.escape(template)) + "$"
             if op_method == method and re.fullmatch(pattern, base):
+                if operation["x-pigloros-status"] != "served":
+                    raise ContractError(
+                        f"{method} {base} is the Draft operation {operation['operationId']}; "
+                        "a served exchange cannot exercise it"
+                    )
                 return template, operation
         raise ContractError(f"{method} {base} names no operation of the contract")
+
+    def schema_name(self, reference: str) -> str:
+        return reference.rsplit("/", 1)[1] if reference.startswith("#/") else self.names[reference]
+
+    def reachable(self, value: object) -> set[str]:
+        """The component schemas a description fragment reaches through its references."""
+        found: set[str] = set()
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, list):
+                stack.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            stack.extend(item.values())
+            reference = item.get("$ref")
+            if not isinstance(reference, str):
+                continue
+            if reference.startswith("#/") and not reference.startswith("#/components/schemas/"):
+                stack.append(self.resolve({"$ref": reference}))
+                continue
+            name = self.schema_name(reference)
+            if name not in found:
+                found.add(name)
+                stack.append(self.schemas[name])
+        return found
 
     def response_errors(
         self, operation: dict, status: int, body: object, template: str, path: str = ""
@@ -179,6 +234,157 @@ def check_description(contract: Contract) -> None:
         if operation.get("x-pigloros-status") not in STATUSES:
             raise ContractError(f"{where}: x-pigloros-status is not one of {sorted(STATUSES)}")
         check_responses(contract, where, operation)
+        check_operation_status(contract, method, where, operation)
+    check_maturity(contract)
+    check_bounded(contract, check_limits(contract))
+
+
+def check_operation_status(contract: Contract, method: str, where: str, operation: dict) -> None:
+    """A Draft operation is structurally Draft; every admission answers the admission receipt."""
+    for status, response in operation["responses"].items():
+        if status == "202" and response_schema_id(contract, response) != ADMISSION_ID:
+            raise ContractError(f"{where} 202: an admission answers the admission receipt")
+    owner = operation.get("x-pigloros-owner")
+    if operation["x-pigloros-status"] == "served":
+        if owner is not None:
+            raise ContractError(f"{where}: a served operation has no Draft owner")
+        return
+    if not isinstance(owner, str) or not DRAFT_OWNER.match(owner):
+        raise ContractError(f"{where}: a Draft operation names its owner ticket #302-#309")
+    if not operation.get("description", "").startswith(f"Draft ({owner}): "):
+        raise ContractError(f"{where}: the description does not start with Draft ({owner})")
+    tags = operation.get("tags")
+    if not isinstance(tags, list) or len(tags) != 1:
+        raise ContractError(f"{where}: a Draft operation has exactly one family tag")
+    parameters = [contract.resolve(parameter) for parameter in operation.get("parameters", [])]
+    if method in MUTATIONS and not any(
+        parameter["in"] == "header"
+        and parameter["name"].lower() == "idempotency-key"
+        and parameter.get("required") is True
+        for parameter in parameters
+    ):
+        raise ContractError(f"{where}: a Draft mutation requires Idempotency-Key")
+    if method == "GET":
+        schema_id = response_schema_id(contract, operation["responses"].get("200", {}))
+        schema = contract.schemas[contract.names[schema_id]] if schema_id else {}
+        if (
+            {"$ref": ENVELOPE_ID} not in schema.get("allOf", [])
+            or schema.get("unevaluatedProperties") is not False
+            or schema["properties"].get("schema_id", {}).get("const") != schema_id
+        ):
+            raise ContractError(f"{where} 200: a Draft read answers a closed enveloped resource")
+
+
+def response_schema_id(contract: Contract, response: dict) -> str | None:
+    """The `$id` of the referenced JSON schema a response answers, if any."""
+    content = contract.resolve(response).get("content", {}).get("application/json", {})
+    reference = content.get("schema", {}).get("$ref")
+    if not isinstance(reference, str):
+        return None
+    return contract.schemas[contract.schema_name(reference)]["$id"]
+
+
+def check_maturity(contract: Contract) -> None:
+    """Draft operations reach Draft or shared served schemas; served ones reach no Draft schema."""
+    served: set[str] = set()
+    drafts: list[tuple[str, set[str]]] = []
+    for operation in contract.operations().values():
+        reached = contract.reachable(operation)
+        if operation["x-pigloros-status"] == "served":
+            served |= reached
+        else:
+            drafts.append((operation["operationId"], reached))
+    for name in sorted(served):
+        if contract.schemas[name].get("x-pigloros-maturity") == "draft":
+            raise ContractError(f"served operations reach the Draft schema {name}")
+    for operation_id, reached in drafts:
+        for name in sorted(reached - served):
+            if contract.schemas[name].get("x-pigloros-maturity") != "draft":
+                raise ContractError(f"{operation_id} reaches {name}, neither Draft nor served")
+
+
+def pointer(document: object, path: str) -> object:
+    """Resolve an RFC 6901 JSON Pointer."""
+    target = document
+    for part in path.removeprefix("/").split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, list) and part.isdigit() and int(part) < len(target):
+            target = target[int(part)]
+        elif isinstance(target, dict) and part in target:
+            target = target[part]
+        else:
+            raise ContractError(f"limit pointer {path} does not resolve")
+    return target
+
+
+def check_limits(contract: Contract) -> set[str]:
+    """Every stated limit is enforced; returns the schema keyword pointers that enforce one."""
+    limits = contract.document.get("x-pigloros-limits")
+    if not isinstance(limits, dict) or not limits:
+        raise ContractError("the contract states no x-pigloros-limits")
+    pointers: set[str] = set()
+    for name, limit in limits.items():
+        if not isinstance(limit, dict) or set(limit) != LIMIT_MEMBERS:
+            raise ContractError(f"limit {name} does not have exactly {sorted(LIMIT_MEMBERS)}")
+        value = limit["value"]
+        if type(value) is not int or value < 1:
+            raise ContractError(f"limit {name} has no positive integer value")
+        if limit["scope"] not in LIMIT_SCOPES or limit["origin"] not in LIMIT_ORIGINS:
+            raise ContractError(f"limit {name} has an unknown scope or origin")
+        if not limit["unit"] or not limit["source"]:
+            raise ContractError(f"limit {name} has no unit or source")
+        enforced = limit["enforced_by"]
+        if set(enforced) == {"schema"} and enforced["schema"]:
+            for path in enforced["schema"]:
+                if path.rsplit("/", 1)[-1] not in LIMIT_KEYWORDS or path in pointers:
+                    raise ContractError(f"limit {name}: {path} is not a unique bound keyword")
+                if pointer(contract.document, path) != value:
+                    raise ContractError(f"limit {name}: {path} does not equal {value}")
+                pointers.add(path)
+        elif set(enforced) == {"runtime"}:
+            problem = enforced["runtime"]
+            if problem.get("status") not in contract.statuses.get(problem.get("code"), set()):
+                raise ContractError(f"limit {name}: its runtime problem is not registered")
+        else:
+            raise ContractError(f"limit {name} is enforced by neither schema nor runtime")
+    return pointers
+
+
+def check_bounded(contract: Contract, limit_pointers: set[str]) -> None:
+    """Every array, string and map of a Draft schema is bounded; array bounds are limits."""
+    for name, schema in contract.schemas.items():
+        if schema.get("x-pigloros-maturity") == "draft":
+            check_bounded_node(schema, f"/components/schemas/{name}", limit_pointers)
+
+
+def check_bounded_node(node: object, path: str, limit_pointers: set[str]) -> None:
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            check_bounded_node(item, f"{path}/{index}", limit_pointers)
+        return
+    if not isinstance(node, dict):
+        return
+    kinds = node.get("type")
+    kinds = set(kinds) if isinstance(kinds, list) else {kinds}
+    if "array" in kinds or "items" in node or "prefixItems" in node:
+        if "maxItems" not in node:
+            raise ContractError(f"{path}: an unbounded array")
+        items = node.get("items")
+        enumerated = (
+            node.get("uniqueItems") is True
+            and isinstance(items, dict)
+            and node["maxItems"] == len(items.get("enum", []))
+        )
+        if f"{path}/maxItems" not in limit_pointers and not enumerated:
+            raise ContractError(f"{path}/maxItems is not a stated limit")
+    if "string" in kinds and not {"const", "enum", "maxLength"} & set(node):
+        raise ContractError(f"{path}: an unbounded string")
+    if isinstance(node.get("additionalProperties"), dict) and "maxProperties" not in node:
+        raise ContractError(f"{path}: an unbounded map")
+    for key, value in node.items():
+        if key not in ("enum", "const"):
+            check_bounded_node(value, f"{path}/{key.replace('~', '~0').replace('/', '~1')}",
+                               limit_pointers)
 
 
 def check_references(value: object, contract: Contract, schema_ids: set[str]) -> None:
@@ -223,7 +429,10 @@ def check_registry(contract: Contract) -> None:
 
 
 def parameter_errors(operation: dict, contract: Contract, location: str, values: dict) -> list[str]:
-    """Violations of the declared `header` or `query` parameters; unknown queries are invalid."""
+    """Violations of the declared `header`, `query` or `path` parameters.
+
+    Unknown query and path parameters are invalid; undeclared headers are ignored.
+    """
     errors = []
     fold = str.lower if location == "header" else str
     given = {fold(name): value for name, value in values.items()}
@@ -239,39 +448,64 @@ def parameter_errors(operation: dict, contract: Contract, location: str, values:
                 errors.append(f"missing {location} {parameter['name']}")
             continue
         errors.extend(contract.schema_errors(given[name], parameter["schema"]))
-    if location == "query":
-        errors.extend(f"unknown query {name}" for name in sorted(set(given) - declared))
+    if location != "header":
+        errors.extend(f"unknown {location} {name}" for name in sorted(set(given) - declared))
     return errors
 
 
-def check_examples(contract: Contract) -> int:
+def load_examples(directory: Path = EXAMPLES) -> list[tuple[str, dict]]:
+    paths = sorted(directory.glob("*.json"))
+    return [(path.name, load(path)) for path in paths]  # type: ignore[misc]
+
+
+def check_examples(contract: Contract, examples: list[tuple[str, dict]] | None = None) -> int:
+    """Validate the golden examples; the only check a Draft operation has."""
+    examples = load_examples() if examples is None else examples
     operations = {
         op["operationId"]: (template, op) for (_, template), op in contract.operations().items()
     }
-    count = 0
-    for path in sorted(EXAMPLES.glob("*.json")):
-        example = load(path)
+    statuses: dict[str, list[int]] = {}
+    for name, example in examples:
         if example["operation_id"] not in operations:
-            raise ContractError(f"{path.name}: unknown operation {example['operation_id']}")
+            raise ContractError(f"{name}: unknown operation {example['operation_id']}")
         template, operation = operations[example["operation_id"]]
         request = example["request"]
         errors = parameter_errors(operation, contract, "header", request.get("headers", {}))
         errors += parameter_errors(operation, contract, "query", request.get("query", {}))
+        if "path" in request:
+            errors += parameter_errors(operation, contract, "path", request["path"])
         if "body" in request:
             body_schema = contract.resolve(operation["requestBody"])["content"]["application/json"]
             errors.extend(contract.schema_errors(request["body"], body_schema["schema"]))
         if (not errors) != example["request_valid"]:
-            raise ContractError(f"{path.name}: request validity is not {example['request_valid']}")
+            raise ContractError(f"{name}: request validity is not {example['request_valid']}")
         response = example["response"]
         errors = contract.response_errors(
             operation, response["status"], response["body"], template
         )
         if errors:
-            raise ContractError(f"{path.name}: response invalid: {errors[:3]}")
-        count += 1
-    if count == 0:
+            raise ContractError(f"{name}: response invalid: {errors[:3]}")
+        statuses.setdefault(example["operation_id"], []).append(response["status"])
+    if not examples:
         raise ContractError("no golden examples")
-    return count
+    check_draft_examples(operations, statuses)
+    return len(examples)
+
+
+def check_draft_examples(operations: dict, statuses: dict[str, list[int]]) -> None:
+    """Every Draft operation has an example; every Draft family a positive and a fail-closed one."""
+    families: dict[str, list[int]] = {}
+    for operation_id, (_, operation) in operations.items():
+        if operation["x-pigloros-status"] != "draft":
+            continue
+        if operation_id not in statuses:
+            raise ContractError(f"the Draft operation {operation_id} has no golden example")
+        families.setdefault(operation["tags"][0], []).extend(statuses[operation_id])
+    for family, seen in sorted(families.items()):
+        if not any(status < 300 for status in seen) or not any(status >= 400 for status in seen):
+            raise ContractError(
+                f"the Draft family {family} lacks a positive or a fail-closed example"
+            )
 
 
 def restore(value: object, key: str | None = None) -> object:
@@ -287,9 +521,9 @@ def restore(value: object, key: str | None = None) -> object:
     return value
 
 
-def check_fixtures(contract: Contract) -> int:
+def check_fixtures(contract: Contract, inputs: Path = FIXTURE_INPUTS) -> int:
     count = 0
-    for path in sorted(FIXTURE_INPUTS.glob("*.json")):
+    for path in sorted(inputs.glob("*.json")):
         payload = load(path)
         for subcase in payload["subcases"]:
             for index, exchange in enumerate(subcase["exchanges"], start=1):
@@ -323,7 +557,12 @@ def main() -> int:
     except ContractError as error:
         print(f"gateway contract check failed: {error}", file=sys.stderr)
         return 1
-    print(f"Gateway v1 contract OK: {examples} examples, {exchanges} served exchanges.")
+    drafts = sum(op["x-pigloros-status"] == "draft" for op in contract.operations().values())
+    limits = len(contract.document["x-pigloros-limits"])
+    print(
+        f"Gateway v1 contract OK: {examples} examples, {exchanges} served exchanges, "
+        f"{drafts} Draft operations, {limits} limits."
+    )
     return 0
 
 

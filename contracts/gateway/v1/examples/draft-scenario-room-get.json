@@ -1,0 +1,92 @@
+{
+  "name": "draft-scenario-room-get",
+  "operation_id": "getScenarioRoomRevision",
+  "request": {
+    "path": {
+      "room_id": "01JC0GATEWAYW9R00M00000001",
+      "revision": 1
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+      "id": "01JC0GATEWAYW9R00M00000001",
+      "revision": 1,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "principal-authored"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "descriptor": {
+        "room_id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 1,
+        "schema_version": 1,
+        "tick_duration_ms": 100,
+        "max_ticks": 600,
+        "scheduler_seed": "0404040404040404040404040404040404040404040404040404040404040404",
+        "scheduler_policy": 0,
+        "intervention_policy": 1,
+        "plugins": [
+          {
+            "plugin_id": "world",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "society",
+            "version": "1.0.0"
+          }
+        ],
+        "rules": [
+          {
+            "rule_id": "society.nudge.scale",
+            "value": 0.25
+          }
+        ],
+        "participants": [
+          {
+            "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+            "kind": "persona"
+          },
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "kind": "society"
+          }
+        ],
+        "initial_conditions": [
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "dimension": "trust",
+            "value": 0.6
+          }
+        ],
+        "governance_ref": "01JC0GATEWAYW90G0VERN00001",
+        "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001",
+        "correlation_id": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
+        "plugin_composition_hash": "0606060606060606060606060606060606060606060606060606060606060606",
+        "rule_set_hash": "0707070707070707070707070707070707070707070707070707070707070707",
+        "descriptor_hash": "0909090909090909090909090909090909090909090909090909090909090909"
+      },
+      "parent_revision": null,
+      "commit": {
+        "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+        "event_id": "01JC0GATEWAYW9EVENT0000001",
+        "seq": 1,
+        "event_schema_id": "room.revision.v1",
+        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.2"
+      }
+    }
+  }
+}

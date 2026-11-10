@@ -1,0 +1,83 @@
+{
+  "name": "draft-option-spec-create",
+  "operation_id": "createOptionSpec",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json"
+    },
+    "body": {
+      "options": [
+        {
+          "key": "coast",
+          "label": "Move to the coast",
+          "tags": [
+            "nature",
+            "quiet"
+          ],
+          "lean_hint": 0.2
+        },
+        {
+          "key": "city",
+          "label": "Stay in the city",
+          "tags": [
+            "cost",
+            "culture"
+          ],
+          "coordinates": {
+            "x": 1.5,
+            "z": -2.0
+          }
+        }
+      ]
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:option-spec-revision",
+      "id": "01JC0GATEWAYW9QPT10N00001A",
+      "revision": 1,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "principal-authored"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "options": [
+        {
+          "key": "coast",
+          "label": "Move to the coast",
+          "tags": [
+            "nature",
+            "quiet"
+          ],
+          "lean_hint": 0.2
+        },
+        {
+          "key": "city",
+          "label": "Stay in the city",
+          "tags": [
+            "cost",
+            "culture"
+          ],
+          "coordinates": {
+            "x": 1.5,
+            "z": -2.0
+          }
+        }
+      ],
+      "parent_revision": null,
+      "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+    }
+  }
+}

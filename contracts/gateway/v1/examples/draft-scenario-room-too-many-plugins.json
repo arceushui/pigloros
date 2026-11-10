@@ -1,0 +1,197 @@
+{
+  "name": "draft-scenario-room-too-many-plugins",
+  "operation_id": "deriveScenarioRoomRevision",
+  "request": {
+    "path": {
+      "room_id": "01JC0GATEWAYW9R00M00000001"
+    },
+    "headers": {
+      "Idempotency-Key": "client-1-3",
+      "content-type": "application/json"
+    },
+    "body": {
+      "parent_revision": 1,
+      "descriptor": {
+        "schema_version": 1,
+        "tick_duration_ms": 100,
+        "max_ticks": 600,
+        "scheduler_seed": "0404040404040404040404040404040404040404040404040404040404040404",
+        "scheduler_policy": 0,
+        "intervention_policy": 1,
+        "plugins": [
+          {
+            "plugin_id": "plugin-0",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-1",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-2",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-3",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-4",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-5",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-6",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-7",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-8",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-9",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-10",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-11",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-12",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-13",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-14",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-15",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-16",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-17",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-18",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-19",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-20",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-21",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-22",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-23",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-24",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-25",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-26",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-27",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-28",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-29",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-30",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-31",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "plugin-32",
+            "version": "1.0.0"
+          }
+        ],
+        "rules": [
+          {
+            "rule_id": "society.nudge.scale",
+            "value": 0.25
+          }
+        ],
+        "participants": [
+          {
+            "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+            "kind": "persona"
+          },
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "kind": "society"
+          }
+        ],
+        "initial_conditions": [
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "dimension": "trust",
+            "value": 0.6
+          }
+        ],
+        "governance_ref": "01JC0GATEWAYW90G0VERN00001",
+        "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001"
+      }
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 413,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:resource-limit-exceeded",
+      "title": "Resource limit exceeded",
+      "status": 413,
+      "detail": "the room names more than 32 plugins",
+      "instance": "/v1/scenario-rooms/{room_id}/revisions",
+      "code": "resource-limit-exceeded",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

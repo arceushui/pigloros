@@ -1,0 +1,65 @@
+{
+  "name": "draft-ensemble-without-adversarial",
+  "operation_id": "createEnsemble",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {
+      "Idempotency-Key": "client-1-10",
+      "content-type": "application/json"
+    },
+    "body": {
+      "parent_cut": {
+        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+        "seq": 3
+      },
+      "horizon_ticks": 120,
+      "profile_id": "deterministic-local-v1",
+      "forks": [
+        {
+          "label": "Ordinary alternative",
+          "condition": "ordinary",
+          "interventions": [
+            {
+              "ordinal": 0,
+              "effective_tick": 4,
+              "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+              "field": "trust",
+              "operation": "set",
+              "value": 0.4
+            }
+          ]
+        },
+        {
+          "label": "Ordinary alternative",
+          "condition": "ordinary",
+          "interventions": [
+            {
+              "ordinal": 0,
+              "effective_tick": 4,
+              "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+              "field": "trust",
+              "operation": "set",
+              "value": 0.4
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "an adversarial condition is required",
+      "instance": "/v1/decision-previews/{preview_id}/ensembles",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
