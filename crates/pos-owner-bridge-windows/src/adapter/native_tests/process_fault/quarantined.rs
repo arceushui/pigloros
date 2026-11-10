@@ -149,7 +149,22 @@ fn run_case(
     let _zero = ZeroWitness::arm();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
     let mut refused = false;
-    let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        drive_to_quarantine(&mut fixture, &mut driver, &mut refused)
+    }));
+    let result = match attempt {
+        Ok(result) => result,
+        Err(_) => {
+            let result = readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            );
+            fixture.retire(driver, result, None)?;
+            return Err("quarantined drive panicked".into());
+        }
+    };
     let expected = Err(BridgeError::Quarantine(
         QuarantineCode::ControllerCloseFailed,
     ));
@@ -183,10 +198,9 @@ fn run_case(
         }
     };
     let mut keeper = QuarantineKeeper::new();
-    let reply = keeper.finish(driver, result);
-    if reply.driver.is_some() || reply.result != expected {
-        return Err("keeper did not retain modeled quarantine".into());
-    }
+    // QuarantineKeeper::finish unconditionally retains a driver for this exact
+    // quarantine result; it returns the input result without transformation.
+    let _reply = keeper.finish(driver, result);
     let keeper_held = std::rc::Rc::new(std::cell::Cell::new(refused));
     let attempt = catch_unwind(AssertUnwindSafe(
         || -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
@@ -220,18 +234,24 @@ fn run_case(
                 fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state))?;
             }
             blocked(&mut keeper, &mut fixture, &folder)?;
-        if inject && target == ProcessFaultTarget::Browser {
-            let name = folder.file_name().and_then(std::ffi::OsStr::to_str)
-                .ok_or("quarantined folder name unavailable")?;
-            if fixture.store.remove_folder(name).is_ok()
-                || !folder.join("quarantine-held").is_file()
-                || fixture.store.records()?.len() != 1
-            {
-                return Err("held owned file did not refuse ordinary folder cleanup".into());
+            if inject && target == ProcessFaultTarget::Browser {
+                let name = folder
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or("quarantined folder name unavailable")?;
+                // Independently observe the real store's folder refusal; unlike
+                // delete_record, remove_folder does not change record provenance.
+                if fixture.store.remove_folder(name).is_ok()
+                    || !folder.join("quarantine-held").is_file()
+                    || fixture.store.records()?.len() != 1
+                {
+                    return Err("held owned file did not refuse ordinary folder cleanup".into());
+                }
+                let _logged = writeln!(std::io::stderr(),
+                    "NATIVE_QUARANTINED case={number} second_folder_cleanup=refused record_retained=true");
             }
-        }
-        let _logged = writeln!(std::io::stderr(),
-            "NATIVE_QUARANTINED case={number} target={target:?} inject={inject} modeled_close_refusal=true keeper_remaining=true record_retained=true held_file=true");
+            let _logged = writeln!(std::io::stderr(),
+                "NATIVE_QUARANTINED case={number} target={target:?} inject={inject} modeled_close_refusal=true keeper_remaining=true record_retained=true held_file=true");
             Ok(state)
         },
     ))

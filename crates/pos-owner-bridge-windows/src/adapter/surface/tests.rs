@@ -259,6 +259,31 @@ fn reused_surface_observes_only_the_admitted_opening() -> TestResult {
 }
 
 #[test]
+fn quarantined_fault_refuses_missing_state_and_unheld_keeper() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.ready()?;
+    assert!(fixture.surface.generation.is_none());
+    assert!(fixture.store.records_now().is_empty());
+    assert!(fixture.surface.native.early_renderer_presence().is_err());
+    assert!(fixture.surface.quarantined_fault_state().is_err());
+    let before = fixture.factory.calls.borrow().clone();
+    let seal = crate::FaultSeal {
+        trace: Rc::new(std::cell::RefCell::new(Vec::new())),
+        deadline: std::time::Instant::now() + Duration::from_secs(1),
+    };
+    assert!(fixture
+        .surface
+        .inject_quarantined_fault(
+            crate::ProcessFaultTarget::Renderer,
+            seal,
+            Rc::new(std::cell::Cell::new(false)),
+        )
+        .is_err());
+    assert_eq!(*fixture.factory.calls.borrow(), before);
+    fixture.finish()
+}
+
+#[test]
 fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.foreground.set(false);
