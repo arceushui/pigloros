@@ -241,12 +241,12 @@ mod cases {
             .map(|name| unit_path(name))
             .collect::<TestResult<Vec<_>>>()?;
         let (server, client) = peer_connections(|server| {
-            paths.iter().fold(
+            paths.into_iter().fold(
                 server.serve_at("/org/freedesktop/systemd1", manager),
                 |server, path| {
                     server
-                        .serve_at(path.as_str(), FailedService(String::new()))
-                        .serve_at(path.as_str(), FailedUnit("failed".to_owned()))
+                        .serve_at(path.clone(), FailedService(String::new()))
+                        .serve_at(path, FailedUnit("failed".to_owned()))
                 },
             )
         })
