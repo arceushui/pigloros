@@ -29,7 +29,7 @@ jobs:
           - case: before
             ref: 621fc7bfece354739556b22279c39cbe2e8e61d2
           - case: after
-            ref: 702c87d1dc451504b42543aa2723c61e0a6735b9
+            ref: 120522063b3196fbfeb345e384fe79eeb6029326
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -143,20 +143,19 @@ jobs:
           assert [p["process_status"] for p in baselines[0]["phase_results"]] == ["Success", "Success"]
           baseline_log = (out / baselines[0]["log_path"]).read_text()
           assert re.search(r"running [1-9][0-9]* tests?", baseline_log)
-          prefix = "root_selector::tests::admission_bounds::"
           if os.environ["PROOF_CASE"] == "after":
-              for test in ["held_image_admission_enforces_gpt_header_bounds",
-                           "held_image_admission_enforces_gpt_entry_bounds"]:
-                  assert re.search(r"test " + re.escape(prefix + test) + r" \.\.\. ok", baseline_log), test
+              for test in ["sandbox_provider_protocol::admission::image_gpt::tests::usable_range_rejects_inversion_but_admits_a_single_lba",
+                           "sandbox_provider_protocol::admission::image_gpt::tests::gpt_header_bounds_follow_both_systemd_repart_layouts",
+                           "sandbox_provider_protocol::admission::image_gpt::tests::gpt_entry_bounds_follow_both_systemd_repart_layouts",
+                           "root_selector::tests::admission_bounds::snapshot_open_rejects_gpt_bounds_on_both_architectures"]:
+                  assert re.search(r"test " + re.escape(test) + r" \.\.\. ok", baseline_log), test
           mutants = [row for row in outcomes["outcomes"] if row["scenario"] != "Baseline"]
           assert len(mutants) == outcomes["total_mutants"] == 28
           assert {row["scenario"]["Mutant"]["name"] for row in mutants} == requested
           assert outcomes["timeout"] == outcomes["unviable"] == 0 and outcomes["end_time"]
-          # The three documented equivalents survive; every other mutant must fail.
+          # The one documented equivalent survives; every other mutant must fail.
           source = "crates/pos-reference/src/sandbox_provider_protocol/admission/image_gpt.rs:"
-          equivalent = {source + "161:36: replace > with == in Header::validate_bounds",
-                        source + "161:36: replace > with >= in Header::validate_bounds",
-                        source + "173:49: replace > with >= in Header::validate_bounds"}
+          equivalent = {source + "173:49: replace > with >= in Header::validate_bounds"}
           verdict = []
           for row in sorted(mutants, key=lambda r: r["scenario"]["Mutant"]["name"]):
               name = row["scenario"]["Mutant"]["name"]
