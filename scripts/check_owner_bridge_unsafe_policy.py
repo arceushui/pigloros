@@ -1563,7 +1563,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'cc574eff6f73fcd65bbf64fcb04f17e4ff8728c12ea13d5f28bda1e78adc98cb',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'ea0720dd5d863b366a4af77871c01163bd9f5d448451fe09c4dea084d6401670',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '36ec25751175e4a00a34b010f2b39232062ea9c687abac5fed802089eb461ba2',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '9612ac983fe12d279035bb241ceb31da3fe16310d8dd625ea23b730a3df19b7e',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '325e26461e331f804c810140858791205246c09c118995e537f1d129340acfe5',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': 'b602b19fcffe9dd47c694737603ac5de0fe7f24370f402ac3c215694d75c0a31',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '2fd540f86b5bcf37a49f82c5b47b0013983b4a611b1f672a00bf506e1b208afc',

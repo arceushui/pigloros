@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::ExitMembershipKind::{Browser, Other};
 use crate::{
     BoolProperty, BufferSlot, ClientBounds, EnvironmentOptions, EnvironmentSnapshot, EventSink,
     Failure, NativeError, NativeFactory, NativeOperations, NativePath, NativePulse, NativeResult,
@@ -180,7 +181,6 @@ impl NativeOperations for Session {
         {
             return Err(());
         }
-        use crate::ExitMembershipKind::{Browser, Other};
         let entries = match self.factory.failure.get() {
             Some("exit_membership_missing") => vec![(41, Other)],
             Some("exit_membership_malformed") => vec![(42, Browser), (42, Other)],
