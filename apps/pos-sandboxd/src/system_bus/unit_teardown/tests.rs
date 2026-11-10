@@ -79,7 +79,7 @@ pub(super) mod cases {
         /// Successive `ControlGroup` reads; the last one repeats.
         control_groups: VecDeque<String>,
         /// The unit's `ActiveState`, or a read failure.
-        active_state: Option<String>,
+        activity: Option<String>,
     }
 
     struct Manager {
@@ -257,7 +257,7 @@ pub(super) mod cases {
             self.0
                 .lock()
                 .map_err(failed)?
-                .active_state
+                .activity
                 .clone()
                 .ok_or_else(|| fdo::Error::AccessDenied("ActiveState denied".to_owned()))
         }
@@ -328,7 +328,7 @@ pub(super) mod cases {
                 reset_serial: None,
                 get_serial: None,
                 control_groups: VecDeque::from(["/attempt".to_owned()]),
-                active_state: Some("active".to_owned()),
+                activity: Some("active".to_owned()),
             }));
             let manager = Manager {
                 state: Arc::clone(&state),
@@ -986,7 +986,7 @@ pub(super) mod cases {
         let fixture = Fixture::new(id, Stop::Empty, Reset::Unload).await?;
         {
             let mut fake = fixture.state.lock().map_err(|_| "poisoned fixture")?;
-            fake.active_state = state.map(str::to_owned);
+            fake.activity = state.map(str::to_owned);
             fake.control_groups = control_groups
                 .iter()
                 .map(|&cgroup| cgroup.to_owned())
@@ -1089,6 +1089,7 @@ pub(super) mod cases {
                 .calls
                 .iter()
                 .any(|call| matches!(call, Call::Stop(..) | Call::Kill(..) | Call::Reset(..))));
+            drop(calls);
         }
         Ok(())
     }

@@ -71,8 +71,8 @@ mod cases {
     #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
     impl FailedService {
         #[zbus(property, name = "ControlGroup")]
-        fn control_group(&self) -> fdo::Result<String> {
-            Ok(self.0.clone())
+        fn control_group(&self) -> String {
+            self.0.clone()
         }
     }
 
@@ -82,8 +82,8 @@ mod cases {
     #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
     impl FailedUnit {
         #[zbus(property, name = "ActiveState")]
-        fn active_state(&self) -> fdo::Result<String> {
-            Ok(self.0.clone())
+        fn active_state(&self) -> String {
+            self.0.clone()
         }
     }
 
@@ -145,15 +145,15 @@ mod cases {
         }
 
         /// Clearing the failed state unloads the unit.
-        fn reset_failed_unit(&self, name: String) -> fdo::Result<()> {
+        fn reset_failed_unit(&self, name: &str) -> fdo::Result<()> {
             self.resets
                 .lock()
                 .map_err(|error| fdo::Error::Failed(error.to_string()))?
-                .push(name.clone());
+                .push(name.to_owned());
             self.loaded
                 .lock()
                 .map_err(|error| fdo::Error::Failed(error.to_string()))?
-                .retain(|loaded| *loaded != name);
+                .retain(|loaded| loaded != name);
             Ok(())
         }
 
