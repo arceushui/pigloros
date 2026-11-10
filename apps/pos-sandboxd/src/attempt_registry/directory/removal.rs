@@ -1,7 +1,8 @@
 //! Exact unmounted directory removal, retaining durable intent for recovery.
 
-use rustix::fs::{unlinkat, AtFlags, Dir};
+use rustix::fs::Dir;
 
+use super::super::remove_empty;
 use super::{registry_io, File, PreparedAttemptDirectory, SystemdAttemptRegistryError};
 
 type RemovalResult = Result<(), SystemdAttemptRegistryError>;
@@ -19,7 +20,8 @@ impl PreparedAttemptDirectory {
     /// unit/process shutdown and root unmounting before calling. This operation
     /// does not establish unit, cgroup, device or namespace absence. The durable
     /// intent is retained, including after successful directory removal; only
-    /// complete lifecycle reconciliation may delete it or reopen admission.
+    /// [`Self::finish_terminal_cleanup`] or restart reconciliation may delete
+    /// it, and neither reopens admission by itself.
     /// A previously quarantined owner can remove verified directories, but this
     /// never clears its quarantine.
     ///
@@ -32,8 +34,15 @@ impl PreparedAttemptDirectory {
         let Ok(mut state) = self.planned.state.lock() else {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         };
-        let result = self
-            .verify_record_and_tree()
+        let result = self.remove_tree();
+        state.failed |= result.is_err();
+        result
+    }
+
+    /// Verify the exact record and unmounted tree, then remove root and attempt
+    /// directories through held parents. The caller holds registry ownership.
+    pub(super) fn remove_tree(&self) -> RemovalResult {
+        self.verify_record_and_tree()
             .and_then(|()| require_only_root(&self.attempt))
             .and_then(|()| remove_empty(&self.attempt, "root"))
             .and_then(|()| {
@@ -41,9 +50,7 @@ impl PreparedAttemptDirectory {
                     &self.attempts,
                     self.intent().unit_name().attempt_component(),
                 )
-            });
-        state.failed |= result.is_err();
-        result
+            })
     }
 }
 
@@ -66,12 +73,6 @@ fn require_only_root(directory: &File) -> RemovalResult {
             }
             Ok(())
         })
-}
-
-fn remove_empty(parent: &File, component: &str) -> RemovalResult {
-    registry_io(|| unlinkat(parent, component, AtFlags::REMOVEDIR).map_err(std::io::Error::from))
-        .and_then(|()| registry_io(|| parent.sync_all()))
-        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -109,7 +110,7 @@ mod tests {
                 fs::read_dir(runtime.path().join("attempts"))?.count(),
                 8 - usize::from(id)
             );
-            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 9);
         }
         // Directory removal neither deletes intents nor quarantines a clean owner.
         registry.commit_planned(&intent(9)?)?;
