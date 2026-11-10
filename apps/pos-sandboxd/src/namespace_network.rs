@@ -28,7 +28,10 @@ mod rule_codec;
 
 pub use attempt_network::{AttemptNetworkError, NamespaceConnector, NamespacedLocalNetwork};
 pub use control::NetlinkNamespaceControl;
-pub use host_egress::{AttemptEgress, EgressControl, HostEgress, HostEgressError, HOST_TABLE};
+pub use host_egress::{
+    AttemptEgress, EgressControl, ForwardingRecords, HostEgress, HostEgressError,
+    FORWARDING_RECORDS, HOST_TABLE,
+};
 pub use pinned::NetworkNamespaces;
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
 pub use rule_codec::{decode_firewall_rule, encode_firewall_rule, UndecodableRule};
