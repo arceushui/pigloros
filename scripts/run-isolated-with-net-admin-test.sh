@@ -1,21 +1,35 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Owner decision 2026-11-09 (#911): run one pos-sandboxd library test of the
 # Local attempt namespace adapter in a container that adds NET_ADMIN and
 # SYS_ADMIN, so it can create network namespaces, veth pairs and nftables
 # state. The container has no network, drops every other capability, keeps
-# no-new-privileges and a read-only root, and sees the worktree read-only.
+# no-new-privileges and a read-only root, and sees only the test binary,
+# read-only: not the worktree.
 #
 # The adapter's own tests (namespace_network::control) pin namespaces with
 # bind mounts under /run/netns, which Docker's AppArmor profile refuses, so
 # they alone also run unconfined by AppArmor.
 #
-# Residual risk: SYS_ADMIN lets the test remount filesystems inside its own
-# mount namespace, and Docker's AppArmor profile is what normally refuses
-# that; the unconfined tests keep only the capability bound. The runner
-# therefore accepts only a pos-sandboxd test harness built under target/,
-# only the named privileged tests, and verifies inside the container that
-# the worktree bind is read-only before the test starts.
+# Residual risk: neither capability can go. unshare(CLONE_NEWNET) and
+# setns(2) into a network namespace need SYS_ADMIN, as does the bind mount
+# that pins one, and the pinning tests need AppArmor off because Docker's
+# profile denies mount(2) outright. SYS_ADMIN therefore lets those tests
+# remount filesystems inside their own mount namespace, and without a user
+# namespace no mount flag is locked against such a remount. The runner bounds
+# what one could reach instead: the only host path the container sees is the
+# test binary itself (and the coverage profile it writes), it accepts only a
+# pos-sandboxd test harness built under target/ and only the named
+# privileged tests, and it fails unless the binary's bind refuses writes both
+# before and after the test.
+#
+# bash -p reads no BASH_ENV or ENV file and imports no shell functions, so
+# the caller's environment runs nothing here; the fixed PATH below chooses
+# every program this runner starts, and Docker runs under exactly the
+# environment named where it starts: the system Docker daemon, no Docker
+# context and no Docker configuration.
 set -euo pipefail
+readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=$RUNNER_PATH
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 TEST_BINARY TEST_NAME" >&2
@@ -75,8 +89,8 @@ docker_arguments=(
   --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m
   --tmpfs /var/lib:rw,nosuid,nodev,mode=0755,size=64m
   --tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m
-  --mount "type=bind,source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly"
-  --workdir "$REPOSITORY_ROOT"
+  --mount "type=bind,source=$TEST_BINARY,target=$TEST_BINARY,readonly"
+  --workdir /tmp
   --env PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1
 )
 profile_output=
@@ -116,13 +130,15 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
 fi
 
 # access(2) reports a read-only filesystem even to root, so the test starts
-# only while the worktree bind refuses writes.
-readonly READ_ONLY_PROBE='if [ -w "$1" ]; then echo "the worktree bind is writable" >&2; exit 1; fi; shift; exec "$@"'
+# only while the binary's bind refuses writes, and passes only if it still
+# does once the test ends.
+readonly READ_ONLY_PROBE='if [ -w "$1" ]; then echo "the test binary bind is writable" >&2; exit 1; fi; "$@"; status=$?; if [ -w "$1" ]; then echo "the test binary bind became writable" >&2; exit 1; fi; exit "$status"'
 
 set +e
 timeout --signal=TERM --kill-after=5s 30s \
+  env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \
   docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE" \
-  /bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \
+  /bin/sh -c "$READ_ONLY_PROBE" read-only-probe \
   "$TEST_BINARY" --exact "$TEST_NAME" --nocapture
 status=$?
 set -e

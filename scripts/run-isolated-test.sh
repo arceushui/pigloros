@@ -1,5 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# bash -p reads no BASH_ENV or ENV file and imports no shell functions, so
+# the caller's environment runs nothing here; the fixed PATH below chooses
+# every program this runner starts, and Docker runs under exactly the
+# environment named where it starts: the system Docker daemon, no Docker
+# context and no Docker configuration.
 set -euo pipefail
+readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=$RUNNER_PATH
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 TEST_BINARY TEST_NAME" >&2
@@ -64,6 +71,7 @@ fi
 
 set +e
 timeout --signal=TERM --kill-after=5s 30s \
+  env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \
   docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE" \
   "$TEST_BINARY" --exact "$TEST_NAME" --nocapture
 status=$?
