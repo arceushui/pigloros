@@ -29,7 +29,7 @@ jobs:
           - case: before
             ref: 621fc7bfece354739556b22279c39cbe2e8e61d2
           - case: after
-            ref: 93b9110adbef011f8cf08ac3361be46521121573
+            ref: cc6a0b04ff9a08f671d899660eee4282f83352af
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
