@@ -3,6 +3,9 @@
 //! veth pair and firewall, read back before it is returned, and a connector
 //! that opens every connection from inside that namespace.
 //!
+//! Every attempt also gets host egress (`host_egress`) to exactly its
+//! endpoints once its namespace is read back, and loses it first on teardown.
+//!
 //! Teardown is RAII. Dropping the connector removes the namespace and frees
 //! the slot. A removal that fails quarantines the slot and closes the port:
 //! every later establishment fails, naming the slot, until restart
@@ -19,11 +22,12 @@ use std::time::Duration;
 use pos_reference::sandbox_provider_protocol::NetworkEndpointConnector;
 use tokio::runtime::RuntimeFlavor;
 
+use super::host_egress::{AttemptEgress, EgressControl, HostEgress, HostEgressError};
 use super::netlink::{in_namespace, NetlinkError};
 use super::pinned::NetworkNamespaces;
 use super::{
-    establish_namespace, EstablishError, ExpectedNamespace, LinkName, NamespaceControl,
-    NamespaceName, NetworkPlanError, NetworkRange,
+    establish_namespace, EstablishError, ExpectedNamespace, NamespaceControl, NetworkPlanError,
+    NetworkRange,
 };
 use crate::{EstablishedNetwork, LocalNetworkPort};
 
@@ -119,6 +123,9 @@ pub enum AttemptNetworkError {
     /// The established namespace could not be opened for its connector.
     #[error("the attempt namespace could not be opened")]
     Open(#[source] NetlinkError),
+    /// The host cannot give the attempt egress to its endpoints.
+    #[error("the attempt's host egress failed")]
+    Egress(#[source] HostEgressError),
     /// The attempt holds a slot already.
     #[error("the attempt holds an attempt network already")]
     InUse,
@@ -140,22 +147,24 @@ pub enum AttemptNetworkError {
 /// The Local network port over attempt namespaces that `control` installs,
 /// addressed from `range` and pinned in `namespaces`.
 #[derive(Debug)]
-pub struct NamespacedLocalNetwork<C> {
+pub struct NamespacedLocalNetwork<C, E = HostEgress> {
     control: Arc<C>,
+    egress: Arc<E>,
     namespaces: NetworkNamespaces,
     range: NetworkRange,
     slots: Arc<Slots>,
 }
 
-impl<C> NamespacedLocalNetwork<C> {
+impl<C, E> NamespacedLocalNetwork<C, E> {
     /// Attempt networks of `range`, at most one per slot, installed through
-    /// `control` and pinned in `namespaces`, the directory `control` pins
-    /// them in.
+    /// `control`, given host egress through `egress` and pinned in
+    /// `namespaces`, the directory `control` pins them in.
     #[must_use]
-    pub fn new(control: C, namespaces: NetworkNamespaces, range: NetworkRange) -> Self {
+    pub fn new(control: C, egress: E, namespaces: NetworkNamespaces, range: NetworkRange) -> Self {
         let count = u16::try_from(range.slots()).unwrap_or(u16::MAX);
         Self {
             control: Arc::new(control),
+            egress: Arc::new(egress),
             namespaces,
             range,
             slots: Arc::new(Slots {
@@ -166,29 +175,45 @@ impl<C> NamespacedLocalNetwork<C> {
     }
 }
 
-/// Removes one attempt's namespace and frees its slot when dropped.
+/// Removes one attempt's egress and namespace and frees its slot when
+/// dropped.
 #[derive(Debug)]
-struct Teardown<C: NamespaceControl> {
+struct Teardown<C: NamespaceControl, E: EgressControl> {
     control: Arc<C>,
-    name: NamespaceName,
-    host_link: LinkName,
+    egress: Arc<E>,
+    attempt: AttemptEgress,
     slot: SlotLease,
 }
 
-impl<C: NamespaceControl> Drop for Teardown<C> {
+impl<C: NamespaceControl, E: EgressControl> Teardown<C, E> {
+    /// Remove the egress, then the namespace, attempting both, and report
+    /// the first failure.
+    fn remove(&self) -> Result<(), String> {
+        let egress = self
+            .egress
+            .remove(&self.attempt)
+            .map_err(|error| error.to_string());
+        let namespace = self
+            .control
+            .remove(&self.attempt.namespace, &self.attempt.host_link)
+            .map_err(|error| error.to_string());
+        egress.and(namespace)
+    }
+}
+
+impl<C: NamespaceControl, E: EgressControl> Drop for Teardown<C, E> {
     fn drop(&mut self) {
         // Removal waits on the kernel, a few netlink replies each bounded by
         // the receive timeout. On a Tokio worker it gives the worker's other
         // tasks to another thread first.
-        let remove = || self.control.remove(&self.name, &self.host_link);
         let removed = match tokio::runtime::Handle::try_current() {
             Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(remove)
+                tokio::task::block_in_place(|| self.remove())
             }
-            _ => remove(),
+            _ => self.remove(),
         };
-        if let Err(error) = removed {
-            self.slot.quarantine(error.to_string());
+        if let Err(reason) = removed {
+            self.slot.quarantine(reason);
         }
     }
 }
@@ -196,12 +221,12 @@ impl<C: NamespaceControl> Drop for Teardown<C> {
 /// Opens every connection from a thread inside one attempt's namespace, and
 /// removes the namespace when dropped.
 #[derive(Debug)]
-pub struct NamespaceConnector<C: NamespaceControl> {
+pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress> {
     namespace: OwnedFd,
-    _teardown: Teardown<C>,
+    _teardown: Teardown<C, E>,
 }
 
-impl<C: NamespaceControl> NetworkEndpointConnector for NamespaceConnector<C> {
+impl<C: NamespaceControl, E: EgressControl> NetworkEndpointConnector for NamespaceConnector<C, E> {
     fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         // An IPv4-mapped endpoint is reached as the IPv4 endpoint it maps,
         // as the plan admitted it.
@@ -216,26 +241,28 @@ impl<C: NamespaceControl> NetworkEndpointConnector for NamespaceConnector<C> {
     }
 }
 
-impl<C> LocalNetworkPort for NamespacedLocalNetwork<C>
+impl<C, E> LocalNetworkPort for NamespacedLocalNetwork<C, E>
 where
     C: NamespaceControl<Error = NetlinkError> + Send + Sync + 'static,
+    E: EgressControl + Send + Sync + 'static,
 {
-    type Connector = NamespaceConnector<C>;
+    type Connector = NamespaceConnector<C, E>;
     type Error = AttemptNetworkError;
 
     fn establish(
         &self,
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
-    ) -> Result<EstablishedNetwork<NamespaceConnector<C>>, AttemptNetworkError> {
+    ) -> Result<EstablishedNetwork<NamespaceConnector<C, E>>, AttemptNetworkError> {
         self.connector(attempt_id, endpoints)
             .map(|connector| EstablishedNetwork::new(attempt_id, connector))
     }
 }
 
-impl<C> NamespacedLocalNetwork<C>
+impl<C, E> NamespacedLocalNetwork<C, E>
 where
     C: NamespaceControl<Error = NetlinkError>,
+    E: EgressControl,
 {
     /// Establish the namespace of `attempt_id`, reaching exactly
     /// `endpoints`, in the lowest free slot, and return the connector that
@@ -244,11 +271,21 @@ where
         &self,
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
-    ) -> Result<NamespaceConnector<C>, AttemptNetworkError> {
+    ) -> Result<NamespaceConnector<C, E>, AttemptNetworkError> {
+        // Host egress sees each endpoint as the plan does: an IPv4-mapped
+        // IPv6 endpoint is the IPv4 endpoint it maps.
+        let endpoints: Vec<SocketAddr> = endpoints
+            .iter()
+            .map(|endpoint| SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port()))
+            .collect();
+        let endpoints = endpoints.as_slice();
         let mut slot = self.slots.take(attempt_id)?;
         let expected =
             ExpectedNamespace::for_attempt(attempt_id, &self.range, slot.slot, endpoints)
                 .map_err(AttemptNetworkError::Plan)?;
+        self.egress
+            .admit(endpoints)
+            .map_err(AttemptNetworkError::Egress)?;
         // An existing namespace of this name belongs to an earlier run of the
         // attempt that only restart reconciliation may remove: installing
         // would fail and the cleanup after it would delete that namespace.
@@ -269,12 +306,20 @@ where
         })?;
         let teardown = Teardown {
             control: Arc::clone(&self.control),
-            name: expected.name,
-            host_link: expected.host_link,
+            egress: Arc::clone(&self.egress),
+            attempt: AttemptEgress {
+                namespace: expected.name,
+                host_link: expected.host_link,
+                endpoints: endpoints.to_vec(),
+            },
             slot,
         };
+        // Dropping the teardown on a failure removes whatever was installed.
+        self.egress
+            .install(&teardown.attempt)
+            .map_err(AttemptNetworkError::Egress)?;
         self.namespaces
-            .open(&teardown.name)
+            .open(&teardown.attempt.namespace)
             .and_then(|namespace| namespace.ok_or(NetlinkError::Io(rustix::io::Errno::NOENT)))
             .map(|namespace| NamespaceConnector {
                 namespace,

@@ -8,8 +8,8 @@ use rustix::io::Errno;
 
 use super::*;
 use crate::namespace_network::{
-    FirewallTableFamily, IpPrefix, LinkKind, ObservedAddress, ObservedLink, ObservedNamespace,
-    ObservedRoute, ObservedTable,
+    FirewallTableFamily, IpPrefix, LinkKind, LinkName, NamespaceName, ObservedAddress,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -19,6 +19,48 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 struct Journal {
     installed: Vec<String>,
     removed: Vec<String>,
+    egress: Vec<String>,
+    endpoints: Vec<Vec<SocketAddr>>,
+}
+
+/// Host egress that records what it is asked to do, or refuses.
+#[derive(Debug, Default)]
+struct FakeEgress {
+    journal: Arc<Mutex<Journal>>,
+    refuse_admission: bool,
+    refuse_install: bool,
+    refuse_removal: bool,
+}
+
+impl FakeEgress {
+    fn record(&self, event: &str, refuse: bool) -> Result<(), HostEgressError> {
+        entries(&self.journal).egress.push(event.to_owned());
+        (!refuse).then_some(()).ok_or(HostEgressError::Readback)
+    }
+}
+
+impl EgressControl for FakeEgress {
+    fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+        entries(&self.journal).endpoints.push(endpoints.to_vec());
+        self.record("admit", self.refuse_admission)
+    }
+
+    fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        entries(&self.journal)
+            .endpoints
+            .push(attempt.endpoints.clone());
+        self.record(
+            &format!("install {}", attempt.host_link.as_str()),
+            self.refuse_install,
+        )
+    }
+
+    fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        self.record(
+            &format!("remove {}", attempt.host_link.as_str()),
+            self.refuse_removal,
+        )
+    }
 }
 
 /// A kernel that installs exactly what it is asked to, pinning each
@@ -159,21 +201,45 @@ fn range(ipv4_length: u8, ipv6_length: u8) -> TestResult<NetworkRange> {
 const ENDPOINT: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
 
-/// A network over `control`, whose namespaces are pinned in `directory`.
-fn network(
+/// A network over fakes, with the journal they share.
+type FakeNetwork = (
+    NamespacedLocalNetwork<FakeControl, FakeEgress>,
+    Arc<Mutex<Journal>>,
+);
+
+/// A network over `control` and an egress refusing as `egress` does, which
+/// share one journal, whose namespaces are pinned in `directory`.
+fn network_with(
     directory: &std::path::Path,
     control: FakeControl,
+    egress: &FakeEgress,
     ipv4_length: u8,
-) -> TestResult<(NamespacedLocalNetwork<FakeControl>, Arc<Mutex<Journal>>)> {
+) -> TestResult<FakeNetwork> {
     let journal = Arc::clone(&control.journal);
+    let egress = FakeEgress {
+        journal: Arc::clone(&journal),
+        refuse_admission: egress.refuse_admission,
+        refuse_install: egress.refuse_install,
+        refuse_removal: egress.refuse_removal,
+    };
     Ok((
         NamespacedLocalNetwork::new(
             control,
+            egress,
             NetworkNamespaces::pinned_under(directory),
             range(ipv4_length, 120)?,
         ),
         journal,
     ))
+}
+
+/// A network over `control` and an egress that grants everything.
+fn network(
+    directory: &std::path::Path,
+    control: FakeControl,
+    ipv4_length: u8,
+) -> TestResult<FakeNetwork> {
+    network_with(directory, control, &FakeEgress::default(), ipv4_length)
 }
 
 /// A kernel that pins every namespace it installs in `directory`.
@@ -324,10 +390,85 @@ async fn a_connector_dropped_on_a_runtime_worker_is_removed() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn egress_is_admitted_first_installed_last_and_removed_first() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    drop(network.establish([1; 16], &[ENDPOINT])?);
+    assert_eq!(
+        entries(&journal).egress,
+        ["admit", "install piglor-h0", "remove piglor-h0"]
+    );
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    Ok(())
+}
+
+#[test]
+fn host_egress_sees_an_ipv4_mapped_endpoint_as_ipv4() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
+    drop(network.establish([1; 16], &[mapped])?);
+    assert_eq!(
+        entries(&journal).endpoints,
+        [vec![ENDPOINT], vec![ENDPOINT]]
+    );
+    Ok(())
+}
+
+#[test]
+fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let unadmitted = FakeEgress {
+        refuse_admission: true,
+        ..FakeEgress::default()
+    };
+    let (refusing, journal) =
+        network_with(directory.path(), pinning(directory.path()), &unadmitted, 24)?;
+    let refused = refusing.establish([1; 16], &[ENDPOINT]).map(drop);
+    // Nothing was installed for an endpoint the host cannot reach.
+    assert!(matches!(refused, Err(AttemptNetworkError::Egress(_))));
+    assert!(entries(&journal).installed.is_empty());
+    let uninstallable = FakeEgress {
+        refuse_install: true,
+        ..FakeEgress::default()
+    };
+    let (failing, journal) = network_with(
+        directory.path(),
+        pinning(directory.path()),
+        &uninstallable,
+        24,
+    )?;
+    let failed = failing.establish([2; 16], &[ENDPOINT]).map(drop);
+    assert!(matches!(failed, Err(AttemptNetworkError::Egress(_))));
+    // The partial egress and the namespace were removed.
+    assert_eq!(
+        entries(&journal).egress.last().map(String::as_str),
+        Some("remove piglor-h0")
+    );
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    let unremovable = FakeEgress {
+        refuse_removal: true,
+        ..FakeEgress::default()
+    };
+    let (stuck, _) = network_with(
+        directory.path(),
+        pinning(directory.path()),
+        &unremovable,
+        24,
+    )?;
+    drop(stuck.establish([3; 16], &[ENDPOINT])?);
+    assert!(matches!(
+        stuck.establish([4; 16], &[ENDPOINT]),
+        Err(AttemptNetworkError::Quarantined { slot: 0, .. })
+    ));
+    Ok(())
+}
+
 /// A network whose removals wait until the returned sender lets them
 /// proceed, and the receiver that reports each removal starting.
 type GatedNetwork = (
-    NamespacedLocalNetwork<FakeControl>,
+    NamespacedLocalNetwork<FakeControl, FakeEgress>,
     Arc<Mutex<Journal>>,
     std::sync::mpsc::Receiver<()>,
     std::sync::mpsc::Sender<()>,
@@ -397,8 +538,12 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
         namespace: std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?,
         _teardown: Teardown {
             control: Arc::clone(&control),
-            name: NamespaceName::for_attempt([1; 16]),
-            host_link: LinkName::new("piglor-h0")?,
+            egress: Arc::new(FakeEgress::default()),
+            attempt: AttemptEgress {
+                namespace: NamespaceName::for_attempt([1; 16]),
+                host_link: LinkName::new("piglor-h0")?,
+                endpoints: vec![ENDPOINT],
+            },
             slot: slots.take([1; 16])?,
         },
     };
@@ -452,7 +597,7 @@ mod privileged {
 
     use super::*;
     use crate::namespace_network::netlink::{NetlinkSession, ROUTE};
-    use crate::namespace_network::{route, NetlinkNamespaceControl};
+    use crate::namespace_network::{route, ForwardingRecords, NetlinkNamespaceControl};
 
     /// Whether this process is the isolated one; otherwise run `name` there
     /// and require it to pass.
@@ -507,6 +652,7 @@ mod privileged {
         let namespaces = NetworkNamespaces::system();
         let network = NamespacedLocalNetwork::new(
             NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
             namespaces.clone(),
             range(24, 120)?,
         );
@@ -533,6 +679,227 @@ mod privileged {
             "{outcomes:?}"
         );
         assert!(removed);
+        Ok(())
+    }
+
+    /// The off-host endpoint, in a target namespace behind the host, on an
+    /// unprivileged port: the target's fresh namespace keeps the default
+    /// `ip_unprivileged_port_start`, and the container grants no
+    /// `CAP_NET_BIND_SERVICE`.
+    const TARGET: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 8443);
+
+    /// Give link `name` of the session's namespace `address` and bring it up.
+    fn link_up<T: crate::namespace_network::netlink::NetlinkTransport>(
+        session: &NetlinkSession<T>,
+        name: &LinkName,
+        address: IpPrefix,
+    ) -> Result<(), NetlinkError> {
+        route::link_reply(session.request(route::get_link(name)))
+            .and_then(|link| link.ok_or(NetlinkError::Unexpected))
+            .and_then(|link| {
+                session.execute(vec![route::address(link.index, address), route::up(name)])
+            })
+    }
+
+    /// The host's end of the target's veth pair, `tgt-h0`, with the
+    /// target's other end in `target`.
+    fn host_side(target: std::os::fd::BorrowedFd<'_>) -> TestResult {
+        let (host, inner) = (LinkName::new("tgt-h0")?, LinkName::new("tgt-n0")?);
+        let address = IpPrefix {
+            address: std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            length: 24,
+        };
+        NetlinkSession::open(ROUTE)
+            .and_then(|session| {
+                session
+                    .execute(vec![route::veth_pair(&host, &inner, target)])
+                    .and_then(|()| link_up(&session, &host, address))
+            })
+            .map_err(Into::into)
+    }
+
+    /// A listener on [`TARGET`] inside `target`.
+    fn target_listener(target: std::os::fd::BorrowedFd<'_>) -> TestResult<TcpListener> {
+        let inner = LinkName::new("tgt-n0")?;
+        let address = IpPrefix {
+            address: TARGET.ip(),
+            length: 24,
+        };
+        let listener = in_namespace(target, || {
+            NetlinkSession::open(ROUTE)
+                .and_then(|session| link_up(&session, &inner, address))
+                .map_err(|error| error.to_string())
+                .and_then(|()| TcpListener::bind(TARGET).map_err(|error| error.to_string()))
+        })?;
+        Ok(listener?)
+    }
+
+    /// The chains of the host egress table, or `None` without it.
+    fn host_chains() -> Result<Option<Vec<String>>, NetlinkError> {
+        NetlinkSession::open(crate::namespace_network::netlink::NETFILTER)
+            .and_then(|session| crate::namespace_network::host_egress::host_chains(&session))
+    }
+
+    /// Whether host link `name` forwards IPv4.
+    fn forwarding_of(name: &str) -> TestResult<bool> {
+        let link = LinkName::new(name)?;
+        let forwarding = NetlinkSession::open(ROUTE).and_then(|session| {
+            session
+                .request(route::get_link(&link))
+                .and_then(crate::namespace_network::host_egress::link_forwarding)
+        })?;
+        Ok(forwarding.1)
+    }
+
+    /// Turn forwarding on or off for host link `name`.
+    fn set_forwarding_of(name: &str, on: bool) -> TestResult {
+        let link = LinkName::new(name)?;
+        NetlinkSession::open(ROUTE).and_then(|session| {
+            route::link_reply(session.request(route::get_link(&link)))
+                .and_then(|found| found.ok_or(NetlinkError::Unexpected))
+                .and_then(|found| {
+                    session.execute(vec![crate::namespace_network::host_egress::set_forwarding(
+                        found.index,
+                        on,
+                    )])
+                })
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_device_that_already_forwarded_is_left_forwarding() -> TestResult {
+        if !isolated("a_device_that_already_forwarded_is_left_forwarding")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        set_forwarding_of("tgt-h0", true)?;
+        let network = NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        );
+        let established = network.connector([9; 16], &[TARGET]).map(drop);
+        assert!(established.is_ok(), "{established:?}");
+        assert!(forwarding_of("tgt-h0")?);
+        assert!(ForwardingRecords::default().recorded()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn the_sweep_restores_recorded_forwarding() -> TestResult {
+        if !isolated("the_sweep_restores_recorded_forwarding")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // A crash after the record and the change, before the teardown.
+        let session = NetlinkSession::open(ROUTE)?;
+        let link = route::link_reply(session.request(route::get_link(&LinkName::new("tgt-h0")?)))?
+            .ok_or("no such link")?;
+        ForwardingRecords::default().record(link.index, "tgt-h0")?;
+        set_forwarding_of("tgt-h0", true)?;
+        let swept = NetlinkNamespaceControl::new(namespaces).remove_orphans();
+        assert!(swept.is_ok(), "{swept:?}");
+        assert!(!forwarding_of("tgt-h0")?);
+        assert!(ForwardingRecords::default().recorded()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed() -> TestResult {
+        if !isolated("an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // The host routes the endpoint's network, so only admission refuses
+        // it.
+        let routed = IpPrefix {
+            address: std::net::IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1)),
+            length: 64,
+        };
+        let host = LinkName::new("tgt-h0")?;
+        NetlinkSession::open(ROUTE).and_then(|session| {
+            route::link_reply(session.request(route::get_link(&host)))
+                .and_then(|link| link.ok_or(NetlinkError::Unexpected))
+                .and_then(|link| session.execute(vec![route::address(link.index, routed)]))
+        })?;
+        let network = NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces.clone(),
+            range(24, 120)?,
+        );
+        let endpoint = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 10), 8443));
+        let refused = network.connector([8; 16], &[endpoint]).map(drop);
+        assert!(
+            matches!(
+                refused,
+                Err(AttemptNetworkError::Egress(HostEgressError::Ipv6Egress))
+            ),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            namespaces.open(&NamespaceName::for_attempt([8; 16])),
+            Ok(None)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint() -> TestResult {
+        if !isolated("a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // A new link inherits the namespace's default forwarding, which a
+        // host that already routes has on; start from off so the provider
+        // has to turn it on and back off.
+        set_forwarding_of("tgt-h0", false)?;
+        let listener = target_listener(target.as_fd())?;
+        let control = NetlinkNamespaceControl::new(namespaces.clone());
+        let network = NamespacedLocalNetwork::new(
+            control.clone(),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        );
+        let outcome = network.connector([7; 16], &[TARGET]).map(|mut connector| {
+            let connected = connector.connect(TARGET, Duration::from_secs(5)).map(drop);
+            // The target sees the host's address: the attempt's was
+            // masqueraded, so the reply needs no route to the attempt range.
+            let peer = listener.accept().map(|(_, peer)| peer.ip());
+            (connected, peer)
+        });
+        // Dropping the connector took the attempt's chain away again, and
+        // turned the target link's forwarding back off.
+        let left = host_chains();
+        let forwarding = forwarding_of("tgt-h0");
+        let records = ForwardingRecords::default()
+            .recorded()
+            .map_err(|error| error.to_string());
+        let swept = control.remove_orphans();
+        assert!(
+            matches!(&outcome, Ok((Ok(()), Ok(peer))) if *peer == std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            left.map_err(|error| error.to_string()),
+            Ok(Some(vec!["forward".to_owned(), "postrouting".to_owned()]))
+        );
+        assert!(matches!(forwarding, Ok(false)), "{forwarding:?}");
+        assert_eq!(records, Ok(Vec::new()));
+        assert!(swept.is_ok(), "{swept:?}");
+        assert!(matches!(host_chains(), Ok(None)));
         Ok(())
     }
 }
