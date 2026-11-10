@@ -228,6 +228,9 @@ pub struct NamespaceConnector<C: NamespaceControl, E: EgressControl = HostEgress
 
 impl<C: NamespaceControl, E: EgressControl> NetworkEndpointConnector for NamespaceConnector<C, E> {
     fn connect(&mut self, endpoint: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        // An IPv4-mapped endpoint is reached as the IPv4 endpoint it maps,
+        // as the plan admitted it.
+        let endpoint = SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port());
         // The socket keeps the namespace it was created in after the thread
         // that created it ends.
         in_namespace(self.namespace.as_fd(), || {
