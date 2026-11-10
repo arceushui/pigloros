@@ -894,3 +894,17 @@ mod privileged {
         Ok(())
     }
 }
+
+#[test]
+fn only_an_ipv4_mapped_endpoint_changes_and_to_the_ipv4_it_maps() {
+    let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
+    assert_eq!(canonical_endpoint(&mapped), ENDPOINT);
+    assert_eq!(canonical_endpoint(&ENDPOINT), ENDPOINT);
+    let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+        Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+        443,
+        5,
+        3,
+    ));
+    assert_eq!(canonical_endpoint(&scoped), scoped);
+}
