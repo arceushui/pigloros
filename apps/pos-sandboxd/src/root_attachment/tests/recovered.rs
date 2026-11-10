@@ -511,6 +511,11 @@ mod cases {
         }
         // An image directory that cannot be resolved.
         assert!(!kernel.provider_image("loop2", &root.join("missing")));
+        // The production rule sweeps the installed images.
+        assert_eq!(
+            images_directory(),
+            Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT).join("images")
+        );
         Ok(())
     }
 }

@@ -176,6 +176,14 @@ impl SystemdAttemptRecovery {
     }
 }
 
+/// A root entry is opened only as a directory path, never through a symlink.
+const ROOT_ENTRY_OPEN: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+/// It is resolved beneath the held attempt directory, across a mount.
+const ROOT_ENTRY_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
+
 /// The root entry of one recorded attempt directory, if it has one.
 fn root_entry(
     parent: &File,
@@ -196,24 +204,26 @@ fn root_entry(
             .ok_or(SystemdAttemptRegistryError::UnsafeRegistry)
     })
     .and_then(|attempt| names(&attempt).map(|children| (attempt, children)))
-    .and_then(|(attempt, children)| match children.as_slice() {
-        [] => Ok(None),
-        [name] if name == "root" => openat2(
-            &attempt,
-            "root",
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        )
-        .map_err(|_| SystemdAttemptRegistryError::UnsafeRegistry)
-        .map(|root| {
-            Some(RecordedRootEntry {
-                intent: intent.clone(),
-                attempt,
-                root,
-            })
-        }),
-        _ => Err(SystemdAttemptRegistryError::UnsafeRegistry),
+    .and_then(|(attempt, children)| {
+        match children.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            [] => Ok(None),
+            ["root"] => openat2(
+                &attempt,
+                "root",
+                ROOT_ENTRY_OPEN,
+                Mode::empty(),
+                ROOT_ENTRY_RESOLVE,
+            )
+            .map_err(|_| SystemdAttemptRegistryError::UnsafeRegistry)
+            .map(|root| {
+                Some(RecordedRootEntry {
+                    intent: intent.clone(),
+                    attempt,
+                    root,
+                })
+            }),
+            _ => Err(SystemdAttemptRegistryError::UnsafeRegistry),
+        }
     })
 }
 
@@ -569,18 +579,21 @@ mod tests {
             Ok(runtime.join("attempts").join(key(id)?))
         };
         // Attempts 4 to 8 recorded both directory identities, 1 to 3 did not.
-        // Attempt 4's root is gone and an unknown attempt 9 is skipped.
+        // Attempt 4's root is gone, attempt 8's directories are both gone, and
+        // an unknown attempt 9 is skipped.
         let (directory, recovery) = fixture()?;
         let runtime = directory.path();
         fs::remove_dir(attempt(runtime, 4)?.join("root"))?;
+        fs::remove_dir(attempt(runtime, 8)?.join("root"))?;
+        fs::remove_dir(attempt(runtime, 8)?)?;
         private_directory(&attempt(runtime, 9)?)?;
         let entries = recovery.recorded_root_entries()?;
         let ids: Vec<_> = entries
             .iter()
             .map(|entry| entry.intent.planned().attempt_id())
             .collect();
-        assert_eq!(ids, (5..=8).map(|id| [id; 16]).collect::<Vec<_>>());
-        for (id, entry) in (5..=8).zip(&entries) {
+        assert_eq!(ids, (5..=7).map(|id| [id; 16]).collect::<Vec<_>>());
+        for (id, entry) in (5..=7).zip(&entries) {
             let path = attempt(runtime, id)?;
             let held = entry.attempt.metadata()?;
             let expected = fs::metadata(&path)?;
