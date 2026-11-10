@@ -849,6 +849,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             ("Export failed native coverage diagnostics", "if", "steps.coverage.outcome == 'failure'", "steps.coverage.outcome == 'success'"),
             ("Export failed native coverage diagnostics", "run", "cargo llvm-cov report -p", "cargo llvm-cov -p"),
             ("Export failed native coverage diagnostics", "run", "failed-measurement-diagnostic-only", "qualified"),
+            ("Export failed native coverage diagnostics", "run", "Get-ChildItem -LiteralPath $profileDirectory", "Get-ChildItem -LiteralPath $metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "Join-Path $metadata.target_directory 'llvm-cov-target'", "$metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "CARGO_LLVM_COV_TARGET_DIR", "CARGO_TARGET_DIR"),
             ("Retain failed native coverage diagnostics", "name", "owner-windows-failed-diagnostic-", "owner-windows-lcov-"),
             ("Retain failed native coverage diagnostics", "path", "owner-windows-failed-diagnostic/", "owner-windows.lcov"),
         ):

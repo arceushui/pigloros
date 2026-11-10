@@ -166,6 +166,7 @@ jobs:
             expected_checkout = $env:GITHUB_SHA
             checkout = $null
             cargo_llvm_cov_version = 'unavailable'
+            profile_directory = $null
             profile_files = 0
             json = 'unavailable'
             lcov = 'unavailable'
@@ -181,7 +182,14 @@ jobs:
             $metadata = $rawMetadata | ConvertFrom-Json
             $ignore = $rawMetadata | python scripts/owner_bridge_windows_cov_ignore.py
             if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'coverage scope unavailable' }
-            $profiles = @(Get-ChildItem -LiteralPath $metadata.target_directory -Filter '*.profraw' -File | Where-Object { $_.Length -gt 0 })
+            $targetOverride = [Environment]::GetEnvironmentVariable('CARGO_LLVM_COV_TARGET_DIR')
+            $profileDirectory = if ($null -ne $targetOverride) {
+              [System.IO.Path]::GetFullPath($targetOverride, (Get-Location).Path)
+            } else {
+              Join-Path $metadata.target_directory 'llvm-cov-target'
+            }
+            $receipt.profile_directory = $profileDirectory
+            $profiles = @(Get-ChildItem -LiteralPath $profileDirectory -Filter '*.profraw' -File | Where-Object { $_.Length -gt 0 })
             $receipt.profile_files = $profiles.Count
             if ($profiles.Count -eq 0) { throw 'profile unavailable' }
             cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --ignore-filename-regex "$ignore" --output-path "$directory/diagnostic.json"

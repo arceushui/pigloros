@@ -227,6 +227,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
          '  expected_checkout = $env:GITHUB_SHA\n'
          '  checkout = $null\n'
          "  cargo_llvm_cov_version = 'unavailable'\n"
+         '  profile_directory = $null\n'
          '  profile_files = 0\n'
          "  json = 'unavailable'\n"
          "  lcov = 'unavailable'\n"
@@ -243,8 +244,15 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
          '  $metadata = $rawMetadata | ConvertFrom-Json\n'
          '  $ignore = $rawMetadata | python scripts/owner_bridge_windows_cov_ignore.py\n'
          "  if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'coverage scope unavailable' }\n"
-         '  $profiles = @(Get-ChildItem -LiteralPath $metadata.target_directory -Filter '
-         "'*.profraw' -File | Where-Object { $_.Length -gt 0 })\n"
+         "  $targetOverride = [Environment]::GetEnvironmentVariable('CARGO_LLVM_COV_TARGET_DIR')\n"
+         '  $profileDirectory = if ($null -ne $targetOverride) {\n'
+         '    [System.IO.Path]::GetFullPath($targetOverride, (Get-Location).Path)\n'
+         '  } else {\n'
+         "    Join-Path $metadata.target_directory 'llvm-cov-target'\n"
+         '  }\n'
+         '  $receipt.profile_directory = $profileDirectory\n'
+         "  $profiles = @(Get-ChildItem -LiteralPath $profileDirectory -Filter '*.profraw' -File | "
+         'Where-Object { $_.Length -gt 0 })\n'
          '  $receipt.profile_files = $profiles.Count\n'
          "  if ($profiles.Count -eq 0) { throw 'profile unavailable' }\n"
          '  cargo llvm-cov report -p pos-owner-bridge-windows --locked --json '
