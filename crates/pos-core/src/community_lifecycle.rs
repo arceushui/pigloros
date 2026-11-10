@@ -14,6 +14,7 @@ mod guest_error;
 mod host_error;
 mod invocation;
 mod member;
+mod member_progress;
 mod metadata_envelope;
 mod metadata_scope;
 mod owner_binding;
@@ -64,6 +65,11 @@ pub use invocation::{
     MeteringV1,
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
+pub use member_progress::{
+    CommunityCarriedEventV1, CommunityCarriedEventsIterV1, CommunityCarriedEventsV1,
+    CommunityFactualNodeReferenceV1, CommunityMemberProgressInputV1, CommunityMemberProgressV1,
+    CommunityProgressReferenceV1, MAX_COMMUNITY_CARRIED_EVENTS_V1,
+};
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{
     CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityScopeMemberV1,
