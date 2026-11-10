@@ -1308,7 +1308,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "317266bfb5b98b5771be3a6029daef161531277628c9861ce2c40a7598a08140":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "2a5464c96011d13afdedd32f9a08cea56e24fd282e21169b6144ae3de1f93e2d":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

@@ -3975,7 +3975,8 @@ fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
 }
 
 fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> TestResult {
-    let reached = run_success_exit(runtime, root, number, false)?;
+    let reached =
+        run_success_releasing(runtime, root, number, ProcessFaultTarget::Renderer, false)?;
     if reached.generation != 1 || reached.record_count != 1 {
         return Err("fresh ceremony state after retirement was not established".into());
     }
