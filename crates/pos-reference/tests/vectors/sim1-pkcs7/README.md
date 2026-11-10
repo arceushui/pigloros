@@ -131,17 +131,20 @@ structure and algorithm parameter encodings as the original fixture.
 edge of the RSA-2048 profile: its modulus has 256 unsigned bytes beginning
 with `0x80`, the smallest leading byte of a 2048-bit modulus. The public test
 checks that geometry, exponent 65537 and dates, then requires acceptance.
+Test vector only; never a trust anchor; private key destroyed.
 Random RSA-2048 key generation bounds each prime independently at or above
-`sqrt(2) * 2^1023`, so this leading byte needs both primes near that bound and
-is practically unreachable; the primes were chosen explicitly instead.
+`sqrt(2) * 2^1023`, so this leading byte occurs in only about 1 in several
+thousand random keys (roughly 2e-4); the primes were chosen directly instead
+of searching.
 
 The certificate is self-issued, serial 1, `CN=SIM1 RSA-2048 0x80 fixture`,
 with validity from 2026-01-01 00:00:00 UTC through 2036-01-01 00:00:00 UTC.
 The CMS structure and algorithm encodings match the `rsa-2047-*` fixture.
 
 OpenSSL 3.6.1 (library 3.6.1) produced it offline in a disposable private
-directory containing the same `root-hash.txt`. Only key generation differs
-from the RSA-2047/3072 procedure above:
+directory containing the same `root-hash.txt`. Key generation and the OpenSSL
+version (3.6.1 rather than 3.0.13) differ from the RSA-2047/3072 procedure
+above:
 
 1. Choose 1024-bit primes `p` and `q` from a cryptographically secure random
    offset above `isqrt(0x80 << 2040)`, with `p - 1` and `q - 1` not divisible

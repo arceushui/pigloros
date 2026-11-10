@@ -186,14 +186,31 @@ fn certificate_defect(certificate: &mut Certificate, defect: CertificateDefect) 
     Ok(())
 }
 
+#[derive(der::Sequence)]
+struct FixtureRsaKey<'a> {
+    modulus: der::asn1::UintRef<'a>,
+    exponent: der::asn1::UintRef<'a>,
+}
+
+// Asserts a signed RSA fixture's valid dates and exponent 65537, then returns
+// its unsigned modulus bytes.
+fn fixture_modulus(certificate: &[u8]) -> TestResult<Vec<u8>> {
+    let parsed = Certificate::from_der(certificate)?;
+    let tbs = &parsed.tbs_certificate;
+    assert!(tbs.validity.not_before.to_unix_duration().as_secs() < NOW);
+    assert!(tbs.validity.not_after.to_unix_duration().as_secs() > NOW);
+    let key_bytes = tbs
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .ok_or("unaligned fixture public key")?;
+    let key = FixtureRsaKey::from_der(key_bytes)?;
+    assert_eq!(key.exponent.as_bytes(), &[1, 0, 1]);
+    Ok(key.modulus.as_bytes().to_vec())
+}
+
 #[test]
 fn public_proof_verification_rejects_signed_non_profile_rsa_moduli() -> TestResult {
-    #[derive(der::Sequence)]
-    struct FixtureRsaKey<'a> {
-        modulus: der::asn1::UintRef<'a>,
-        exponent: der::asn1::UintRef<'a>,
-    }
-
     verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
     for (bits, proof, certificate) in [
         (
@@ -207,21 +224,10 @@ fn public_proof_verification_rejects_signed_non_profile_rsa_moduli() -> TestResu
             &include_bytes!("../vectors/sim1-pkcs7/rsa-3072-signer.der")[..],
         ),
     ] {
-        let parsed = Certificate::from_der(certificate)?;
-        let tbs = &parsed.tbs_certificate;
-        assert!(tbs.validity.not_before.to_unix_duration().as_secs() < NOW);
-        assert!(tbs.validity.not_after.to_unix_duration().as_secs() > NOW);
-        let key_bytes = tbs
-            .subject_public_key_info
-            .subject_public_key
-            .as_bytes()
-            .ok_or("unaligned fixture public key")?;
-        let key = FixtureRsaKey::from_der(key_bytes)?;
-        let modulus = key.modulus.as_bytes();
+        let modulus = fixture_modulus(certificate)?;
         let first = modulus.first().ok_or("empty fixture modulus")?;
         let actual_bits = modulus.len() * 8 - usize::try_from(first.leading_zeros())?;
         assert_eq!(actual_bits, bits);
-        assert_eq!(key.exponent.as_bytes(), &[1, 0, 1]);
         assert_eq!(
             verify(&fixture(proof, certificate)?, NOW)?,
             Err(SandboxImageProofError::UnsupportedProfile),
@@ -233,28 +239,12 @@ fn public_proof_verification_rejects_signed_non_profile_rsa_moduli() -> TestResu
 
 #[test]
 fn public_proof_verification_accepts_signed_rsa_2048_minimum_leading_modulus_byte() -> TestResult {
-    #[derive(der::Sequence)]
-    struct FixtureRsaKey<'a> {
-        modulus: der::asn1::UintRef<'a>,
-        exponent: der::asn1::UintRef<'a>,
-    }
-
     let proof = include_bytes!("../vectors/sim1-pkcs7/rsa-2048-0x80-proof.der");
     let certificate = include_bytes!("../vectors/sim1-pkcs7/rsa-2048-0x80-signer.der");
-    let parsed = Certificate::from_der(certificate)?;
-    let tbs = &parsed.tbs_certificate;
-    assert!(tbs.validity.not_before.to_unix_duration().as_secs() < NOW);
-    assert!(tbs.validity.not_after.to_unix_duration().as_secs() > NOW);
-    let key_bytes = tbs
-        .subject_public_key_info
-        .subject_public_key
-        .as_bytes()
-        .ok_or("unaligned fixture public key")?;
-    let key = FixtureRsaKey::from_der(key_bytes)?;
+    let modulus = fixture_modulus(certificate)?;
     // 0x80 is the smallest leading byte of a 256-byte, 2048-bit modulus.
-    assert_eq!(key.modulus.as_bytes().len(), 256);
-    assert_eq!(key.modulus.as_bytes().first(), Some(&0x80));
-    assert_eq!(key.exponent.as_bytes(), &[1, 0, 1]);
+    assert_eq!(modulus.len(), 256);
+    assert_eq!(modulus.first(), Some(&0x80));
     let result = verify(&fixture(proof, certificate)?, NOW)?;
     assert!(
         result.is_ok(),
