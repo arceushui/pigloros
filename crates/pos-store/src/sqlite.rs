@@ -19769,12 +19769,15 @@ mod tests {
             .test_err();
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
-        BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(20));
+        // The budget is wide enough that an instrumented, loaded runner still
+        // reaches the injected delay before it runs out, so the time bound
+        // trips after the first page rather than during planning.
+        BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(400));
         let time_error = store
             .read_bounded(
                 timeline.id(),
                 SeqRange::all(),
-                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 250_000),
             )
             .test_err();
         BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(0));
