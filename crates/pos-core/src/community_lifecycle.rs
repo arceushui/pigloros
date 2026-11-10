@@ -8,7 +8,10 @@
 mod classification;
 mod envelope;
 mod error;
+mod failure;
+mod guest_claim;
 mod guest_error;
+mod host_error;
 mod invocation;
 mod member;
 mod metadata_envelope;
@@ -39,7 +42,23 @@ pub use envelope::{
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
-pub use guest_error::is_valid_community_id_v1;
+pub use failure::{
+    CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
+    CommunityPassFailureV1,
+};
+pub use guest_claim::{
+    CommunityClaimArtifactV1, CommunityGuestClaimContextV1, CommunityGuestClaimKindV1,
+    CommunityGuestClaimReferenceV1, CommunityGuestClaimReferencesV1, CommunityGuestClaimV1,
+    COMMUNITY_CLAIM_STATE_SCHEMA_V1, COMMUNITY_GUEST_CLAIM_SCHEMA_V1,
+};
+pub use guest_error::{
+    is_valid_community_id_v1, CommunityGuestErrorCodeV1, CommunityGuestErrorV1, FieldRefV1,
+    GuestPluginErrorV1, PluginErrorCodeV1,
+};
+pub use host_error::{
+    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
+    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+};
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
     MeteringV1,

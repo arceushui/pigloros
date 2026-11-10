@@ -9,7 +9,7 @@ use super::{
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
 
-/// Exact `contract-v1.artifact-ref` data for complete prepared-input readers.
+/// Exact `contract-v1.artifact-ref`, shared with the live Runtime public path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArtifactRefV1 {
     /// Registered schema ID.
