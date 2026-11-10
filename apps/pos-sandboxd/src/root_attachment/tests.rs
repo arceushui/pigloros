@@ -142,9 +142,11 @@ pub fn attached_fixture_root(
         .map_err(|error| error.to_string())
 }
 
-/// Restart detachment of recorded roots, each over its own fake kernel that
-/// reads back the fixture provider root of the entry's attempt. That root is
-/// mounted only on the one `mounted` attempt; every other root is unmounted.
+/// Restart detachment of recorded roots over fake kernels.
+///
+/// Each kernel reads back the fixture provider root of its entry's attempt.
+/// That root is mounted only on the one `mounted` attempt; every other root
+/// is unmounted.
 pub struct FakeRecoveredRoots {
     mounted: [u8; 16],
     detached: Mutex<Vec<([u8; 16], usize)>>,
