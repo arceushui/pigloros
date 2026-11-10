@@ -42,6 +42,7 @@ mod plugin_trust_bridge;
 mod profile_contract;
 mod provider_contract;
 mod report_attestation;
+pub mod run_evidence_archive;
 mod sandbox_provider_contract;
 mod trust_policy_snapshot;
 mod verification_preflight;
