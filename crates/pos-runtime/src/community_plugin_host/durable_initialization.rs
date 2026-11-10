@@ -1,24 +1,37 @@
-//! Initial producer binding to actual retained tuple/member/State data.
+//! Initial producer binding to retained tuple/member/profile/State references.
 
 use pos_core::community_lifecycle::{
     ArtifactRefV1, CommunityDurableProfileV1, CommunityInitializationProducerInputV1,
     CommunityInitializationProducerV1, CommunityInitializationRequestV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1, CommunityStateContentV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingV1,
 };
 use pos_core::Hash;
 
 use super::CommunityNegotiatedTupleV1;
 
+/// Untrusted source-schema and CSC1 identity supplied independently of CMB1.
+///
+/// This contains no State bytes and authenticates neither field. Only the
+/// qualified protected owner may hash actual private State, account for every
+/// crypto copy and verify that this reference names those exact bytes.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CommunityInitializationStateReferenceV1 {
+    /// Original source State schema, not a current default or a conversion.
+    pub schema_digest: Hash,
+    /// Original CSC1 identity verified later by the qualified source owner.
+    pub state_content_digest: Hash,
+}
+
 impl CommunityNegotiatedTupleV1<'_> {
-    /// Bind CIS1 to the exact request, negotiated member and initial CSC1.
+    /// Bind CIS1 to the request, negotiated member and retained State reference.
     ///
-    /// Derive identities from the complete supplied records, without accepting
-    /// replacements for their hashes. This prepares untrusted data only: the
-    /// qualified owner must independently verify the actual initializer, full
-    /// source scope, current authority and complete generation roster.
+    /// Derive metadata identities from the complete supplied records. This
+    /// prepares untrusted data only and does not read or hash State plaintext.
+    /// The qualified owner must independently verify actual CSC1 bytes, the
+    /// initializer, full source scope, current authority and complete roster.
     ///
     /// # Errors
-    /// Rejects a foreign member/release/tuple, substituted State/schema/source,
+    /// Rejects a foreign member/release/tuple, inconsistent State references,
     /// absent roster member, zero producer links or extended/invalid horizon.
     /// Neither successful preparation nor CIS1 decoding issues a guest permit.
     pub fn initialization_producer(
@@ -26,11 +39,11 @@ impl CommunityNegotiatedTupleV1<'_> {
         request: &CommunityInitializationRequestV1<'_>,
         member: &CommunityMemberBindingV1<'_>,
         profile: &CommunityDurableProfileV1<'_>,
-        state: &CommunityStateContentV1<'_>,
+        state: &CommunityInitializationStateReferenceV1,
         scope_binding_digest: Hash,
         evidence_not_after_micros: u64,
     ) -> Result<CommunityInitializationProducerV1, Error> {
-        initial_state_digest(self, member, state).and_then(|state_content_digest| {
+        validate_initial_state_reference(self, member, state).and_then(|state_content_digest| {
             profile_initializer(self, request, member, profile).and_then(|initializer_ref| {
                 if evidence_not_after_micros > request.as_input().evidence_not_after_micros {
                     return Err(Error::InvalidBinding);
@@ -48,19 +61,19 @@ impl CommunityNegotiatedTupleV1<'_> {
     }
 }
 
-fn initial_state_digest(
+fn validate_initial_state_reference(
     tuple: &CommunityNegotiatedTupleV1<'_>,
     member: &CommunityMemberBindingV1<'_>,
-    state: &CommunityStateContentV1<'_>,
+    state: &CommunityInitializationStateReferenceV1,
 ) -> Result<Hash, Error> {
     let binding = member.as_input();
-    let state_digest = state.digest();
+    let state_digest = state.state_content_digest;
     if binding.implementation.plugin_id() != tuple.negotiated().plugin_id()
         || binding.implementation.release_digest().as_bytes()
             != &tuple.negotiated().release_digest()
         || binding.pmf1_digest.as_bytes() != &tuple.negotiated().pmf1_digest()
         || binding.negotiated_tuple_digest != tuple.digest()
-        || binding.state_schema_digest != state.schema_digest()
+        || binding.state_schema_digest != state.schema_digest
         || binding.initial_state_content_digest != state_digest
     {
         Err(Error::InvalidBinding)

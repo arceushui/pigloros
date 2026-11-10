@@ -10,9 +10,10 @@ use pos_core::community_lifecycle::{
     CommunityInitializationRequestInputV1, CommunityInitializationRequestV1 as Request,
     CommunityInitializationSourceV1 as Source, CommunityMemberBindingInputV1,
     CommunityMemberBindingV1 as Member, CommunityProfileMemberV1 as ProfileMember,
-    CommunityProfileRetentionV1, CommunityStateContentV1 as State,
+    CommunityProfileRetentionV1,
 };
 use pos_core::{Hash, ImplementationKeyV1, Seq, TimelineId};
+use pos_runtime::community_plugin_host::CommunityInitializationStateReferenceV1 as State;
 
 fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
@@ -80,7 +81,6 @@ fn producer_binds_actual_tuple_member_request_and_canonical_initial_state() -> T
     let negotiated = negotiated(&profile)?;
     let tuple = Tuple::new(&negotiated, &profile)?;
     let key = key("plugin-a", 2)?;
-    let state = State::new(hash(3), b"initial-state")?;
     let expected_content = independent_hash(
         b"PiglorOS.Community.CSC1.v1\0",
         &Value::Array(vec![
@@ -90,7 +90,10 @@ fn producer_binds_actual_tuple_member_request_and_canonical_initial_state() -> T
             bytes(b"initial-state"),
         ]),
     )?;
-    assert_eq!(state.digest(), expected_content);
+    let state = State {
+        schema_digest: hash(3),
+        state_content_digest: expected_content,
+    };
     let member = tuple.member_binding("entry", &key, hash(3), expected_content, hash(6))?;
     let roster = [tuple.profile_member("entry", &key, hash(3), initializer())?];
     let durable = DurableProfile::new(durable_input(&profile, &roster)?)?;
@@ -143,8 +146,12 @@ fn producer_rejects_each_negotiated_member_or_state_substitution_independently()
     let negotiated = negotiated(&profile)?;
     let tuple = Tuple::new(&negotiated, &profile)?;
     let key = key("plugin-a", 2)?;
-    let state = State::new(hash(3), b"initial-state")?;
-    let member = tuple.member_binding("entry", &key, hash(3), state.digest(), hash(6))?;
+    let state = State {
+        schema_digest: hash(3),
+        state_content_digest: hash(4),
+    };
+    let member =
+        tuple.member_binding("entry", &key, hash(3), state.state_content_digest, hash(6))?;
     let other_plugin = self::key("plugin-b", 2)?;
     let other_release = self::key("plugin-a", 9)?;
     for input in [
@@ -206,8 +213,12 @@ fn producer_refuses_absent_member_foreign_profile_and_horizon_extension() -> Tes
     let negotiated = negotiated(&profile)?;
     let tuple = Tuple::new(&negotiated, &profile)?;
     let key = key("plugin-a", 2)?;
-    let state = State::new(hash(3), b"initial-state")?;
-    let member = tuple.member_binding("entry", &key, hash(3), state.digest(), hash(6))?;
+    let state = State {
+        schema_digest: hash(3),
+        state_content_digest: hash(4),
+    };
+    let member =
+        tuple.member_binding("entry", &key, hash(3), state.state_content_digest, hash(6))?;
     let roster = [tuple.profile_member("entry", &key, hash(3), initializer())?];
     let input = durable_input(&profile, &roster)?;
     let durable = DurableProfile::new(input)?;
@@ -289,8 +300,12 @@ fn producer_checks_actual_profile_roster_and_its_initializer() -> TestResult {
     let tuple = Tuple::new(&negotiated, &profile)?;
     let key = key("plugin-a", 2)?;
     let other_key = self::key("plugin-b", 2)?;
-    let state = State::new(hash(3), b"initial-state")?;
-    let member = tuple.member_binding("entry", &key, hash(3), state.digest(), hash(6))?;
+    let state = State {
+        schema_digest: hash(3),
+        state_content_digest: hash(4),
+    };
+    let member =
+        tuple.member_binding("entry", &key, hash(3), state.state_content_digest, hash(6))?;
     let binding = member.as_input();
     let members = [member.digest()];
     for (entry, implementation, pmf, schema, cnt) in [
@@ -345,6 +360,26 @@ fn producer_checks_actual_profile_roster_and_its_initializer() -> TestResult {
             .initialization_producer(&request, &member, &changed_profile, &state, hash(8), 1000)
             .err(),
         Some(Error::InvalidBinding)
+    );
+    // Bind the request to the changed complete profile. A row's initializer is
+    // selected from that policy, independently of the generation-level source.
+    let matching = Request::new(request_input(
+        &members,
+        Source::Initializer(initializer()),
+        changed_profile.digest(),
+    ))?;
+    let producer = tuple.initialization_producer(
+        &matching,
+        &member,
+        &changed_profile,
+        &state,
+        hash(8),
+        1000,
+    )?;
+    assert_eq!(producer.as_input().initializer_ref, foreign_initializer);
+    assert_eq!(
+        producer.as_input().generation_request_digest,
+        matching.digest()
     );
     Ok(())
 }

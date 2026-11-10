@@ -20,6 +20,15 @@ const MAX_RECORD_BYTES: usize = 1_048_624;
 /// state or create another persistence encoding.
 /// Plaintext hashing belongs to the qualified protected owner, which must
 /// account for the cryptographic implementation's temporary copies.
+///
+/// The portable view cannot hash private State outside that owner:
+///
+/// ```compile_fail,E0599
+/// use pos_core::community_lifecycle::CommunityStateContentV1;
+/// fn hash_without_owner(state: &CommunityStateContentV1<'_>) {
+///     let _ = state.digest();
+/// }
+/// ```
 pub struct CommunityStateContentV1<'a> {
     schema: Hash,
     state: &'a [u8],
@@ -65,12 +74,6 @@ impl<'a> CommunityStateContentV1<'a> {
         encode_head(&mut out, 2, self.state.len() as u64);
         out.extend_from_slice(self.state);
         out
-    }
-
-    /// Exact CSC1 identity, including schema and the complete State bytes.
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        super::digest(b"PiglorOS.Community.CSC1.v1\0", &self.to_canonical_cbor())
     }
 
     /// Decode a complete preferred CSC1, borrowing its exact state byte range.
