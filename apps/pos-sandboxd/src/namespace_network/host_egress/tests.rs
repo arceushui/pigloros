@@ -590,6 +590,12 @@ fn forwarding_records_survive_as_files_and_ignore_unfinished_ones() -> TestResul
     let file = ForwardingRecords::in_directory(directory.path().join("forwarding/9"));
     assert!(file.recorded().is_err());
     assert!(file.record(1, "x").is_err());
+    // Only a missing record counts as forgotten; any other failure to
+    // remove one (here the record path is under a file) is reported.
+    assert_eq!(
+        file.forget(1).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::NotADirectory)
+    );
     assert_eq!(
         ForwardingRecords::default(),
         ForwardingRecords::in_directory(FORWARDING_RECORDS)
