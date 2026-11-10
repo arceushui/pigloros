@@ -6,7 +6,7 @@ use pos_owner_bridge_codec::CeremonyId;
 use super::{CloseState, Ownership, PreEnvironmentRetention, Surface};
 
 impl Surface {
-    pub(in crate::adapter) fn controller_creation_retention(
+    fn controller_creation_custody(
         &mut self,
         ceremony: &CeremonyId,
     ) -> Option<PreEnvironmentRetention> {
@@ -22,7 +22,6 @@ impl Surface {
             || !self.native.pending_opening_owners_retained()
             || !self.native.window().ok()?.exists
             || !self.native.pending()
-            || self.native.recordless_controller_completion().is_some()
         {
             return None;
         }
@@ -34,33 +33,25 @@ impl Surface {
             PreEnvironmentRetention::Active
         })
     }
+
+    pub(in crate::adapter) fn controller_creation_retention(
+        &mut self,
+        ceremony: &CeremonyId,
+    ) -> Option<PreEnvironmentRetention> {
+        let state = self.controller_creation_custody(ceremony)?;
+        if self.native.recordless_controller_completion().is_some() {
+            None
+        } else {
+            Some(state)
+        }
+    }
+
     pub(in crate::adapter) fn controller_result_retention(
         &mut self,
         ceremony: &CeremonyId,
     ) -> Option<(PreEnvironmentRetention, bool)> {
-        if self.ownership != Ownership::CreatingController
-            || self.opening_spec.as_ref()?.ceremony_id != *ceremony
-            || self.folder.as_ref()? != &pos_owner_bridge::folder_name(ceremony)
-            || self.identity.is_some()
-            || self.recordless_fault.is_some()
-            || self.buffers
-            || self.generation.is_some()
-            || self.close != CloseState::Idle
-            || !self.store.records().ok()?.is_empty()
-            || !self.native.pending_opening_owners_retained()
-            || !self.native.window().ok()?.exists
-            || !self.native.pending()
-        {
-            return None;
-        }
+        let state = self.controller_creation_custody(ceremony)?;
         let result = self.native.recordless_controller_completion()?;
-        let folder = self.root.join(self.folder.as_ref()?);
-        crate::verify_private_directory(&folder).ok()?;
-        let state = if self.failed_open {
-            PreEnvironmentRetention::Abandoned
-        } else {
-            PreEnvironmentRetention::Active
-        };
         Some((state, result))
     }
 
