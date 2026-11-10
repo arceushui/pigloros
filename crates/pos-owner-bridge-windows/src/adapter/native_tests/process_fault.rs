@@ -389,11 +389,11 @@ fn run() -> TestResult {
             "empty-reply control and fault reached different states"
         );
     }
-    let control = run_pending_opening(Path::new(&runtime), &root.0, 0x45, false)?;
-    let fault = run_pending_opening(Path::new(&runtime), &root.0, 0x46, true)?;
+    let control = run_first_opening_browser(Path::new(&runtime), &root.0, 0x45, false)?;
+    let fault = run_first_opening_browser(Path::new(&runtime), &root.0, 0x46, true)?;
     assert_eq!(
         control, fault,
-        "pending-opening control and fault reached different states"
+        "opening control and fault reached different cutpoints"
     );
     for (number, target) in [
         (0x4b, ProcessFaultTarget::Renderer),
@@ -1830,14 +1830,112 @@ fn run_posted_empty(
 }
 
 impl Fixture {
-    fn drive_pending_opening(
+    fn opening_first_browser(
+        &mut self,
+    ) -> Result<(pos_owner_bridge::ProcessIdentity, ProcessFaultMark), Box<dyn std::error::Error>>
+    {
+        loop {
+            if !self.surface.recordless_opening_ready() || Instant::now() >= self.deadline {
+                return Err("opening browser cutpoint was not reached".into());
+            }
+            match self.surface.pending_opening_completion() {
+                None => {
+                    if let Some(browser) = self
+                        .surface
+                        .prepare_pending_opening_browser()
+                        .map_err(|()| "pending-opening browser or callback indeterminate")?
+                    {
+                        return Ok((
+                            browser,
+                            ProcessFaultMark::PendingOpening {
+                                generation: 1,
+                                record_count: 0,
+                            },
+                        ));
+                    }
+                    readiness::pump(&self.surface)?;
+                }
+                Some(true) => {
+                    if !controller_held_before_exit(&crate::Native::callback_order()) {
+                        return Err("held controller callback order was not established".into());
+                    }
+                    let browser = self
+                        .surface
+                        .prepare_recordless_browser()
+                        .map_err(|()| "held-opening browser identity indeterminate")?;
+                    return Ok((
+                        browser,
+                        ProcessFaultMark::RecordlessOpening {
+                            generation: 1,
+                            record_count: 0,
+                        },
+                    ));
+                }
+                Some(false) => {
+                    return Err("controller callback failed before browser cutpoint".into())
+                }
+            }
+        }
+    }
+
+    fn opening_first_owners_retained(&mut self, mark: ProcessFaultMark) -> bool {
+        match mark {
+            ProcessFaultMark::PendingOpening { .. } => {
+                self.surface.pending_opening_owners_retained()
+                    && self.surface.pending_opening_completion().is_none()
+            }
+            ProcessFaultMark::RecordlessOpening { .. } => {
+                self.surface.recordless_fault_owners_retained()
+                    && self.surface.pending_opening_completion() == Some(true)
+            }
+            _ => false,
+        }
+    }
+
+    fn inject_opening_first_browser(
+        &mut self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        mark: ProcessFaultMark,
+    ) -> TestResult {
+        let seal = crate::FaultSeal {
+            trace: Rc::clone(&self.trace),
+            deadline: self.deadline,
+        };
+        match mark {
+            ProcessFaultMark::PendingOpening { .. } => {
+                self.handle = Some(
+                    self.surface
+                        .inject_pending_opening_browser(seal)
+                        .map_err(|()| "pending-opening browser fault refused")?,
+                );
+                self.observe_pending_opening(browser, mark)?;
+                if !self.surface.pending_opening_owners_retained() {
+                    return Err("pending-opening callback owner not retained".into());
+                }
+            }
+            ProcessFaultMark::RecordlessOpening { .. } => {
+                self.handle = Some(
+                    self.surface
+                        .inject_recordless_browser(seal)
+                        .map_err(|()| "held-opening browser fault refused")?,
+                );
+                self.observe_recordless(browser)?;
+                if !self.surface.recordless_fault_owners_retained() {
+                    return Err("held-opening callback owner not retained".into());
+                }
+            }
+            _ => return Err("unexpected opening fault cutpoint".into()),
+        }
+        Ok(())
+    }
+
+    fn drive_first_opening_browser(
         &mut self,
         driver: &mut CeremonyDriver,
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         let mut reached = false;
         let mut cancelled = false;
-        let mut pending_reported = false;
         loop {
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
@@ -1846,62 +1944,25 @@ impl Fixture {
             ));
             if !reached && matches!(&step, Step::Pending) && self.surface.recordless_opening_ready()
             {
-                if driver.generation() != 1
-                    || driver.posts() != 0
-                    || self.surface.pending_opening_completion().is_some()
-                {
-                    return Err("controller creation was not pending".into());
+                if driver.generation() != 1 || driver.posts() != 0 {
+                    return Err("opening generation or post count changed".into());
                 }
-                let candidate = self
-                    .surface
-                    .prepare_pending_opening_browser()
-                    .map_err(|()| "pending-opening browser or callback indeterminate")?;
-                let Some(browser) = candidate else {
-                    if Instant::now() >= self.deadline {
-                        return Err("pending-opening browser observation timed out".into());
-                    }
-                    if !pending_reported {
-                        pending_reported = true;
-                        let _logged_or_unavailable = writeln!(
-                            std::io::stderr(),
-                            "NATIVE_PENDING_OPENING case={} pending=two-complete-empty",
-                            self.number
-                        );
-                    }
-                    readiness::pump(&self.surface)?;
-                    if !self.surface.recordless_opening_ready()
-                        || self.surface.pending_opening_completion().is_some()
-                    {
-                        return Err("controller completed before browser observation".into());
-                    }
-                    continue;
-                };
-                let first = ProcessFaultMark::PendingOpening {
-                    generation: 1,
-                    record_count: 0,
-                };
+                let (browser, first) = self.opening_first_browser()?;
                 self.trace.borrow_mut().push(first);
-                if !self.surface.pending_opening_owners_retained()
+                if !self.opening_first_owners_retained(first)
                     || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
-                    || !self.surface.pending_opening_owners_retained()
+                    || !self.opening_first_owners_retained(first)
                 {
-                    return Err("pending-opening owners or blocked admission missing".into());
+                    return Err("opening owners or blocked admission missing".into());
                 }
+                let _logged = writeln!(
+                    std::io::stderr(),
+                    "NATIVE_OPENING_FIRST case={} inject={inject} cutpoint={first:?}",
+                    self.number
+                );
                 reached = true;
                 if inject {
-                    let seal = crate::FaultSeal {
-                        trace: Rc::clone(&self.trace),
-                        deadline: self.deadline,
-                    };
-                    self.handle = Some(
-                        self.surface
-                            .inject_pending_opening_browser(seal)
-                            .map_err(|()| "pending-opening browser fault refused")?,
-                    );
-                    self.observe_pending_opening(browser, first)?;
-                    if !self.surface.pending_opening_owners_retained() {
-                        return Err("pending-opening callback owner not retained".into());
-                    }
+                    self.inject_opening_first_browser(browser, first)?;
                     self.surface.controller_lost();
                     cancelled = true;
                 }
@@ -1913,7 +1974,7 @@ impl Fixture {
             }
             match step {
                 Step::Finished(result) => return Ok(result),
-                Step::Done => return Err("pending-opening driver ended without result".into()),
+                Step::Done => return Err("opening driver ended without result".into()),
                 Step::Pending => readiness::pump(&self.surface)?,
             }
         }
@@ -1984,7 +2045,7 @@ impl Fixture {
     }
 }
 
-fn run_pending_opening(
+fn run_first_opening_browser(
     runtime: &Path,
     root: &Path,
     number: u8,
@@ -1996,7 +2057,7 @@ fn run_pending_opening(
     let ceremony_id = CeremonyId::from_bytes([number; 16]);
     let mut driver = readiness::new_driver(ceremony_id, Instant::now())?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_pending_opening(&mut driver, inject)
+        fixture.drive_first_opening_browser(&mut driver, inject)
     }));
     if !matches!(&attempt, Ok(Ok(_))) {
         fixture.retain_recordless_until_exit();
@@ -2015,9 +2076,9 @@ fn run_pending_opening(
         return Err(error);
     }
     if !failed || !wiped || !plan_wiped || !complete {
-        return Err("pending-opening failure, wipe, or evidence was not established".into());
+        return Err("opening failure, wipe, or evidence was not established".into());
     }
-    first.ok_or_else(|| "pending-opening state was not reached".into())
+    first.ok_or_else(|| "opening cutpoint was not reached".into())
 }
 
 impl Fixture {
@@ -4013,39 +4074,345 @@ fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> Te
     Ok(())
 }
 
+impl Fixture {
+    fn held_controller_result_blocked(
+        &mut self,
+        ceremony: &CeremonyId,
+        completion: Option<bool>,
+    ) -> bool {
+        let expected = completion.map(|success| {
+            (
+                crate::adapter::surface::PreEnvironmentRetention::Abandoned,
+                success,
+            )
+        });
+        expected.is_some()
+            && self.surface.controller_result_retention(ceremony) == expected
+            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && self.surface.controller_result_retention(ceremony) == expected
+            && self.surface.pending_opening_completion() == completion
+            && !self.surface.idle()
+            && self.store.records().is_ok_and(|records| records.is_empty())
+    }
+
+    fn drive_controller_input(
+        &mut self,
+        driver: &mut CeremonyDriver,
+    ) -> Result<(CeremonyResult, bool), Box<dyn std::error::Error>> {
+        loop {
+            let step = driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            ));
+            if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
+                if driver.generation() != 1
+                    || driver.posts() != 0
+                    || !self.store.records()?.is_empty()
+                    || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                    || !self.surface.recordless_opening_ready()
+                {
+                    return Err("controller input did not retain active opening owners".into());
+                }
+                loop {
+                    if let Some(success) = self.surface.pending_opening_completion() {
+                        let ceremony = CeremonyId::from_bytes([self.number; 16]);
+                        if self.surface.controller_result_retention(&ceremony)
+                            != Some((
+                                crate::adapter::surface::PreEnvironmentRetention::Active,
+                                success,
+                            ))
+                        {
+                            return Err("actual controller result owner was not retained".into());
+                        }
+                        let result = readiness::cancel_driver(
+                            driver,
+                            &mut self.surface,
+                            &mut self.loopback,
+                            &mut self.store,
+                        );
+                        return Ok((result, success));
+                    }
+                    if Instant::now() >= self.deadline {
+                        return Err("actual controller callback was not observed".into());
+                    }
+                    readiness::pump(&self.surface)?;
+                }
+            }
+            match step {
+                Step::Finished(_) | Step::Done => {
+                    return Err("controller input did not reach the pending stage".into())
+                }
+                Step::Pending => readiness::pump(&self.surface)?,
+            }
+        }
+    }
+}
+
+fn run_controller_input_case(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    obstruct: bool,
+) -> TestResult {
+    let _creation = CreationOrderGuard::arm();
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = if obstruct {
+        Fixture::new_obstructed(runtime, root, number)?
+    } else {
+        Fixture::new(runtime, root, number, FixtureProfile::Pending)?
+    };
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut completion = None;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture
+            .drive_controller_input(&mut driver)
+            .map(|(result, success)| {
+                completion = Some(success);
+                result
+            })
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    let failed = result.is_err();
+    let plan_wiped =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    fixture.surface.abandon_opening();
+    let ceremony = CeremonyId::from_bytes([number; 16]);
+    let blocked = fixture.held_controller_result_blocked(&ceremony, completion);
+    let selected = if completion == Some(true) {
+        fixture.surface.abandoned_completed_browser(&ceremony).ok()
+    } else {
+        None
+    };
+    let no_resurrection = fixture.finished_driver_is_done(&mut driver);
+    retirement::retire(
+        &mut fixture.surface,
+        &mut fixture.loopback,
+        &mut fixture.store,
+        driver,
+        result,
+        |_, _, _| {},
+    );
+    let order = crate::Native::creation_order();
+    let callback = if obstruct {
+        crate::CreationCallback::NativeFailure
+    } else {
+        crate::CreationCallback::Success
+    };
+    let sdk = sdk_controller_result(&order, callback);
+    let matched_exit = selected.is_some()
+        && fixture.surface.recordless_fault_event() == Ok(Some(ProcessFaultMark::OwnBrowserExited));
+    let idle = fixture.surface.idle();
+    let no_record = fixture.store.records()?.is_empty();
+    let folders = fixture.store.folders()?;
+    let expected_orphan = folders
+        == [pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
+            [number; 16],
+        ))];
+    let orphan_count = folders.len();
+    let _logged = writeln!(std::io::stderr(), "NATIVE_CONTROLLER_INPUT case={number} obstruct={obstruct} completion={completion:?} order={order:?} sdk={sdk} blocked={blocked} wiped={wiped} idle={idle} no_record={no_record} orphans={orphan_count}");
+    drop(fixture.surface);
+    Rc::get_mut(&mut fixture.factory)
+        .ok_or("controller factory still shared")?
+        .stop()?;
+    drop(fixture.loopback);
+    check_final_process_failures(None)?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if !sdk
+        || completion != Some(!obstruct)
+        || !blocked
+        || !wiped
+        || !failed
+        || !no_resurrection
+        || !plan_wiped
+        || !idle
+        || !no_record
+        || (obstruct && !expected_orphan)
+        || (!obstruct && !matched_exit)
+    {
+        return Err("actual controller input outcome or ownership was not established".into());
+    }
+    Ok(())
+}
+
 #[test]
-fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
+fn native_controller_failure_from_fixed_owned_input() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
-    let control = {
-        let _creation = CreationOrderGuard::arm();
-        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd0, false)?;
-        let order = crate::Native::creation_order();
-        if !sdk_controller_result(&order, crate::CreationCallback::Success) {
-            return Err(format!(
-                "pending-controller control callback was not established: {order:?}"
-            )
-            .into());
+    run_controller_input_case(Path::new(&runtime), &root.0, 0xd0, false)?;
+    run_controller_input_case(Path::new(&runtime), &root.0, 0xd1, true)
+}
+
+struct PendingControllerEvidence {
+    active_blocked: bool,
+    abandoned_blocked: bool,
+    no_resurrection: bool,
+    browser: Option<pos_owner_bridge::ProcessIdentity>,
+}
+
+impl Fixture {
+    fn drive_outstanding_controller(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        ceremony: &CeremonyId,
+    ) -> Result<(CeremonyResult, PendingControllerEvidence), Box<dyn std::error::Error>> {
+        loop {
+            let step = driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            ));
+            if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
+                break;
+            }
+            match step {
+                Step::Finished(_) | Step::Done => {
+                    return Err("controller did not remain pending".into())
+                }
+                Step::Pending => readiness::pump(&self.surface)?,
+            }
         }
-        reached
-    };
-    let fault = {
-        let _creation = CreationOrderGuard::arm();
-        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd1, true)?;
-        let order = crate::Native::creation_order();
-        if !sdk_controller_result(&order, crate::CreationCallback::NativeFailure) {
-            return Err(format!(
-                "pending-controller native failure callback was not established: {order:?}"
-            )
-            .into());
+        use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
+        let active_blocked = self.surface.controller_creation_retention(ceremony) == Some(Active)
+            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && self.surface.controller_creation_retention(ceremony) == Some(Active)
+            && crate::Native::callback_order()
+                == [crate::NativeCallbackMoment::EnvironmentCompletion(true)];
+        let result = readiness::cancel_driver(
+            driver,
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        );
+        self.surface.abandon_opening();
+        let mut abandoned_blocked = self.surface.controller_creation_retention(ceremony)
+            == Some(Abandoned)
+            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && self.surface.controller_creation_retention(ceremony) == Some(Abandoned)
+            && crate::Native::callback_order()
+                == [crate::NativeCallbackMoment::EnvironmentCompletion(true)];
+        let no_resurrection = self.finished_driver_is_done(driver);
+        loop {
+            match self.surface.pending_opening_completion() {
+                Some(true) => break,
+                Some(false) => return Err("late controller callback was a native failure".into()),
+                None if Instant::now() >= self.deadline => {
+                    return Err("late controller callback was not observed".into())
+                }
+                None => readiness::pump(&self.surface)?,
+            }
         }
-        reached
-    };
-    if control != fault {
-        return Err("pending-controller control and fault reached different states".into());
+        let browser = self.surface.abandoned_completed_browser(ceremony).ok();
+        let no_resurrection = no_resurrection && self.finished_driver_is_done(driver);
+        abandoned_blocked &= browser.is_some()
+            && self.surface.recordless_fault_owners_retained()
+            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && self.surface.recordless_fault_owners_retained();
+        Ok((
+            result,
+            PendingControllerEvidence {
+                active_blocked,
+                abandoned_blocked,
+                no_resurrection,
+                browser,
+            },
+        ))
     }
+}
+
+#[test]
+fn native_outstanding_controller_callback_survives_abandonment() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let callback_guard = CallbackOrderGuard::arm();
+    let creation_guard = CreationOrderGuard::arm();
+    crate::Native::reset_process_failure_observations();
+    let number = 0xd2;
+    let ceremony = CeremonyId::from_bytes([number; 16]);
+    let mut fixture = Fixture::new(
+        Path::new(&runtime),
+        &root.0,
+        number,
+        FixtureProfile::Pending,
+    )?;
+    let mut driver = readiness::new_driver(ceremony, Instant::now())?;
+    let mut evidence = None;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture
+            .drive_outstanding_controller(&mut driver, &ceremony)
+            .map(|(result, observed)| {
+                evidence = Some(observed);
+                result
+            })
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let failed = result.is_err();
+    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    let plan_wiped =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    fixture.surface.abandon_opening();
+    retirement::retire(
+        &mut fixture.surface,
+        &mut fixture.loopback,
+        &mut fixture.store,
+        driver,
+        result,
+        |_, _, _| {},
+    );
+    let actual_exit = fixture.surface.recordless_fault_event().ok().flatten();
+    let order = crate::Native::creation_order();
+    let callbacks = crate::Native::callback_order();
+    let idle = fixture.surface.idle();
+    let no_record = fixture.store.records()?.is_empty();
+    let no_orphan = fixture.store.folders()?.is_empty();
+    let matched = evidence
+        .as_ref()
+        .and_then(|proof| proof.browser)
+        .is_some_and(|browser| {
+            callbacks
+                == [
+                    crate::NativeCallbackMoment::EnvironmentCompletion(true),
+                    crate::NativeCallbackMoment::ControllerCompletion(true),
+                    crate::NativeCallbackMoment::BrowserExit(browser.browser_pid),
+                ]
+                && actual_exit == Some(ProcessFaultMark::OwnBrowserExited)
+        });
+    let _logged = writeln!(std::io::stderr(), "NATIVE_OUTSTANDING_CONTROLLER evidence={} matched={matched} failed={failed} wiped={wiped} idle={idle} no_record={no_record} no_orphan={no_orphan} order={order:?} callbacks={callbacks:?}", evidence.is_some());
+    drop(fixture.surface);
+    Rc::get_mut(&mut fixture.factory)
+        .ok_or("late-controller factory still shared")?
+        .stop()?;
+    drop(fixture.loopback);
+    check_final_process_failures(None)?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let proof = evidence.ok_or("pending controller evidence missing")?;
+    if !proof.active_blocked
+        || !proof.abandoned_blocked
+        || !proof.no_resurrection
+        || !matched
+        || !failed
+        || !wiped
+        || !plan_wiped
+        || !idle
+        || !no_record
+        || !no_orphan
+        || !sdk_controller_result(&order, crate::CreationCallback::Success)
+    {
+        return Err(
+            "actual outstanding controller callback or retirement was not established".into(),
+        );
+    }
+    drop(callback_guard);
+    drop(creation_guard);
     fresh_success_after_retirement(Path::new(&runtime), &root.0, 0xd3)?;
     root.remove()
 }

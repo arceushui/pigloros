@@ -1438,8 +1438,9 @@ def test_owned_process_fault_authority() -> None:
         ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
         ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
         ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
-        ("if !pending_reported {", "if true {"),
-        ("!self.surface.recordless_opening_ready()\n                        || self.surface.pending_opening_completion().is_some()", "false"),
+        ("match self.surface.pending_opening_completion() {", "match Some(true) {"),
+        ("self.surface.pending_opening_completion().is_none()", "true"),
+        ("controller_held_before_exit(&crate::Native::callback_order())", "true"),
         ("Instant::now() >= self.deadline", "false"),
     ):
         if old not in fixture_source:
@@ -1477,7 +1478,7 @@ def test_owned_process_fault_authority() -> None:
         if f"{SHIM}/{relative}: {expected}" not in found:
             raise SystemExit(f"awaiting-load authority mutation was accepted: {old}: {found}")
     # Each new phase must classify ProcessFailed through completed retirement.
-    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_pending_opening", "run_posted_writing", "run_posted_ready", "run_posted_retry", "run_consuming", "run_before_record"):
+    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_first_opening_browser", "run_posted_writing", "run_posted_ready", "run_posted_retry", "run_consuming", "run_before_record"):
         start = fixture_source.find(f"fn {function}(")
         end = fixture_source.find("\n}", start)
         body = fixture_source[start:end]
@@ -1507,6 +1508,9 @@ def test_owned_process_fault_authority() -> None:
         ("check_final_process_failures(finish.actual_fault", "discard_final_process_failures(finish.actual_fault"),
         ("controller_invoked_after_exit(", "discard_callback_order("),
         ("RendererPresence::Absent", "RendererPresence::Unique"),
+        ("sdk_controller_result(&order, callback)", "true"),
+        ("self.surface.controller_creation_retention(ceremony) == Some(Abandoned)", "true"),
+        ("self.surface.abandoned_completed_browser(ceremony).ok()", "None"),
         ("|| !sdk_success", "|| false"),
         ("|| !no_resurrection", "|| false"),
         ("Some(EnvironmentSdkOutcome::NativeFailure) if obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
@@ -2004,6 +2008,8 @@ def test_external_qualification_is_sealed() -> None:
     if errors(sources):
         raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
     mutations = (
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", '!self.native.pending_opening_owners_retained()', 'false'),
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'self.native.recordless_controller_completion().is_some()', 'false'),
         (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
