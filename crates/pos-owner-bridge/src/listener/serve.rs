@@ -45,6 +45,15 @@ pub(super) enum ReadOutcome {
     Silent,
 }
 
+/// Closed diagnostic categories; all retain the same silent production outcome.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SilentReason {
+    Eof,
+    Timeout,
+    Other,
+}
+
 /// The shortest read timeout a socket accepts; a passed deadline reads for this long and fails.
 pub(super) const MIN_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -78,6 +87,7 @@ pub(super) fn read_request<S: TimedRead>(
     buffer: &mut [u8; REQUEST_BUFFER_BYTES],
     timeouts: ListenerTimeouts,
     mut first_byte: impl FnMut(),
+    #[cfg(feature = "test-support")] mut silent: impl FnMut(SilentReason),
 ) -> ReadOutcome {
     let mut deadline = Instant::now() + timeouts.first_byte;
     let mut filled = 0;
@@ -88,7 +98,19 @@ pub(super) fn read_request<S: TimedRead>(
             .limit_next_read(left)
             .and_then(|()| stream.read(room));
         let received = match outcome {
-            Ok(0) | Err(_) => return ReadOutcome::Silent,
+            Ok(0) => {
+                #[cfg(feature = "test-support")]
+                silent(SilentReason::Eof);
+                return ReadOutcome::Silent;
+            }
+            Err(_error) => {
+                #[cfg(feature = "test-support")]
+                silent(match _error.kind() {
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SilentReason::Timeout,
+                    _ => SilentReason::Other,
+                });
+                return ReadOutcome::Silent;
+            }
             Ok(received) => received,
         };
         if filled == 0 {
@@ -176,14 +198,40 @@ pub(super) fn respond<W: Write>(
 }
 
 /// Serve one accepted connection to completion, then close it.
-pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
+pub(super) fn serve_connection(
+    mut stream: TcpStream,
+    context: &ServeContext,
+    #[cfg(feature = "test-support")] accepted_at: Option<Instant>,
+) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let outcome = read_request(&mut stream, &mut buffer, context.timeouts, || {
+    let outcome = read_request(
+        &mut stream,
+        &mut buffer,
+        context.timeouts,
+        || {
+            #[cfg(feature = "test-support")]
+            context
+                .received
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
         #[cfg(feature = "test-support")]
-        context
-            .received
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    });
+        |reason| {
+            use std::sync::atomic::Ordering;
+            let observations = &context.observations;
+            let counter = match reason {
+                SilentReason::Eof => &observations.silent_eof,
+                SilentReason::Timeout => &observations.silent_timeout,
+                SilentReason::Other => &observations.silent_error,
+            };
+            if let Some(started) = accepted_at {
+                let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+                observations
+                    .last_silent_ms_plus_one
+                    .store(millis.saturating_add(1), Ordering::SeqCst);
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+        },
+    );
     #[cfg(feature = "test-support")]
     {
         let counter = match outcome {

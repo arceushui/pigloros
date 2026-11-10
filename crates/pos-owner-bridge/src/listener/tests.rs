@@ -21,7 +21,7 @@ use super::bind::{
 use super::ledger::ServedLedger;
 use super::serve::{
     read_request, respond, write_hashed, write_owner_response, OwnerWrite, ReadOutcome,
-    ServeContext, TimedRead, MIN_TIMEOUT, REQUEST_BUFFER_BYTES,
+    ServeContext, SilentReason, TimedRead, MIN_TIMEOUT, REQUEST_BUFFER_BYTES,
 };
 use super::{
     dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig, ListenerTimeouts,
@@ -447,7 +447,7 @@ fn read_scripted(
 ) -> (ReadOutcome, Vec<Duration>) {
     let mut reader = Scripted::new(chunks);
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let outcome = read_request(&mut reader, &mut buffer, timeouts, || {});
+    let outcome = read_request(&mut reader, &mut buffer, timeouts, || {}, |_| {});
     (outcome, reader.limits)
 }
 
@@ -458,7 +458,13 @@ fn first_request_byte_is_observed_once_even_without_complete_headers() {
         let mut reader = Scripted::new(chunks);
         let mut buffer = [0; REQUEST_BUFFER_BYTES];
         let mut received = 0;
-        let outcome = read_request(&mut reader, &mut buffer, ADR_TIMEOUTS, || received += 1);
+        let outcome = read_request(
+            &mut reader,
+            &mut buffer,
+            ADR_TIMEOUTS,
+            || received += 1,
+            |_| {},
+        );
         assert_eq!(received, expected);
         let expected_outcome = if bytes == OWNER_REQUEST {
             ReadOutcome::Complete(bytes.len())
@@ -497,6 +503,38 @@ fn a_silent_closed_or_failed_read_is_answered_with_nothing() {
         vec![Ok(b"GET /owner".to_vec()), Ok(Vec::new())],
     ] {
         assert_eq!(read_scripted(chunks, timeouts).0, ReadOutcome::Silent);
+    }
+}
+
+#[test]
+fn silent_read_diagnostics_preserve_the_silent_outcome() {
+    for (chunk, expected) in [
+        (Ok(Vec::new()), SilentReason::Eof),
+        (
+            Err(io::Error::from(io::ErrorKind::TimedOut)),
+            SilentReason::Timeout,
+        ),
+        (
+            Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            SilentReason::Timeout,
+        ),
+        (
+            Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+            SilentReason::Other,
+        ),
+    ] {
+        let mut reader = Scripted::new(vec![chunk]);
+        let mut buffer = [0; REQUEST_BUFFER_BYTES];
+        let mut observed = Vec::new();
+        let outcome = read_request(
+            &mut reader,
+            &mut buffer,
+            ADR_TIMEOUTS,
+            || {},
+            |reason| observed.push(reason),
+        );
+        assert_eq!(outcome, ReadOutcome::Silent);
+        assert_eq!(observed, [expected]);
     }
 }
 
