@@ -16,6 +16,7 @@ use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+pub mod netlink;
 mod plan;
 mod rule_codec;
 
