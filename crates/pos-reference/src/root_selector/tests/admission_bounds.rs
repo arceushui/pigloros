@@ -14,6 +14,11 @@ use crate::selector::SelectorBoundaryError;
 
 const SECTOR: usize = 512;
 
+/// A public-seam case: its description, whether admission accepts it, and an
+/// edit of the image given the signature partition's first LBA.
+type ImageCase = (&'static str, bool, ImageEdit);
+type ImageEdit = fn(&mut [u8], u64) -> TestResult;
+
 #[test]
 fn held_image_admission_accepts_full_length_arguments() -> TestResult {
     if matches!(
@@ -86,7 +91,7 @@ fn snapshot_open_enforces_gpt_bounds_on_both_architectures() -> TestResult {
     let mut mismatches = Vec::new();
     for architecture in ["x86-64", "arm64"] {
         let (original, partitions) = ddi_fixture(architecture)?;
-        let cases: [(&str, bool, fn(&mut [u8], u64) -> TestResult); 3] = [
+        let cases: [ImageCase; 3] = [
             ("unchanged image", true, |_, _| Ok(())),
             ("zero disk GUID in both headers", false, |image, _| {
                 let backup = image.len() - SECTOR;
@@ -143,7 +148,7 @@ fn snapshot_open(
     architecture: &str,
     original: &[u8],
     partitions: &[PartitionDescriptor; 3],
-    edit: fn(&mut [u8], u64) -> TestResult,
+    edit: ImageEdit,
 ) -> TestResult<Result<(), SelectorBoundaryError>> {
     let mut image = original.to_vec();
     edit(
