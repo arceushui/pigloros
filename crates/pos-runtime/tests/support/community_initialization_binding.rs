@@ -15,7 +15,7 @@ use pos_core::community_lifecycle::{
 use pos_core::{Hash, ImplementationKeyV1, Seq, TimelineId};
 use pos_runtime::community_plugin_host::CommunityInitializationStateReferenceV1 as State;
 
-fn hash(value: u8) -> Hash {
+const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 const fn initializer() -> ArtifactRefV1 {
@@ -32,7 +32,7 @@ fn key(plugin: &str, release: u8) -> Fallible<ImplementationKeyV1> {
         hash(release),
     )?)
 }
-fn request_input(
+const fn request_input(
     members: &[Hash],
     source: Source,
     profile_digest: Hash,

@@ -12,10 +12,10 @@ use pos_core::{Hash, Seq, TimelineId};
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
 
-fn hash(value: u8) -> Hash {
+const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
-fn timeline(value: u8) -> TimelineId {
+const fn timeline(value: u8) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([value; 16]))
 }
 fn uint(value: u64) -> Value {
@@ -49,7 +49,7 @@ fn independent_digest(domain: &[u8], wire: &[u8]) -> Hash {
     preimage.extend_from_slice(wire);
     Hash::from_bytes(*blake3::hash(&preimage).as_bytes())
 }
-fn request_input(members: &[Hash]) -> CommunityInitializationRequestInputV1<'_> {
+const fn request_input(members: &[Hash]) -> CommunityInitializationRequestInputV1<'_> {
     CommunityInitializationRequestInputV1 {
         operation_id: [1; 16],
         timeline: timeline(2),
@@ -81,7 +81,7 @@ fn request_value() -> Value {
         uint(1000),
     ])
 }
-fn producer_input() -> CommunityInitializationProducerInputV1 {
+const fn producer_input() -> CommunityInitializationProducerInputV1 {
     CommunityInitializationProducerInputV1 {
         generation_request_digest: hash(1),
         member_binding_digest: hash(2),
