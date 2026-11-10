@@ -20,6 +20,7 @@ struct Journal {
     installed: Vec<String>,
     removed: Vec<String>,
     egress: Vec<String>,
+    endpoints: Vec<Vec<SocketAddr>>,
 }
 
 /// Host egress that records what it is asked to do, or refuses.
@@ -39,11 +40,15 @@ impl FakeEgress {
 }
 
 impl EgressControl for FakeEgress {
-    fn admit(&self, _endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+    fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+        entries(&self.journal).endpoints.push(endpoints.to_vec());
         self.record("admit", self.refuse_admission)
     }
 
     fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        entries(&self.journal)
+            .endpoints
+            .push(attempt.endpoints.clone());
         self.record(
             &format!("install {}", attempt.host_link.as_str()),
             self.refuse_install,
@@ -395,6 +400,19 @@ fn egress_is_admitted_first_installed_last_and_removed_first() -> TestResult {
         ["admit", "install piglor-h0", "remove piglor-h0"]
     );
     assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    Ok(())
+}
+
+#[test]
+fn host_egress_sees_an_ipv4_mapped_endpoint_as_ipv4() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
+    drop(network.establish([1; 16], &[mapped])?);
+    assert_eq!(
+        entries(&journal).endpoints,
+        [vec![ENDPOINT], vec![ENDPOINT]]
+    );
     Ok(())
 }
 
