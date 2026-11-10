@@ -245,8 +245,8 @@ mod cases {
                 server.serve_at("/org/freedesktop/systemd1", manager),
                 |server, path| {
                     server
-                        .serve_at(path.clone(), FailedService(String::new()))
-                        .serve_at(path, FailedUnit("failed".to_owned()))
+                        .serve_at(path.as_str().to_owned(), FailedService(String::new()))
+                        .serve_at(path.as_str().to_owned(), FailedUnit("failed".to_owned()))
                 },
             )
         })
