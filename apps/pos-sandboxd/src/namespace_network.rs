@@ -16,6 +16,10 @@ use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+mod plan;
+
+pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
+
 /// The name of one attempt's network namespace: `piglor-` followed by the
 /// attempt identity in lowercase hexadecimal.
 #[derive(Clone, Debug, Eq, PartialEq)]
