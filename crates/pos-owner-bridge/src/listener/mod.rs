@@ -299,20 +299,17 @@ fn accept_loop(
         #[cfg(feature = "test-support")]
         let mut slot = slot;
         let accepted = listener.accept();
-        match accepted {
-            Ok((stream, _)) => {
-                #[cfg(feature = "test-support")]
-                {
-                    slot.accepted = true;
-                    shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
-                    shared.observations.handling.fetch_add(1, Ordering::SeqCst);
-                }
-                dispatch(stream, slot, context, spawn_thread);
+        if let Ok((stream, _)) = accepted {
+            #[cfg(feature = "test-support")]
+            {
+                slot.accepted = true;
+                shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
+                shared.observations.handling.fetch_add(1, Ordering::SeqCst);
             }
-            Err(_) => {
-                drop(slot);
-                pause();
-            }
+            dispatch(stream, slot, context, spawn_thread);
+        } else {
+            drop(slot);
+            pause();
         }
     }
 }
