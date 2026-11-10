@@ -229,12 +229,49 @@ fn process(
 #[cfg(test)]
 thread_local! {
     static READINESS_CASE: std::cell::Cell<Option<(u64, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+    static READINESS_OPERATIONS: std::cell::RefCell<std::collections::BTreeSet<&'static str>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
 #[cfg(test)]
 impl crate::Native {
     pub(crate) fn readiness_navigation_case(case: Option<(u64, std::time::Instant)>) {
         READINESS_CASE.with(|current| current.set(case));
+        READINESS_OPERATIONS.with(|operations| operations.borrow_mut().clear());
+    }
+
+    pub(crate) fn readiness_span(operation: &'static str) -> impl Drop {
+        let case = READINESS_CASE.with(std::cell::Cell::get).filter(|_| {
+            READINESS_OPERATIONS.with(|operations| operations.borrow_mut().insert(operation))
+        });
+        ReadinessSpan {
+            operation,
+            case,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(test)]
+struct ReadinessSpan {
+    operation: &'static str,
+    case: Option<(u64, std::time::Instant)>,
+    started: std::time::Instant,
+}
+
+#[cfg(test)]
+impl Drop for ReadinessSpan {
+    fn drop(&mut self) {
+        if let Some((case, origin)) = self.case {
+            use std::io::Write as _;
+            let _logged_or_unavailable = writeln!(
+                std::io::stderr(),
+                "NATIVE_READINESS_OPERATION case={case} operation={} entered={:?} returned={:?} duration={:?}",
+                self.operation,
+                self.started.saturating_duration_since(origin),
+                origin.elapsed(),
+                self.started.elapsed(),
+            );
+        }
     }
 }
 

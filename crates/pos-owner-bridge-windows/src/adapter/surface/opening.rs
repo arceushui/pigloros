@@ -105,7 +105,11 @@ impl Surface {
         self.native.show_window().map_err(unavailable)?;
         self.foreground_deadline =
             Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
-        self.native.focus_controller().map_err(unavailable)?;
+        {
+            #[cfg(test)]
+            let _duration = crate::Native::readiness_span("focus");
+            self.native.focus_controller().map_err(unavailable)?;
+        }
         Ok(())
     }
 
@@ -129,7 +133,11 @@ impl Surface {
                 )));
             }
             self.events.begin();
-            self.native.navigate_owner().map_err(unavailable)?;
+            {
+                #[cfg(test)]
+                let _duration = crate::Native::readiness_span("navigation-issue");
+                self.native.navigate_owner().map_err(unavailable)?;
+            }
             self.navigation_issued = true;
         }
         if self.events.invalid() {
