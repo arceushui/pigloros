@@ -154,11 +154,10 @@ fn observe_case(
     keeper: &mut QuarantineKeeper,
     folder: &Path,
     keeper_held: &std::rc::Rc<std::cell::Cell<bool>>,
-    wipe: (bool, bool, bool),
+    (refused, wiped, native_wiped): (bool, bool, bool),
     target: ProcessFaultTarget,
     inject: bool,
 ) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
-    let (refused, wiped, native_wiped) = wipe;
     if !refused || !wiped || !native_wiped {
         return Err("quarantine mappings or secrets were not wiped".into());
     }
