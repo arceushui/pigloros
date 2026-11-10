@@ -1256,7 +1256,7 @@ mod cases {
             matches!(
                 result,
                 Err(RestartReconciliationError::Registry(
-                    SystemdAttemptRegistryError::UnsafeRegistry
+                    SystemdAttemptRegistryError::InvalidIntent
                 ))
             ),
             "{result:?}"
