@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import stat
 from pathlib import Path
@@ -21,14 +22,33 @@ def require(text: str, fragment: str, source: Path) -> None:
 # structural checks below still hold over the pinned text, so a pin cannot be
 # moved to a runner that drops them.
 RUNNER_DIGESTS = {
-    "run-isolated-test.sh": "d1056bcca65ad5e02233dff104ea3a77dd162c03bb389975aa88fc6d3279900b",
-    "run-isolated-with-net-admin-test.sh": "918cb4ae4cec78101fb1f91e76b0f3de061cadd2263e6d9117cde4dbfa3a8c12",
+    "run-isolated-test.sh": "e8b3c9c9183b410abd099dd74498d51c25defc4ef3ed934f5258b88a8983c980",
+    "run-isolated-with-net-admin-test.sh": "123c2e8e2d53c1e697b30dde1a5858d367637d1d131951b1b69f9c406f7410b6",
 }
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
 NET_ADMIN_RUNNER = "run-isolated-with-net-admin-test.sh"
 CAPABILITIES = {NET_ADMIN_RUNNER: ["NET_ADMIN", "SYS_ADMIN"]}
 NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
+# Where Rust sources live; every one is scanned for runner references.
+RUST_ROOTS = ("apps", "crates", "fuzz", "plugins", "scripts")
+# A Rust test self-locates a runner through exactly this literal.
+RUNNER_REFERENCE = re.compile(r'\.join\("\.\./\.\./scripts/([^"\n]+)"\)')
+# Comments, then string literals (raw, plain, byte) and char literals, in the
+# order a Rust lexer meets them, so a quote inside one never starts another.
+RUST_TOKEN = re.compile(
+    r"//[^\n]*"
+    r"|/\*(?:[^*]|\*(?!/))*\*/"
+    r'|(?<![A-Za-z0-9_])b?r(?P<hashes>#*)"(?P<raw>.*?)"(?P=hashes)'
+    r'|(?<![A-Za-z0-9_])b?"(?P<text>(?:[^"\\]|\\.)*)"'
+    r"|(?<![A-Za-z0-9_])b?'(?:[^'\\\n]|\\[^'\n]{1,10})'",
+    re.S,
+)
+# The distinctive pieces of a runner name, as they read once every string
+# literal of a source is joined and stripped of all but letters and digits:
+# no concatenation, macro or format string can split a name past them.
+ISOLATED_FRAGMENT = "runisolated"
+NET_ADMIN_FRAGMENT = "netadmin"
 # The guards that run before Docker: only a pos-sandboxd test harness under
 # target/, never the daemon, only the named privileged tests, no comma in a
 # bind source, and a read-only worktree bind checked inside the container.
@@ -48,15 +68,36 @@ NET_ADMIN_GUARDS = (
     "fi",
     "if [[ $REPOSITORY_ROOT == *,* ]]; then",
     "  if [[ $profile_directory == *,* ]]; then",
-    "readonly READ_ONLY_PROBE='if [ -w \"$1\" ]; then echo \"the worktree bind is writable\" >&2; "
-    "exit 1; fi; shift; exec \"$@\"'",
-    '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \\\n'
+    "readonly READ_ONLY_PROBE='if [ -w \"$1\" ]; then echo \"the test binary bind is writable\" >&2; "
+    'exit 1; fi; "$@"; status=$?; if [ -w "$1" ]; then '
+    'echo "the test binary bind became writable" >&2; exit 1; fi; exit "$status"\'',
+    '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe \\\n'
     '  "$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
+    "--workdir /tmp",
 )
+# bash -p reads no BASH_ENV or ENV file and imports no shell functions.
+RUNNER_SHEBANG = "#!/bin/bash -p\n"
+# Before anything else runs, a fixed PATH, and Docker only under exactly the
+# environment `env -i` names: the caller's environment picks no program,
+# Docker daemon, context or configuration.
+RUNNER_ENVIRONMENT = (
+    "set -euo pipefail\n"
+    "readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+    "export PATH=$RUNNER_PATH\n"
+)
+RUNNER_DOCKER = (
+    'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \\\n'
+    '  docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE"'
+)
+# What the container sees of the host: the worktree read-only, or for the
+# NET_ADMIN runner, whose test may remount, only the test binary read-only.
+HOST_BIND_SOURCES = {NET_ADMIN_RUNNER: "$TEST_BINARY"}
+WORKTREE_SOURCE = "$REPOSITORY_ROOT"
 # What every runner keeps: a bounded, networkless, read-only container that
-# drops every capability and sees the worktree read-only.
+# drops every capability and sees the host read-only.
 RUNNER_FRAGMENTS = (
-    "set -euo pipefail",
+    RUNNER_ENVIRONMENT,
+    RUNNER_DOCKER,
     "[[ $# -ne 2 ]]",
     "timeout --signal=TERM --kill-after=5s 30s",
     "docker run",
@@ -71,7 +112,6 @@ RUNNER_FRAGMENTS = (
     "--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m",
     "--tmpfs /var/lib:rw,nosuid,nodev,mode=0755,size=64m",
     "--tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m",
-    "source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly",
     '"$REPOSITORY_ROOT"/target/*',
     'mktemp "$profile_directory/isolated-profile.XXXXXX.profraw"',
     'chmod 0666 "$profile_output"',
@@ -90,15 +130,29 @@ def check_runner(runner_path: Path) -> None:
     pinned = RUNNER_DIGESTS.get(runner_path.name)
     if pinned is None:
         raise SystemExit(f"{runner_path}: isolated test runner has no pinned digest")
-    content = runner_path.read_bytes()
+    # Open the runner itself, never what a symlink names, and only as a
+    # regular file.
+    try:
+        descriptor = os.open(runner_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise SystemExit(f"{runner_path}: isolated test runner must be a regular file: {error}")
+    with os.fdopen(descriptor, "rb") as runner_file:
+        status = os.fstat(runner_file.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            raise SystemExit(f"{runner_path}: isolated test runner must be a regular file")
+        content = runner_file.read()
     if hashlib.sha256(content).hexdigest() != pinned:
         raise SystemExit(
             f"{runner_path}: differs from its pinned content; review the change and "
             "update RUNNER_DIGESTS in the same commit"
         )
-    if not runner_path.stat().st_mode & stat.S_IXUSR:
+    if not status.st_mode & stat.S_IXUSR:
         raise SystemExit(f"{runner_path}: isolated test runner must be executable")
     runner = content.decode("utf-8")
+    if not runner.startswith(RUNNER_SHEBANG):
+        raise SystemExit(f"{runner_path}: isolated test runner must start with {RUNNER_SHEBANG!r}")
+    if runner.count("docker run") != 1 or runner.count("env -i") != 1:
+        raise SystemExit(f"{runner_path}: Docker must run exactly once, under env -i")
     if re.search(r"\bsudo\b", runner) or "--privileged" in runner:
         raise SystemExit(f"{runner_path}: ambient sudo and privileged containers are forbidden")
     if re.search(r"(?m)(?:^[ \t]*|[;&|][ \t]*)rm[ \t]+-[^\n]*r", runner):
@@ -107,12 +161,50 @@ def check_runner(runner_path: Path) -> None:
         raise SystemExit(f"{runner_path}: isolation image must be digest-pinned")
     for fragment in RUNNER_FRAGMENTS:
         require(runner, fragment, runner_path)
+    source = HOST_BIND_SOURCES.get(runner_path.name, WORKTREE_SOURCE)
+    require(runner, f'--mount "type=bind,source={source},target={source},readonly"', runner_path)
+    sources = re.findall(r"source=([^,\s\"]*)", runner)
+    if sources != [source, "$profile_output"]:
+        raise SystemExit(f"{runner_path}: binds host paths other than its own: {sources}")
     added = re.findall(r"--cap-add[ =]+(\S+)", runner)
     if added != CAPABILITIES.get(runner_path.name, []):
         raise SystemExit(f"{runner_path}: adds capabilities other than its own: {added}")
     if runner_path.name == NET_ADMIN_RUNNER:
         for fragment in NET_ADMIN_GUARDS:
             require(runner, fragment, runner_path)
+
+
+def literal_text(text: str) -> str:
+    """Every string and char literal of a Rust source joined, lowercased and
+    stripped of all but letters and digits."""
+    joined = "".join(
+        (token.group("raw") or "") + (token.group("text") or "")
+        for token in RUST_TOKEN.finditer(text)
+    )
+    return re.sub(r"[^a-z0-9]", "", joined.lower())
+
+
+def check_runner_references(
+    root: Path, source: Path, text: str, references: list[str], runner_names: set[str]
+) -> None:
+    """Fail unless every runner `source` names is a discovered one, named by
+    the one literal form the checker follows, and only the Local namespace
+    adapter names anything of the NET_ADMIN runner."""
+    for reference in references:
+        if reference not in runner_names:
+            raise SystemExit(
+                f"{source}: delegated test runner is not a discovered isolated runner: {reference}"
+            )
+    literals = literal_text(text)
+    if literals.count(ISOLATED_FRAGMENT) != len(references):
+        raise SystemExit(
+            f"{source}: names an isolated test runner other than through "
+            '.join("../../scripts/<runner>")'
+        )
+    if NET_ADMIN_FRAGMENT in literals and not source.relative_to(root).as_posix().startswith(
+        NET_ADMIN_OWNER_ROOT
+    ):
+        raise SystemExit(f"{source}: only the Local namespace adapter may own {NET_ADMIN_RUNNER}")
 
 
 def main() -> None:
@@ -146,39 +238,25 @@ def main() -> None:
         raise SystemExit("no delegated isolated test runners were discovered")
     rust_sources = {
         source: source.read_text(encoding="utf-8")
-        for source in (root / "crates").glob("**/*.rs")
-    }
-    net_admin_sources = {
-        source: source.read_text(encoding="utf-8")
-        for source in (root / "apps").glob("**/*.rs")
+        for top in RUST_ROOTS
+        for source in sorted((root / top).glob("**/*.rs"))
     }
     runner_names = {runner.name for runner in runners}
+    references = {}
     for source, text in rust_sources.items():
-        for reference in re.findall(r'\.join\("\.\./\.\./scripts/([^"\n]+)"\)', text):
-            if reference not in runner_names:
-                raise SystemExit(
-                    f"{source}: delegated test runner is not a discovered isolated runner: {reference}"
-                )
+        references[source] = RUNNER_REFERENCE.findall(text)
+        check_runner_references(root, source, text, references[source], runner_names)
 
     missing = set(RUNNER_DIGESTS) - runner_names
     if missing:
         raise SystemExit(f"pinned isolated test runners are missing: {sorted(missing)}")
     for runner_path in runners:
         check_runner(runner_path)
-        sources = rust_sources
-        if runner_path.name == NET_ADMIN_RUNNER:
-            sources = {**rust_sources, **net_admin_sources}
         owners = [
             (source, text)
-            for source, text in sources.items()
-            if runner_path.name in text
+            for source, text in rust_sources.items()
+            if runner_path.name in references[source]
         ]
-        if runner_path.name == NET_ADMIN_RUNNER:
-            for source, _ in owners:
-                if not source.relative_to(root).as_posix().startswith(NET_ADMIN_OWNER_ROOT):
-                    raise SystemExit(
-                        f"{source}: only the Local namespace adapter may own {NET_ADMIN_RUNNER}"
-                    )
         if not owners:
             raise SystemExit(f"{runner_path}: no Rust test self-locates this runner")
         for source, text in owners:

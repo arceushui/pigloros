@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,16 +19,25 @@ RUNNERS = tuple(sorted((ROOT / "scripts").glob("run-isolated*-test.sh")))
 if not RUNNERS:
     raise SystemExit("no delegated isolated test runners were discovered")
 RUNNER_PATHS = tuple(path.relative_to(ROOT) for path in RUNNERS)
-OWNER_PATHS = tuple(
-    source.relative_to(ROOT)
-    for source in sorted((ROOT / "crates").glob("**/*.rs"))
-    if any(runner.name in source.read_text(encoding="utf-8") for runner in RUNNERS)
-)
 NET_ADMIN_RUNNER = Path("scripts/run-isolated-with-net-admin-test.sh")
-NET_ADMIN_OWNER_PATHS = tuple(
+RUST_SOURCES = tuple(
     source.relative_to(ROOT)
-    for source in sorted((ROOT / "apps").glob("**/*.rs"))
-    if NET_ADMIN_RUNNER.name in source.read_text(encoding="utf-8")
+    for top in ("apps", "crates", "fuzz", "plugins", "scripts")
+    for source in sorted((ROOT / top).glob("**/*.rs"))
+)
+OWNER_PATHS = tuple(
+    source
+    for source in RUST_SOURCES
+    if any(
+        runner.name in (ROOT / source).read_text(encoding="utf-8")
+        for runner in RUNNERS
+        if runner.name != NET_ADMIN_RUNNER.name
+    )
+)
+NET_ADMIN_OWNER_PATHS = tuple(
+    source
+    for source in RUST_SOURCES
+    if NET_ADMIN_RUNNER.name in (ROOT / source).read_text(encoding="utf-8")
 )
 if not NET_ADMIN_OWNER_PATHS:
     raise SystemExit("no Rust owner of the NET_ADMIN isolated test runner was discovered")
@@ -146,6 +156,7 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
         ),
     }
     check_net_admin_runner_happy_path(root, harness, named)
+    check_net_admin_runner_environment(root, harness, named)
     for description, (runner_root, binary, name, environment, message) in refused.items():
         result = run_runner(runner_root, binary, name, environment)
         if result.returncode != 2 or message not in result.stderr:
@@ -155,35 +166,146 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
             )
 
 
+RUNNER_PATH = "readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+
+
+def fake_docker(root: Path) -> Path:
+    """The runner in `root`, its fixed PATH led by a directory holding a fake
+    `docker` that logs its arguments and environment and writes the coverage
+    profile it is handed; returns that directory."""
+    fake = root / "fake-bin"
+    if fake.exists():
+        return fake
+    fake.mkdir()
+    docker = fake / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\0' \"$@\" > '{root}/docker-arguments'\n"
+        f"env > '{root}/docker-environment'\n"
+        'for argument in "$@"; do\n'
+        '  case $argument in\n'
+        "    *,target=/pigloros-profile.profraw)\n"
+        '      source=${argument#*source=}\n'
+        '      echo profile > "${source%%,*}"\n'
+        "      ;;\n"
+        "  esac\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    runner = root / NET_ADMIN_RUNNER
+    text = runner.read_text(encoding="utf-8")
+    if text.count(RUNNER_PATH) != 1:
+        raise SystemExit(f"{NET_ADMIN_RUNNER} does not fix its PATH: {RUNNER_PATH}")
+    runner.write_text(
+        text.replace(RUNNER_PATH, f"readonly RUNNER_PATH={fake}:/usr/sbin:/usr/bin:/sbin:/bin\n"),
+        encoding="utf-8",
+    )
+    return fake
+
+
 def docker_run_arguments(
     root: Path, harness: Path, name: str, environment: dict[str, str]
 ) -> list[str]:
     """Run the NET_ADMIN runner against a fake `docker` and return the
     arguments it passed, after requiring that the runner succeeded."""
-    fake = root / "fake-bin"
-    fake.mkdir(exist_ok=True)
-    log = root / "docker-arguments"
-    docker = fake / "docker"
-    docker.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, sys\n"
-        f"open({str(log)!r}, 'w').write('\\0'.join(sys.argv[1:]))\n"
-        "for argument in sys.argv[1:]:\n"
-        "    if argument.endswith(',target=/pigloros-profile.profraw'):\n"
-        "        source = argument.split('source=', 1)[1].split(',', 1)[0]\n"
-        "        open(source, 'w').write('profile')\n",
-        encoding="utf-8",
-    )
-    docker.chmod(0o755)
-    result = run_runner(
-        root,
-        harness,
-        name,
-        {**environment, "PATH": f"{fake}:{os.environ['PATH']}"},
-    )
+    fake_docker(root)
+    result = run_runner(root, harness, name, environment)
     if result.returncode != 0:
         raise SystemExit(f"NET_ADMIN runner failed on its happy path: {result.stderr}")
-    return log.read_text(encoding="utf-8").split("\0")
+    return (root / "docker-arguments").read_text(encoding="utf-8").split("\0")[:-1]
+
+
+def check_net_admin_runner_environment(root: Path, harness: Path, named: str) -> None:
+    """Nothing in the caller's environment runs, picks a program or reaches
+    Docker: no BASH_ENV or ENV file, no PATH entry, no Docker variable."""
+    fake = fake_docker(root)
+    marker = root / "caller-environment-ran"
+    hostile = root / "hostile-bin"
+    hostile.mkdir()
+    for program in ("docker", "env", "timeout", "realpath", "mktemp", "chmod", "dirname"):
+        (hostile / program).write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+        (hostile / program).chmod(0o755)
+    startup = root / "startup.sh"
+    startup.write_text(f"touch '{marker}'\n", encoding="utf-8")
+    docker_run_arguments(
+        root,
+        harness,
+        named,
+        {
+            "PATH": f"{hostile}:{os.environ['PATH']}",
+            "BASH_ENV": str(startup),
+            "ENV": str(startup),
+            "DOCKER_HOST": "tcp://192.0.2.1:2375",
+            "DOCKER_CONTEXT": "hostile",
+            "DOCKER_CONFIG": str(hostile),
+            "BASH_FUNC_docker%%": f"() {{ touch '{marker}'; }}",
+        },
+    )
+    if marker.exists():
+        raise SystemExit("the NET_ADMIN runner ran something its caller's environment named")
+    seen = dict(
+        line.split("=", 1)
+        for line in (root / "docker-environment").read_text(encoding="utf-8").splitlines()
+    )
+    seen.pop("PWD", None)
+    expected = {
+        "PATH": f"{fake}:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": "/nonexistent",
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+    }
+    if seen != expected:
+        raise SystemExit(f"Docker ran under an environment other than its own: {seen}")
+
+
+def check_read_only_probe(temporary: Path) -> None:
+    """The in-container probe starts the test only while the binary's bind
+    refuses writes, passes on the test's status, and fails if the test left
+    the bind writable."""
+    match = re.search(
+        r"^readonly READ_ONLY_PROBE='([^']+)'$",
+        (ROOT / NET_ADMIN_RUNNER).read_text(encoding="utf-8"),
+        re.M,
+    )
+    if match is None:
+        raise SystemExit(f"{NET_ADMIN_RUNNER} has no read-only probe")
+    binary = temporary / "probed-binary"
+    started = temporary / "probed-binary-started"
+    cases = (
+        ("a writable bind", 0o755, f"touch '{started}'", 1, "the test binary bind is writable"),
+        ("a test that fails", 0o555, "exit 3", 3, ""),
+        ("a test that passes", 0o555, f"touch '{started}'", 0, ""),
+        (
+            "a test that makes the bind writable",
+            0o555,
+            'chmod 0755 "$0"',
+            1,
+            "the test binary bind became writable",
+        ),
+    )
+    for description, mode, test, status, message in cases:
+        started.unlink(missing_ok=True)
+        if binary.exists():
+            binary.chmod(0o755)
+        binary.write_text(f"#!/bin/sh\n[ \"$*\" = '--exact a_test' ] || exit 9\n{test}\n", encoding="utf-8")
+        binary.chmod(mode)
+        if os.access(binary, os.W_OK) != bool(mode & 0o200):
+            raise SystemExit("the probe self-test needs an unprivileged user")
+        result = subprocess.run(
+            ["/bin/sh", "-c", match.group(1), "read-only-probe", str(binary), "--exact", "a_test"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if (
+            result.returncode != status
+            or message not in result.stderr
+            or started.exists() != (description == "a test that passes")
+        ):
+            raise SystemExit(
+                f"the read-only probe mishandled {description}:"
+                f" exit {result.returncode}: {result.stderr}"
+            )
 
 
 def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> None:
@@ -199,9 +321,10 @@ def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> 
     expected_tail = [
         "/bin/sh",
         "-c",
-        'if [ -w "$1" ]; then echo "the worktree bind is writable" >&2; exit 1; fi; shift; exec "$@"',
+        'if [ -w "$1" ]; then echo "the test binary bind is writable" >&2; exit 1; fi; "$@"; '
+        'status=$?; if [ -w "$1" ]; then echo "the test binary bind became writable" >&2; '
+        'exit 1; fi; exit "$status"',
         "read-only-probe",
-        str(root),
         str(harness),
         "--exact",
         named,
@@ -216,11 +339,17 @@ def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> 
         ["--cap-add", "SYS_ADMIN"],
         ["--network", "none"],
         ["--env", "ASAN_OPTIONS=detect_leaks=1"],
+        ["--mount", f"type=bind,source={harness},target={harness},readonly"],
+        ["--workdir", "/tmp"],
     ):
         if not any(options[i : i + 2] == required for i in range(len(options))):
             raise SystemExit(f"NET_ADMIN runner omitted {required}: {options}")
     if any(option.startswith("apparmor") for option in options):
         raise SystemExit(f"NET_ADMIN runner dropped AppArmor for {named}: {options}")
+    # The container sees the test binary and its profile, not the worktree.
+    binds = [option for option in options if "source=" in option]
+    if len(binds) != 2 or any(str(harness) not in bind and "profraw" not in bind for bind in binds):
+        raise SystemExit(f"NET_ADMIN runner binds more of the host than the test binary: {binds}")
 
 
 def edited_bytes(content: bytes) -> list[bytes]:
@@ -255,6 +384,16 @@ def check_runner_pins(temporary: Path) -> None:
     (missing / PRIMARY_RUNNER).unlink()
     if invoke(missing).returncode == 0:
         raise SystemExit("checker accepted a missing pinned runner")
+    # A runner that is a symlink fails even when it names a byte-identical,
+    # executable copy.
+    linked = temporary / "linked"
+    copy_fixture(linked)
+    shutil.copy2(ROOT / PRIMARY_RUNNER, linked / "linked-runner.sh")
+    (linked / PRIMARY_RUNNER).unlink()
+    (linked / PRIMARY_RUNNER).symlink_to(linked / "linked-runner.sh")
+    result = invoke(linked)
+    if result.returncode == 0 or "must be a regular file" not in result.stderr:
+        raise SystemExit(f"checker accepted a runner that is a symlink: {result.stderr}")
     unexecutable = temporary / "unexecutable"
     copy_fixture(unexecutable)
     (unexecutable / PRIMARY_RUNNER).chmod(0o644)
@@ -288,7 +427,11 @@ def check_repinned_runners(temporary: Path) -> None:
     """A pin moved to a runner that drops a structural guarantee still fails,
     and one moved to a harmless edit passes."""
     harmless = repinned(
-        temporary, "comment", NET_ADMIN_RUNNER, "set -euo pipefail\n", "set -euo pipefail\n# reviewed\n"
+        temporary,
+        "comment",
+        NET_ADMIN_RUNNER,
+        "readonly ISOLATION_IMAGE=",
+        "# reviewed\nreadonly ISOLATION_IMAGE=",
     )
     if harmless.returncode != 0:
         raise SystemExit(f"checker refused a re-pinned harmless edit: {harmless.stderr}")
@@ -298,16 +441,87 @@ def check_repinned_runners(temporary: Path) -> None:
         (PRIMARY_RUNNER, "  --rm\n", "  --rm\n  --privileged\n"),
         (PRIMARY_RUNNER, "@sha256:", ":latest@x"),
         (PRIMARY_RUNNER, "docker run", "sudo -n docker run"),
+        (PRIMARY_RUNNER, "#!/bin/bash -p\n", "#!/usr/bin/env bash\n"),
+        (PRIMARY_RUNNER, "export PATH=$RUNNER_PATH\n", "\n"),
+        (PRIMARY_RUNNER, "set -euo pipefail\nreadonly", "set -euo pipefail\nsource \"$BASH_ENV\"\nreadonly"),
+        (
+            PRIMARY_RUNNER,
+            'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \\\n',
+            "",
+        ),
+        (PRIMARY_RUNNER, "DOCKER_HOST=unix:///var/run/docker.sock", 'DOCKER_HOST="$DOCKER_HOST"'),
+        (PRIMARY_RUNNER, "set +e\n", 'set +e\ndocker run --rm "$ISOLATION_IMAGE" true\n'),
+        (PRIMARY_RUNNER, "source=$REPOSITORY_ROOT,", "source=/,"),
         (NET_ADMIN_RUNNER, "  --cap-drop ALL\n", "  --cap-add ALL\n"),
         (NET_ADMIN_RUNNER, "  --cap-add NET_ADMIN\n", "  --cap-add NET_RAW\n"),
         (NET_ADMIN_RUNNER, "  --read-only\n", "\n"),
         (NET_ADMIN_RUNNER, "readonly TEST_PATTERN=", "readonly UNUSED_PATTERN="),
         (NET_ADMIN_RUNNER, "if [[ $REPOSITORY_ROOT == *,* ]]; then", "if false; then"),
         (NET_ADMIN_RUNNER, "if [ -w \"$1\" ]; then", "if false; then"),
+        (NET_ADMIN_RUNNER, '"$@"; status=$?; if [ -w "$1" ]; then', 'exec "$@"; if false; then'),
+        (NET_ADMIN_RUNNER, "source=$TEST_BINARY,target=$TEST_BINARY", "source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT"),
+        (
+            NET_ADMIN_RUNNER,
+            '  --workdir /tmp\n',
+            '  --workdir /tmp\n  --mount "type=bind,source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly"\n',
+        ),
     )
     for index, (runner, old, new) in enumerate(unsafe):
         if repinned(temporary, str(index), runner, old, new).returncode == 0:
             raise SystemExit(f"checker accepted re-pinned unsafe {runner}: {old} -> {new}")
+
+
+def check_runner_name_pieces(temporary: Path) -> None:
+    """A runner named in pieces fails wherever it is, and the NET_ADMIN
+    runner's name fails outside the Local namespace adapter in any form;
+    comments and quotes inside char literals do not count."""
+    allowed = Path("apps/pos-sandboxd/src/namespace_network/pieces.rs")
+    refused = {
+        "a concatenated NET_ADMIN runner in apps": (
+            Path("apps/pos-sandboxd/src/pieces.rs"),
+            'const RUNNER: &str = concat!("../../scripts/run-isolated-with-", "net-admin-test.sh");\n',
+        ),
+        "a NET_ADMIN runner split inside its distinctive piece": (
+            Path("crates/pieces/src/lib.rs"),
+            'const RUNNER: &str = concat!("run-isolated-with-net", "-admin-test.sh");\n',
+        ),
+        "a formatted NET_ADMIN runner": (
+            Path("plugins/pieces/src/lib.rs"),
+            'fn runner() -> String { format!("{}-{}", "with-NET", r#"ADMIN"#) }\n',
+        ),
+        "a concatenated runner inside the adapter": (
+            allowed,
+            'const RUNNER: &str = concat!("../../scripts/run-", "isolated-test.sh");\n',
+        ),
+        "an undiscovered runner in apps": (
+            Path("apps/pos-sandboxd/src/pieces.rs"),
+            'fn f(p: &Path) -> PathBuf { p.join("../../scripts/run-isolated-other-test.sh") }\n',
+        ),
+    }
+    accepted = {
+        "comments and char literals": (
+            Path("crates/pieces/src/lib.rs"),
+            "// run-isolated-with-net-admin-test.sh is the NET_ADMIN runner.\n"
+            "/* run-isolated-test.sh */\n"
+            "const QUOTE: char = '\"'; const LABEL: &str = \"net\"; fn f<'a>(_: &'a str) {}\n"
+            "const OTHER: char = '\"'; const ADMINISTRATOR: &str = \"x\";\n",
+        ),
+        "the adapter naming its own runner's capability": (
+            allowed,
+            'const CAPABILITY: &str = "NET_ADMIN";\n',
+        ),
+    }
+    for verdict, cases in ((False, refused), (True, accepted)):
+        for index, (description, (relative, source)) in enumerate(cases.items()):
+            root = temporary / f"pieces-{verdict}-{index}"
+            copy_fixture(root)
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(source, encoding="utf-8")
+            result = invoke(root)
+            if (result.returncode == 0) != verdict:
+                raise SystemExit(
+                    f"checker {'refused' if verdict else 'accepted'} {description}: {result.stderr}"
+                )
 
 
 def main() -> None:
@@ -337,6 +551,7 @@ def main() -> None:
         check_net_admin_runner_guards(temporary)
         check_runner_pins(temporary)
         check_repinned_runners(temporary)
+        check_read_only_probe(temporary)
         # A changed caller must still be rejected when another caller retains
         # the valid runner reference, so owner discovery cannot hide the fault.
         multiple_owners = temporary / "multiple-owners"
@@ -362,6 +577,7 @@ def main() -> None:
         )
         if invoke(foreign_owner).returncode == 0:
             raise SystemExit("a foreign owner of the NET_ADMIN runner was accepted")
+        check_runner_name_pieces(temporary)
         for index, (relative, old, new) in enumerate(mutations):
             fixture_root = temporary / str(index)
             copy_fixture(fixture_root)
