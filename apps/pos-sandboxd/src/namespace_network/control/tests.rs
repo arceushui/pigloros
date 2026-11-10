@@ -18,6 +18,52 @@ fn a_missing_namespace_is_not_observed_and_removes_as_nothing() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn only_prefixed_veth_ends_are_the_providers_and_nothing_may_remain() {
+    let link = |name: &str, kind| ObservedLink {
+        index: 1,
+        name: name.to_owned(),
+        kind,
+        up: true,
+    };
+    let veth = LinkKind::Veth {
+        peer_index: 2,
+        peer_netnsid: None,
+    };
+    assert!(is_attempt_host_link(&link("piglor-h3", veth)));
+    assert!(!is_attempt_host_link(&link("piglor-h3", LinkKind::Other)));
+    assert!(!is_attempt_host_link(&link("other-h0", veth)));
+    assert!(none_remain(&[], &[]).is_ok());
+    assert!(matches!(
+        none_remain(&[NamespaceName::for_attempt([1; 16])], &[]),
+        Err(NetlinkError::Residual)
+    ));
+    assert!(matches!(
+        none_remain(&[], &[link("piglor-h3", veth)]),
+        Err(NetlinkError::Residual)
+    ));
+}
+
+#[test]
+fn a_link_already_gone_counts_as_deleted() {
+    assert!(already_gone(Ok(())).is_ok());
+    assert!(already_gone(Err(NetlinkError::Kernel(-19))).is_ok());
+    assert!(matches!(
+        already_gone(Err(NetlinkError::Kernel(-1))),
+        Err(NetlinkError::Kernel(-1))
+    ));
+}
+
+#[test]
+fn nothing_orphaned_removes_as_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    // Reading the host's links needs no privilege, and the test host has no
+    // provider-owned veth end.
+    let control = NetlinkNamespaceControl::new(NetworkNamespaces::pinned_under(directory.path()));
+    assert!(matches!(control.remove_orphans(), Ok(())));
+    Ok(())
+}
+
 /// Tests that need `NET_ADMIN`, `SYS_ADMIN` and mounts. Each re-runs itself
 /// in the isolated container that grants exactly those, and runs its body
 /// there, where the container's own network namespace is the host's.
@@ -192,6 +238,47 @@ mod privileged {
         assert!(matches!(repeated, Err(NetlinkError::Io(Errno::EXIST))));
         assert!(deleted.is_ok(), "{deleted:?}");
         assert!(matches!(namespaces.open(&name), Ok(None)));
+        Ok(())
+    }
+
+    /// Two attempts' plans and a host veth pair of another name.
+    fn orphan_fixture() -> TestResult<(ExpectedNamespace, ExpectedNamespace, LinkName, LinkName)> {
+        Ok((
+            planned(7, 9)?,
+            planned(8, 10)?,
+            LinkName::new("other-h0")?,
+            LinkName::new("other-n0")?,
+        ))
+    }
+
+    #[test]
+    fn orphans_are_removed_and_other_links_kept() -> TestResult {
+        if !isolated("orphans_are_removed_and_other_links_kept")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let control = NetlinkNamespaceControl::new(namespaces.clone());
+        let (first, second, other_host, other_inner) = orphan_fixture()?;
+        // Both ends of the other pair stay in the host namespace.
+        let created = namespaces.create(&first.name).and_then(|peer| {
+            namespaces.create(&second.name).and_then(|_| {
+                host_namespace().and_then(|host| {
+                    with_session(ROUTE, |session| {
+                        session.execute(vec![
+                            route::veth_pair(&first.host_link, &first.inner_link, peer.as_fd()),
+                            route::veth_pair(&other_host, &other_inner, host.as_fd()),
+                        ])
+                    })
+                })
+            })
+        });
+        let removed = control.remove_orphans();
+        assert!(created.is_ok(), "{created:?}");
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(matches!(namespaces.attempt_names(), Ok(names) if names.is_empty()));
+        assert!(matches!(host_link(&first.host_link), Ok(None)));
+        // A veth end of another name is not the provider's.
+        assert!(matches!(host_link(&other_host), Ok(Some(_))));
         Ok(())
     }
 }

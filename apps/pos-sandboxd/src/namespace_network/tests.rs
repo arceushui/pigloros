@@ -751,3 +751,18 @@ fn another_attempts_host_link_survives_a_failed_establish() -> TestResult {
     assert_eq!(*control.host_links.borrow(), [other]);
     Ok(())
 }
+
+#[test]
+fn only_prefixed_lowercase_attempt_identities_parse_as_namespace_names() {
+    let name = NamespaceName::for_attempt([0xab; 16]);
+    assert_eq!(NamespaceName::parse(name.as_str()), Some(name));
+    for other in [
+        "piglor-",
+        "piglor-abababababababababababababababab00",
+        "piglor-ABABABABABABABABABABABABABABABAB",
+        "piglor-abababababababababababababababag",
+        "other-abababababababababababababababab",
+    ] {
+        assert_eq!(NamespaceName::parse(other), None, "{other}");
+    }
+}

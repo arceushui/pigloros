@@ -93,6 +93,38 @@ impl NetworkNamespaces {
         }
     }
 
+    /// Every attempt namespace entry: each entry that is no directory and
+    /// whose name [`NamespaceName::parse`] accepts. A missing directory holds
+    /// none.
+    ///
+    /// # Errors
+    /// Fails if the directory exists but cannot be read.
+    pub fn attempt_names(&self) -> Result<Vec<NamespaceName>, NetlinkError> {
+        match std::fs::read_dir(&self.directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            listed => listed
+                .and_then(|entries| {
+                    entries
+                        .map(|entry| {
+                            entry.and_then(|entry| {
+                                entry.file_type().map(|kind| {
+                                    entry
+                                        .file_name()
+                                        .to_str()
+                                        .filter(|_| !kind.is_dir())
+                                        .and_then(NamespaceName::parse)
+                                })
+                            })
+                        })
+                        .filter_map(Result::transpose)
+                        .collect()
+                })
+                .map_err(|error| {
+                    NetlinkError::Io(Errno::from_io_error(&error).unwrap_or(Errno::IO))
+                }),
+        }
+    }
+
     /// Unpin namespace `name` and remove its entry, whichever of them
     /// exist. The namespace ends once nothing else holds it.
     ///

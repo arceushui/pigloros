@@ -276,6 +276,75 @@ fn remove_attempt_link(
     })
 }
 
+/// The prefix of every provider-owned host veth end.
+const HOST_LINK_PREFIX: &str = "piglor-h";
+
+/// Every provider-owned host veth end the session's namespace holds.
+fn attempt_host_links<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+) -> Result<Vec<ObservedLink>, NetlinkError> {
+    links(session).map(|links| links.into_iter().filter(is_attempt_host_link).collect())
+}
+
+/// Whether `link` is a provider-owned host veth end.
+fn is_attempt_host_link(link: &ObservedLink) -> bool {
+    link.name.starts_with(HOST_LINK_PREFIX) && matches!(link.kind, LinkKind::Veth { .. })
+}
+
+/// `Ok` if neither `names` nor `links` remain.
+fn none_remain(names: &[NamespaceName], links: &[ObservedLink]) -> Result<(), NetlinkError> {
+    match (names, links) {
+        ([], []) => Ok(()),
+        _ => Err(NetlinkError::Residual),
+    }
+}
+
+/// `deleted`, with a link that no longer exists counted as deleted.
+const fn already_gone(deleted: Result<(), NetlinkError>) -> Result<(), NetlinkError> {
+    match deleted {
+        Err(NetlinkError::Kernel(route::NO_SUCH_LINK)) => Ok(()),
+        other => other,
+    }
+}
+
+impl NetlinkNamespaceControl {
+    /// Remove every host veth end named `piglor-h…` and every attempt
+    /// namespace pinned in this adapter's directory, whichever attempt owned
+    /// them, and read their absence back.
+    ///
+    /// Only restart reconciliation may call this, before admission opens and
+    /// once every attempt unit is known to be gone: it removes the network of
+    /// any attempt, live or not.
+    ///
+    /// The host links go first. Unpinning a namespace lets the kernel destroy
+    /// it, and its veth pair with it, asynchronously; a link that is already
+    /// gone when its deletion arrives counts as removed.
+    ///
+    /// # Errors
+    /// Fails if any of them cannot be removed, or remains afterwards.
+    pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
+        consistent(|| with_session(ROUTE, attempt_host_links))
+            .and_then(|orphans| {
+                orphans.iter().try_for_each(|link| {
+                    already_gone(with_session(ROUTE, |session| {
+                        session.execute(vec![route::delete_link(link.index)])
+                    }))
+                })
+            })
+            .and_then(|()| self.namespaces.attempt_names())
+            .and_then(|names| {
+                names
+                    .iter()
+                    .try_for_each(|name| self.namespaces.delete(name))
+            })
+            .and_then(|()| self.namespaces.attempt_names())
+            .and_then(|names| {
+                consistent(|| with_session(ROUTE, attempt_host_links)).map(|links| (names, links))
+            })
+            .and_then(|(names, links)| none_remain(&names, &links))
+    }
+}
+
 impl NamespaceControl for NetlinkNamespaceControl {
     type Error = NetlinkError;
 
