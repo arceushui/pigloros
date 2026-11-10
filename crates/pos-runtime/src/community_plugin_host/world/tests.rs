@@ -111,7 +111,7 @@ struct FakeMember {
     address: BundleAddressV1,
     material: FixedTrustMaterialSourceV1,
     offers: Rc<Cell<usize>>,
-    reject_offer: bool,
+    offer_result: Result<(), CommunityPluginHostErrorV1>,
     refusals: Rc<RefCell<Vec<CommunityPluginHostErrorV1>>>,
 }
 
@@ -141,11 +141,7 @@ impl CommunityPluginMemberV1 for FakeMember {
         _authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), CommunityPluginHostErrorV1> {
         self.offers.set(self.offers.get() + 1);
-        if self.reject_offer {
-            Err(CommunityPluginHostErrorV1::InvalidInvocation)
-        } else {
-            Ok(())
-        }
+        self.offer_result
     }
 
     fn record_refusal(&self, error: CommunityPluginHostErrorV1) {
@@ -218,7 +214,7 @@ impl Rig {
             address: self.address.clone(),
             material: FixedTrustMaterialSourceV1::new(self.material.clone()),
             offers: Rc::default(),
-            reject_offer: false,
+            offer_result: Ok(()),
             refusals: Rc::default(),
         })
     }
@@ -375,7 +371,7 @@ fn failed_authorization_offer_refuses_pass_and_never_offers_later_members() -> T
     let mut rig = Rig::ready()?;
     let mut members = members(&rig, 3)?;
     register_staging(&mut rig, members[0].plugin)?;
-    members[1].reject_offer = true;
+    members[1].offer_result = Err(CommunityPluginHostErrorV1::InvalidInvocation);
     let ids: Vec<_> = members.iter().map(|member| member.plugin).collect();
     let offers: Vec<_> = members
         .iter()
