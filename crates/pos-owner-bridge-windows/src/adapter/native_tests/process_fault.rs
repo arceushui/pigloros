@@ -4169,12 +4169,94 @@ fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
 }
 
 fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> TestResult {
-    let reached =
-        run_success_releasing(runtime, root, number, ProcessFaultTarget::Renderer, false)?;
-    if reached.generation != 1 || reached.record_count != 1 {
-        return Err("fresh ceremony state after retirement was not established".into());
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::SuccessfulGet)?;
+    let _zero_witness = ZeroWitness::arm();
+    let ceremony = CeremonyId::from_bytes([number; 16]);
+    let mut driver = readiness::new_driver(ceremony, Instant::now())?;
+    let mut provenance = None;
+    let mut failure_stage = None;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_fresh_success(&mut driver, ceremony, &mut provenance, &mut failure_stage)
+    }));
+    let attempt_stage = match &attempt {
+        Ok(Ok(_)) => "driver_returned",
+        Ok(Err(_)) => "fixture_error",
+        Err(_) => "panic",
+    };
+    let _logged = writeln!(std::io::stderr(), "NATIVE_FRESH_SUCCESS case={number} attempt={attempt_stage} failure_stage={failure_stage:?} provenance={}", provenance.is_some());
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let receipt_on_time = driver
+        .first_receipt_at()
+        .is_some_and(|received| received < fixture.deadline);
+    let verified = result.is_ok()
+        && has_synthetic_success_prf(&driver)
+        && driver.request_clear()
+        && receipt_on_time;
+    let close = fixture.surface.initial_close_observation();
+    let closed = close.is_some_and(|observation| {
+        observation.removed.is_ok()
+            && observation.closed.is_ok()
+            && observation.buffers_closed
+            && !observation.buffers_uncertain
+            && observation.had_controller
+    });
+    let own_exit =
+        provenance.is_some_and(|browser| fixture.surface.fresh_success_own_exit(browser));
+    let observations = crate::Native::take_native_zero_observations();
+    let native_zeroed = native_zeroing_observed(&observations);
+    let _logged = writeln!(std::io::stderr(), "NATIVE_FRESH_SUCCESS case={number} verified={verified} receipt_on_time={receipt_on_time} closed={closed} own_exit={own_exit} native_zeroed={native_zeroed} driver_error={:?}", result.as_ref().err());
+    fixture.retire(driver, result, None)?;
+    let classification = check_final_process_failures(None);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    classification?;
+    if !verified || !closed || !own_exit || !native_zeroed || provenance.is_none() {
+        return Err(
+            "fresh verified success or its native retirement evidence was not established".into(),
+        );
     }
     Ok(())
+}
+
+impl Fixture {
+    fn drive_fresh_success(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        ceremony: CeremonyId,
+        provenance: &mut Option<pos_owner_bridge::ProcessIdentity>,
+        failure_stage: &mut Option<&'static str>,
+    ) -> DriveResult {
+        loop {
+            let step = driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            ));
+            if provenance.is_none() && driver.posts() == 1 && matches!(&step, Step::Pending) {
+                *provenance = Some(self.surface.fresh_success_provenance(ceremony).map_err(
+                    |()| {
+                        *failure_stage = Some("provenance");
+                        "fresh ceremony record or generation did not match the owner"
+                    },
+                )?);
+            }
+            match step {
+                Step::Finished(result) => return Ok(result),
+                Step::Done => {
+                    *failure_stage = Some("driver_done");
+                    return Err("fresh success driver ended without result".into());
+                }
+                Step::Pending => {
+                    if let Err(error) = readiness::pump(&self.surface) {
+                        *failure_stage = Some("pump");
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Fixture {

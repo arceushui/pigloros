@@ -23,6 +23,49 @@ pub(in crate::adapter) enum ExitBoundary {
 }
 
 impl Surface {
+    pub(in crate::adapter) fn fresh_success_provenance(
+        &mut self,
+        ceremony: pos_owner_bridge_codec::CeremonyId,
+    ) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || !self.buffers
+            || self.generation != Some(1)
+            || self.events.invalid()
+            || self.events.exited().is_some()
+        {
+            return Err(());
+        }
+        let spec = self.opening_spec.as_ref().ok_or(())?;
+        let folder = self.folder.as_ref().ok_or(())?;
+        let browser = self.identity.ok_or(())?;
+        if spec.ceremony_id != ceremony || *folder != pos_owner_bridge::folder_name(&ceremony) {
+            return Err(());
+        }
+        let records = self.store.records().map_err(|_| ())?;
+        let [bytes] = records.as_slice() else {
+            return Err(());
+        };
+        let record = pos_owner_bridge_codec::decode_cleanup_record(bytes).map_err(|_| ())?;
+        if record.ceremony_id() != ceremony
+            || record.folder_name() != folder.as_str()
+            || record.browser_pid() != browser.browser_pid
+            || record.creation_filetime() != browser.creation_filetime
+            || record.image_path_sha256() != browser.image_path_sha256
+        {
+            return Err(());
+        }
+        Ok(browser)
+    }
+
+    pub(in crate::adapter) fn fresh_success_own_exit(
+        &self,
+        browser: pos_owner_bridge::ProcessIdentity,
+    ) -> bool {
+        self.idle() && self.events.matching_exit_at_boundary(browser.browser_pid)
+    }
+
     pub(in crate::adapter) fn arm_exit_capture(
         &mut self,
         ceremony: pos_owner_bridge_codec::CeremonyId,

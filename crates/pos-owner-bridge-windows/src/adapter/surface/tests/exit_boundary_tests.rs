@@ -28,6 +28,21 @@ fn prepared_fixture(
     failure: Option<&'static str>,
     window: Duration,
 ) -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
+    let mut fixture = buffered_fixture()?;
+    fixture
+        .surface
+        .zero_close_buffers()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.factory.failure.set(failure);
+    let deadline = Instant::now() + window;
+    fixture
+        .surface
+        .arm_exit_capture(spec(40).ceremony_id, std::rc::Rc::default(), deadline)
+        .map_err(|()| "capture arm")?;
+    Ok((fixture, deadline))
+}
+
+fn buffered_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
     let selected = spec(40);
@@ -60,17 +75,81 @@ fn prepared_fixture(
         .surface
         .create_and_write(&request, &reply)
         .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok(fixture)
+}
+
+#[test]
+fn fresh_success_provenance_binds_record_and_matching_exit_to_owner() -> TestResult {
+    let mut fixture = buffered_fixture()?;
+    let ceremony = spec(40).ceremony_id;
+    let browser = fixture
+        .surface
+        .fresh_success_provenance(ceremony)
+        .map_err(|()| "fresh provenance")?;
+    assert!(fixture
+        .surface
+        .fresh_success_provenance(spec(41).ceremony_id)
+        .is_err());
+    fixture.surface.generation = Some(2);
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    fixture.surface.generation = Some(1);
+    let records = fixture.store.records().map_err(|_| "records")?;
+    let [original] = records.as_slice() else {
+        return Err("missing original record".into());
+    };
+    fixture
+        .store
+        .delete_record(original)
+        .map_err(|_| "delete record")?;
+    let selected = spec(40);
+    let wrong = CleanupRecordV1::new(
+        ceremony,
+        &selected.folder_name,
+        browser.browser_pid + 1,
+        browser.creation_filetime,
+        browser.image_path_sha256,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut encoded = [0; 4096];
+    let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
+        .map_err(|error| error.to_string())?;
+    fixture
+        .store
+        .write_record(&encoded[..size])
+        .map_err(|_| "wrong record")?;
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    fixture
+        .store
+        .delete_record(&encoded[..size])
+        .map_err(|_| "delete wrong record")?;
+    fixture
+        .store
+        .write_record(original)
+        .map_err(|_| "restore record")?;
+    assert!(matches!(
+        fixture.surface.open(&spec(41)),
+        std::task::Poll::Ready(Err(_))
+    ));
+    assert!(!fixture.surface.fresh_success_own_exit(browser));
     fixture
         .surface
-        .zero_close_buffers()
+        .close_controller()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
-    fixture.factory.failure.set(failure);
-    let deadline = Instant::now() + window;
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing sink")?;
+    sink.event(crate::NativeEvent::BrowserExited {
+        pid: browser.browser_pid,
+    });
     fixture
         .surface
-        .arm_exit_capture(selected.ceremony_id, std::rc::Rc::default(), deadline)
-        .map_err(|()| "capture arm")?;
-    Ok((fixture, deadline))
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.fresh_success_own_exit(browser));
+    Ok(())
 }
 
 #[test]
