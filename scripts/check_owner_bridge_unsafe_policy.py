@@ -914,7 +914,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "3d5d27e543b46e99533d5ab01815017f396566f09a225355e0bb573dfde4e686"
+    return hashlib.sha256(normalized).hexdigest() == "f88bd48684a63723208aa883583b88e7ade4861d3d81361649ae71a335f54546"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1572,7 +1572,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '0731905c610d9e970a200a1f01381aafb930eeb03c42b346e91f0bc3e9736874',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'a87fcd13d875548127097aa8e9869757d3fb9c7d3bc925df1a9fef293b545cdc',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '5a69be4481dec57c8059cb43cfbace27b533c5d22e6cd0ef97efa2a52800afa6',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '184716e9896fe0fb73d246212df0c41d773c8f5a6848f9deee166579b07e33ba',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',

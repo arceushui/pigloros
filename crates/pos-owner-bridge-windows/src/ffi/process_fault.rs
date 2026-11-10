@@ -7,7 +7,7 @@
 use std::io::Write as _;
 
 #[cfg(test)]
-fn pending_opening_diagnostic(message: &'static str) {
+fn fault_diagnostic(message: &'static str) {
     let _logged_or_unavailable = writeln!(std::io::stderr(), "{message}");
 }
 
@@ -54,20 +54,16 @@ impl ExitRetained {
         let (identity, image) =
             super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)
                 .map_err(|()| {
-                    pending_opening_diagnostic(
+                    fault_diagnostic(
                         "NATIVE_EXIT_QUERY stage=required_identity result=query_failed",
                     );
                 })?;
         if image != self.image {
-            pending_opening_diagnostic(
-                "NATIVE_EXIT_QUERY stage=required_identity result=image_mismatch",
-            );
+            fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=image_mismatch");
             return Err(());
         }
         if identity != self.retained.identity {
-            pending_opening_diagnostic(
-                "NATIVE_EXIT_QUERY stage=required_identity result=identity_mismatch",
-            );
+            fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=identity_mismatch");
             return Err(());
         }
         self.retained.exit_code()
@@ -251,14 +247,10 @@ pub(super) fn retain_exit_browser(
     };
     let (identity, image) = super::process::read_identity(retained.handle, expected.browser_pid)
         .map_err(|()| {
-            pending_opening_diagnostic(
-                "NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed",
-            );
+            fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed");
         })?;
     if identity != expected {
-        pending_opening_diagnostic(
-            "NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch",
-        );
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch");
         return Err(());
     }
     if retained.exit_code()?.is_some()
@@ -269,20 +261,14 @@ pub(super) fn retain_exit_browser(
     }
     let (rechecked_identity, rechecked_image) =
         super::process::read_identity(retained.handle, expected.browser_pid).map_err(|()| {
-            pending_opening_diagnostic(
-                "NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed",
-            );
+            fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed");
         })?;
     if rechecked_image != image {
-        pending_opening_diagnostic(
-            "NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch",
-        );
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch");
         return Err(());
     }
     if rechecked_identity != identity {
-        pending_opening_diagnostic(
-            "NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch",
-        );
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch");
         return Err(());
     }
     if retained.exit_code()?.is_some() || !authority.valid() {
@@ -340,7 +326,7 @@ pub(super) fn browser_candidate(
     environment: &ICoreWebView2Environment,
 ) -> Result<ProcessIdentity, ()> {
     let first = candidates(environment).map_err(|()| {
-        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-snapshot-incomplete");
+        fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-snapshot-incomplete");
     })?;
     browser_candidate_from_first(environment, &first)
 }
@@ -418,13 +404,13 @@ fn browser_candidate_from_first(
     })?;
     let (identity, image) = super::process::inspect(pid)
         .map_err(|()| {
-            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-error");
+            fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-error");
         })?
         .ok_or_else(|| {
-            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-absent");
+            fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-absent");
         })?;
     let second = candidates(environment).map_err(|()| {
-        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-snapshot-incomplete");
+        fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-snapshot-incomplete");
     })?;
     let _logged_or_unavailable = writeln!(
         std::io::stderr(),
@@ -447,18 +433,18 @@ fn browser_candidate_from_first(
         );
     })?;
     if second_pid != pid {
-        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=browser-changed");
+        fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=browser-changed");
         return Err(());
     }
     let second_identity = super::process::inspect(pid)
         .map_err(|()| {
-            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-error");
+            fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-error");
         })?
         .ok_or_else(|| {
-            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-absent");
+            fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-absent");
         })?;
     if second_identity != (identity, image) {
-        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=identity-changed");
+        fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=identity-changed");
         return Err(());
     }
     Ok(identity)
