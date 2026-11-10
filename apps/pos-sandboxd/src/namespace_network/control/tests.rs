@@ -19,6 +19,35 @@ fn a_missing_namespace_is_not_observed_and_removes_as_nothing() -> TestResult {
 }
 
 #[test]
+fn only_attempt_and_probe_veth_ends_are_the_providers_and_nothing_may_remain() {
+    let link = |name: &str, kind| ObservedLink {
+        index: 1,
+        name: name.to_owned(),
+        kind,
+        up: true,
+    };
+    let veth = LinkKind::Veth {
+        peer_index: 2,
+        peer_netnsid: None,
+    };
+    assert!(is_attempt_host_link(&link("piglor-h3", veth)));
+    assert!(!is_attempt_host_link(&link("piglor-h3", LinkKind::Other)));
+    assert!(!is_attempt_host_link(&link("other-h0", veth)));
+    assert!(is_attempt_host_link(&link("piglor-t0", veth)));
+    assert!(!is_attempt_host_link(&link("piglor-t0", LinkKind::Other)));
+    assert!(!is_attempt_host_link(&link("piglor-t1", veth)));
+    assert!(none_remain(&[], &[]).is_ok());
+    assert!(matches!(
+        none_remain(&[NamespaceName::for_attempt([1; 16])], &[]),
+        Err(NetlinkError::Residual)
+    ));
+    assert!(matches!(
+        none_remain(&[], &[link("piglor-h3", veth)]),
+        Err(NetlinkError::Residual)
+    ));
+}
+
+#[test]
 fn a_link_already_gone_counts_as_deleted() {
     assert!(already_gone(Ok(())).is_ok());
     assert!(already_gone(Err(NetlinkError::Kernel(-19))).is_ok());
