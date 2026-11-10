@@ -4298,7 +4298,7 @@ fn run_controller_input_case(
 
 impl crate::Native {
     pub(crate) fn native_controller_failure_from_owned_parent_loss() -> TestResult {
-        let _port = crate::Native::fixed_port_fixture();
+        let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .ok_or("canonical retained runtime is required by process qualification")?;
