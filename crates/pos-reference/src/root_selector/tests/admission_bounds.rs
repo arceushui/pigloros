@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use super::image_files::refresh_table_crc;
 use super::{isolated_role, FixedCompositionFixture, IsolatedCompositionRole, TestResult};
 use crate::provider_admission::tests::request_for;
 use crate::provider_admission::ProviderImageSnapshot;
@@ -9,6 +8,7 @@ use crate::selector::installation::fixture::{
     admitted_state_with_arguments, admitted_state_with_salt, ddi_fixture, ddi_salt,
     materialize_state, ImageSigning,
 };
+use crate::selector::installation::tests::refresh_table_crc;
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
 use crate::selector::SelectorBoundaryError;
 
@@ -71,10 +71,10 @@ fn held_image_admission_accepts_two_mib_signature_partition() -> TestResult {
 }
 
 #[test]
-fn snapshot_open_rejects_gpt_bounds_on_both_architectures() -> TestResult {
+fn snapshot_open_enforces_gpt_bounds_on_both_architectures() -> TestResult {
     if matches!(
         isolated_role(
-            "root_selector::tests::admission_bounds::snapshot_open_rejects_gpt_bounds_on_both_architectures"
+            "root_selector::tests::admission_bounds::snapshot_open_enforces_gpt_bounds_on_both_architectures"
         )?,
         IsolatedCompositionRole::Delegated
     ) {
@@ -159,21 +159,16 @@ fn snapshot_open(
         &ImageSigning::ddi(architecture)?,
         ddi_salt(architecture)?,
     )?;
-    let _paths = FixedCompositionFixture::create()?;
-    let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
-    let request = request_for(&installed)?.to_canonical_cbor()?;
-    // A local, not a match temporary, so the snapshot drops before the
-    // installed state and fixed paths in every edition.
-    let opened = ProviderImageSnapshot::open(&request);
-    let outcome = match opened {
-        Err(error) => Err(error),
-        Ok(snapshot) => {
-            assert_eq!(snapshot.image().manifest().partitions, *partitions);
-            snapshot.admit_held_image()?;
-            Ok(())
-        }
-    };
-    Ok(outcome)
+    open_installed(state, |opened| {
+        Ok(match opened {
+            Err(error) => Err(error),
+            Ok(snapshot) => {
+                assert_eq!(snapshot.image().manifest().partitions, *partitions);
+                snapshot.admit_held_image()?;
+                Ok(())
+            }
+        })
+    })
 }
 
 fn assert_public_admission(
@@ -181,19 +176,31 @@ fn assert_public_admission(
     context: &str,
     check: impl FnOnce(&ProviderImageSnapshot),
 ) -> TestResult {
+    open_installed(state, |opened| {
+        assert!(
+            opened.is_ok(),
+            "valid bounded image rejected by public snapshot admission: {:?}; {context}",
+            opened.as_ref().err()
+        );
+        let snapshot = opened?;
+        check(&snapshot);
+        snapshot.admit_held_image()?;
+        Ok(())
+    })
+}
+
+/// Stage `state` at the fixed installation paths, open its snapshot through
+/// the public seam and hand the outcome to `inspect`. The snapshot is a local
+/// moved into `inspect`, so it drops before the installed state and paths.
+fn open_installed<T>(
+    state: InstalledSelectorState,
+    inspect: impl FnOnce(Result<ProviderImageSnapshot, SelectorBoundaryError>) -> TestResult<T>,
+) -> TestResult<T> {
     let _paths = FixedCompositionFixture::create()?;
     let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
     let request = request_for(&installed)?.to_canonical_cbor()?;
     let opened = ProviderImageSnapshot::open(&request);
-    assert!(
-        opened.is_ok(),
-        "valid bounded image rejected by public snapshot admission: {:?}; {context}",
-        opened.as_ref().err()
-    );
-    let snapshot = opened?;
-    check(&snapshot);
-    snapshot.admit_held_image()?;
-    Ok(())
+    inspect(opened)
 }
 
 /// Retain the real root/hash/proof bytes while extending only the NUL suffix

@@ -360,7 +360,6 @@ mod tests {
     const ENTRIES_LBA: usize = 72;
     const ENTRY_COUNT: usize = 80;
     const ENTRY_SIZE: usize = 84;
-    const TABLE_CRC: usize = 88;
 
     /// One GPT edit: its description, whether admission accepts it, and the
     /// edit itself. `GptImage::finish` repairs every CRC afterwards.
@@ -539,7 +538,7 @@ mod tests {
             ("arm64", SandboxArchitecture::Aarch64),
         ] {
             let (original, partitions) = crate::selector::installation::tests::ddi_fixture(name)?;
-            assert_tight_gpt(&original, &partitions, name)?;
+            assert_tight_gpt(&original, &partitions, name);
             let manifest = layout_manifest(architecture, &original, partitions.clone())?;
             for (case, accepted, edit) in cases {
                 let expected = if *accepted { Ok(()) } else { Err(INVALID) };
@@ -579,7 +578,7 @@ mod tests {
         image: &[u8],
         partitions: &[crate::sandbox_provider_protocol::PartitionDescriptor; 3],
         architecture: &str,
-    ) -> TestResult {
+    ) {
         assert_eq!(image.len() / SECTOR - 1, 3287, "{architecture}");
         for (header, entries) in [(SECTOR, 2), (image.len() - SECTOR, 3255)] {
             assert_eq!(
@@ -603,7 +602,6 @@ mod tests {
         let gpt = GptImage::new(image.to_vec(), partitions);
         assert!(gpt.first_partition >= 35, "{architecture}");
         assert!(gpt.last_partition <= 3253, "{architecture}");
-        Ok(())
     }
 
     /// A DDI image under edit, with its fixture's partition LBAs.
@@ -681,15 +679,11 @@ mod tests {
         /// Repair both tables' and headers' CRCs so only the edit differs.
         fn finish(mut self) -> TestResult<Vec<u8>> {
             for header in self.headers() {
-                let mut crc = Crc::new();
-                crc.update(self.table_mut(header)?);
-                self.image[header + TABLE_CRC..header + TABLE_CRC + 4]
-                    .copy_from_slice(&crc.sum().to_le_bytes());
-                let size = usize::try_from(le32(&self.image, header + 12))?;
-                self.image[header + 16..header + 20].fill(0);
-                let mut crc = Crc::new();
-                crc.update(&self.image[header..header + size]);
-                self.image[header + 16..header + 20].copy_from_slice(&crc.sum().to_le_bytes());
+                crate::selector::installation::tests::refresh_table_crc(
+                    &mut self.image,
+                    header,
+                    SECTOR,
+                )?;
             }
             Ok(self.image)
         }
