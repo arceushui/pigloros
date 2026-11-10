@@ -180,8 +180,8 @@ pub use namespace_network::{
     HostEgressError, InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceConnector,
     NamespaceControl, NamespaceName, NamespaceRoute, NamespacedLocalNetwork,
     NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress,
-    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, ReadbackMismatch,
-    UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, OrphanSweepError,
+    ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{

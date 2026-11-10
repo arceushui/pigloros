@@ -121,7 +121,7 @@ impl NetworkRange {
     }
 
     /// Whether `address` lies inside the reserved range.
-    fn contains(&self, address: IpAddr) -> bool {
+    pub(super) fn contains(&self, address: IpAddr) -> bool {
         match address {
             IpAddr::V4(address) => {
                 let hosts = u32::MAX

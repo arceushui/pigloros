@@ -506,6 +506,24 @@ fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult
 }
 
 #[test]
+fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
+        let probed = network.probe_egress(EgressProbe {
+            network: inside,
+            port: 7000,
+        });
+        assert!(
+            matches!(probed, Err(EgressProbeError::Network)),
+            "{probed:?}"
+        );
+    }
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
@@ -544,7 +562,7 @@ fn probe_errors_say_what_failed() {
         ),
         (
             EgressProbeError::Network,
-            "the egress probe's /30 is misaligned or overlaps a host address or route",
+            "the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route",
         ),
     ] {
         assert_eq!(error.to_string(), message);
@@ -1039,4 +1057,18 @@ mod privileged {
         );
         Ok(())
     }
+}
+
+#[test]
+fn only_an_ipv4_mapped_endpoint_changes_and_to_the_ipv4_it_maps() {
+    let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
+    assert_eq!(canonical_endpoint(&mapped), ENDPOINT);
+    assert_eq!(canonical_endpoint(&ENDPOINT), ENDPOINT);
+    let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+        Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+        443,
+        5,
+        3,
+    ));
+    assert_eq!(canonical_endpoint(&scoped), scoped);
 }
