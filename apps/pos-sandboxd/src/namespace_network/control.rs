@@ -9,6 +9,7 @@
 //! pair, then each end's `addr_gen_mode`, addresses and link state, and the
 //! namespace's routes once its end is up.
 
+use std::future::Future;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::fs::{open, Mode};
@@ -399,6 +400,30 @@ impl NetlinkNamespaceControl {
                 consistent(|| with_session(ROUTE, attempt_host_links)).map(|links| (names, links))
             })
             .and_then(|(names, links)| none_remain(&names, &links))
+    }
+}
+
+/// Run the blocking `sweep` on Tokio's blocking pool. A sweep that panics,
+/// or whose task is cancelled because the runtime shuts down, fails as
+/// [`NetlinkError::Panicked`]: the sweep is never reported done unless it
+/// ran to completion.
+async fn on_blocking_pool(
+    sweep: impl FnOnce() -> Result<(), OrphanSweepError> + Send + 'static,
+) -> Result<(), OrphanSweepError> {
+    tokio::task::spawn_blocking(sweep)
+        .await
+        .unwrap_or(Err(OrphanSweepError::Netlink(NetlinkError::Panicked)))
+}
+
+/// Restart reconciliation's network sweep (#1200): the blocking
+/// [`NetlinkNamespaceControl::remove_orphans`] on Tokio's blocking pool, so
+/// the reconciling task's worker keeps running other tasks.
+impl crate::OrphanNetworkCleanup for NetlinkNamespaceControl {
+    type Error = OrphanSweepError;
+
+    fn remove_orphans(&self) -> impl Future<Output = Result<(), OrphanSweepError>> + Send {
+        let control = self.clone();
+        on_blocking_pool(move || control.remove_orphans())
     }
 }
 
