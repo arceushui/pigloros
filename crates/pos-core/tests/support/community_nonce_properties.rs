@@ -8,7 +8,10 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Exercise each complete boundary matrix with eight generated inputs. The
 /// runner retains shrinking and regression persistence; every original length
 /// and refusal case still runs for every generated nonce.
-pub fn check<S: Strategy>(strategy: S, property: impl Fn(S::Value) -> TestResult) -> TestResult {
+pub(super) fn check<S: Strategy>(
+    strategy: S,
+    property: impl Fn(S::Value) -> TestResult,
+) -> TestResult {
     let mut runner = TestRunner::new(Config {
         cases: 8,
         source_file: Some(file!()),
