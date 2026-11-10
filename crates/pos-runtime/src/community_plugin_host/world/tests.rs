@@ -1,6 +1,9 @@
 //! R8-W2: the evaluation world, with a fake member and a fake Driver that stages one draft, on
 //! the shared signed-release test world (installed at second 50 and Tick 5).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_core::{CanonicalBytes, Capability, EventDraft, Kind, Plugin, PluginId, TimelineId};
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
@@ -84,8 +87,10 @@ impl Plugin for StagingPlugin {
     }
 }
 
-/// A Driver that stages one draft per step.
-struct StagingDriver;
+/// A Driver that stages either one draft or an empty output per step.
+struct StagingDriver {
+    emit_event: bool,
+}
 
 impl Driver for StagingDriver {
     fn name(&self) -> &'static str {
@@ -93,11 +98,31 @@ impl Driver for StagingDriver {
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
-        Ok(StepOutput::new(vec![EventDraft::new(
-            EntityId::new(),
-            Kind::new(EVENT_TYPE),
-            CanonicalBytes::from_static(b"staged"),
-        )]))
+        let draft = self.emit_event.then(|| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE),
+                CanonicalBytes::from_static(b"staged"),
+            )
+        });
+        Ok(StepOutput::new(draft.into_iter().collect()))
+    }
+}
+
+/// A reachable commit fault poisons the registry without private-state injection.
+struct CommitPanickingDriver;
+
+impl Driver for CommitPanickingDriver {
+    fn name(&self) -> &'static str {
+        "commit-panicking"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(Vec::new()))
+    }
+
+    fn commit_step(&mut self) {
+        std::panic::resume_unwind(Box::new("injected Driver commit panic"));
     }
 }
 
@@ -108,26 +133,32 @@ struct FakeMember {
     source: LocalOciPublisherV1,
     address: BundleAddressV1,
     material: FixedTrustMaterialSourceV1,
+    calls: Rc<Cell<usize>>,
 }
 
 impl CommunityPluginMemberV1 for FakeMember {
     fn plugin(&self) -> PluginId {
+        self.calls.set(self.calls.get() + 1);
         self.plugin
     }
 
     fn expectation(&self) -> &CommunityPluginExpectationV1 {
+        self.calls.set(self.calls.get() + 1);
         &self.expectation
     }
 
     fn release_source(&self) -> &dyn ReleaseSourceV1 {
+        self.calls.set(self.calls.get() + 1);
         &self.source
     }
 
     fn release_address(&self) -> &BundleAddressV1 {
+        self.calls.set(self.calls.get() + 1);
         &self.address
     }
 
     fn trust_material(&self) -> &dyn PluginTrustMaterialSourceV1 {
+        self.calls.set(self.calls.get() + 1);
         &self.material
     }
 
@@ -135,22 +166,30 @@ impl CommunityPluginMemberV1 for FakeMember {
         &self,
         _authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), CommunityPluginHostErrorV1> {
+        self.calls.set(self.calls.get() + 1);
         Ok(())
     }
 
-    fn record_refusal(&self, _error: CommunityPluginHostErrorV1) {}
+    fn record_refusal(&self, _error: CommunityPluginHostErrorV1) {
+        self.calls.set(self.calls.get() + 1);
+    }
 
-    fn close_pass(&self) {}
+    fn close_pass(&self) {
+        self.calls.set(self.calls.get() + 1);
+    }
 
     fn pass_failure(&self) -> Option<CommunityPluginHostErrorV1> {
+        self.calls.set(self.calls.get() + 1);
         None
     }
 
     fn pass_invocation_id(&self) -> Option<[u8; 16]> {
+        self.calls.set(self.calls.get() + 1);
         None
     }
 
     fn sync_registry(&self, _registry: &mut PluginRegistry) -> Result<(), RuntimeError> {
+        self.calls.set(self.calls.get() + 1);
         Ok(())
     }
 }
@@ -205,6 +244,7 @@ impl Rig {
             source: self.publisher.root.store()?,
             address: self.address.clone(),
             material: FixedTrustMaterialSourceV1::new(self.material.clone()),
+            calls: Rc::default(),
         })
     }
 
@@ -301,7 +341,11 @@ impl Rig {
 /// Register the staging Driver of `plugin`.
 fn register_staging(rig: &mut Rig, plugin: PluginId) -> BoxResult<()> {
     let plugins = rig.eval.plugins_mut();
-    plugins.register_generated(&StagingPlugin(plugin), None, Some(Box::new(StagingDriver)))?;
+    plugins.register_generated(
+        &StagingPlugin(plugin),
+        None,
+        Some(Box::new(StagingDriver { emit_event: true })),
+    )?;
     plugins.compose_non_participant_drivers()?;
     Ok(())
 }
@@ -328,6 +372,113 @@ fn consecutive_passes_commit_one_event_each_with_fresh_attempts() -> TestResult 
         let events = rig.eval.committed_events().map_err(|e| format!("{e:?}"))?;
         assert_eq!(events.len(), expected);
     }
+    Ok(())
+}
+
+/// An unfinished pass owns the member slots, even when it emitted no Event. A new host
+/// request must reject before sampling, gating, offering, reporting, closing or syncing them.
+#[test]
+fn an_unfinished_pass_rejects_a_new_request_without_touching_members() -> TestResult {
+    for emit_event in [false, true] {
+        let mut rig = Rig::ready()?;
+        let member = rig.member()?;
+        let calls = Rc::clone(&member.calls);
+        rig.eval.plugins_mut().register_generated(
+            &StagingPlugin(member.plugin),
+            None,
+            Some(Box::new(StagingDriver { emit_event })),
+        )?;
+        rig.eval.plugins_mut().compose_non_participant_drivers()?;
+        let mut host = CommunityPluginHostV1::new(vec![member]);
+        let timeline = rig.eval.pass_timeline;
+        let observed = observe(&mut rig.eval.pass_host, &rig.eval.plugins, timeline)
+            .map_err(|e| format!("{e:?}"))?;
+        let drafts = rig.eval.plugins.step_all_anchored_with_events(
+            timeline,
+            &observed.chain,
+            observed.head,
+            &observed.prefix,
+        )?;
+        assert_eq!(drafts.len(), usize::from(emit_event));
+
+        let mut clock = one_second();
+        let outcome = rig
+            .eval
+            .run_pass(&mut host, &mut clock, TICK + 1)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(outcome.tick, TICK + 1);
+        assert_eq!(outcome.utc, None);
+        assert!(outcome.gates.is_empty(), "{outcome:?}");
+        let PassResultV1::Failed { host: None, error } = outcome.result else {
+            return Err(format!("unexpected result: {:?}", outcome.result).into());
+        };
+        assert!(matches!(*error, RuntimeError::PendingDriverStep));
+        assert_eq!(clock.remaining(), 1);
+        assert_eq!(calls.get(), 0, "the pending pass still owns every member");
+        assert_eq!(rig.eval.committed_events().map(|e| e.len()), Ok(0));
+        let still_pending =
+            rig.eval
+                .plugins
+                .step_all_anchored(timeline, &observed.chain, observed.head);
+        assert!(matches!(
+            still_pending,
+            Err(RuntimeError::PendingDriverStep)
+        ));
+
+        rig.eval.plugins.abort_step();
+        let resumed = rig
+            .eval
+            .run_pass(&mut host, &mut clock, TICK + 1)
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(matches!(resumed.result, PassResultV1::Committed(_)));
+        assert_eq!(clock.remaining(), 0);
+        assert!(calls.get() > 0);
+        assert_eq!(
+            rig.eval.committed_events().map(|e| e.len()),
+            Ok(usize::from(emit_event)),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_poisoned_driver_rejects_a_new_pass_without_touching_members() -> TestResult {
+    let mut rig = Rig::ready()?;
+    let member = rig.member()?;
+    let calls = Rc::clone(&member.calls);
+    rig.eval.plugins_mut().register_generated(
+        &StagingPlugin(member.plugin),
+        None,
+        Some(Box::new(CommitPanickingDriver)),
+    )?;
+    rig.eval.plugins_mut().compose_non_participant_drivers()?;
+    let mut host = CommunityPluginHostV1::new(vec![member]);
+    let timeline = rig.eval.pass_timeline;
+    let observed = observe(&mut rig.eval.pass_host, &rig.eval.plugins, timeline)
+        .map_err(|e| format!("{e:?}"))?;
+    rig.eval
+        .plugins
+        .step_all_anchored(timeline, &observed.chain, observed.head)?;
+    rig.eval.plugins.commit_step_at(observed.head, 1)?;
+
+    let mut clock = one_second();
+    let outcome = rig
+        .eval
+        .run_pass(&mut host, &mut clock, TICK + 1)
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(outcome.tick, TICK + 1);
+    assert_eq!(outcome.utc, None);
+    assert!(outcome.gates.is_empty(), "{outcome:?}");
+    let PassResultV1::Failed { host: None, error } = outcome.result else {
+        return Err(format!("unexpected result: {:?}", outcome.result).into());
+    };
+    let RuntimeError::DriverCommitPanicked { name } = *error else {
+        return Err(format!("unexpected error: {error:?}").into());
+    };
+    assert_eq!(name, "commit-panicking");
+    assert_eq!(clock.remaining(), 1);
+    assert_eq!(calls.get(), 0);
+    assert_eq!(rig.eval.committed_events().map(|e| e.len()), Ok(0));
     Ok(())
 }
 
