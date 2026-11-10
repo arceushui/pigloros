@@ -222,8 +222,7 @@ flips the 24 cases of `NI-PUBLIC-006` and `NI-EVAL-007` in modes L, R and F.
 - The rows that may be flipped are declared once in
   `scripts/non_interference_executed_rows.json`, which the binder, the fixture
   verify script and the Plugin conformance checker read.
-- Air-Gapped cases stay non-executed until N7 (#1235), and `NI-ARCHIVE-009` until
-  N1b (#1284).
+- Air-Gapped cases stay non-executed until N7 (#1235).
 
 ADR-062 Revision 8 slice N4 (#1232, owner note `ADR-062_R8_NonInterference_Fork`)
 flips the 12 cases of `NI-FORK-008` in modes L, R and F the same way, over the
@@ -238,6 +237,20 @@ flips the 48 cases of `NI-TOOL-001`, `NI-STATE-003`, `NI-NET-010` and
 `scripts/generate_non_interference_g_plug_fixtures.py`. The `NI-STATE-003` cases
 cover its state members only; its migration surfaces and migration-only canary
 stay non-executed until PMF1 v2 (#621, wiki `ADR-059_R9_State_Migration_Scoping`).
+
+ADR-062 Revision 8 slice N3 (#1231, owner note `ADR-062_R8_NonInterference_Operations`)
+flips the 48 cases of `NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`
+in modes L, R and F, under the same rules. Their oracle is
+`scripts/generate_non_interference_g_ops_fixtures.py`; only each row's #181
+operational normalization is applied, and their Air-Gapped cases stay non-executed
+until N7.
+
+ADR-062 Revision 8 slice N1b (#1284, wiki `ADR-127_Deterministic_Run_Evidence_Archive`)
+flips the 12 cases of `NI-ARCHIVE-009` in modes L, R and F the same way, over the
+canonical RVA1 run-evidence archive of the G-PUB subject's export. Their expected
+result digests are derived by `scripts/generate_non_interference_g_archive_fixtures.py`,
+which writes every archive byte with the shared ustar encoder `scripts/ustar.py`.
+Archive bytes are not checked in: each NIA1 result digest binds them.
 `expected-authority/inventory.json` records the eleven #172 handoff slots. Its
 `expected_outcome` values are planned authority targets, not observed results.
 Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its
