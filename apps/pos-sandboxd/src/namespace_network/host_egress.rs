@@ -781,6 +781,7 @@ fn admit_on<T: NetlinkTransport>(
 ///
 /// # Errors
 /// Fails if the table cannot be read.
+#[cfg(test)]
 pub(super) fn host_chains<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
 ) -> Result<Option<Vec<String>>, NetlinkError> {
@@ -939,10 +940,11 @@ struct Installed {
     devices: BTreeMap<String, Vec<u32>>,
 }
 
-/// The provider's host egress in the calling thread's network namespace:
-/// the attempts it installed, whose table it reads back after every change,
-/// and the record of the egress devices it turned forwarding on for. One
-/// change runs at a time.
+/// The provider's host egress in the calling thread's network namespace.
+///
+/// It holds the attempts it installed, whose table it reads back after
+/// every change, and the record of the egress devices it turned forwarding
+/// on for. One change runs at a time.
 #[derive(Debug, Default)]
 pub struct HostEgress {
     installed: Mutex<Installed>,
