@@ -20,11 +20,22 @@ use super::{readiness, retirement, FixtureRoot, TestResult};
 use crate::adapter::surface::ExitBoundary;
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::{
-    BufferSlot, NativeFactory, NativeZeroObservation, ProcessExitState, ProcessFaultHandle,
-    ProcessFaultMark, ProcessFaultState, ProcessFaultTarget,
+    BufferSlot, NativeFactory, NativeZeroObservation, ProcessFaultHandle, ProcessFaultMark,
+    ProcessFaultState, ProcessFaultTarget,
 };
 
 mod obstruction;
+mod quarantined;
+
+#[test]
+fn native_quarantined_faults_do_not_release_the_keeper() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let root = FixtureRoot::new()?;
+    quarantined::run(Path::new(&runtime), &root.0)?;
+    root.remove()
+}
 
 type Trace = Rc<RefCell<Vec<ProcessFaultMark>>>;
 type CeremonyResult = Result<Verified, BridgeError>;
