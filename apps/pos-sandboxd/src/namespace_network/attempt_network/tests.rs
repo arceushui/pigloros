@@ -524,6 +524,24 @@ fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes()
 }
 
 #[test]
+fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    // Every network namespace holds the loopback address 127.0.0.1.
+    let probed = network.probe_egress(EgressProbe {
+        network: Ipv4Addr::new(127, 0, 0, 0),
+        port: 7000,
+    });
+    assert!(
+        matches!(probed, Err(EgressProbeError::Network)),
+        "{probed:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    assert!(std::fs::read_dir(directory.path())?.next().is_none());
+    Ok(())
+}
+
+#[test]
 fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
@@ -547,6 +565,10 @@ fn probe_errors_say_what_failed() {
         (
             EgressProbeError::Target(NetlinkError::Unexpected),
             "the egress probe's target could not be set up or removed",
+        ),
+        (
+            EgressProbeError::Listen(io::ErrorKind::AddrInUse.into()),
+            "the egress probe's target could not listen",
         ),
         (
             EgressProbeError::Establish(AttemptNetworkError::InUse),

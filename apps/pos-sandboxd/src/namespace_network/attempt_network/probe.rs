@@ -140,6 +140,9 @@ pub enum EgressProbeError {
     /// The probe's target could not be set up or removed.
     #[error("the egress probe's target could not be set up or removed")]
     Target(#[source] NetlinkError),
+    /// The probe's target could not listen on its address.
+    #[error("the egress probe's target could not listen")]
+    Listen(#[source] io::Error),
     /// The probe's attempt network could not be established.
     #[error("the egress probe's attempt network could not be established")]
     Establish(#[source] AttemptNetworkError),
@@ -179,12 +182,17 @@ const fn on_probe_network(address: Ipv4Addr) -> IpPrefix {
     }
 }
 
+/// One of the probe's own veth ends, [`PROBE_HOST_LINK`] or
+/// [`PROBE_TARGET_LINK`], both valid interface names.
+fn probe_link(name: &str) -> LinkName {
+    LinkName(name.to_owned())
+}
+
 /// Create the target's veth pair with its far end in `target`, address
 /// both ends, and listen on the target.
-fn set_up_target(target: BorrowedFd<'_>, probe: Placed) -> Result<TcpListener, NetlinkError> {
-    let host_link = LinkName::new(PROBE_HOST_LINK).map_err(|_| NetlinkError::Unrepresentable)?;
-    let target_link =
-        LinkName::new(PROBE_TARGET_LINK).map_err(|_| NetlinkError::Unrepresentable)?;
+fn set_up_target(target: BorrowedFd<'_>, probe: Placed) -> Result<TcpListener, EgressProbeError> {
+    let host_link = probe_link(PROBE_HOST_LINK);
+    let target_link = probe_link(PROBE_TARGET_LINK);
     NetlinkSession::open(ROUTE)
         .and_then(|session| {
             session
@@ -197,22 +205,17 @@ fn set_up_target(target: BorrowedFd<'_>, probe: Placed) -> Result<TcpListener, N
                     .and_then(|session| {
                         link_up(&session, &target_link, on_probe_network(*probe.target.ip()))
                     })
-                    .and_then(|()| {
-                        TcpListener::bind(probe.target).map_err(|error| {
-                            NetlinkError::Io(
-                                rustix::io::Errno::from_io_error(&error)
-                                    .unwrap_or(rustix::io::Errno::IO),
-                            )
-                        })
-                    })
+                    .map(|()| TcpListener::bind(probe.target))
             })
             .and_then(std::convert::identity)
         })
+        .map_err(EgressProbeError::Target)
+        .and_then(|bound| bound.map_err(EgressProbeError::Listen))
 }
 
 /// Remove the target's veth pair, if it exists, and its namespace.
 fn remove_target(namespaces: &NetworkNamespaces) -> Result<(), NetlinkError> {
-    let host_link = LinkName::new(PROBE_HOST_LINK).map_err(|_| NetlinkError::Unrepresentable)?;
+    let host_link = probe_link(PROBE_HOST_LINK);
     NetlinkSession::open(ROUTE)
         .and_then(|session| {
             route::link_reply(session.request(route::get_link(&host_link))).and_then(|link| {
@@ -245,16 +248,16 @@ where
             .addresses()
             .filter(|_| !self.range.contains(IpAddr::V4(probe.network)))
             .ok_or(EgressProbeError::Network)?;
-        if !unused_by_host(probe.network).map_err(EgressProbeError::Target)? {
-            return Err(EgressProbeError::Network);
-        }
+        unused_by_host(probe.network)
+            .map_err(EgressProbeError::Target)
+            .and_then(|unused| unused.then_some(()).ok_or(EgressProbeError::Network))?;
         let probe = Placed { host, target };
         let target_name = NamespaceName::for_attempt(PROBE_TARGET);
         let probed = self
             .namespaces
             .create(&target_name)
-            .and_then(|target| set_up_target(target.as_fd(), probe))
             .map_err(EgressProbeError::Target)
+            .and_then(|target| set_up_target(target.as_fd(), probe))
             .and_then(|listener| {
                 self.connector(PROBE_ATTEMPT, &[SocketAddr::V4(probe.target)])
                     .map_err(EgressProbeError::Establish)
