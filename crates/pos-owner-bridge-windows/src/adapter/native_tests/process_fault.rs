@@ -1455,6 +1455,12 @@ impl Fixture {
         if Instant::now() >= deadline {
             return Err("successful exit fault point expired".into());
         }
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_EXIT_CUTPOINT_OBSERVED case={} boundary={boundary:?} active_status=259_ambiguous_not_liveness remaining_ms={}",
+            self.number,
+            cutpoint_remaining.as_millis(),
+        );
         self.exit_reached = Some(boundary);
         if !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
             || !self.surface.exit_fault_owners_retained()

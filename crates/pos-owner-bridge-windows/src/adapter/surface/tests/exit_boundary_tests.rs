@@ -228,6 +228,34 @@ fn active_exit_capture_is_one_use_and_retains_ordinary_ownership() -> TestResult
     Ok(())
 }
 
+#[test]
+fn final_exit_status_is_distinct_from_earlier_required_identity_observation() -> TestResult {
+    let (mut fixture, deadline) = closed_fixture()?;
+    let handle = fixture
+        .surface
+        .consume_exit_capture(deadline, false)
+        .map_err(|()| "required pre-exit observation")?;
+    fixture.factory.failure.set(Some("exit_observation"));
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing sink")?;
+    sink.event(crate::NativeEvent::BrowserExited { pid: 42 });
+    assert!(fixture.surface.matching_exit_event());
+    assert_eq!(handle.exit_code(), Ok(Some(0)));
+    fixture.factory.failure.set(Some("exit_final_query"));
+    assert_eq!(handle.exit_code(), Err(()));
+    assert!(!fixture.store.records_now().is_empty());
+    fixture.factory.failure.set(None);
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok(())
+}
+
 fn assert_retained_without_fault(fixture: &mut Fixture) {
     assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
     assert!(matches!(

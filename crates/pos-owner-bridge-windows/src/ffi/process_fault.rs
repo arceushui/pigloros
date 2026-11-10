@@ -45,15 +45,29 @@ impl ProcessFaultHandle for ExitRetained {
     }
 
     fn exit_code(&self) -> Result<Option<u32>, ()> {
-        self.verified_exit_code()
+        self.retained.exit_code()
     }
 }
 
 impl ExitRetained {
     fn verified_exit_code(&self) -> Result<Option<u32>, ()> {
-        if super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)?
-            != (self.retained.identity, self.image.clone())
-        {
+        let (identity, image) =
+            super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)
+                .map_err(|()| {
+                    pending_opening_diagnostic(
+                        "NATIVE_EXIT_QUERY stage=required_identity result=query_failed",
+                    );
+                })?;
+        if image != self.image {
+            pending_opening_diagnostic(
+                "NATIVE_EXIT_QUERY stage=required_identity result=image_mismatch",
+            );
+            return Err(());
+        }
+        if identity != self.retained.identity {
+            pending_opening_diagnostic(
+                "NATIVE_EXIT_QUERY stage=required_identity result=identity_mismatch",
+            );
             return Err(());
         }
         self.retained.exit_code()
@@ -109,7 +123,13 @@ impl ProcessFaultHandle for Retained {
     fn exit_code(&self) -> Result<Option<u32>, ()> {
         let mut code = 0;
         // SAFETY: the owned process handle stays live and the output is writable.
-        unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.map_err(|_| ())?;
+        unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.map_err(|error| {
+            let _logged_or_unavailable = writeln!(
+                std::io::stderr(),
+                "NATIVE_EXIT_QUERY stage=exit_code result=query_failed hresult={:#x}",
+                error.code().0
+            );
+        })?;
         Ok((code != ACTIVE).then_some(code))
     }
 }
@@ -229,16 +249,43 @@ pub(super) fn retain_exit_browser(
         handle: open_owned_process(expected.browser_pid)?,
         identity: expected,
     };
-    let (identity, image) = super::process::read_identity(retained.handle, expected.browser_pid)?;
-    if identity != expected
-        || retained.exit_code()?.is_some()
+    let (identity, image) = super::process::read_identity(retained.handle, expected.browser_pid)
+        .map_err(|()| {
+            pending_opening_diagnostic(
+                "NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed",
+            );
+        })?;
+    if identity != expected {
+        pending_opening_diagnostic(
+            "NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch",
+        );
+        return Err(());
+    }
+    if retained.exit_code()?.is_some()
         || select(&candidates(environment)?, COREWEBVIEW2_PROCESS_KIND_BROWSER)?
             != expected.browser_pid
-        || super::process::read_identity(retained.handle, expected.browser_pid)?
-            != (identity, image.clone())
-        || retained.exit_code()?.is_some()
-        || !authority.valid()
     {
+        return Err(());
+    }
+    let (rechecked_identity, rechecked_image) =
+        super::process::read_identity(retained.handle, expected.browser_pid).map_err(|()| {
+            pending_opening_diagnostic(
+                "NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed",
+            );
+        })?;
+    if rechecked_image != image {
+        pending_opening_diagnostic(
+            "NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch",
+        );
+        return Err(());
+    }
+    if rechecked_identity != identity {
+        pending_opening_diagnostic(
+            "NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch",
+        );
+        return Err(());
+    }
+    if retained.exit_code()?.is_some() || !authority.valid() {
         return Err(());
     }
     Ok(Box::new(ExitRetained {

@@ -1390,6 +1390,10 @@ def test_owned_process_fault_authority() -> None:
         "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
         "fault call evidence suppressed": ("authority.record(crate::ProcessFaultMark::TerminationCall);", ""),
         "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
+        "late identity requery restored": ("fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }", "fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }"),
+        "required earlier identity query removed": ("fn observe(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }", "fn observe(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }"),
+        "required identity mismatch accepted": ("if identity != self.retained.identity {", "if false {"),
+        "required image mismatch accepted": ("if image != self.image {", "if false {"),
     }
     for name, (old, new) in mutations.items():
         if old not in original:
@@ -2044,6 +2048,8 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", 'assert_retained_without_fault(&mut expired);', ''),
         (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", '#[test]\nfn exit_fault_refuses_malformed_or_nonempty_missing_membership', '#[cfg(any())]\n#[test]\nfn exit_fault_refuses_malformed_or_nonempty_missing_membership'),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'active_status=259_ambiguous_not_liveness', 'active_status=alive'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'NATIVE_EXIT_CUTPOINT_OBSERVED', 'NATIVE_EXIT_NOT_OBSERVED'),
+        (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", 'assert_eq!(handle.exit_code(), Err(()));', ''),
         (f"{SHIM}/src/ffi/process_fault.rs", '|| self.observe()?.is_some()', '|| false'),
         (f"{SHIM}/src/adapter/events.rs", '!self.exit_boundary_invalid.get()', 'true'),
         (f"{SHIM}/src/ffi/events/control_fixture.rs", 'MAX_OBSERVATIONS: usize = 2', 'MAX_OBSERVATIONS: usize = 1'),

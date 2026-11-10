@@ -128,7 +128,11 @@ impl crate::ProcessFaultHandle for ExitHandle {
         self.identity
     }
     fn exit_code(&self) -> Result<Option<u32>, ()> {
-        Ok(self.factory.exit_code.get())
+        if self.factory.failure.get() == Some("exit_final_query") {
+            Err(())
+        } else {
+            Ok(self.factory.exit_code.get())
+        }
     }
 }
 
