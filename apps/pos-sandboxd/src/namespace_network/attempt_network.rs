@@ -242,7 +242,14 @@ where
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
     ) -> Result<NamespaceConnector<C>, AttemptNetworkError> {
-        let slot = self.slots.take(attempt_id)?;
+        // An IPv4-mapped IPv6 endpoint is the IPv4 endpoint it maps, for the
+        // namespace and the host alike.
+        let endpoints: Vec<SocketAddr> = endpoints
+            .iter()
+            .map(|endpoint| SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port()))
+            .collect();
+        let endpoints = endpoints.as_slice();
+        let mut slot = self.slots.take(attempt_id)?;
         let expected =
             ExpectedNamespace::for_attempt(attempt_id, &self.range, slot.slot, endpoints)
                 .map_err(AttemptNetworkError::Plan)?;
@@ -257,7 +264,13 @@ where
         {
             return Err(AttemptNetworkError::Exists);
         }
-        establish_namespace(&*self.control, &expected).map_err(AttemptNetworkError::Establish)?;
+        establish_namespace(&*self.control, &expected).map_err(|error| {
+            // What could not be removed still holds the slot's names.
+            if let Some(removal) = &error.removal {
+                slot.quarantine(removal.to_string());
+            }
+            AttemptNetworkError::Establish(error)
+        })?;
         let teardown = Teardown {
             control: Arc::clone(&self.control),
             name: expected.name,

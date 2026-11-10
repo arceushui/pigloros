@@ -263,6 +263,27 @@ fn a_full_range_bad_endpoints_and_a_refusing_kernel_establish_nothing() -> TestR
 }
 
 #[test]
+fn an_install_that_cannot_be_undone_quarantines_its_slot() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let broken = FakeControl {
+        refuse: true,
+        refuse_removal: true,
+        ..FakeControl::default()
+    };
+    let (network, _) = network(directory.path(), broken, 24)?;
+    let failed = network.establish([1; 16], &[ENDPOINT]).map(drop);
+    assert!(
+        matches!(&failed, Err(AttemptNetworkError::Establish(error)) if error.removal.is_some()),
+        "{failed:?}"
+    );
+    assert!(matches!(
+        network.establish([2; 16], &[ENDPOINT]),
+        Err(AttemptNetworkError::Quarantined { slot: 0, .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn a_failed_removal_quarantines_its_slot_and_closes_the_port() -> TestResult {
     let directory = tempfile::tempdir()?;
     let stuck = FakeControl {
