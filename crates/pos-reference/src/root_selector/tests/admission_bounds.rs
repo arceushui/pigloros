@@ -12,6 +12,8 @@ use crate::selector::installation::fixture::{
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
 use crate::selector::SelectorBoundaryError;
 
+const SECTOR: usize = 512;
+
 #[test]
 fn held_image_admission_accepts_full_length_arguments() -> TestResult {
     if matches!(
@@ -68,315 +70,95 @@ fn held_image_admission_accepts_two_mib_signature_partition() -> TestResult {
     Ok(())
 }
 
-/// One GPT edit: its description, whether public admission accepts it, and
-/// the edit itself. `GptImage::finish` repairs every CRC afterwards.
-type GptCase = (&'static str, bool, fn(&mut GptImage) -> TestResult);
-
 #[test]
-fn held_image_admission_enforces_gpt_header_bounds() -> TestResult {
+fn snapshot_open_rejects_gpt_bounds_on_both_architectures() -> TestResult {
     if matches!(
         isolated_role(
-            "root_selector::tests::admission_bounds::held_image_admission_enforces_gpt_header_bounds"
+            "root_selector::tests::admission_bounds::snapshot_open_rejects_gpt_bounds_on_both_architectures"
         )?,
         IsolatedCompositionRole::Delegated
     ) {
         return Ok(());
     }
-    // Each edit is applied to both headers unless it names one, so only the
-    // header bound under test differs from the unchanged fixture geometry.
-    let cases: [GptCase; 11] = [
-        ("zero disk GUID", false, |gpt| {
-            gpt.set(DISK_GUID, &[0; 16]);
-            Ok(())
-        }),
-        ("backup disk GUID differs in its last byte", false, |gpt| {
-            let byte = gpt.backup() + DISK_GUID + 15;
-            gpt.image[byte] ^= 1;
-            Ok(())
-        }),
-        ("64-byte entries", false, |gpt| {
-            gpt.set(ENTRY_SIZE, &64_u32.to_le_bytes());
-            Ok(())
-        }),
-        (
-            "first usable LBA 33 inside the primary table",
-            false,
-            |gpt| {
-                gpt.set(FIRST_USABLE, &33_u64.to_le_bytes());
-                Ok(())
-            },
-        ),
-        ("first usable LBA 35 after one free sector", true, |gpt| {
-            gpt.set(FIRST_USABLE, &35_u64.to_le_bytes());
-            Ok(())
-        }),
-        ("last usable LBA 3253 before one free sector", true, |gpt| {
-            gpt.set(LAST_USABLE, &3253_u64.to_le_bytes());
-            Ok(())
-        }),
-        (
-            "primary table at LBA 3 overlaps first usable LBA 34",
-            false,
-            |gpt| gpt.move_table(SECTOR, 3),
-        ),
-        (
-            "64 entries within the 16 KiB minimum reserve",
-            true,
-            |gpt| {
-                gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
-                Ok(())
-            },
-        ),
-        (
-            "64 entries, first usable LBA 33 inside the minimum reserve",
-            false,
-            |gpt| {
-                gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
-                gpt.set(FIRST_USABLE, &33_u64.to_le_bytes());
-                Ok(())
-            },
-        ),
-        (
-            "64 entries at backup LBA 3256, last usable LBA 3255 inside the minimum reserve",
-            false,
-            |gpt| {
-                gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
-                gpt.set(LAST_USABLE, &3255_u64.to_le_bytes());
-                gpt.move_table(gpt.backup(), 3256)
-            },
-        ),
-        (
-            "backup table at LBA 3254 overlaps last usable LBA 3254",
-            false,
-            |gpt| gpt.move_table(gpt.backup(), 3254),
-        ),
-    ];
-    let mismatches = gpt_admission_mismatches(&cases)?;
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-    Ok(())
-}
-
-#[test]
-fn held_image_admission_enforces_gpt_entry_bounds() -> TestResult {
-    if matches!(
-        isolated_role(
-            "root_selector::tests::admission_bounds::held_image_admission_enforces_gpt_entry_bounds"
-        )?,
-        IsolatedCompositionRole::Delegated
-    ) {
-        return Ok(());
-    }
-    // Partition tables and signed extents stay unchanged unless an edit
-    // names them; equal usable bounds admit the edge partitions.
-    let cases: [GptCase; 7] = [
-        (
-            "256-byte entries put a partition in an extension",
-            false,
-            |gpt| {
-                gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
-                gpt.set(ENTRY_SIZE, &256_u32.to_le_bytes());
-                Ok(())
-            },
-        ),
-        ("256-byte entries, one partition per entry", true, |gpt| {
-            gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
-            gpt.set(ENTRY_SIZE, &256_u32.to_le_bytes());
-            for header in gpt.headers() {
-                let table = gpt.table_mut(header)?;
-                let records = table[..3 * 128].to_vec();
-                table[..5 * 128].fill(0);
-                for (index, record) in records.chunks_exact(128).enumerate() {
-                    table[index * 256..index * 256 + 128].copy_from_slice(record);
-                }
-            }
-            Ok(())
-        }),
-        ("first usable LBA at the first partition", true, |gpt| {
-            gpt.set(FIRST_USABLE, &gpt.first_partition.to_le_bytes());
-            Ok(())
-        }),
-        (
-            "first usable LBA one sector into the first partition",
-            false,
-            |gpt| {
-                gpt.set(FIRST_USABLE, &(gpt.first_partition + 1).to_le_bytes());
-                Ok(())
-            },
-        ),
-        ("last usable LBA at the last partition", true, |gpt| {
-            gpt.set(LAST_USABLE, &gpt.last_partition.to_le_bytes());
-            Ok(())
-        }),
-        (
-            "last usable LBA one sector into the last partition",
-            false,
-            |gpt| {
-                gpt.set(LAST_USABLE, &(gpt.last_partition - 1).to_le_bytes());
-                Ok(())
-            },
-        ),
-        (
-            "signature entry one sector after its signed extent",
-            false,
-            |gpt| {
-                let signature = gpt.signature_partition;
-                for header in gpt.headers() {
-                    for entry in gpt.table_mut(header)?.chunks_exact_mut(128) {
-                        if little_u64(entry, 32)? == signature {
-                            let last = little_u64(entry, 40)?;
-                            entry[32..40].copy_from_slice(&(signature + 1).to_le_bytes());
-                            entry[40..48].copy_from_slice(&(last + 1).to_le_bytes());
-                        }
-                    }
-                }
-                Ok(())
-            },
-        ),
-    ];
-    let mismatches = gpt_admission_mismatches(&cases)?;
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-    Ok(())
-}
-
-// GPT header field offsets (UEFI 2.10 table 5.21).
-const FIRST_USABLE: usize = 40;
-const LAST_USABLE: usize = 48;
-const DISK_GUID: usize = 56;
-const ENTRIES_LBA: usize = 72;
-const ENTRY_COUNT: usize = 80;
-const ENTRY_SIZE: usize = 84;
-const SECTOR: usize = 512;
-
-/// Run every case on both architectures' signed systemd-repart DDI through
-/// public snapshot and held-image admission, and describe each case whose
-/// outcome differs, so a failure names every affected architecture.
-fn gpt_admission_mismatches(cases: &[GptCase]) -> TestResult<Vec<String>> {
+    // `image_gpt` unit tests cover each bound; this proves the public open
+    // seam itself enforces one header and one entry bound on both signed
+    // architectures, after the unchanged image is admitted end to end.
     let mut mismatches = Vec::new();
     for architecture in ["x86-64", "arm64"] {
         let (original, partitions) = ddi_fixture(architecture)?;
-        assert_tight_gpt(&original, architecture)?;
+        let cases: [(&str, bool, fn(&mut [u8], u64) -> TestResult); 3] = [
+            ("unchanged image", true, |_, _| Ok(())),
+            ("zero disk GUID in both headers", false, |image, _| {
+                let backup = image.len() - SECTOR;
+                for header in [SECTOR, backup] {
+                    image[header + 56..header + 72].fill(0);
+                }
+                Ok(())
+            }),
+            (
+                "signature entry one sector after its signed extent",
+                false,
+                |image, signature| {
+                    let backup = image.len() - SECTOR;
+                    for header in [SECTOR, backup] {
+                        let table = usize::try_from(little_u64(image, header + 72)?)? * SECTOR;
+                        // Both fixtures hold 128 entries of 128 bytes.
+                        for entry in image[table..table + 128 * 128].chunks_exact_mut(128) {
+                            if little_u64(entry, 32)? == signature {
+                                let last = little_u64(entry, 40)?;
+                                entry[32..40].copy_from_slice(&(signature + 1).to_le_bytes());
+                                entry[40..48].copy_from_slice(&(last + 1).to_le_bytes());
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            ),
+        ];
         for (case, accepted, edit) in cases {
-            let mut gpt = GptImage::new(original.clone(), &partitions);
-            edit(&mut gpt)?;
-            let state = admitted_state_with_salt(
-                &gpt.finish()?,
-                b"adapter",
-                &partitions,
-                &ImageSigning::ddi(architecture)?,
-                ddi_salt(architecture)?,
-            )?;
-            let outcome = public_admission(state, |snapshot| {
-                assert_eq!(snapshot.image().manifest().partitions, partitions);
-            })?;
-            let expected = if *accepted {
+            let expected = if accepted {
                 Ok(())
             } else {
                 Err(SelectorBoundaryError::ArtifactInvalid)
             };
-            if outcome != expected {
-                mismatches.push(format!(
-                    "{architecture}: {case}: expected {expected:?}, public admission {outcome:?}"
-                ));
+            match snapshot_open(architecture, &original, &partitions, edit) {
+                Ok(outcome) if outcome == expected => {}
+                Ok(outcome) => mismatches.push(format!(
+                    "{architecture}: {case}: expected {expected:?}, snapshot open {outcome:?}"
+                )),
+                Err(error) => mismatches.push(format!("{architecture}: {case}: {error}")),
             }
         }
     }
-    Ok(mismatches)
-}
-
-/// Both fixtures have a last LBA of 3287 and 128 entries of 128 bytes (32
-/// sectors) at LBAs 2 and 3255 with usable LBAs 34..=3254, so every reserved
-/// area is exactly full and each case's literal LBAs move one bound.
-fn assert_tight_gpt(image: &[u8], architecture: &str) -> TestResult {
-    assert_eq!(image.len() / SECTOR - 1, 3287, "{architecture}");
-    for (header, entries) in [(SECTOR, 2), (image.len() - SECTOR, 3255)] {
-        let field = |offset| little_u64(image, header + offset);
-        assert_eq!(
-            [
-                field(FIRST_USABLE)?,
-                field(LAST_USABLE)?,
-                field(ENTRIES_LBA)?
-            ],
-            [34, 3254, entries],
-            "{architecture}"
-        );
-        assert_eq!(
-            [
-                little_u32(image, header + ENTRY_COUNT)?,
-                little_u32(image, header + ENTRY_SIZE)?,
-            ],
-            [128, 128],
-            "{architecture}"
-        );
-    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
     Ok(())
 }
 
-/// A DDI image under edit, with its fixture's partition LBAs.
-struct GptImage {
-    image: Vec<u8>,
-    first_partition: u64,
-    last_partition: u64,
-    signature_partition: u64,
-}
-
-impl GptImage {
-    fn new(image: Vec<u8>, partitions: &[PartitionDescriptor; 3]) -> Self {
-        let signature = &partitions[2];
-        Self {
-            image,
-            first_partition: partitions[0].start_bytes / 512,
-            last_partition: (signature.start_bytes + signature.length_bytes) / 512 - 1,
-            signature_partition: signature.start_bytes / 512,
-        }
-    }
-
-    fn backup(&self) -> usize {
-        self.image.len() - SECTOR
-    }
-
-    fn headers(&self) -> [usize; 2] {
-        [SECTOR, self.backup()]
-    }
-
-    /// Write one field identically in both headers.
-    fn set(&mut self, field: usize, bytes: &[u8]) {
-        for header in self.headers() {
-            self.image[header + field..header + field + bytes.len()].copy_from_slice(bytes);
-        }
-    }
-
-    /// One header's partition table, as its current LBA, count and size place it.
-    fn table_mut(&mut self, header: usize) -> TestResult<&mut [u8]> {
-        let start = usize::try_from(little_u64(&self.image, header + ENTRIES_LBA)?)? * SECTOR;
-        let count = little_u32(&self.image, header + ENTRY_COUNT)?;
-        let size = little_u32(&self.image, header + ENTRY_SIZE)?;
-        let end = start + usize::try_from(count)? * usize::try_from(size)?;
-        Ok(&mut self.image[start..end])
-    }
-
-    /// Copy one header's table to `lba` and point that header at the copy.
-    fn move_table(&mut self, header: usize, lba: u64) -> TestResult {
-        let table = self.table_mut(header)?.to_vec();
-        let start = usize::try_from(lba)? * SECTOR;
-        self.image[start..start + table.len()].copy_from_slice(&table);
-        self.image[header + ENTRIES_LBA..header + ENTRIES_LBA + 8]
-            .copy_from_slice(&lba.to_le_bytes());
-        Ok(())
-    }
-
-    /// Repair both tables' and headers' CRCs so only the edited bound differs.
-    fn finish(mut self) -> TestResult<Vec<u8>> {
-        for header in self.headers() {
-            refresh_table_crc(&mut self.image, header, SECTOR)?;
-        }
-        Ok(self.image)
-    }
-}
-
-fn public_admission(
-    state: InstalledSelectorState,
-    check: impl FnOnce(&ProviderImageSnapshot),
+/// Edit a copy of one architecture's DDI, repair both GPT copies' CRCs, and
+/// open it through the public snapshot seam. An accepted snapshot must also
+/// pass held-image admission.
+fn snapshot_open(
+    architecture: &str,
+    original: &[u8],
+    partitions: &[PartitionDescriptor; 3],
+    edit: fn(&mut [u8], u64) -> TestResult,
 ) -> TestResult<Result<(), SelectorBoundaryError>> {
+    let mut image = original.to_vec();
+    edit(
+        &mut image,
+        partitions[2].start_bytes / u64::try_from(SECTOR)?,
+    )?;
+    let backup = image.len() - SECTOR;
+    for header in [SECTOR, backup] {
+        refresh_table_crc(&mut image, header, SECTOR)?;
+    }
+    let state = admitted_state_with_salt(
+        &image,
+        b"adapter",
+        partitions,
+        &ImageSigning::ddi(architecture)?,
+        ddi_salt(architecture)?,
+    )?;
     let _paths = FixedCompositionFixture::create()?;
     let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
     let request = request_for(&installed)?.to_canonical_cbor()?;
@@ -386,9 +168,9 @@ fn public_admission(
     let outcome = match opened {
         Err(error) => Err(error),
         Ok(snapshot) => {
-            check(&snapshot);
-            let held = snapshot.admit_held_image();
-            held.map(|_| ())
+            assert_eq!(snapshot.image().manifest().partitions, *partitions);
+            snapshot.admit_held_image()?;
+            Ok(())
         }
     };
     Ok(outcome)
@@ -399,12 +181,18 @@ fn assert_public_admission(
     context: &str,
     check: impl FnOnce(&ProviderImageSnapshot),
 ) -> TestResult {
-    let outcome = public_admission(state, check)?;
+    let _paths = FixedCompositionFixture::create()?;
+    let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
+    let request = request_for(&installed)?.to_canonical_cbor()?;
+    let opened = ProviderImageSnapshot::open(&request);
     assert!(
-        outcome.is_ok(),
-        "valid bounded image rejected by public admission: {:?}; {context}",
-        outcome.err()
+        opened.is_ok(),
+        "valid bounded image rejected by public snapshot admission: {:?}; {context}",
+        opened.as_ref().err()
     );
+    let snapshot = opened?;
+    check(&snapshot);
+    snapshot.admit_held_image()?;
     Ok(())
 }
 
@@ -414,7 +202,6 @@ fn pad_signature_partition(
     mut image: Vec<u8>,
     mut partitions: [PartitionDescriptor; 3],
 ) -> TestResult<(Vec<u8>, [PartitionDescriptor; 3])> {
-    const SECTOR: usize = 512;
     let signature = &mut partitions[2];
     let growth = 2 * 1024 * 1024 - usize::try_from(signature.length_bytes)?;
     let end = usize::try_from(signature.start_bytes + signature.length_bytes)?;
@@ -450,8 +237,4 @@ fn pad_signature_partition(
 
 fn little_u64(bytes: &[u8], offset: usize) -> TestResult<u64> {
     Ok(u64::from_le_bytes(bytes[offset..offset + 8].try_into()?))
-}
-
-fn little_u32(bytes: &[u8], offset: usize) -> TestResult<u32> {
-    Ok(u32::from_le_bytes(bytes[offset..offset + 4].try_into()?))
 }

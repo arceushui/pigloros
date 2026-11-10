@@ -202,7 +202,8 @@ fn feature_digest(features: &[String]) -> TestResult<[u8; 32]> {
     Ok(*hasher.finalize().as_bytes())
 }
 
-/// The protocol code every architecture-qualified record carries.
+/// The protocol code every architecture-qualified record carries. This is
+/// deliberately an independent encoding, not the production `code()`.
 const fn architecture_code(architecture: SandboxArchitecture) -> u64 {
     match architecture {
         SandboxArchitecture::X86_64 => 0,
@@ -214,7 +215,7 @@ fn provider_manifest(
     authority: &ProviderAuthority,
     binary_digest: [u8; 32],
     features_digest: [u8; 32],
-    architecture: u64,
+    architecture: SandboxArchitecture,
 ) -> TestResult<Vec<u8>> {
     sign_record(
         "SPM1",
@@ -232,7 +233,7 @@ fn provider_manifest(
                 integer(1),
                 integer(1),
             ])]),
-            Value::Array(vec![integer(architecture)]),
+            Value::Array(vec![integer(architecture_code(architecture))]),
             digest([13; 32]),
             digest([14; 32]),
             digest([15; 32]),
@@ -246,11 +247,11 @@ fn provider_manifest(
     )
 }
 
-fn syscall_record(architecture: u64) -> TestResult<Vec<u8>> {
+fn syscall_record(architecture: SandboxArchitecture) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(vec![
         Value::Text("SCS1".to_owned()),
         integer(1),
-        integer(architecture),
+        integer(architecture_code(architecture)),
         Value::Array(vec![Value::Text("read".to_owned())]),
         Value::Array(vec![Value::Text("read".to_owned())]),
     ]);
@@ -263,7 +264,10 @@ fn syscall_record(architecture: u64) -> TestResult<Vec<u8>> {
     ]))?)
 }
 
-fn host_profile(authority: &ProviderAuthority, architecture: u64) -> TestResult<Vec<u8>> {
+fn host_profile(
+    authority: &ProviderAuthority,
+    architecture: SandboxArchitecture,
+) -> TestResult<Vec<u8>> {
     let proofs = ordered(
         crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
             .iter()
@@ -281,7 +285,7 @@ fn host_profile(authority: &ProviderAuthority, architecture: u64) -> TestResult<
         Value::Array(vec![
             Value::Text("HCP1".to_owned()),
             integer(1),
-            integer(architecture),
+            integer(architecture_code(architecture)),
             Value::Text("6.12.0".to_owned()),
             Value::Array(proofs),
             digest([19; 32]),
@@ -298,7 +302,7 @@ fn conformance_report(
     binary_digest: [u8; 32],
     features_digest: [u8; 32],
     host_profile_digest: [u8; 32],
-    architecture: u64,
+    architecture: SandboxArchitecture,
 ) -> TestResult<Vec<u8>> {
     let capability = Value::Array(vec![
         Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
@@ -318,7 +322,7 @@ fn conformance_report(
             digest([12; 32]),
             digest(*hasher.finalize().as_bytes()),
             digest(features_digest),
-            integer(architecture),
+            integer(architecture_code(architecture)),
             digest(host_profile_digest),
             integer(0),
             Value::Text("reviewer".to_owned()),
@@ -572,7 +576,7 @@ pub(crate) fn admitted_state_with_arguments(
     arguments: &[String],
 ) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
-    let architecture = architecture_code(signing.architecture);
+    let architecture = signing.architecture;
     let trust = provider_trust(&authority, signing)?;
     let trust_digest = signed_record_digest(&trust)?;
     let revocation = provider_revocation(&authority, trust_digest)?;
@@ -685,31 +689,33 @@ impl ImageSigning {
     /// as its root-verity-sig partition embeds them.
     pub(crate) fn ddi(architecture: &str) -> TestResult<Self> {
         // The kernel's x509 descriptions of each signer.der: CN, then SKID.
-        let (root_hash, proof, certificate, key_description): (&[u8], &[u8], _, _) =
-            match architecture {
-                "x86-64" => (
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/root-hash.txt"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/proof.der"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/signer.der").as_slice(),
-                    "PiglorOS SIM1 DDI fixture x86-64: \
-                     e0b3c91db94dc506da3652b0ace1603e49009f3e",
-                ),
-                "arm64" => (
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/root-hash.txt"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/proof.der"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/signer.der").as_slice(),
-                    "PiglorOS SIM1 DDI fixture arm64: \
-                     cee4947773692d91c1a7e728a9b98d6223ec099d",
-                ),
-                _ => return Err("unknown DDI fixture".into()),
-            };
+        let (architecture, root_hash, proof, certificate, key_description): (
+            _,
+            &[u8],
+            &[u8],
+            _,
+            _,
+        ) = match architecture {
+            "x86-64" => (
+                SandboxArchitecture::X86_64,
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/root-hash.txt"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/proof.der"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/signer.der").as_slice(),
+                "PiglorOS SIM1 DDI fixture x86-64: \
+                 e0b3c91db94dc506da3652b0ace1603e49009f3e",
+            ),
+            "arm64" => (
+                SandboxArchitecture::Aarch64,
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/root-hash.txt"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/proof.der"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/signer.der").as_slice(),
+                "PiglorOS SIM1 DDI fixture arm64: \
+                 cee4947773692d91c1a7e728a9b98d6223ec099d",
+            ),
+            _ => return Err("unknown DDI fixture".into()),
+        };
         Ok(Self {
-            // The match above has already rejected any other fixture name.
-            architecture: if architecture == "arm64" {
-                SandboxArchitecture::Aarch64
-            } else {
-                SandboxArchitecture::X86_64
-            },
+            architecture,
             root_hash: hex_digest(root_hash)?,
             proof: proof.to_vec(),
             certificate,

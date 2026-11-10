@@ -351,4 +351,347 @@ mod tests {
         }
         Ok(())
     }
+
+    // GPT header field offsets (UEFI 2.10 table 5.21).
+    const SECTOR: usize = 512;
+    const FIRST_USABLE: usize = 40;
+    const LAST_USABLE: usize = 48;
+    const DISK_GUID: usize = 56;
+    const ENTRIES_LBA: usize = 72;
+    const ENTRY_COUNT: usize = 80;
+    const ENTRY_SIZE: usize = 84;
+    const TABLE_CRC: usize = 88;
+
+    /// One GPT edit: its description, whether admission accepts it, and the
+    /// edit itself. `GptImage::finish` repairs every CRC afterwards.
+    type GptCase = (&'static str, bool, fn(&mut GptImage) -> TestResult);
+
+    #[test]
+    fn usable_range_rejects_inversion_but_admits_a_single_lba() {
+        let header = |first_usable, last_usable| Header {
+            layout: TableLayout {
+                first_usable,
+                last_usable,
+                disk_guid: [1; 16],
+                count: 128,
+                entry_size: 128,
+            },
+            entries: 2,
+            crc: 0,
+        };
+        // Every other bound holds with room to spare for both headers.
+        assert_eq!(header(100, 100).validate_bounds(512, 3287, true), Ok(()));
+        assert_eq!(
+            header(100, 50).validate_bounds(512, 3287, true),
+            Err(INVALID)
+        );
+        assert_eq!(
+            header(100, 99).validate_bounds(512, 3287, true),
+            Err(INVALID)
+        );
+    }
+
+    #[test]
+    fn gpt_header_bounds_follow_both_systemd_repart_layouts() -> TestResult {
+        // Each edit applies to both headers unless it names one, so only the
+        // header bound under test differs from the unchanged fixture geometry.
+        let cases: [GptCase; 11] = [
+            ("zero disk GUID", false, |gpt| {
+                gpt.set(DISK_GUID, &[0; 16]);
+                Ok(())
+            }),
+            ("backup disk GUID differs in its last byte", false, |gpt| {
+                let byte = gpt.backup() + DISK_GUID + 15;
+                gpt.image[byte] ^= 1;
+                Ok(())
+            }),
+            ("64-byte entries", false, |gpt| {
+                gpt.set(ENTRY_SIZE, &64_u32.to_le_bytes());
+                Ok(())
+            }),
+            (
+                "first usable LBA 33 inside the primary table",
+                false,
+                |gpt| {
+                    gpt.set(FIRST_USABLE, &33_u64.to_le_bytes());
+                    Ok(())
+                },
+            ),
+            ("first usable LBA 35 after one free sector", true, |gpt| {
+                gpt.set(FIRST_USABLE, &35_u64.to_le_bytes());
+                Ok(())
+            }),
+            ("last usable LBA 3253 before one free sector", true, |gpt| {
+                gpt.set(LAST_USABLE, &3253_u64.to_le_bytes());
+                Ok(())
+            }),
+            (
+                "primary table at LBA 3 overlaps first usable LBA 34",
+                false,
+                |gpt| gpt.move_table(SECTOR, 3),
+            ),
+            (
+                "64 entries within the 16 KiB minimum reserve",
+                true,
+                |gpt| {
+                    gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
+                    Ok(())
+                },
+            ),
+            (
+                "64 entries, first usable LBA 33 inside the minimum reserve",
+                false,
+                |gpt| {
+                    gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
+                    gpt.set(FIRST_USABLE, &33_u64.to_le_bytes());
+                    Ok(())
+                },
+            ),
+            (
+                "64 entries at backup LBA 3256, last usable LBA 3255 inside the minimum reserve",
+                false,
+                |gpt| {
+                    gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
+                    gpt.set(LAST_USABLE, &3255_u64.to_le_bytes());
+                    gpt.move_table(gpt.backup(), 3256)
+                },
+            ),
+            (
+                "backup table at LBA 3254 overlaps last usable LBA 3254",
+                false,
+                |gpt| gpt.move_table(gpt.backup(), 3254),
+            ),
+        ];
+        let mismatches = gpt_mismatches(&cases)?;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn gpt_entry_bounds_follow_both_systemd_repart_layouts() -> TestResult {
+        // Partition tables and signed extents stay unchanged unless an edit
+        // names them; equal usable bounds admit the edge partitions.
+        let cases: [GptCase; 7] = [
+            (
+                "256-byte entries put a partition in an extension",
+                false,
+                |gpt| {
+                    gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
+                    gpt.set(ENTRY_SIZE, &256_u32.to_le_bytes());
+                    Ok(())
+                },
+            ),
+            ("256-byte entries, one partition per entry", true, |gpt| {
+                gpt.set(ENTRY_COUNT, &64_u32.to_le_bytes());
+                gpt.set(ENTRY_SIZE, &256_u32.to_le_bytes());
+                for header in gpt.headers() {
+                    let table = gpt.table_mut(header)?;
+                    let records = table[..3 * 128].to_vec();
+                    table[..5 * 128].fill(0);
+                    for (index, record) in records.chunks_exact(128).enumerate() {
+                        table[index * 256..index * 256 + 128].copy_from_slice(record);
+                    }
+                }
+                Ok(())
+            }),
+            ("first usable LBA at the first partition", true, |gpt| {
+                gpt.set(FIRST_USABLE, &gpt.first_partition.to_le_bytes());
+                Ok(())
+            }),
+            (
+                "first usable LBA one sector into the first partition",
+                false,
+                |gpt| {
+                    gpt.set(FIRST_USABLE, &(gpt.first_partition + 1).to_le_bytes());
+                    Ok(())
+                },
+            ),
+            ("last usable LBA at the last partition", true, |gpt| {
+                gpt.set(LAST_USABLE, &gpt.last_partition.to_le_bytes());
+                Ok(())
+            }),
+            (
+                "last usable LBA one sector into the last partition",
+                false,
+                |gpt| {
+                    gpt.set(LAST_USABLE, &(gpt.last_partition - 1).to_le_bytes());
+                    Ok(())
+                },
+            ),
+            (
+                "signature entry one sector after its signed extent",
+                false,
+                |gpt| gpt.shift_signature_entry(),
+            ),
+        ];
+        let mismatches = gpt_mismatches(&cases)?;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+        Ok(())
+    }
+
+    /// Run every case through `verify` on both architectures' systemd-repart
+    /// DDI and describe each case whose outcome differs or whose edit fails,
+    /// so a failure names every affected architecture and case.
+    fn gpt_mismatches(cases: &[GptCase]) -> TestResult<Vec<String>> {
+        let mut mismatches = Vec::new();
+        for (name, architecture) in [
+            ("x86-64", SandboxArchitecture::X86_64),
+            ("arm64", SandboxArchitecture::Aarch64),
+        ] {
+            let (original, partitions) = crate::selector::installation::tests::ddi_fixture(name)?;
+            assert_tight_gpt(&original, &partitions, name)?;
+            let manifest = layout_manifest(architecture, &original, partitions.clone())?;
+            for (case, accepted, edit) in cases {
+                let expected = if *accepted { Ok(()) } else { Err(INVALID) };
+                let outcome = run_case(&original, &partitions, &manifest, *edit);
+                match outcome {
+                    Ok(outcome) if outcome == expected => {}
+                    Ok(outcome) => mismatches.push(format!(
+                        "{name}: {case}: expected {expected:?}, verify {outcome:?}"
+                    )),
+                    Err(error) => mismatches.push(format!("{name}: {case}: {error}")),
+                }
+            }
+        }
+        Ok(mismatches)
+    }
+
+    /// Apply one edit to a copy of the fixture and verify it as a file.
+    fn run_case(
+        original: &[u8],
+        partitions: &[crate::sandbox_provider_protocol::PartitionDescriptor; 3],
+        manifest: &SignedImageManifest,
+        edit: fn(&mut GptImage) -> TestResult,
+    ) -> TestResult<Result<(), SandboxAdmissionError>> {
+        let mut gpt = GptImage::new(original.to_vec(), partitions);
+        edit(&mut gpt)?;
+        let mut file = tempfile::tempfile()?;
+        file.write_all(&gpt.finish()?)?;
+        Ok(verify(&file, manifest))
+    }
+
+    /// Both fixtures have a last LBA of 3287 and 128 entries of 128 bytes (32
+    /// sectors) at LBAs 2 and 3255 with usable LBAs 34..=3254, so every
+    /// reserved area is exactly full and each case's literal LBAs move one
+    /// bound. Partitions span LBAs 35..=3253 at most, leaving the free sector
+    /// the accept cases and the signature shift rely on.
+    fn assert_tight_gpt(
+        image: &[u8],
+        partitions: &[crate::sandbox_provider_protocol::PartitionDescriptor; 3],
+        architecture: &str,
+    ) -> TestResult {
+        assert_eq!(image.len() / SECTOR - 1, 3287, "{architecture}");
+        for (header, entries) in [(SECTOR, 2), (image.len() - SECTOR, 3255)] {
+            assert_eq!(
+                [
+                    le64(image, header + FIRST_USABLE),
+                    le64(image, header + LAST_USABLE),
+                    le64(image, header + ENTRIES_LBA),
+                ],
+                [34, 3254, entries],
+                "{architecture}"
+            );
+            assert_eq!(
+                [
+                    le32(image, header + ENTRY_COUNT),
+                    le32(image, header + ENTRY_SIZE)
+                ],
+                [128, 128],
+                "{architecture}"
+            );
+        }
+        let gpt = GptImage::new(image.to_vec(), partitions);
+        assert!(gpt.first_partition >= 35, "{architecture}");
+        assert!(gpt.last_partition <= 3253, "{architecture}");
+        Ok(())
+    }
+
+    /// A DDI image under edit, with its fixture's partition LBAs.
+    struct GptImage {
+        image: Vec<u8>,
+        first_partition: u64,
+        last_partition: u64,
+        signature_partition: u64,
+    }
+
+    impl GptImage {
+        fn new(
+            image: Vec<u8>,
+            partitions: &[crate::sandbox_provider_protocol::PartitionDescriptor; 3],
+        ) -> Self {
+            let sector = SECTOR as u64;
+            let signature = &partitions[2];
+            Self {
+                image,
+                first_partition: partitions[0].start_bytes / sector,
+                last_partition: (signature.start_bytes + signature.length_bytes) / sector - 1,
+                signature_partition: signature.start_bytes / sector,
+            }
+        }
+
+        fn backup(&self) -> usize {
+            self.image.len() - SECTOR
+        }
+
+        fn headers(&self) -> [usize; 2] {
+            [SECTOR, self.backup()]
+        }
+
+        /// Write one field identically in both headers.
+        fn set(&mut self, field: usize, bytes: &[u8]) {
+            for header in self.headers() {
+                self.image[header + field..header + field + bytes.len()].copy_from_slice(bytes);
+            }
+        }
+
+        /// One header's table, as its current LBA, count and size place it.
+        fn table_mut(&mut self, header: usize) -> TestResult<&mut [u8]> {
+            let start = usize::try_from(le64(&self.image, header + ENTRIES_LBA))? * SECTOR;
+            let count = usize::try_from(le32(&self.image, header + ENTRY_COUNT))?;
+            let size = usize::try_from(le32(&self.image, header + ENTRY_SIZE))?;
+            Ok(&mut self.image[start..start + count * size])
+        }
+
+        /// Copy one header's table to `lba` and point that header at the copy.
+        fn move_table(&mut self, header: usize, lba: u64) -> TestResult {
+            let table = self.table_mut(header)?.to_vec();
+            let start = usize::try_from(lba)? * SECTOR;
+            self.image[start..start + table.len()].copy_from_slice(&table);
+            self.image[header + ENTRIES_LBA..header + ENTRIES_LBA + 8]
+                .copy_from_slice(&lba.to_le_bytes());
+            Ok(())
+        }
+
+        /// Move the signature entry one sector later in both tables, keeping
+        /// its length, so only its start disagrees with the manifest.
+        fn shift_signature_entry(&mut self) -> TestResult {
+            let signature = self.signature_partition;
+            for header in self.headers() {
+                for entry in self.table_mut(header)?.chunks_exact_mut(128) {
+                    if le64(entry, 32) == signature {
+                        let last = le64(entry, 40);
+                        entry[32..40].copy_from_slice(&(signature + 1).to_le_bytes());
+                        entry[40..48].copy_from_slice(&(last + 1).to_le_bytes());
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        /// Repair both tables' and headers' CRCs so only the edit differs.
+        fn finish(mut self) -> TestResult<Vec<u8>> {
+            for header in self.headers() {
+                let mut crc = Crc::new();
+                crc.update(self.table_mut(header)?);
+                self.image[header + TABLE_CRC..header + TABLE_CRC + 4]
+                    .copy_from_slice(&crc.sum().to_le_bytes());
+                let size = usize::try_from(le32(&self.image, header + 12))?;
+                self.image[header + 16..header + 20].fill(0);
+                let mut crc = Crc::new();
+                crc.update(&self.image[header..header + size]);
+                self.image[header + 16..header + 20].copy_from_slice(&crc.sum().to_le_bytes());
+            }
+            Ok(self.image)
+        }
+    }
 }

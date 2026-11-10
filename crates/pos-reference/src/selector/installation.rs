@@ -847,7 +847,7 @@ pub mod tests {
     use ciborium::value::Value;
     use ed25519_dalek::SigningKey;
 
-    use crate::sandbox_provider_protocol::PartitionDescriptor;
+    use crate::sandbox_provider_protocol::{PartitionDescriptor, SandboxArchitecture};
 
     use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 
@@ -1069,7 +1069,7 @@ pub mod tests {
         /// `proof` over the synthetic `sim1-pkcs7` root hash 00..1f.
         pub(crate) fn synthetic(proof: &[u8]) -> Self {
             Self {
-                architecture: crate::sandbox_provider_protocol::SandboxArchitecture::X86_64,
+                architecture: SandboxArchitecture::X86_64,
                 root_hash: std::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
                 proof: proof.to_vec(),
                 certificate: IMAGE_CERTIFICATE,
