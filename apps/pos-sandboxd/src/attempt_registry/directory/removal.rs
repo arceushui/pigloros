@@ -96,7 +96,11 @@ mod tests {
         let (runtime, registry) = fixture()?;
         let mut prepared = Vec::new();
         for id in 1..=8 {
-            prepared.push(registry.commit_planned(&intent(id)?)?.prepare_directory()?);
+            prepared.push(
+                registry
+                    .commit_planned(&intent(id)?)?
+                    .prepare_fixture_directory()?,
+            );
         }
         for (id, directory) in (1..=8).zip(prepared) {
             let planned = intent(id)?;
@@ -123,7 +127,9 @@ mod tests {
             let (runtime, registry) = fixture()?;
             let planned = intent(1)?;
             let key = planned.unit_name().attempt_component();
-            let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+            let directory = registry
+                .commit_planned(&planned)?
+                .prepare_fixture_directory()?;
             let attempts = runtime.path().join("attempts");
             let attempt = attempts.join(key);
             let root = attempt.join("root");
@@ -174,7 +180,9 @@ mod tests {
         }
         let operation_count = {
             let (_runtime, registry) = fixture()?;
-            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&intent(1)?)?
+                .prepare_fixture_directory()?;
             let (result, count) = with_io_fault(None, || prepared.remove_unmounted());
             result?;
             count
@@ -184,7 +192,9 @@ mod tests {
             let (runtime, registry) = fixture()?;
             let planned = intent(1)?;
             let key = planned.unit_name().attempt_component();
-            let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+            let directory = registry
+                .commit_planned(&planned)?
+                .prepare_fixture_directory()?;
             let attempt = runtime.path().join("attempts").join(key);
             let root = attempt.join("root");
             let record = runtime.path().join("registry").join(key);
@@ -234,7 +244,9 @@ mod tests {
         for (poisoned, nonempty) in [(false, false), (false, true), (true, false)] {
             let (runtime, registry) = fixture()?;
             let planned = intent(1)?;
-            let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+            let directory = registry
+                .commit_planned(&planned)?
+                .prepare_fixture_directory()?;
             if nonempty {
                 fs::write(
                     runtime

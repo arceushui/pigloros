@@ -14,7 +14,7 @@ mod cases {
             directories.push(
                 tree.registry
                     .commit_planned(&PlannedAttemptIntent::new([id; 16], [9; 32])?)?
-                    .prepare_directory()?,
+                    .prepare_fixture_directory()?,
             );
         }
         for (index, directory) in directories.into_iter().enumerate() {
@@ -305,7 +305,7 @@ mod cases {
         let foreign = tree
             .registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
-            .prepare_directory()?;
+            .prepare_fixture_directory()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
         assert_eq!(
             detach_owned(root, &kernel, &foreign).await,
@@ -335,7 +335,7 @@ mod cases {
         })?;
         let key = component(&tree.prepared);
         let record = tree.runtime.path().join("registry").join(&key);
-        assert_eq!(fs::read(&record)?.len(), 393);
+        assert_eq!(fs::read(&record)?.len(), 409);
         let released = release_owned(root, &kernel, &tree.prepared).await?;
         let completed = tree
             .prepared
@@ -356,7 +356,7 @@ mod cases {
             let other = tree
                 .registry
                 .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
-                .prepare_directory()?;
+                .prepare_fixture_directory()?;
             let (kernel, root) = attached_root(&other)?;
             let foreign = release_owned(root, &kernel, &other).await?;
             let (kernel, root) = attached_root(&tree.prepared)?;

@@ -588,7 +588,7 @@ fn prepared_tree() -> Result<PreparedTree, BoxError> {
     let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
     let prepared = registry
         .commit_planned(&PlannedAttemptIntent::new([7; 16], [9; 32])?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     Ok(PreparedTree {
         runtime,
         prepared,
@@ -1727,7 +1727,30 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         snapshot.request().attempt_id,
         snapshot.request().authority.sim1_digest,
     )?;
-    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+    // An admission of another SIM1 prepares nothing.
+    let other_image = PlannedAttemptIntent::new([0x45; 16], [0x78; 32])?;
+    assert!(matches!(
+        registry
+            .commit_planned(&other_image)?
+            .prepare_directory(&admission),
+        Err(crate::SystemdAttemptRegistryError::InvalidIntent)
+    ));
+    let other_key = other_image.unit_name().attempt_component().to_owned();
+    assert!(!Path::new("/run/pigloros/sandbox/attempts")
+        .join(&other_key)
+        .exists());
+    let prepared = registry
+        .commit_planned(&planned)?
+        .prepare_directory(&admission)?;
+    // PAI2 records the held image's device and inode after the directories'.
+    let held = rustix::fs::fstat(&admission)?;
+    let record = fs::read(Path::new("/run/pigloros/sandbox/registry").join(component(&prepared)))?;
+    assert_eq!(record.len(), 100);
+    assert_eq!(&record[..4], b"PAI2");
+    assert_eq!(
+        record[84..].to_vec(),
+        [held.st_dev.to_le_bytes(), held.st_ino.to_le_bytes()].concat()
+    );
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
     let expected = Expected::for_admission(&admission, root_directory.clone())
         .ok_or("the held image identity")?;
@@ -1769,7 +1792,27 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // the released root alone lets terminal cleanup delete intent last.
     retry_and_clean(&kernel, &admission, prepared).await?;
     assert_request_recorded()?;
-    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+    // A directory whose PAI2 record names another image is never activated.
+    let fixture = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x46; 16],
+            snapshot.request().authority.sim1_digest,
+        )?)?
+        .prepare_fixture_directory()?;
+    assert_eq!(
+        activate(
+            &kernel,
+            &admission,
+            &fixture,
+            MountfsdImageActivator::connect
+        )
+        .await
+        .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
+    let prepared = registry
+        .commit_planned(&planned)?
+        .prepare_directory(&admission)?;
 
     // Every gate passes: the verified root names the attempt path.
     let verified = activate(
@@ -1894,7 +1937,7 @@ fn check_admitted_recheck(
     let checked = verified.recheck_with(kernel, prepared, &entry)?;
     let committed = fs::read(&record)?;
     assert_eq!(&committed[..4], b"PAI3");
-    assert_eq!(committed.len(), 393);
+    assert_eq!(committed.len(), 409);
     assert_eq!(checked.root_directory(), verified.root_directory());
     assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
     let foreign = registry
@@ -1902,7 +1945,7 @@ fn check_admitted_recheck(
             [0x44; 16],
             snapshot.request().authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     assert_eq!(
         verified.recheck_with(kernel, &foreign, &entry).err(),
         Some(ImageActivationError::EvidenceMismatch)

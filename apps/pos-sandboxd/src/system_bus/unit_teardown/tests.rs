@@ -803,7 +803,7 @@ pub(super) mod cases {
         )?;
         let prepared = registry
             .commit_planned(&crate::PlannedAttemptIntent::new([id; 16], [9; 32])?)?
-            .prepare_directory()?;
+            .prepare_fixture_directory()?;
         Ok((runtime, registry, prepared))
     }
 

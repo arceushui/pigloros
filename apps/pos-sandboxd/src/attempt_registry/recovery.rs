@@ -8,6 +8,7 @@ use std::time::Duration;
 use rustix::fs::{openat2, Dir, Mode, OFlags, ResolveFlags};
 
 use super::activation::{self, ActivationMarker};
+use super::directory::DIRECTORY_RECORD_SIZE;
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
     registry_io, validate_directory, PlannedAttemptIntent, RegistryDirectory,
@@ -27,6 +28,7 @@ pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 pub struct RecoveredAttemptIntent {
     planned: PlannedAttemptIntent,
     directory_identities: Option<[(u64, u64); 2]>,
+    image: Option<(u64, u64)>,
     root: Option<RootRecord>,
 }
 
@@ -44,6 +46,13 @@ impl RecoveredAttemptIntent {
     #[must_use]
     pub const fn directory_identities(&self) -> Option<[(u64, u64); 2]> {
         self.directory_identities
+    }
+
+    /// The admitted image descriptor's `(device, inode)` recorded by a PAI2
+    /// or later stage: a retained claim for correlation with a still-mounted
+    /// root's loop backing file, not evidence.
+    pub(crate) const fn recorded_image(&self) -> Option<(u64, u64)> {
+        self.image
     }
 
     /// The recorded mapper and loop generations of a PAI3 stage, if any.
@@ -64,9 +73,12 @@ impl RecoveredAttemptIntent {
         planned_bytes.copy_from_slice(&bytes[..52]);
         planned_bytes[..4].copy_from_slice(b"PAI1");
         let planned = PlannedAttemptIntent::decode(&planned_bytes)?;
-        let directory_identities = if bytes.len() >= 84 {
-            let mut identities = [0; 4];
-            for (slot, chunk) in identities.iter_mut().zip(bytes[52..84].chunks_exact(8)) {
+        let (directory_identities, image) = if bytes.len() >= DIRECTORY_RECORD_SIZE {
+            let mut identities = [0; 6];
+            for (slot, chunk) in identities
+                .iter_mut()
+                .zip(bytes[52..DIRECTORY_RECORD_SIZE].chunks_exact(8))
+            {
                 let mut word = [0; 8];
                 word.copy_from_slice(chunk);
                 *slot = u64::from_le_bytes(word);
@@ -74,16 +86,20 @@ impl RecoveredAttemptIntent {
             if identities[0] != identities[2] || identities[1] == identities[3] {
                 return Err(SystemdAttemptRegistryError::InvalidIntent);
             }
-            Some([
-                (identities[0], identities[1]),
-                (identities[2], identities[3]),
-            ])
+            (
+                Some([
+                    (identities[0], identities[1]),
+                    (identities[2], identities[3]),
+                ]),
+                Some((identities[4], identities[5])),
+            )
         } else {
-            None
+            (None, None)
         };
         RootRecord::decode_extension(bytes, &planned).map(|root| Self {
             planned,
             directory_identities,
+            image,
             root,
         })
     }
@@ -454,10 +470,14 @@ fn parse_content(
     temporary: bool,
 ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
     let header = &bytes[..bytes.len().min(4)];
-    let size = [(b"PAI1", 52), (b"PAI2", 84), (b"PAI3", ROOT_RECORD_SIZE)]
-        .into_iter()
-        .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
-        .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
+    let size = [
+        (b"PAI1", 52),
+        (b"PAI2", DIRECTORY_RECORD_SIZE),
+        (b"PAI3", ROOT_RECORD_SIZE),
+    ]
+    .into_iter()
+    .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
+    .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
     if bytes.len() > size || !temporary && bytes.len() != size {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
@@ -512,10 +532,34 @@ mod tests {
     fn directory_record() -> TestResult<Vec<u8>> {
         let mut bytes = planned()?;
         bytes[..4].copy_from_slice(b"PAI2");
-        for value in [7_u64, 11, 7, 13] {
+        for value in [7_u64, 11, 7, 13, 5, 6] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn a_directory_stage_round_trips_its_identities_and_image() -> TestResult {
+        let (runtime, held) = fixture()?;
+        let bytes = directory_record()?;
+        assert_eq!(bytes.len(), 100);
+        write_record(runtime.path(), KEY, &bytes)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let intent = recovery.entries()[0]
+            .intent()
+            .ok_or("a complete directory stage")?;
+        assert_eq!(intent.planned().attempt_id(), [1; 16]);
+        assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
+        assert_eq!(intent.recorded_image(), Some((5, 6)));
+        assert!(intent.recorded_root().is_none());
+        // A planned-only stage records neither.
+        let (runtime, held) = fixture()?;
+        write_record(runtime.path(), KEY, &planned()?)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let intent = recovery.entries()[0].intent().ok_or("a planned stage")?;
+        assert_eq!(intent.recorded_image(), None);
+        assert_eq!(intent.directory_identities(), None);
+        Ok(())
     }
 
     fn root_record() -> TestResult<Vec<u8>> {
@@ -544,6 +588,7 @@ mod tests {
             .ok_or("complete root claims")?;
         assert_eq!(intent.planned().attempt_id(), [1; 16]);
         assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
+        assert_eq!(intent.recorded_image(), Some((5, 6)));
         assert_eq!(
             intent
                 .root
@@ -555,7 +600,7 @@ mod tests {
         );
         recovery.verify_unchanged()?;
         let mut changed = bytes;
-        changed[84] ^= 1;
+        changed[100] ^= 1;
         write_record(runtime.path(), KEY, &changed)?;
         assert!(recovery.verify_unchanged().is_err());
         Ok(())
@@ -570,7 +615,7 @@ mod tests {
         for (value, component) in [(0, 0), (u64::from(u32::MAX), u32::MAX)] {
             let mut bytes = valid.clone();
             for index in [1, 2, 6, 7, 9, 10] {
-                bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
+                bytes[100 + index * 8..100 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
             let devices = read_entry(&held, KEY)?
@@ -585,7 +630,7 @@ mod tests {
         }
         for index in [0, 3, 5, 8, 11] {
             let mut bytes = valid.clone();
-            bytes[84 + index * 8..84 + (index + 1) * 8].fill(0);
+            bytes[100 + index * 8..100 + (index + 1) * 8].fill(0);
             write_record(runtime.path(), KEY, &bytes)?;
             assert!(read_entry(&held, KEY).is_err(), "zero word {index}");
         }
@@ -593,7 +638,7 @@ mod tests {
         for indices in [&[1, 6][..], &[2, 7], &[9], &[10]] {
             let mut bytes = valid.clone();
             for &index in indices {
-                bytes[84 + index * 8..84 + (index + 1) * 8]
+                bytes[100 + index * 8..100 + (index + 1) * 8]
                     .copy_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
@@ -601,16 +646,16 @@ mod tests {
         }
         for index in [6, 7] {
             let mut wrong_mapper = valid.clone();
-            wrong_mapper[84 + index * 8..84 + (index + 1) * 8]
+            wrong_mapper[100 + index * 8..100 + (index + 1) * 8]
                 .copy_from_slice(&254_u64.to_le_bytes());
             write_record(runtime.path(), KEY, &wrong_mapper)?;
             assert!(read_entry(&held, KEY).is_err(), "mapper word {index}");
         }
         let mut wrong_path = valid.clone();
-        wrong_path[180] ^= 1;
+        wrong_path[196] ^= 1;
         write_record(runtime.path(), KEY, &wrong_path)?;
         assert!(read_entry(&held, KEY).is_err());
-        for (start, end) in [(248, 377), (377, 393)] {
+        for (start, end) in [(264, 393), (393, 409)] {
             for fault in 0..4 {
                 let mut bytes = valid.clone();
                 match fault {
@@ -699,7 +744,7 @@ mod tests {
         drop(
             registry
                 .commit_planned(&PlannedAttemptIntent::new([2; 16], [2; 32])?)?
-                .prepare_directory()?,
+                .prepare_fixture_directory()?,
         );
         assert!(SystemdAttemptRecovery::open().is_err());
         drop(registry);
@@ -793,7 +838,7 @@ mod tests {
             write_record(directory.path(), &name, &bytes[..length])?;
             assert!(SystemdAttemptRecovery::from_directory(held).is_err());
         }
-        for length in 52..84 {
+        for length in 52..100 {
             let (directory, held) = fixture()?;
             let mut bytes = directory_record()?;
             bytes[20..52].fill(0);
@@ -882,7 +927,7 @@ mod tests {
                 "accepted {name}"
             );
         }
-        for fault in 0..8 {
+        for fault in 0..9 {
             let (directory, held) = fixture()?;
             let mut bytes = directory_record()?;
             match fault {
@@ -892,7 +937,9 @@ mod tests {
                 3 => bytes[20..52].fill(0),
                 4 => bytes[68..76].copy_from_slice(&8_u64.to_le_bytes()),
                 5 => bytes[76..84].copy_from_slice(&11_u64.to_le_bytes()),
+                // Oversized, or truncated to a stage without the image.
                 6 => bytes.push(0),
+                7 => bytes.truncate(84),
                 _ => bytes[..4].copy_from_slice(b"PAI1"),
             }
             write_record(directory.path(), KEY, &bytes)?;

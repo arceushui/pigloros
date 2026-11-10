@@ -349,7 +349,7 @@ mod tests {
                     private_directory(&attempt.join("root"))?;
                 }
                 _ => {
-                    committed.prepare_directory()?;
+                    committed.prepare_fixture_directory()?;
                 }
             }
         }

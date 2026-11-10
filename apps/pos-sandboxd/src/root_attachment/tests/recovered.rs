@@ -304,11 +304,25 @@ mod cases {
                 |observed| edit_loop(observed, |device| device.read_only = Some(0)),
                 false,
             ),
+            // The loop is backed by another image than the one PAI2 recorded
+            // from the admission, or its backing file cannot be read.
+            edit(
+                |observed| edit_loop(observed, |device| device.backing = Some((5, 7))),
+                false,
+            ),
+            edit(
+                |observed| edit_loop(observed, |device| device.backing = Some((4, 6))),
+                false,
+            ),
+            edit(
+                |observed| edit_loop(observed, |device| device.backing = None),
+                false,
+            ),
         ]
     }
 
-    /// Edits of only the PAI3 record's identities: another activation of a
-    /// provider image still satisfies a PAI2 attempt.
+    /// Edits of only the PAI3 record's identities: another activation of the
+    /// image PAI2 recorded still satisfies a PAI2 attempt.
     fn recorded_edits() -> Vec<Edit> {
         vec![
             edit(
@@ -355,10 +369,6 @@ mod cases {
                         }
                     });
                 },
-                true,
-            ),
-            edit(
-                |observed| edit_loop(observed, |device| device.backing = Some((5, 7))),
                 true,
             ),
         ]

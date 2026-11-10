@@ -298,7 +298,8 @@ async fn generations_absent(
 ///
 /// # Errors
 /// Returns [`ImageActivationError::AttachFailure`] when the prepared directory
-/// changed or attachment fails, and [`ImageActivationError::HostFeatureUnavailable`]
+/// changed, records another image than the admission holds, or attachment
+/// fails, and [`ImageActivationError::HostFeatureUnavailable`]
 /// when the kernel command line does not veto userspace Verity. Otherwise it
 /// returns the `MountImage` transport's error, or
 /// [`ImageActivationError::EvidenceMismatch`] for any readback or re-admission
@@ -348,6 +349,12 @@ where
             Expected::for_admission(admission, root_directory)
                 .zip(ActivationImage::from_admission(admission).ok())
                 .ok_or(ImageActivationError::Transport)
+        })
+        .and_then(|prepared| {
+            // The directory's PAI2 record must name exactly this held image.
+            (prepared.0.held == directory.image())
+                .then_some(prepared)
+                .ok_or(ImageActivationError::AttachFailure)
         });
     match prepared {
         Ok((expected, image)) => {

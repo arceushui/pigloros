@@ -414,8 +414,16 @@ mod cases {
         let registry =
             SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
         registry.commit_planned(&intent(1)?)?;
-        drop(registry.commit_planned(&intent(2)?)?.prepare_directory()?);
-        drop(registry.commit_planned(&intent(3)?)?.prepare_directory()?);
+        drop(
+            registry
+                .commit_planned(&intent(2)?)?
+                .prepare_fixture_directory()?,
+        );
+        drop(
+            registry
+                .commit_planned(&intent(3)?)?
+                .prepare_fixture_directory()?,
+        );
         fs::remove_dir(
             runtime
                 .path()
@@ -426,7 +434,7 @@ mod cases {
         if let Some(ending) = root {
             let prepared = registry
                 .commit_planned(&intent(ROOT_ATTEMPT)?)?
-                .prepare_directory()?;
+                .prepare_fixture_directory()?;
             let identity = crate::test_fixtures::recorded_identity(&prepared)?;
             prepared.record_root(&identity, || Ok(()))?;
             ending(prepared);

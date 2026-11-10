@@ -76,7 +76,7 @@ mod cases {
                 SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
             let directory = registry
                 .commit_planned(&PlannedAttemptIntent::new([1; 16], [9; 32])?)?
-                .prepare_directory()?;
+                .prepare_fixture_directory()?;
             Ok(Self {
                 runtime,
                 registry,
@@ -402,7 +402,7 @@ mod cases {
         for id in 1..=8 {
             let directory = registry
                 .commit_planned(&PlannedAttemptIntent::new([id; 16], [9; 32])?)?
-                .prepare_directory()?;
+                .prepare_fixture_directory()?;
             let fixture =
                 TeardownFixture::new(id, TeardownStop::Empty, TeardownReset::Unload).await?;
             let ownership = directory.execution_ownership();

@@ -63,7 +63,9 @@ mod cases {
 
     /// Commit, extend with the tree, record the root, release it and finish.
     async fn lifecycle(registry: &SystemdAttemptRegistry) -> TestResult {
-        let prepared = registry.commit_planned(&intent()?)?.prepare_directory()?;
+        let prepared = registry
+            .commit_planned(&intent()?)?
+            .prepare_fixture_directory()?;
         let identity = crate::test_fixtures::recorded_identity(&prepared)?;
         prepared.record_root(&identity, || Ok(()))?;
         let released = crate::test_fixtures::released_root(&prepared).await?;

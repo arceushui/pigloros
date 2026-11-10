@@ -8,8 +8,10 @@
 //! EROFS mount at this attempt's fixed root path, on a read-only dm-verity
 //! device over two partitions of one read-only, autoclear loop device that is
 //! backed by a provider image, by the canonical and device/inode rules of the
-//! provider loop sweep. A PAI3 record must also match every recorded mount,
-//! mapper, loop and image identity. Anything else is refused and left
+//! provider loop sweep. The loop's backing file must be the image whose
+//! device and inode the PAI2 stage recorded from the attempt's admission, and
+//! a PAI3 record must also match every recorded mount, mapper, loop and image
+//! identity. Anything else is refused and left
 //! mounted. A root with any submount, or an unreadable mount table, is also
 //! refused. After the descriptor-bound lazy detach, the root descriptor closes
 //! and the mapper and loop generations read back are awaited absent.
@@ -84,7 +86,7 @@ pub(super) async fn detach_with(
         &observed,
         (mount, parent),
         (&root_directory, images),
-        intent.recorded_root(),
+        (intent.recorded_image(), intent.recorded_root()),
     )
     .ok_or(ImageActivationError::EvidenceMismatch)?;
     before(kernel, deadline)?;
@@ -104,14 +106,14 @@ pub(super) async fn detach_with(
 }
 
 /// The mapper and loop generations of `mount`, mounted on the mount
-/// `parent`, when it is exactly a provider root at `root_directory` over an
-/// image in `images` that matches `recorded`, if any.
+/// `parent`, when it is exactly a provider root at `root_directory` over the
+/// recorded `image` in `images` that matches `recorded`, if any.
 fn provider_root(
     kernel: &impl AttachmentKernel,
     observed: &Observations,
     (mount, parent): (Node, u64),
     (root_directory, images): (&ActivatedRootDirectory, &Path),
-    recorded: Option<&RecordedRoot>,
+    (image, recorded): (Option<(u64, u64)>, Option<&RecordedRoot>),
 ) -> Option<[BlockIdentity; 2]> {
     let entry = observed.entry.as_ref()?;
     let mapper = observed.mapper.as_ref()?;
@@ -137,6 +139,8 @@ fn provider_root(
         && loop_device.size_limit == Some(0)
         && loop_device.autoclear == Some(1)
         && loop_device.read_only == Some(1)
+        // The admitted image PAI2 recorded; unreadable backing info refuses.
+        && image.is_some_and(|image| loop_device.backing == Some(image))
         && kernel.provider_image(loop_name, images)
         // A lazy detach would also detach any submount.
         && kernel.has_submounts(mount.mount_id) == Some(false);
