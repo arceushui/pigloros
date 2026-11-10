@@ -3,8 +3,9 @@
 //!
 //! Before mountfsd is called, the prepared attempt directory is verified
 //! again. The kernel command line must also veto systemd's userspace Verity
-//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). One
-//! bounded `MountImage` call then activates the admitted image. Its single
+//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). The
+//! registry durably records the request's boot and time (owner decision D2),
+//! and one bounded `MountImage` call then activates the admitted image. Its single
 //! sealed root mount descriptor is attached by descriptor with `move_mount`
 //! onto the held root directory descriptor, so no path is resolved. It is
 //! then made private, and detached on rejection, through that descriptor's
@@ -33,6 +34,7 @@ mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
+pub use release::ReleasedAttemptRoot;
 
 use std::{
     fs::File,
@@ -222,6 +224,63 @@ fn recheck<K: AttachmentKernel>(
         .map(|()| root.expected.root_directory.clone())
 }
 
+impl RootResourceIdentity {
+    /// Whether the recorded mapper and loop generations of a previous
+    /// runtime's root are both absent now, by fresh sysfs observation.
+    ///
+    /// Restart reconciliation uses this only for a root whose directory is
+    /// already unmounted. No block-device descriptor is opened.
+    ///
+    /// # Errors
+    /// [`ImageActivationError::ResourceAbsenceUnverified`] for a contradictory
+    /// generation stamp, an unreadable device index or a zero sequence.
+    pub(crate) async fn recorded_generations_absent(
+        generations: [((u32, u32), u64); 2],
+    ) -> Result<bool, ImageActivationError> {
+        generations_absent(&HostKernel::system(), generations).await
+    }
+
+    /// Whether no loop device is backed by a provider image now, by a fresh
+    /// sysfs sweep of every bound loop device's backing file.
+    ///
+    /// Restart reconciliation uses this after every attempt unit was observed
+    /// absent, so a remaining loop over an image belongs to no live attempt,
+    /// including one whose activation crashed before its root was recorded.
+    /// The sweep runs on a blocking thread so the caller's deadline bounds it.
+    /// No block-device descriptor is opened.
+    ///
+    /// # Errors
+    /// [`ImageActivationError::ResourceAbsenceUnverified`] when the image
+    /// directory cannot be resolved, or the block class or a bound loop
+    /// device's backing file cannot be read.
+    pub(crate) async fn provider_loops_absent() -> Result<bool, ImageActivationError> {
+        let images =
+            std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+                .join("images");
+        let swept = tokio::task::spawn_blocking(move || {
+            HostKernel::system().provider_loops_absent(&images)
+        })
+        .await;
+        swept
+            .ok()
+            .flatten()
+            .ok_or(ImageActivationError::ResourceAbsenceUnverified)
+    }
+}
+
+async fn generations_absent(
+    kernel: &HostKernel,
+    generations: [((u32, u32), u64); 2],
+) -> Result<bool, ImageActivationError> {
+    let [mapper, loop_device] = generations.map(|(device, sequence)| {
+        std::num::NonZeroU64::new(sequence).map(|diskseq| BlockIdentity { device, diskseq })
+    });
+    match mapper.zip(loop_device) {
+        Some(devices) => kernel.devices_absent(devices.into()).await,
+        None => Err(ImageActivationError::ResourceAbsenceUnverified),
+    }
+}
+
 /// Activate, attach and verify the admitted SIM1 root of one attempt.
 ///
 /// # Errors
@@ -284,7 +343,7 @@ where
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
             let mounted = match connected {
-                Ok(activator) => activator.mount_image(image).await,
+                Ok(activator) => send_recorded(directory, activator, image).await,
                 Err(error) => Err(error),
             };
             mounted.and_then(|mount| {
@@ -298,6 +357,24 @@ where
             })
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Durably record the request's boot and time, so a restart can wait it out
+/// (owner decision D2), and only then send it.
+async fn send_recorded<A: ImageActivator>(
+    directory: &PreparedAttemptDirectory,
+    activator: A,
+    image: ActivationImage,
+) -> Result<QuarantinedRootMount, ImageActivationError> {
+    match directory.record_activation_request() {
+        Ok(()) => {
+            // Only a request that reaches mountfsd can leave loop/dm
+            // resources, so only it binds intent to a released root.
+            directory.begin_activation();
+            activator.mount_image(image).await
+        }
+        Err(_) => Err(ImageActivationError::AttachFailure),
     }
 }
 
@@ -337,4 +414,6 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
-pub use tests::recorded_identity;
+pub use tests::{attached_fixture_root, fake_root_release, release_fake_root, FakeRootRelease};
+#[cfg(test)]
+pub use tests::{recorded_identity, released_root};
