@@ -10,7 +10,8 @@
 //! backed by a provider image, by the canonical and device/inode rules of the
 //! provider loop sweep. A PAI3 record must also match every recorded mount,
 //! mapper, loop and image identity. Anything else is refused and left
-//! mounted. After the descriptor-bound lazy detach, the root descriptor closes
+//! mounted. A root with any submount, or an unreadable mount table, is also
+//! refused. After the descriptor-bound lazy detach, the root descriptor closes
 //! and the mapper and loop generations read back are awaited absent.
 
 use std::{os::fd::AsFd, path::Path};
@@ -136,7 +137,9 @@ fn provider_root(
         && loop_device.size_limit == Some(0)
         && loop_device.autoclear == Some(1)
         && loop_device.read_only == Some(1)
-        && kernel.provider_image(loop_name, images);
+        && kernel.provider_image(loop_name, images)
+        // A lazy detach would also detach any submount.
+        && kernel.has_submounts(mount.mount_id) == Some(false);
     let as_recorded = recorded.is_none_or(|recorded| {
         recorded.mount_id == mount.mount_id
             && recorded.inode == mount.inode

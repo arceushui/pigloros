@@ -62,6 +62,29 @@ mod cases {
         listing: Listing,
         loaded: Loaded,
         lookups: Arc<Mutex<Vec<String>>>,
+        resets: Loaded,
+    }
+
+    /// The service object of a failed unit whose cgroup systemd removed.
+    struct FailedService(String);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
+    impl FailedService {
+        #[zbus(property, name = "ControlGroup")]
+        fn control_group(&self) -> fdo::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The unit object of a failed unit.
+    struct FailedUnit(String);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl FailedUnit {
+        #[zbus(property, name = "ActiveState")]
+        fn active_state(&self) -> fdo::Result<String> {
+            Ok(self.0.clone())
+        }
     }
 
     fn loaded_names(loaded: &Loaded) -> fdo::Result<Vec<String>> {
@@ -121,6 +144,19 @@ mod cases {
             }
         }
 
+        /// Clearing the failed state unloads the unit.
+        fn reset_failed_unit(&self, name: String) -> fdo::Result<()> {
+            self.resets
+                .lock()
+                .map_err(|error| fdo::Error::Failed(error.to_string()))?
+                .push(name.clone());
+            self.loaded
+                .lock()
+                .map_err(|error| fdo::Error::Failed(error.to_string()))?
+                .retain(|loaded| *loaded != name);
+            Ok(())
+        }
+
         fn get_unit(&self, name: String) -> Result<OwnedObjectPath, BoxDBusError> {
             self.lookups
                 .lock()
@@ -177,26 +213,51 @@ mod cases {
         transport: SystemdTransientUnitTransport,
         lookups: Arc<Mutex<Vec<String>>>,
         loaded: Loaded,
+        resets: Loaded,
     }
 
     async fn host(listing: Listing, loaded: Vec<String>) -> TestResult<Host> {
+        host_with_failed(listing, loaded, &[]).await
+    }
+
+    /// A fake manager whose `failed` units are failed with no cgroup.
+    async fn host_with_failed(
+        listing: Listing,
+        loaded: Vec<String>,
+        failed: &[String],
+    ) -> TestResult<Host> {
         let lookups = Arc::new(Mutex::new(Vec::new()));
         let loaded = Arc::new(Mutex::new(loaded));
+        let resets = Arc::new(Mutex::new(Vec::new()));
         let manager = Manager {
             subscriptions: AtomicUsize::new(0),
             listing,
             loaded: Arc::clone(&loaded),
             lookups: Arc::clone(&lookups),
+            resets: Arc::clone(&resets),
         };
-        let (server, client) =
-            peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager))
-                .await?;
+        let paths = failed
+            .iter()
+            .map(|name| unit_path(name))
+            .collect::<TestResult<Vec<_>>>()?;
+        let (server, client) = peer_connections(|server| {
+            paths.iter().fold(
+                server.serve_at("/org/freedesktop/systemd1", manager),
+                |server, path| {
+                    server
+                        .serve_at(path.as_str(), FailedService(String::new()))
+                        .serve_at(path.as_str(), FailedUnit("failed".to_owned()))
+                },
+            )
+        })
+        .await?;
         let transport = SystemdTransientUnitTransport::from_connection(client).await?;
         Ok(Host {
             _server: server,
             transport,
             lookups,
             loaded,
+            resets,
         })
     }
 
@@ -529,6 +590,45 @@ mod cases {
     }
 
     #[tokio::test]
+    async fn the_public_entry_stops_a_failed_unit_and_checks_each_root() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::the_public_entry_stops_a_failed_unit_and_checks_each_root",
+        )? {
+            return Ok(());
+        }
+        // Attempt 2's recorded unit survived as a failed unit whose cgroup
+        // systemd removed (owner decision A).
+        let runtime = seed(false)?;
+        let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
+        let network = Network::new(Cleanup::Removes);
+        let result = reconcile_restart(
+            &host.transport,
+            recovery(runtime.path())?,
+            &network,
+            cleanup()?,
+            deadline(),
+        )
+        .await;
+        // The host reset the unit and observed it unloaded, and found the
+        // recorded roots unmounted on the real kernel; the network was then
+        // cleaned. The real host's loop sweep decides the rest.
+        assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
+        assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
+        assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        match &result {
+            Ok(reconciled) => {
+                assert_eq!(reconciled.attempts().len(), 3);
+                assert_eq!(count(&runtime.path().join("registry"))?, 1);
+            }
+            Err(RestartReconciliationError::ProviderLoops(_)) => {
+                assert_untouched(runtime.path(), 4)?;
+            }
+            Err(error) => return Err(format!("unexpected refusal: {error:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_surviving_unlisted_or_unobservable_unit_keeps_admission_closed() -> TestResult {
         if !in_lock_test_process(
         "restart::tests::cases::a_surviving_unlisted_or_unobservable_unit_keeps_admission_closed",
@@ -756,10 +856,11 @@ mod cases {
             let host = host(Listing::Empty, Vec::new()).await?;
             let survivors = FakeSurvivors::new(&host, Outcome::Succeeds, outcome);
             let probes = AtomicUsize::new(0);
+            let network = Network::new(Cleanup::Removes);
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &Network::new(Cleanup::Removes),
+                &network,
                 &survivors,
                 deadlines()?,
                 (
@@ -785,6 +886,8 @@ mod cases {
             // before any device is probed.
             assert_eq!(survivors.detached()?, vec![[2; 16], [ROOT_ATTEMPT; 16]]);
             assert_eq!(probes.load(Ordering::SeqCst), 0);
+            // Roots are detached before the network cleanup, which never runs.
+            assert_eq!(network.calls.load(Ordering::SeqCst), 0);
             assert_untouched(runtime.path(), 5)?;
         }
         Ok(())

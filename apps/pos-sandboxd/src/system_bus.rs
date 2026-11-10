@@ -305,6 +305,10 @@ pub enum SystemdTransientUnitTransportError {
     /// The exact attempt unit could not be identified at cgroup binding time.
     #[error("systemd attempt-unit identity changed before cgroup binding")]
     CgroupUnitMismatch,
+    /// A unit without a cgroup is not inactive or failed, so its processes
+    /// cannot be proved absent.
+    #[error("a systemd attempt unit without a cgroup is not inactive or failed")]
+    CgrouplessUnitActive,
     /// The typed service `ControlGroup` property could not be read.
     #[error("failed to read the exact systemd attempt ControlGroup")]
     CgroupReadback(#[source] zbus::Error),

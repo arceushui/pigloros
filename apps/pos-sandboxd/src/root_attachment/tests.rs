@@ -543,6 +543,7 @@ struct FakeKernel {
     private: Result<(), ImageActivationError>,
     observations: Observations,
     provider_image: bool,
+    submounts: Option<bool>,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
     readbacks: AtomicUsize,
@@ -564,6 +565,7 @@ impl FakeKernel {
             private: Ok(()),
             observations,
             provider_image: true,
+            submounts: Some(false),
             detach: Ok(()),
             detached: AtomicUsize::new(0),
             readbacks: AtomicUsize::new(0),
@@ -612,6 +614,10 @@ impl AttachmentKernel for FakeKernel {
 
     fn provider_image(&self, _: &str, _: &Path) -> bool {
         self.provider_image
+    }
+
+    fn has_submounts(&self, _: u64) -> Option<bool> {
+        self.submounts
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {

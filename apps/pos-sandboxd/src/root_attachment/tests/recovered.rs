@@ -394,16 +394,21 @@ mod cases {
                 assert_eq!(kernel.detached(), usize::from(accepted));
             }
         }
-        // A loop that is not backed by a provider image.
-        for recorded in [false, true] {
-            let (_runtime, entry) = recovered_entry(recorded)?;
-            let kernel = FakeKernel {
-                provider_image: false,
-                ..mounted_kernel(provider_root()?)?
-            };
-            let result = detach(&kernel, entry, cleanup_deadline()).await;
-            assert_eq!(result, Err(ImageActivationError::EvidenceMismatch));
-            assert_eq!(kernel.detached(), 0);
+        // A loop that is not backed by a provider image, a root with a
+        // submount, and an unreadable mount table.
+        for (provider_image, submounts) in [(false, Some(false)), (true, Some(true)), (true, None)]
+        {
+            for recorded in [false, true] {
+                let (_runtime, entry) = recovered_entry(recorded)?;
+                let kernel = FakeKernel {
+                    provider_image,
+                    submounts,
+                    ..mounted_kernel(provider_root()?)?
+                };
+                let result = detach(&kernel, entry, cleanup_deadline()).await;
+                assert_eq!(result, Err(ImageActivationError::EvidenceMismatch));
+                assert_eq!(kernel.detached(), 0);
+            }
         }
         Ok(())
     }
@@ -488,6 +493,29 @@ mod cases {
             crate::RootResourceIdentity::detach_recovered(foreign, cleanup_deadline()).await,
             Err(ImageActivationError::EvidenceMismatch)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_mount_table_entry_parented_by_the_root_is_a_submount() -> TestResult {
+        let host = tempfile::tempdir()?;
+        let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+        // No mount table.
+        assert_eq!(kernel.has_submounts(41), None);
+        fs::create_dir_all(host.path().join("proc/self"))?;
+        let root =
+            "41 30 253:3 / /run/pigloros/sandbox/attempts/a/root ro,relatime - erofs /dev/dm-3 ro";
+        let child = "42 41 0:5 / /run/pigloros/sandbox/attempts/a/root/x rw - tmpfs tmpfs rw";
+        let sibling = "43 30 0:6 / /run/other rw - tmpfs tmpfs rw";
+        for (table, expected) in [
+            (format!("{root}\n{sibling}\n"), Some(false)),
+            (format!("{root}\n{child}\n"), Some(true)),
+            // A malformed line could hide a submount.
+            (format!("{root}\nnot a mount entry\n"), None),
+        ] {
+            fs::write(host.path().join("proc/self/mountinfo"), &table)?;
+            assert_eq!(kernel.has_submounts(41), expected, "{table}");
+        }
         Ok(())
     }
 

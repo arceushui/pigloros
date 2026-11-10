@@ -84,6 +84,9 @@ trait AttachmentKernel: Sync {
     /// unresolvable image directory or an unreadable or empty backing file is
     /// not a provider image.
     fn provider_image(&self, loop_name: &str, images: &std::path::Path) -> bool;
+    /// Whether any mount has the mount `mount_id` as its parent; `None` when
+    /// the mount table cannot be read completely.
+    fn has_submounts(&self, mount_id: u64) -> Option<bool>;
     /// Detach an owned, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
     /// Independently observe whether both original block generations ended.

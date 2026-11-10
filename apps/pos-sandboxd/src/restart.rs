@@ -11,20 +11,24 @@
 //!    mapping checked in both directions, and the unit is stopped with
 //!    bounded grace and escalation, its cgroup observed empty and the unit
 //!    observed unloaded, all within the cleanup's unit phases. A unit with no
-//!    cgroup to bind, such as a failed unit whose cgroup systemd already
-//!    removed, cannot be proved empty and keeps admission closed;
+//!    cgroup is proven empty only when it is inactive or failed, since
+//!    systemd removes a cgroup only once it is empty (the owner's reading of
+//!    ADR-087 §3, decision A, 2026-11-10); a failed one is reset, and either
+//!    is then observed unloaded. A unit without a cgroup in any other state
+//!    keeps admission closed;
 //! 2. proves the exact unit of every recorded attempt and temporary write
 //!    absent, including a unit the listing may have hidden;
-//! 3. removes orphaned provider network state through
-//!    [`OrphanNetworkCleanup`], the seam for the #911 enumerate-and-remove
-//!    primitive;
-//! 4. detaches a root still mounted on a recorded attempt directory. The
+//! 3. detaches a root still mounted on a recorded attempt directory. The
 //!    mount is read back through the held directory and detached by
-//!    descriptor only when it is exactly a provider root on a loop device
-//!    backed by a provider image, matching the PAI3 record if there is one;
-//!    its mapper and loop generations are then awaited absent by the
-//!    cleanup's release deadline. Anything else is left mounted and keeps
-//!    admission closed;
+//!    descriptor only when it is exactly a provider root without submounts,
+//!    on a loop device backed by a provider image, matching the PAI3 record
+//!    if there is one; its mapper and loop generations are then awaited
+//!    absent by the cleanup's release deadline. Anything else is left mounted
+//!    and keeps admission closed;
+//! 4. removes orphaned provider network state through
+//!    [`OrphanNetworkCleanup`], the seam for the #911 enumerate-and-remove
+//!    primitive, by the overall deadline, so it cannot use up the detach
+//!    budget;
 //! 5. proves every PAI3 root's recorded loop/dm generations absent now;
 //! 6. waits until no `MountImage` request of the previous runtime can still
 //!    attach a loop device (owner decision D2). The registry's activation
@@ -344,8 +348,9 @@ fn committed(recovery: &SystemdAttemptRecovery, attempt_id: [u8; 16]) -> bool {
         .any(|entry| !entry.is_temporary() && entry.attempt_id() == attempt_id)
 }
 
-/// Remove orphaned network state, then detach every still-mounted root by
-/// the cleanup's release deadline.
+/// Detach every still-mounted root by the cleanup's release deadline, then
+/// remove orphaned network state by the overall deadline. Each step has its
+/// own bound, so a slow network cleanup cannot use up the detach budget.
 async fn release_survivors<N: OrphanNetworkCleanup + Sync, S: Survivors>(
     recovery: &SystemdAttemptRecovery,
     network: &N,
@@ -353,8 +358,8 @@ async fn release_survivors<N: OrphanNetworkCleanup + Sync, S: Survivors>(
     cleanup: AttemptCleanupDeadlines,
     deadline: Instant,
 ) -> Reconciled<()> {
-    match remove_network(network, deadline).await {
-        Ok(()) => detach_roots(recovery, survivors, cleanup.released().min(deadline)).await,
+    match detach_roots(recovery, survivors, cleanup.released().min(deadline)).await {
+        Ok(()) => remove_network(network, deadline).await,
         Err(error) => Err(error),
     }
 }

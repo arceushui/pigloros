@@ -380,6 +380,16 @@ impl AttachmentKernel for HostKernel {
             })
     }
 
+    fn has_submounts(&self, mount_id: u64) -> Option<bool> {
+        read_text(&self.proc.join("self/mountinfo")).and_then(|mountinfo| {
+            mountinfo
+                .lines()
+                .map(parse_entry)
+                .collect::<Option<Vec<_>>>()
+                .map(|entries| entries.iter().any(|entry| entry.parent_id == mount_id))
+        })
+    }
+
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
         unmount(self.descriptor_path(mount), UnmountFlags::DETACH)
             .map_err(|_| ImageActivationError::TeardownFailure)
