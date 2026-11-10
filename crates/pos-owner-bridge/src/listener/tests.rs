@@ -24,8 +24,9 @@ use super::serve::{
     ServeContext, SilentReason, TimedRead, MIN_TIMEOUT, REQUEST_BUFFER_BYTES,
 };
 use super::{
-    dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig, ListenerTimeouts,
-    LoopbackListener, Shared, SlotGuard, ADR_TIMEOUTS, MAX_CONCURRENT_CONNECTIONS,
+    accept_loop, dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig,
+    ListenerTimeouts, LoopbackListener, Shared, SlotGuard, ADR_TIMEOUTS,
+    MAX_CONCURRENT_CONNECTIONS,
 };
 use crate::{BridgeError, LoopbackPort, UnavailableCode};
 
@@ -667,6 +668,29 @@ fn a_worker_that_runs_gives_back_its_slot_when_it_finishes() -> TestResult {
 
 fn bound() -> Result<TcpListener, io::Error> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+}
+
+#[test]
+fn idle_and_full_accept_pauses_keep_only_independently_owned_slots() -> TestResult {
+    let listener = bound()?;
+    listener.set_nonblocking(true)?;
+    for count in [1, MAX_CONCURRENT_CONNECTIONS] {
+        let shared = Arc::new(Shared::default());
+        let guards: Vec<_> = (0..count)
+            .map(|_| SlotGuard::acquire(&shared).ok_or("no slot"))
+            .collect::<Result<_, _>>()?;
+        let pauses = std::cell::Cell::new(0);
+        accept_loop(&listener, &serve_context(), &shared, || {
+            pauses.set(pauses.get() + 1);
+            assert_eq!(held(&shared), count);
+            shared.stop.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(pauses.get(), 1);
+        assert_eq!(held(&shared), count);
+        drop(guards);
+        assert_eq!(held(&shared), 0);
+    }
+    Ok(())
 }
 
 #[test]

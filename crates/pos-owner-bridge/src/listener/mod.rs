@@ -265,7 +265,9 @@ fn start_accept_threads(
         let (worker_context, worker_shared) = (Arc::clone(context), Arc::clone(shared));
         let started = configure(&socket).and_then(|()| {
             spawn(Box::new(move || {
-                accept_loop(&socket, &worker_context, &worker_shared);
+                accept_loop(&socket, &worker_context, &worker_shared, || {
+                    thread::sleep(ACCEPT_POLL);
+                });
             }))
         });
         match started {
@@ -283,10 +285,15 @@ fn start_accept_threads(
     Ok(workers)
 }
 
-fn accept_loop(listener: &TcpListener, context: &Arc<ServeContext>, shared: &Arc<Shared>) {
+fn accept_loop(
+    listener: &TcpListener,
+    context: &Arc<ServeContext>,
+    shared: &Arc<Shared>,
+    mut pause: impl FnMut(),
+) {
     while !shared.stop.load(Ordering::SeqCst) {
         let Some(slot) = SlotGuard::acquire(shared) else {
-            thread::sleep(ACCEPT_POLL);
+            pause();
             continue;
         };
         #[cfg(feature = "test-support")]
@@ -302,7 +309,10 @@ fn accept_loop(listener: &TcpListener, context: &Arc<ServeContext>, shared: &Arc
                 }
                 dispatch(stream, slot, context, spawn_thread);
             }
-            Err(_) => thread::sleep(ACCEPT_POLL),
+            Err(_) => {
+                drop(slot);
+                pause();
+            }
         }
     }
 }

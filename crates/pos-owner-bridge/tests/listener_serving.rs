@@ -200,6 +200,45 @@ fn an_incomplete_header_block_is_closed_at_the_header_deadline_without_a_respons
 }
 
 #[test]
+fn two_held_silent_connections_leave_capacity_for_owner_document() -> TestResult {
+    let timeouts = ListenerTimeouts {
+        first_byte: Duration::from_secs(30),
+        ..ListenerConfig::adr().timeouts()
+    };
+    let config = ListenerConfig::new(timeouts, *ListenerConfig::adr().expected_digest());
+    let listener = start(config)?;
+    let silent: Vec<_> = (0..2)
+        .map(|_| TcpStream::connect(listener.v4_addr()))
+        .collect::<io::Result<_>>()?;
+    let limit = Instant::now() + Duration::from_secs(10);
+    while listener.observation().handling < 2 {
+        if Instant::now() >= limit {
+            return Err("silent connections were not accepted".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+    assert!(is_the_pinned_owner_response(&response));
+    let limit = Instant::now() + Duration::from_secs(10);
+    let observation = loop {
+        let observation = listener.observation();
+        if observation.handling == 2 {
+            break observation;
+        }
+        if Instant::now() >= limit {
+            return Err("owner connection did not retire".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(observation.silent, 0);
+    assert_eq!(observation.handling, 2);
+    assert_eq!(listener.served().count, 1);
+    assert!(listener.served().integrity_ok);
+    drop(silent);
+    Ok(())
+}
+
+#[test]
 fn silent_preconnect_sockets_cannot_starve_a_real_navigation() -> TestResult {
     let listener = start(ListenerConfig::adr())?;
     let address = listener.v4_addr();
