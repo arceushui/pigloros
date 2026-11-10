@@ -484,10 +484,7 @@ fn the_probe_target_takes_the_second_address_of_an_aligned_slash_30() {
             .map(|(host, _)| host),
         Some(Ipv4Addr::new(255, 255, 255, 253))
     );
-    for misaligned in [
-        Ipv4Addr::new(198, 18, 0, 5),
-        Ipv4Addr::new(255, 255, 255, 255),
-    ] {
+    for misaligned in [Ipv4Addr::new(198, 18, 0, 5), Ipv4Addr::BROADCAST] {
         assert_eq!(probe(misaligned).addresses(), None);
     }
 }
