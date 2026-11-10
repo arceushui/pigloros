@@ -170,6 +170,28 @@ async fn the_reconciliation_sweep_fails_closed_without_privilege() -> TestResult
     Ok(())
 }
 
+#[tokio::test]
+async fn the_blocking_sweep_reports_its_outcome_and_a_panic_as_panicked() {
+    assert!(on_blocking_pool(|| Ok(())).await.is_ok());
+    let failed = on_blocking_pool(|| Err(OrphanSweepError::Netlink(NetlinkError::Residual))).await;
+    assert!(
+        matches!(
+            failed,
+            Err(OrphanSweepError::Netlink(NetlinkError::Residual))
+        ),
+        "{failed:?}"
+    );
+    let panicked =
+        on_blocking_pool(|| std::panic::resume_unwind(Box::new("the sweep panicked"))).await;
+    assert!(
+        matches!(
+            panicked,
+            Err(OrphanSweepError::Netlink(NetlinkError::Panicked))
+        ),
+        "{panicked:?}"
+    );
+}
+
 /// Tests that need `NET_ADMIN`, `SYS_ADMIN` and mounts. Each re-runs itself
 /// in the isolated container that grants exactly those, and runs its body
 /// there, where the container's own network namespace is the host's.

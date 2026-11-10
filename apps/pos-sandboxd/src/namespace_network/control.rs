@@ -403,6 +403,16 @@ impl NetlinkNamespaceControl {
     }
 }
 
+/// Run the blocking `sweep` on Tokio's blocking pool; a sweep that panics
+/// fails as [`NetlinkError::Panicked`].
+async fn on_blocking_pool(
+    sweep: impl FnOnce() -> Result<(), OrphanSweepError> + Send + 'static,
+) -> Result<(), OrphanSweepError> {
+    tokio::task::spawn_blocking(sweep)
+        .await
+        .unwrap_or(Err(OrphanSweepError::Netlink(NetlinkError::Panicked)))
+}
+
 /// Restart reconciliation's network sweep (#1200): the blocking
 /// [`NetlinkNamespaceControl::remove_orphans`] on Tokio's blocking pool, so
 /// the reconciling task's worker keeps running other tasks.
@@ -411,11 +421,7 @@ impl crate::OrphanNetworkCleanup for NetlinkNamespaceControl {
 
     fn remove_orphans(&self) -> impl Future<Output = Result<(), OrphanSweepError>> + Send {
         let control = self.clone();
-        async move {
-            tokio::task::spawn_blocking(move || control.remove_orphans())
-                .await
-                .unwrap_or(Err(OrphanSweepError::Netlink(NetlinkError::Panicked)))
-        }
+        on_blocking_pool(move || control.remove_orphans())
     }
 }
 
