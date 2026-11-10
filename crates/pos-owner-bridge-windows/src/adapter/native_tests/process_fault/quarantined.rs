@@ -132,6 +132,87 @@ fn blocked(keeper: &mut QuarantineKeeper, fixture: &mut Fixture, folder: &Path) 
     Ok(())
 }
 
+fn retire_keeper(keeper: &mut QuarantineKeeper, fixture: &mut Fixture) {
+    let mut returned = None;
+    loop {
+        let polled = keeper_poll(keeper, fixture);
+        if let Some(driver) = polled.driver {
+            returned = Some(driver);
+        }
+        if !polled.remaining && fixture.surface.idle() {
+            break;
+        }
+        readiness::pump_retaining(&fixture.surface);
+    }
+    if let Some(driver) = returned {
+        drop(driver.into_slots());
+    }
+}
+
+fn observe_case(
+    fixture: &mut Fixture,
+    keeper: &mut QuarantineKeeper,
+    folder: &Path,
+    keeper_held: &std::rc::Rc<std::cell::Cell<bool>>,
+    wipe: (bool, bool, bool),
+    target: ProcessFaultTarget,
+    inject: bool,
+) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
+    let (refused, wiped, native_wiped) = wipe;
+    if !refused || !wiped || !native_wiped {
+        return Err("quarantine mappings or secrets were not wiped".into());
+    }
+    let state = fixture
+        .surface
+        .quarantined_fault_state()
+        .map_err(|()| "quarantined owners not established")?;
+    fixture
+        .trace
+        .borrow_mut()
+        .push(ProcessFaultMark::ReachedQuarantined(state));
+    if !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+        || fixture.surface.quarantined_fault_state().ok() != Some(state)
+    {
+        return Err("competing admission changed quarantined owners".into());
+    }
+    if inject {
+        let seal = crate::FaultSeal {
+            trace: std::rc::Rc::clone(&fixture.trace),
+            deadline: fixture.deadline,
+        };
+        fixture.handle = Some(
+            fixture
+                .surface
+                .inject_quarantined_fault(target, seal, std::rc::Rc::clone(keeper_held))
+                .map_err(|()| "quarantined target was not validated")?,
+        );
+        fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state))?;
+    }
+    blocked(keeper, fixture, folder)?;
+    if inject && target == ProcessFaultTarget::Browser {
+        let name = folder
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or("quarantined folder name unavailable")?;
+        // Independently observe the real store's folder refusal; unlike
+        // delete_record, remove_folder does not change record provenance.
+        if fixture.store.remove_folder(name).is_ok()
+            || !folder.join("quarantine-held").is_file()
+            || fixture.store.records()?.len() != 1
+        {
+            return Err("held owned file did not refuse ordinary folder cleanup".into());
+        }
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_QUARANTINED case={} second_folder_cleanup=refused record_retained=true",
+            fixture.number
+        );
+    }
+    let _logged = writeln!(std::io::stderr(),
+        "NATIVE_QUARANTINED case={} target={target:?} inject={inject} modeled_close_refusal=true keeper_remaining=true record_retained=true held_file=true", fixture.number);
+    Ok(state)
+}
+
 fn run_case(
     runtime: &Path,
     root: &Path,
@@ -152,18 +233,15 @@ fn run_case(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         drive_to_quarantine(&mut fixture, &mut driver, &mut refused)
     }));
-    let result = match attempt {
-        Ok(result) => result,
-        Err(_) => {
-            let result = readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            );
-            fixture.retire(driver, result, None)?;
-            return Err("quarantined drive panicked".into());
-        }
+    let Ok(result) = attempt else {
+        let result = readiness::cancel_driver(
+            &mut driver,
+            &mut fixture.surface,
+            &mut fixture.loopback,
+            &mut fixture.store,
+        );
+        fixture.retire(driver, result, None)?;
+        return Err("quarantined drive panicked".into());
     };
     let expected = Err(BridgeError::Quarantine(
         QuarantineCode::ControllerCloseFailed,
@@ -202,79 +280,24 @@ fn run_case(
     // quarantine result; it returns the input result without transformation.
     let _reply = keeper.finish(driver, result);
     let keeper_held = std::rc::Rc::new(std::cell::Cell::new(refused));
-    let attempt = catch_unwind(AssertUnwindSafe(
-        || -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
-            if !refused || !wiped || !native_wiped {
-                return Err("quarantine mappings or secrets were not wiped".into());
-            }
-            let state = fixture
-                .surface
-                .quarantined_fault_state()
-                .map_err(|()| "quarantined owners not established")?;
-            fixture
-                .trace
-                .borrow_mut()
-                .push(ProcessFaultMark::ReachedQuarantined(state));
-            if !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
-                || fixture.surface.quarantined_fault_state().ok() != Some(state)
-            {
-                return Err("competing admission changed quarantined owners".into());
-            }
-            if inject {
-                let seal = crate::FaultSeal {
-                    trace: std::rc::Rc::clone(&fixture.trace),
-                    deadline: fixture.deadline,
-                };
-                fixture.handle = Some(
-                    fixture
-                        .surface
-                        .inject_quarantined_fault(target, seal, std::rc::Rc::clone(&keeper_held))
-                        .map_err(|()| "quarantined target was not validated")?,
-                );
-                fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state))?;
-            }
-            blocked(&mut keeper, &mut fixture, &folder)?;
-            if inject && target == ProcessFaultTarget::Browser {
-                let name = folder
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .ok_or("quarantined folder name unavailable")?;
-                // Independently observe the real store's folder refusal; unlike
-                // delete_record, remove_folder does not change record provenance.
-                if fixture.store.remove_folder(name).is_ok()
-                    || !folder.join("quarantine-held").is_file()
-                    || fixture.store.records()?.len() != 1
-                {
-                    return Err("held owned file did not refuse ordinary folder cleanup".into());
-                }
-                let _logged = writeln!(std::io::stderr(),
-                    "NATIVE_QUARANTINED case={number} second_folder_cleanup=refused record_retained=true");
-            }
-            let _logged = writeln!(std::io::stderr(),
-                "NATIVE_QUARANTINED case={number} target={target:?} inject={inject} modeled_close_refusal=true keeper_remaining=true record_retained=true held_file=true");
-            Ok(state)
-        },
-    ))
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        observe_case(
+            &mut fixture,
+            &mut keeper,
+            &folder,
+            &keeper_held,
+            (refused, wiped, native_wiped),
+            target,
+            inject,
+        )
+    }))
     .unwrap_or_else(|_| Err("quarantined fixture panicked".into()));
     keeper_held.set(false);
     // Release only the fixture's own file, then perform the ordinary real Close.
     drop(held);
     let closed = fixture.surface.close_controller();
     let close_observation = fixture.surface.initial_close_observation();
-    let mut returned = None;
-    loop {
-        let polled = keeper_poll(&mut keeper, &mut fixture);
-        if let Some(driver) = polled.driver {
-            returned = Some(driver);
-        }
-        if !polled.remaining && fixture.surface.idle() {
-            break;
-        }
-        readiness::pump_retaining(&fixture.surface);
-    }
-    if let Some(driver) = returned {
-        drop(driver.into_slots());
-    }
+    retire_keeper(&mut keeper, &mut fixture);
     drop(fixture.handle.take());
     drop(fixture.surface);
     std::rc::Rc::get_mut(&mut fixture.factory)
