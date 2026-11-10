@@ -57,7 +57,7 @@ impl Surface {
         let Some(mut capture) = self.exit_capture.take() else {
             return;
         };
-        if !capture.attempted {
+        if !capture.attempted && !capture.consumed {
             capture.attempted = true;
             capture.handle = self.acquire_exit_handle(&capture).ok();
         }

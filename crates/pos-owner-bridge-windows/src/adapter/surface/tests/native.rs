@@ -178,10 +178,16 @@ impl NativeOperations for Session {
             || self.factory.failure.get() == Some("exit_membership")
             || handle.identity().browser_pid != 42
         {
-            Err(())
-        } else {
-            Ok(())
+            return Err(());
         }
+        use crate::ExitMembershipKind::{Browser, Other};
+        let entries = match self.factory.failure.get() {
+            Some("exit_membership_missing") => vec![(41, Other)],
+            Some("exit_membership_malformed") => vec![(42, Browser), (42, Other)],
+            Some("exit_membership_empty") => Vec::new(),
+            _ => vec![(42, Browser)],
+        };
+        crate::retained_exit_membership(&entries, handle.identity().browser_pid)
     }
 
     fn retain_exit_browser(

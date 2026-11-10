@@ -45,6 +45,12 @@ impl ProcessFaultHandle for ExitRetained {
     }
 
     fn exit_code(&self) -> Result<Option<u32>, ()> {
+        self.verified_exit_code()
+    }
+}
+
+impl ExitRetained {
+    fn verified_exit_code(&self) -> Result<Option<u32>, ()> {
         if super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)?
             != (self.retained.identity, self.image.clone())
         {
@@ -60,12 +66,7 @@ impl crate::RetainedExitHandle for ExitRetained {
     }
 
     fn observe(&self) -> Result<Option<u32>, ()> {
-        if super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)?
-            != (self.retained.identity, self.image.clone())
-        {
-            return Err(());
-        }
-        self.retained.exit_code()
+        self.verified_exit_code()
     }
 
     fn terminate(&mut self, authority: &crate::FaultAuthority) -> Result<(), ()> {
@@ -169,11 +170,18 @@ fn retained_browser_membership(
     entries: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
     expected: u32,
 ) -> Result<(), ()> {
-    if entries.is_empty() || select(entries, COREWEBVIEW2_PROCESS_KIND_BROWSER)? == expected {
-        Ok(())
-    } else {
-        Err(())
-    }
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(pid, kind)| {
+            let kind = if *kind == COREWEBVIEW2_PROCESS_KIND_BROWSER {
+                crate::ExitMembershipKind::Browser
+            } else {
+                crate::ExitMembershipKind::Other
+            };
+            (*pid, kind)
+        })
+        .collect();
+    crate::retained_exit_membership(&entries, expected)
 }
 
 pub(super) fn observe_retained_exit_membership(

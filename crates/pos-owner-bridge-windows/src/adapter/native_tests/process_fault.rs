@@ -1447,7 +1447,7 @@ impl Fixture {
             .classify_exit_boundary(deadline)
             .map_err(|()| {
                 format!(
-                    "AwaitingExit live target or already-delivered matching exit was not established: {}",
+                    "AwaitingExit retained-object status and matching SDK-event classification failed: {}",
                     self.surface.fixture_progress()
                 )
             })?;
@@ -1505,7 +1505,7 @@ impl Fixture {
         }
         writeln!(
             std::io::stderr(),
-            "NATIVE_SUCCESS_EXIT case={} boundary={boundary:?} requested_injection={inject} actual_injection={} cutpoint_remaining_ms={} final_remaining_ms={} trace={:?}",
+            "NATIVE_SUCCESS_EXIT case={} boundary={boundary:?} active_status=259_ambiguous_not_liveness requested_injection={inject} actual_injection={} cutpoint_remaining_ms={} final_remaining_ms={} trace={:?}",
             self.number,
             inject && matches!(boundary, ExitBoundary::ActiveStatus(_)),
             cutpoint_remaining.as_millis(),

@@ -610,6 +610,37 @@ pub(crate) trait ProcessFaultHandle {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExitMembershipKind {
+    Browser,
+    Other,
+}
+
+#[cfg(test)]
+fn retained_exit_membership(
+    entries: &[(u32, ExitMembershipKind)],
+    expected: u32,
+) -> Result<(), ()> {
+    if entries.len() > 64 || expected == 0 {
+        return Err(());
+    }
+    let mut browser = None;
+    for (index, &(pid, kind)) in entries.iter().enumerate() {
+        if pid == 0 || entries[..index].iter().any(|(earlier, _)| *earlier == pid) {
+            return Err(());
+        }
+        if kind == ExitMembershipKind::Browser && browser.replace(pid).is_some() {
+            return Err(());
+        }
+    }
+    if entries.is_empty() || browser == Some(expected) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+#[cfg(test)]
 trait RetainedExitHandle {
     fn identity(&self) -> pos_owner_bridge::ProcessIdentity;
     fn observe(&self) -> Result<Option<u32>, ()>;

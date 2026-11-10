@@ -16,6 +16,18 @@ fn closed_fixture() -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
 fn closed_fixture_with_failure(
     failure: Option<&'static str>,
 ) -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
+    let (mut fixture, deadline) = prepared_fixture(failure, Duration::from_secs(10))?;
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok((fixture, deadline))
+}
+
+fn prepared_fixture(
+    failure: Option<&'static str>,
+    window: Duration,
+) -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
     let selected = spec(40);
@@ -53,15 +65,11 @@ fn closed_fixture_with_failure(
         .zero_close_buffers()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     fixture.factory.failure.set(failure);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + window;
     fixture
         .surface
         .arm_exit_capture(selected.ceremony_id, std::rc::Rc::default(), deadline)
         .map_err(|()| "capture arm")?;
-    fixture
-        .surface
-        .close_controller()
-        .map_err(pos_owner_bridge::SurfaceError::error)?;
     Ok((fixture, deadline))
 }
 
@@ -147,6 +155,12 @@ fn exit_capture_distinguishes_active_and_exited_and_refuses_uncertainty() -> Tes
         fixture.surface.classify_exit_boundary(deadline),
         Ok(ExitBoundary::ActiveStatus(_))
     ));
+    fixture.factory.failure.set(Some("exit_membership_empty"));
+    assert!(matches!(
+        fixture.surface.classify_exit_boundary(deadline),
+        Ok(ExitBoundary::ActiveStatus(_))
+    ));
+    fixture.factory.failure.set(None);
     assert!(matches!(
         fixture.surface.open(&spec(41)),
         std::task::Poll::Ready(Err(_))
@@ -211,5 +225,74 @@ fn active_exit_capture_is_one_use_and_retains_ordinary_ownership() -> TestResult
     ));
     assert!(!fixture.store.records_now().is_empty());
     assert!(fixture.surface.finish().is_err());
+    Ok(())
+}
+
+fn assert_retained_without_fault(fixture: &mut Fixture) {
+    assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
+    assert!(matches!(
+        fixture.surface.open(&spec(41)),
+        std::task::Poll::Ready(Err(_))
+    ));
+    assert!(!fixture.store.records_now().is_empty());
+    assert!(fixture.surface.finish().is_err());
+}
+
+#[test]
+fn exit_fault_refuses_wrong_phase_and_expired_original_deadline() -> TestResult {
+    let (mut wrong_phase, deadline) = prepared_fixture(None, Duration::from_secs(10))?;
+    assert!(wrong_phase
+        .surface
+        .consume_exit_capture(deadline, true)
+        .is_err());
+    wrong_phase
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(wrong_phase
+        .surface
+        .consume_exit_capture(deadline, false)
+        .is_err());
+    assert_retained_without_fault(&mut wrong_phase);
+
+    let (mut expired, deadline) = prepared_fixture(None, Duration::from_secs(1))?;
+    expired
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    expired.factory.exit_code.set(None);
+    assert!(matches!(
+        expired.surface.classify_exit_boundary(deadline),
+        Ok(ExitBoundary::ActiveStatus(_))
+    ));
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    assert!(expired
+        .surface
+        .consume_exit_capture(deadline, true)
+        .is_err());
+    assert!(expired
+        .surface
+        .consume_exit_capture(deadline, false)
+        .is_err());
+    assert_retained_without_fault(&mut expired);
+    Ok(())
+}
+
+#[test]
+fn exit_fault_refuses_malformed_or_nonempty_missing_membership() -> TestResult {
+    for failure in ["exit_membership_missing", "exit_membership_malformed"] {
+        let (mut fixture, deadline) = closed_fixture()?;
+        fixture.factory.exit_code.set(None);
+        fixture.factory.failure.set(Some(failure));
+        assert!(fixture
+            .surface
+            .consume_exit_capture(deadline, true)
+            .is_err());
+        assert!(fixture
+            .surface
+            .consume_exit_capture(deadline, false)
+            .is_err());
+        assert_retained_without_fault(&mut fixture);
+    }
     Ok(())
 }
