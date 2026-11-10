@@ -1082,15 +1082,18 @@ mod privileged {
 }
 
 #[test]
-fn only_an_ipv4_mapped_endpoint_changes_and_to_the_ipv4_it_maps() {
+fn an_ipv4_mapped_endpoint_establishes_the_namespace_of_the_ipv4_it_maps() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, _journal) = network(directory.path(), pinning(directory.path()), 24)?;
     let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
-    assert_eq!(canonical_endpoint(&mapped), ENDPOINT);
-    assert_eq!(canonical_endpoint(&ENDPOINT), ENDPOINT);
-    let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
-        Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
-        443,
-        5,
-        3,
-    ));
-    assert_eq!(canonical_endpoint(&scoped), scoped);
+    drop(network.establish([1; 16], &[mapped])?);
+    let installed = network
+        .control
+        .current
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let ipv4 = ExpectedNamespace::for_attempt([1; 16], &range(24, 120)?, 0, &[ENDPOINT])?;
+    assert_eq!(installed, Some(ipv4));
+    Ok(())
 }
