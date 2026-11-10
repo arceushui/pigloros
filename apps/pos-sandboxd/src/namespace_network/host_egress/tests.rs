@@ -966,9 +966,8 @@ fn acks(first: u32, requests: &[Request<NetfilterMessage>]) -> Vec<u8> {
 /// The three dumps of [`observe`], numbered from `first`, reporting what
 /// `batches` created.
 fn dumps_of(first: u32, batches: &[Vec<Request<NetfilterMessage>>]) -> Vec<Vec<u8>> {
-    let (tables, chains, rules) = as_dumped(batches);
     let mut replies = Vec::new();
-    for (sequence, objects) in (first..).zip([tables, chains, rules]) {
+    for (sequence, objects) in (first..).zip(<[_; 3]>::from(as_dumped(batches))) {
         replies.extend(objects.into_iter().map(|object| {
             message(
                 sequence,
