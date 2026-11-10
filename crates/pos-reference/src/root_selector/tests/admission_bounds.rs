@@ -380,14 +380,18 @@ fn public_admission(
     let _paths = FixedCompositionFixture::create()?;
     let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
     let request = request_for(&installed)?.to_canonical_cbor()?;
-    match ProviderImageSnapshot::open(&request) {
-        Err(error) => Ok(Err(error)),
+    // A local, not a match temporary, so the snapshot drops before the
+    // installed state and fixed paths in every edition.
+    let opened = ProviderImageSnapshot::open(&request);
+    let outcome = match opened {
+        Err(error) => Err(error),
         Ok(snapshot) => {
             check(&snapshot);
             let held = snapshot.admit_held_image();
-            Ok(held.map(|_| ()))
+            held.map(|_| ())
         }
-    }
+    };
+    Ok(outcome)
 }
 
 fn assert_public_admission(
