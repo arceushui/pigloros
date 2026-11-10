@@ -170,6 +170,31 @@ fn all_reference_forms_and_absent_zero_or_maximum_step_time_remain_distinct() ->
 }
 
 #[test]
+fn progress_equality_distinguishes_original_event_identity_and_count() -> TestResult {
+    let rows = [event(3, 4, 5), event(6, 7, 8)];
+    let original = Progress::new(input(&rows))?;
+    let wire = original.to_canonical_cbor();
+    let decoded = Progress::from_canonical_cbor(&wire)?;
+    for changed in [
+        vec![event(3, 4, 5)],
+        vec![event(3, 4, 5), event(6, 7, 9)],
+        vec![event(3, 4, 5), event(6, 8, 8)],
+        vec![event(3, 4, 5), event(7, 7, 8)],
+    ] {
+        let different = Progress::new(input(&changed))?;
+        let different_wire = different.to_canonical_cbor();
+        let different_decoded = Progress::from_canonical_cbor(&different_wire)?;
+        for left in [original.as_input(), decoded.as_input()] {
+            for right in [different.as_input(), different_decoded.as_input()] {
+                assert!(left != right);
+                assert!(right != left);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn recorded_reference_borrows_existing_idp1_coordinate_and_decoded_owner() -> TestResult {
     let coordinate =
         DependencyNodeCoordinateV1::try_new(0, 2, "driver:test".into(), 3, 1, hash(10))?;
