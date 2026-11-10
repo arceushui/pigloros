@@ -1805,7 +1805,7 @@ def test_typed_process_failure_evidence() -> None:
     for old, new in (
         ("_ => NativeProcessFailure::Other", "_ => NativeProcessFailure::BrowserExited"),
         (".unwrap_or(NativeProcessFailure::Unavailable)", ".unwrap_or(NativeProcessFailure::BrowserExited)"),
-        ("failures.borrow_mut().push(result)", "failures.borrow_mut().clear()"),
+        ("push_observation(failures, result)", "failures.borrow_mut().clear()"),
         ("PROCESS_FAILURES.with(|failures| failures.borrow().clone())", "Vec::new()"),
     ):
         if source.count(old) != 1:
@@ -2015,6 +2015,8 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/surface/diagnostics.rs", 'if !keeper_held.get()', 'if false'),
         (f"{SHIM}/src/adapter/surface/exit_boundary.rs", '!self.events.matching_exit_at_boundary(browser.browser_pid)', 'false'),
         (f"{SHIM}/src/adapter/events.rs", '!self.exit_boundary_invalid.get()', 'true'),
+        (f"{SHIM}/src/ffi/events/control_fixture.rs", 'MAX_OBSERVATIONS: usize = 2', 'MAX_OBSERVATIONS: usize = 1'),
+        (f"{SHIM}/src/adapter/native_tests/session.rs", '.is_some_and(|expected| self.events.exited() == Some(expected))', '.is_none_or(|expected| self.events.exited() == Some(expected))'),
         (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'self.native.recordless_controller_completion().is_some()', 'false'),
         (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),

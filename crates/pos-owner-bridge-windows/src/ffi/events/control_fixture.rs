@@ -41,7 +41,7 @@ pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>)
                 })
         })
         .unwrap_or(NativeProcessFailure::Unavailable);
-    PROCESS_FAILURES.with(|failures| failures.borrow_mut().push(result));
+    PROCESS_FAILURES.with(|failures| push_observation(failures, result));
 }
 
 pub(super) fn mode(kind: EventKind) -> ControlFault {
@@ -59,6 +59,9 @@ pub(super) fn begin(kind: EventKind) -> usize {
     OBSERVATIONS.with(|observations| {
         let mut observations = observations.borrow_mut();
         let id = observations.len();
+        if id == MAX_OBSERVATIONS {
+            return usize::MAX;
+        }
         observations.push(ControlObservation {
             kind,
             deferred: false,
@@ -72,7 +75,12 @@ pub(super) fn begin(kind: EventKind) -> usize {
 }
 
 pub(super) fn update(id: usize, update: impl FnOnce(&mut ControlObservation)) {
-    OBSERVATIONS.with(|observations| update(&mut observations.borrow_mut()[id]));
+    OBSERVATIONS.with(|observations| {
+        let mut observations = observations.borrow_mut();
+        if let Some(observation) = observations.get_mut(id) {
+            update(observation);
+        }
+    });
 }
 
 pub(super) fn readback(control: &Control) -> Result<bool> {
@@ -138,7 +146,7 @@ impl crate::Native {
     }
 
     pub(crate) fn record_renderer_state(state: crate::RendererStateObservation) {
-        RENDERER_STATES.with(|states| states.borrow_mut().push(state));
+        RENDERER_STATES.with(|states| push_observation(states, state));
     }
 
     pub(crate) fn renderer_state_observations() -> Vec<crate::RendererStateObservation> {
@@ -174,4 +182,47 @@ impl crate::Native {
     pub(crate) fn control_observations() -> Vec<ControlObservation> {
         OBSERVATIONS.with(|observations| observations.borrow().clone())
     }
+}
+
+// Every qualification consumer accepts at most one observation. Retaining the
+// second preserves duplicate-event failure evidence while bounding callback storms.
+const MAX_OBSERVATIONS: usize = 2;
+
+fn push_observation<T>(observations: &RefCell<Vec<T>>, value: T) {
+    let mut observations = observations.borrow_mut();
+    if observations.len() < MAX_OBSERVATIONS {
+        observations.push(value);
+    }
+}
+
+#[test]
+fn repeated_callbacks_remain_failed_evidence_without_unbounded_storage() {
+    use crate::{Native, NativeProcessFailure, RendererStateObservation};
+
+    Native::set_control_fault(EventKind::Navigation, ControlFault::Normal);
+    Native::reset_process_failure_observations();
+    let missing_state = RendererStateObservation {
+        generation: None,
+        reply_state: None,
+        record_count: None,
+    };
+    for _ in 0..10_000 {
+        let id = begin(EventKind::Navigation);
+        update(id, |record| record.attempts += 1);
+        process_failed(None);
+        Native::record_renderer_state(missing_state);
+    }
+    let controls = Native::control_observations();
+    assert_eq!(controls.len(), MAX_OBSERVATIONS);
+    assert!(controls.iter().all(|record| record.attempts == 1));
+    assert_eq!(
+        Native::classified_process_failure_observations(),
+        [NativeProcessFailure::Unavailable; MAX_OBSERVATIONS]
+    );
+    assert_eq!(
+        Native::renderer_state_observations(),
+        [missing_state; MAX_OBSERVATIONS]
+    );
+    Native::set_control_fault(EventKind::Navigation, ControlFault::Normal);
+    Native::reset_process_failure_observations();
 }

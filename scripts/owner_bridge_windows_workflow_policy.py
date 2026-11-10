@@ -14,6 +14,34 @@ from check_owner_runtime_custody_policy import PolicyError, load_workflow, same_
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ".github/workflows/owner-bridge-windows.yml"
+NATIVE_COVERAGE_COMMAND = """$ErrorActionPreference = 'Stop'
+$metadata = cargo metadata --locked --no-deps --format-version 1
+if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+$metadata | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/owner-windows-metadata.json"
+$ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
+if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
+$marker = Join-Path $env:RUNNER_TEMP ("owner-desktop-stop-" + [guid]::NewGuid().ToString('N'))
+$observer = $null
+try {
+  $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
+} catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
+try {
+  cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
+  $nativeResult = $LASTEXITCODE
+} finally {
+  try {
+    [System.IO.File]::WriteAllText($marker, 'stop')
+    if ($null -ne $observer) {
+      $finished = Wait-Job -Job $observer -Timeout 6
+      if ($null -eq $finished) { Write-Output 'NATIVE_DESKTOP observer_stop=unknown' }
+      if ($observer.State -ne 'Completed') { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
+      Receive-Job -Job $observer -ErrorAction SilentlyContinue
+    }
+  } catch { Write-Output 'NATIVE_DESKTOP observer_output=unknown' }
+}
+if ($nativeResult -ne 0) { throw 'Native coverage execution failed' }
+"""
+
 EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
  True: {'workflow_call': None, 'workflow_dispatch': None},
  'permissions': {'contents': 'read'},
@@ -57,24 +85,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                               'id': 'coverage',
                                               'shell': 'pwsh',
                                               'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
-                                              'run': "$ErrorActionPreference = 'Stop'\n"
-                                                     '$metadata = cargo metadata --locked '
-                                                     '--no-deps --format-version 1\n'
-                                                     "if ($LASTEXITCODE -ne 0) { throw 'Cargo "
-                                                     "metadata failed' }\n"
-                                                     '$metadata | Set-Content -Encoding utf8 '
-                                                     '"$env:RUNNER_TEMP/owner-windows-metadata.json"\n'
-                                                     '$ignore = $metadata | python '
-                                                     'scripts/owner_bridge_windows_cov_ignore.py\n'
-                                                     'if ($LASTEXITCODE -ne 0 -or -not $ignore) { '
-                                                     "throw 'Unsafe coverage scope' }\n"
-                                                     'cargo llvm-cov -p pos-owner-bridge-windows '
-                                                     '--all-features --locked --json --output-path '
-                                                     '"$env:RUNNER_TEMP/owner-windows-coverage.json" '
-                                                     '--ignore-filename-regex "$ignore" -- '
-                                                     '--include-ignored\n'
-                                                     "if ($LASTEXITCODE -ne 0) { throw 'Native "
-                                                     "coverage execution failed' }\n"},
+                                              'run': NATIVE_COVERAGE_COMMAND},
                                              {'name': 'Enforce both changed-line Windows coverage '
                                                       'floors',
                                               'shell': 'pwsh',
@@ -202,34 +213,8 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                                '${{ runner.temp '
                                                                '}}/owner-windows-ffi-full.json\n',
                                                        'if-no-files-found': 'error'}}]}}}
-EXPECTED_NATIVE['jobs']['owner-bridge-windows']['steps'][8]['run'] = """$ErrorActionPreference = 'Stop'
-$metadata = cargo metadata --locked --no-deps --format-version 1
-if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
-$metadata | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/owner-windows-metadata.json"
-$ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
-if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
-$marker = Join-Path $env:RUNNER_TEMP ("owner-desktop-stop-" + [guid]::NewGuid().ToString('N'))
-$observer = $null
-try {
-  $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
-} catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
-try {
-  cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
-  $nativeResult = $LASTEXITCODE
-} finally {
-  try {
-    [System.IO.File]::WriteAllText($marker, 'stop')
-    if ($null -ne $observer) {
-      $finished = Wait-Job -Job $observer -Timeout 6
-      if ($null -eq $finished) { Write-Output 'NATIVE_DESKTOP observer_stop=unknown' }
-      if ($observer.State -ne 'Completed') { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
-      Receive-Job -Job $observer -ErrorAction SilentlyContinue
-    }
-  } catch { Write-Output 'NATIVE_DESKTOP observer_output=unknown' }
-}
-if ($nativeResult -ne 0) { throw 'Native coverage execution failed' }
-"""
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'f57c370b5d02d8ccfd886aaa037cc1a56f5e710fd57768df75017192280d1ff2',
+
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '1302c022514e676174e997633d2acaabb019cbf7e152e89796344ee1806dac84',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
 
