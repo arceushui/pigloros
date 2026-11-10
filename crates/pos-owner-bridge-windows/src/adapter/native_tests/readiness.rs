@@ -121,6 +121,74 @@ fn run_worker(
     outcome
 }
 
+// Constant-memory observations of existing driver and STA pump calls.
+#[derive(Default)]
+struct ProgressBand {
+    step_entered: u32,
+    step_returned: u32,
+    pump_entered: u32,
+    pump_returned: u32,
+    max_step: Duration,
+    max_pump: Duration,
+    max_interstep: Duration,
+    last_step_return: Option<Instant>,
+}
+
+impl ProgressBand {
+    fn enter_step(&mut self) -> Instant {
+        let now = Instant::now();
+        self.step_entered = self.step_entered.saturating_add(1);
+        if let Some(last) = self.last_step_return {
+            self.max_interstep = self.max_interstep.max(now.saturating_duration_since(last));
+        }
+        now
+    }
+
+    fn return_step(&mut self, started: Instant) {
+        let now = Instant::now();
+        self.step_returned = self.step_returned.saturating_add(1);
+        self.max_step = self.max_step.max(now.saturating_duration_since(started));
+        self.last_step_return = Some(now);
+    }
+
+    fn enter_pump(&mut self) -> Instant {
+        self.pump_entered = self.pump_entered.saturating_add(1);
+        Instant::now()
+    }
+
+    fn return_pump(&mut self, started: Instant) {
+        self.pump_returned = self.pump_returned.saturating_add(1);
+        self.max_pump = self.max_pump.max(started.elapsed());
+    }
+}
+
+#[derive(Default)]
+struct ProgressTiming {
+    before_receipt: ProgressBand,
+    after_receipt: ProgressBand,
+}
+
+impl ProgressTiming {
+    const fn band(&mut self, received: bool) -> &mut ProgressBand {
+        if received {
+            &mut self.after_receipt
+        } else {
+            &mut self.before_receipt
+        }
+    }
+
+    fn report(&self, case: u64) {
+        let before = &self.before_receipt;
+        let after = &self.after_receipt;
+        let _logged = writeln!(std::io::stderr(),
+            "NATIVE_G3_CALL_TIMING case={case} before_steps={}/{} before_pumps={}/{} before_max_step={:?} before_max_pump={:?} before_max_interstep={:?} after_steps={}/{} after_pumps={}/{} after_max_step={:?} after_max_pump={:?} after_max_interstep={:?}",
+            before.step_entered, before.step_returned, before.pump_entered, before.pump_returned,
+            before.max_step, before.max_pump, before.max_interstep,
+            after.step_entered, after.step_returned, after.pump_entered, after.pump_returned,
+            after.max_step, after.max_pump, after.max_interstep);
+    }
+}
+
 fn run_ceremony(
     surface: &mut Surface,
     loopback: &mut SharedLoopback,
@@ -143,13 +211,16 @@ fn run_ceremony(
     let mut driver = new_driver(id, started)?;
     let mut trace = Trace::new(number, started);
     let mut receipt = None;
+    let mut timing = ProgressTiming::default();
     // Keep both the driver and its native owners outside the unwind boundary.
     // An assertion failure must enter the same release/exit path as an error.
     let attempt = catch_unwind(AssertUnwindSafe(
         || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
             loop {
                 trace.update("active", surface, &driver, loopback);
+                let step_started = timing.band(receipt.is_some()).enter_step();
                 let step = driver.step(&mut env(surface, loopback, store));
+                timing.band(receipt.is_some()).return_step(step_started);
                 if receipt.is_none() {
                     if let Some(observed) = driver.first_receipt_at() {
                         // Observe the driver's accepted page advance, including
@@ -162,11 +233,17 @@ fn run_ceremony(
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("readiness driver finished without a result".into()),
-                    Step::Pending => pump(surface)?,
+                    Step::Pending => {
+                        let pump_started = timing.band(receipt.is_some()).enter_pump();
+                        let pumped = pump(surface);
+                        timing.band(receipt.is_some()).return_pump(pump_started);
+                        pumped?;
+                    }
                 }
             }
         },
     ));
+    timing.report(number);
     let (result, failure) = match attempt {
         Ok(Ok(result)) => (result, None),
         Ok(Err(error)) => (

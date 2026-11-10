@@ -1551,6 +1551,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'bdb2207da862dedb6f2ef4a9097d7e2a8f12dc633d887df50a916a9791029044',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': 'b602b19fcffe9dd47c694737603ac5de0fe7f24370f402ac3c215694d75c0a31',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '2fd540f86b5bcf37a49f82c5b47b0013983b4a611b1f672a00bf506e1b208afc',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',

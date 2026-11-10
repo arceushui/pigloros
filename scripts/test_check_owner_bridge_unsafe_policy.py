@@ -2011,6 +2011,8 @@ def test_external_qualification_is_sealed() -> None:
     if resource not in CHECKER.EXTERNAL_FIXTURE_SOURCES:
         raise SystemExit("resource callback diagnostic source binding was removed")
     mutations = (
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'timing.report(number);', ''),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'let step = driver.step(&mut env(surface, loopback, store));', 'let step = Step::Pending;'),
         (resource, 'if count >= 9', 'if false'),
         (resource, 'prefix: "NATIVE_RESOURCE",\n        case: super::navigation::readiness_context(),', 'prefix: "NATIVE_RESOURCE",\n        case: None,'),
         (resource, 'prefix: "NATIVE_RESOURCE",', 'prefix: "NATIVE_RESOURCE_UNIT",'),
