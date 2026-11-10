@@ -69,10 +69,11 @@ impl LoopbackPort for SharedLoopback {
     fn probe_ipv6(&mut self) -> Result<(), BridgeError> {
         #[cfg(test)]
         let _duration = crate::Native::readiness_span("ipv6-probe");
-        self.0
+        let mut listener = self
+            .0
             .lock()
-            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?
-            .probe_ipv6()
+            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
+        listener.probe_ipv6()
     }
 }
 

@@ -4261,6 +4261,8 @@ impl Fixture {
         driver: &mut CeremonyDriver,
         ceremony: &CeremonyId,
     ) -> Result<(CeremonyResult, PendingControllerEvidence), Box<dyn std::error::Error>> {
+        use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
+
         loop {
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
@@ -4277,7 +4279,6 @@ impl Fixture {
                 Step::Pending => readiness::pump(&self.surface)?,
             }
         }
-        use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
         let active_blocked = self.surface.controller_creation_retention(ceremony) == Some(Active)
             && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
             && self.surface.controller_creation_retention(ceremony) == Some(Active)
