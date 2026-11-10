@@ -242,12 +242,7 @@ where
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
     ) -> Result<NamespaceConnector<C>, AttemptNetworkError> {
-        // An IPv4-mapped IPv6 endpoint is the IPv4 endpoint it maps, for the
-        // namespace and the host alike.
-        let endpoints: Vec<SocketAddr> = endpoints
-            .iter()
-            .map(|endpoint| SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port()))
-            .collect();
+        let endpoints: Vec<SocketAddr> = endpoints.iter().map(canonical_endpoint).collect();
         let endpoints = endpoints.as_slice();
         let mut slot = self.slots.take(attempt_id)?;
         let expected =
@@ -285,6 +280,19 @@ where
                 _teardown: teardown,
             })
             .map_err(AttemptNetworkError::Open)
+    }
+}
+
+/// `endpoint` as the namespace and the host both see it: an IPv4-mapped
+/// IPv6 endpoint is the IPv4 endpoint it maps, and any other endpoint,
+/// including an IPv6 one's scope and flow label, is unchanged.
+fn canonical_endpoint(endpoint: &SocketAddr) -> SocketAddr {
+    match endpoint {
+        SocketAddr::V6(v6) => v6
+            .ip()
+            .to_ipv4_mapped()
+            .map_or(*endpoint, |ip| SocketAddr::new(ip.into(), v6.port())),
+        SocketAddr::V4(_) => *endpoint,
     }
 }
 
