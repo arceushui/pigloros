@@ -233,6 +233,7 @@ mod privileged {
         let namespaces = NetworkNamespaces::system();
         let control = NetlinkNamespaceControl::new(namespaces.clone());
         let (first, second, other_host, other_inner) = orphan_fixture()?;
+        let (probe_host, probe_inner) = (LinkName::new("piglor-t0")?, LinkName::new("piglor-u0")?);
         // Both ends of the other pair stay in the host namespace.
         let created = namespaces.create(&first.name).and_then(|peer| {
             namespaces.create(&second.name).and_then(|_| {
@@ -241,6 +242,8 @@ mod privileged {
                         session.execute(vec![
                             route::veth_pair(&first.host_link, &first.inner_link, peer.as_fd()),
                             route::veth_pair(&other_host, &other_inner, host.as_fd()),
+                            // An egress probe's target pair left by a crash.
+                            route::veth_pair(&probe_host, &probe_inner, host.as_fd()),
                         ])
                     })
                 })
@@ -251,6 +254,7 @@ mod privileged {
         assert!(removed.is_ok(), "{removed:?}");
         assert!(matches!(namespaces.attempt_names(), Ok(names) if names.is_empty()));
         assert!(matches!(host_link(&first.host_link), Ok(None)));
+        assert!(matches!(host_link(&probe_host), Ok(None)));
         // A veth end of another name is not the provider's.
         assert!(matches!(host_link(&other_host), Ok(Some(_))));
         Ok(())

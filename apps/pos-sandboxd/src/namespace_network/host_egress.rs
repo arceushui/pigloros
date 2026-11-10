@@ -14,7 +14,9 @@
 //! needs no forwarding. No other table is ever read for policy or changed.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use netlink_packet_core::{
@@ -84,9 +86,14 @@ pub enum HostEgressError {
     /// The host table read back differently from the installed attempts.
     #[error("the host egress table read back differently")]
     Readback,
-    /// A device the attempt's traffic enters by does not forward.
-    #[error("a device the attempt's traffic enters by does not forward IPv4")]
+    /// A device the attempt's traffic enters by does not forward, or one
+    /// whose forwarding was restored still does.
+    #[error("a device the attempt's traffic enters by does not have its expected IPv4 forwarding")]
     Forwarding,
+    /// The record of a device's forwarding could not be written, read or
+    /// removed.
+    #[error("the provider's egress forwarding record failed")]
+    State(#[source] std::io::Error),
 }
 
 /// One attempt's egress: its chain, named after its namespace, its host veth
@@ -681,9 +688,12 @@ fn route_reply(reply: RouteNetlinkMessage) -> Result<(bool, u32), NetlinkError> 
     }
 }
 
-/// Turn IPv4 forwarding on for packets that enter by link `index`.
-fn forward_from(index: u32) -> Request<RouteNetlinkMessage> {
-    let forwarding = DefaultNla::new(IPV4_DEVCONF_FORWARDING, 1_u32.to_ne_bytes().to_vec());
+/// Turn IPv4 forwarding on or off for packets that enter by link `index`.
+pub(super) fn set_forwarding(index: u32, on: bool) -> Request<RouteNetlinkMessage> {
+    let forwarding = DefaultNla::new(
+        IPV4_DEVCONF_FORWARDING,
+        u32::from(on).to_ne_bytes().to_vec(),
+    );
     let mut nested = vec![0; forwarding.buffer_len()];
     forwarding.emit(&mut nested);
     let mut message = LinkMessage::default();
@@ -701,16 +711,28 @@ fn get_link(index: u32) -> RouteNetlinkMessage {
     RouteNetlinkMessage::GetLink(message)
 }
 
-/// Whether a [`get_link`] reply reports IPv4 forwarding on.
-fn forwards(reply: RouteNetlinkMessage) -> Result<bool, NetlinkError> {
+/// The name of the link a [`get_link`] reply reports, and whether it
+/// forwards IPv4.
+pub(super) fn link_forwarding(reply: RouteNetlinkMessage) -> Result<(String, bool), NetlinkError> {
     match reply {
-        RouteNetlinkMessage::NewLink(message) => Ok(message.attributes.iter().any(|attribute| {
-            matches!(attribute, LinkAttribute::AfSpecUnspec(specs) if specs.iter().any(|spec| {
-                matches!(spec, AfSpecUnspec::Inet(inet) if inet.iter().any(|value| {
-                    matches!(value, AfSpecInet::DevConf(conf) if conf.forwarding == 1)
+        RouteNetlinkMessage::NewLink(message) => {
+            let forwarding = message.attributes.iter().any(|attribute| {
+                matches!(attribute, LinkAttribute::AfSpecUnspec(specs) if specs.iter().any(|spec| {
+                    matches!(spec, AfSpecUnspec::Inet(inet) if inet.iter().any(|value| {
+                        matches!(value, AfSpecInet::DevConf(conf) if conf.forwarding == 1)
+                    }))
                 }))
-            }))
-        })),
+            });
+            message
+                .attributes
+                .into_iter()
+                .find_map(|attribute| match attribute {
+                    LinkAttribute::IfName(name) => Some(name),
+                    _ => None,
+                })
+                .map(|name| (name, forwarding))
+                .ok_or(NetlinkError::Unrepresentable)
+        }
         _ => Err(NetlinkError::Unexpected),
     }
 }
@@ -765,6 +787,125 @@ pub(super) fn host_chains<T: NetlinkTransport>(
     observe(session).map(|table| table.map(|table| table.chains.into_keys().collect()))
 }
 
+/// Where the provider records the egress devices it turned forwarding on
+/// for.
+pub const FORWARDING_RECORDS: &str = "/run/pigloros/sandbox/egress-forwarding";
+
+/// The provider's durable record of every egress device whose IPv4
+/// forwarding it turned on: one file per device, named by its index and
+/// holding its name. A record is written and synced before forwarding is
+/// turned on, and removed only after it is turned off again, so after a
+/// crash restart reconciliation knows what to restore. A device that
+/// already forwarded is never recorded, and so never turned off.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForwardingRecords {
+    directory: PathBuf,
+}
+
+impl Default for ForwardingRecords {
+    fn default() -> Self {
+        Self::in_directory(FORWARDING_RECORDS)
+    }
+}
+
+impl ForwardingRecords {
+    /// Records kept in `directory`.
+    #[must_use]
+    pub fn in_directory(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+        }
+    }
+
+    /// Record that the provider turns forwarding on for link `index`, named
+    /// `name`.
+    pub(super) fn record(&self, index: u32, name: &str) -> std::io::Result<()> {
+        let partial = self.directory.join(format!("{index}.partial"));
+        std::fs::create_dir_all(&self.directory)
+            .and_then(|()| std::fs::File::create(&partial))
+            .and_then(|mut file| {
+                file.write_all(name.as_bytes())
+                    .and_then(|()| file.sync_all())
+            })
+            .and_then(|()| std::fs::rename(&partial, self.directory.join(index.to_string())))
+            .and_then(|()| std::fs::File::open(&self.directory))
+            .and_then(|directory| directory.sync_all())
+    }
+
+    /// Every recorded device's index and name. A missing directory holds
+    /// none, and a record that was never completed is no record.
+    pub(super) fn recorded(&self) -> std::io::Result<Vec<(u32, String)>> {
+        match std::fs::read_dir(&self.directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            listed => listed.and_then(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        entry
+                            .map(|entry| {
+                                entry
+                                    .file_name()
+                                    .to_str()
+                                    .and_then(|name| name.parse::<u32>().ok())
+                                    .map(|index| (index, entry.path()))
+                            })
+                            .transpose()
+                    })
+                    .map(|entry| {
+                        entry.and_then(|(index, path)| {
+                            std::fs::read_to_string(path).map(|name| (index, name))
+                        })
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    /// Remove the record of link `index`, if any.
+    fn forget(&self, index: u32) -> std::io::Result<()> {
+        match std::fs::remove_file(self.directory.join(index.to_string())) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        }
+    }
+}
+
+/// Turn forwarding back off on recorded link `index`, named `name`, if it
+/// still exists under that name, read that back, and forget the record.
+fn restore<T: NetlinkTransport>(
+    route: &NetlinkSession<T>,
+    records: &ForwardingRecords,
+    index: u32,
+    name: &str,
+) -> Result<(), HostEgressError> {
+    let current = match route.request(get_link(index)) {
+        Err(NetlinkError::Kernel(super::route::NO_SUCH_LINK)) => None,
+        reply => Some(reply.and_then(link_forwarding)?),
+    };
+    // A device that is gone, or whose index now names another device, has
+    // nothing left to restore.
+    if current.is_some_and(|(current_name, _)| current_name == name) {
+        route.execute(vec![set_forwarding(index, false)])?;
+        if route.request(get_link(index)).and_then(link_forwarding)?.1 {
+            return Err(HostEgressError::Forwarding);
+        }
+    }
+    records.forget(index).map_err(HostEgressError::State)
+}
+
+/// Restore every recorded device's forwarding and forget its record.
+/// Restart reconciliation calls this with the other orphan removals.
+///
+/// # Errors
+/// Fails if a record cannot be read or removed, or a device cannot be
+/// restored.
+pub(super) fn restore_forwarding(records: &ForwardingRecords) -> Result<(), HostEgressError> {
+    let route = NetlinkSession::open(ROUTE)?;
+    for (index, name) in records.recorded().map_err(HostEgressError::State)? {
+        restore(&route, records, index, &name)?;
+    }
+    Ok(())
+}
+
 /// The host side of attempt networks: it admits endpoints, gives an
 /// installed attempt egress and takes it away again.
 pub trait EgressControl {
@@ -790,19 +931,39 @@ pub trait EgressControl {
     fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError>;
 }
 
+/// What the provider installed: each attempt's egress, and the egress
+/// devices its traffic returns by.
+#[derive(Debug, Default)]
+struct Installed {
+    attempts: BTreeMap<String, AttemptEgress>,
+    devices: BTreeMap<String, Vec<u32>>,
+}
+
 /// The provider's host egress in the calling thread's network namespace:
-/// the attempts it installed, whose table it reads back after every change.
-/// One change runs at a time.
+/// the attempts it installed, whose table it reads back after every change,
+/// and the record of the egress devices it turned forwarding on for. One
+/// change runs at a time.
 #[derive(Debug, Default)]
 pub struct HostEgress {
-    attempts: Mutex<BTreeMap<String, AttemptEgress>>,
+    installed: Mutex<Installed>,
+    records: ForwardingRecords,
 }
 
 impl HostEgress {
-    /// No attempt has egress yet.
+    /// No attempt has egress yet; forwarding is recorded in
+    /// [`FORWARDING_RECORDS`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// No attempt has egress yet; forwarding is recorded in `records`.
+    #[must_use]
+    pub fn recording_in(records: ForwardingRecords) -> Self {
+        Self {
+            installed: Mutex::default(),
+            records,
+        }
     }
 
     /// Give `attempt`, whose host veth end has index `host_link`, egress
@@ -816,69 +977,115 @@ impl HostEgress {
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
         install_locked(
-            &mut self.attempts.lock().unwrap_or_else(PoisonError::into_inner),
-            route,
-            netfilter,
+            &mut self
+                .installed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            &self.records,
+            (route, netfilter),
             host_link,
             attempt,
         )
     }
 
-    /// Take `attempt`'s egress away through `netfilter`, holding the
-    /// installed attempts for the whole change.
-    fn remove_with<N: NetlinkTransport>(
+    /// Take `attempt`'s egress away through `route` and `netfilter`,
+    /// holding the installed attempts for the whole change.
+    fn remove_with<R: NetlinkTransport, N: NetlinkTransport>(
         &self,
+        route: &NetlinkSession<R>,
         netfilter: &NetlinkSession<N>,
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
         remove_locked(
-            &mut self.attempts.lock().unwrap_or_else(PoisonError::into_inner),
-            netfilter,
+            &mut self
+                .installed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            &self.records,
+            (route, netfilter),
             attempt,
         )
     }
 }
 
-/// [`HostEgress::install_with`] with the installed `attempts`.
+/// [`HostEgress::install_with`] with what is `installed`.
+///
+/// The table, with its final drop, exists before any forwarding is turned
+/// on, so a forwarded packet never meets a host without the drop. An egress
+/// device that does not forward yet is recorded before it is turned on.
 fn install_locked<R: NetlinkTransport, N: NetlinkTransport>(
-    attempts: &mut BTreeMap<String, AttemptEgress>,
-    route: &NetlinkSession<R>,
-    netfilter: &NetlinkSession<N>,
+    installed: &mut Installed,
+    records: &ForwardingRecords,
+    (route, netfilter): (&NetlinkSession<R>, &NetlinkSession<N>),
     host_link: u32,
     attempt: &AttemptEgress,
 ) -> Result<(), HostEgressError> {
     let links = ingress_links(route, host_link, &attempt.endpoints)?;
-    route.execute(links.iter().map(|&link| forward_from(link)).collect())?;
-    for &link in &links {
-        if !route.request(get_link(link)).and_then(forwards)? {
-            return Err(HostEgressError::Forwarding);
-        }
-    }
+    let egress: Vec<u32> = links
+        .iter()
+        .copied()
+        .filter(|&link| link != host_link)
+        .collect();
+    let name = attempt.namespace.as_str().to_owned();
+    installed.attempts.insert(name.clone(), attempt.clone());
+    installed.devices.insert(name, egress.clone());
     if observe(netfilter)?.is_none() {
         netfilter.execute(create_table())?;
     }
-    attempts.insert(attempt.namespace.as_str().to_owned(), attempt.clone());
+    for &link in &egress {
+        let (device, forwarding) = route.request(get_link(link)).and_then(link_forwarding)?;
+        if !forwarding {
+            records
+                .record(link, &device)
+                .map_err(HostEgressError::State)?;
+        }
+    }
+    route.execute(
+        links
+            .iter()
+            .map(|&link| set_forwarding(link, true))
+            .collect(),
+    )?;
+    for &link in &links {
+        if !route.request(get_link(link)).and_then(link_forwarding)?.1 {
+            return Err(HostEgressError::Forwarding);
+        }
+    }
     netfilter.execute(install_attempt(attempt))?;
     observe(netfilter)?
-        .is_some_and(|table| is_exact(&table, attempts))
+        .is_some_and(|table| is_exact(&table, &installed.attempts))
         .then_some(())
         .ok_or(HostEgressError::Readback)
 }
 
-/// [`HostEgress::remove_with`] with the installed `attempts`.
-fn remove_locked<N: NetlinkTransport>(
-    attempts: &mut BTreeMap<String, AttemptEgress>,
-    netfilter: &NetlinkSession<N>,
+/// [`HostEgress::remove_with`] with what is `installed`: the attempt's rules
+/// go first, then each recorded egress device no other attempt still uses
+/// gets its forwarding back.
+fn remove_locked<R: NetlinkTransport, N: NetlinkTransport>(
+    installed: &mut Installed,
+    records: &ForwardingRecords,
+    (route, netfilter): (&NetlinkSession<R>, &NetlinkSession<N>),
     attempt: &AttemptEgress,
 ) -> Result<(), HostEgressError> {
-    attempts.remove(attempt.namespace.as_str());
+    installed.attempts.remove(attempt.namespace.as_str());
+    let devices = installed
+        .devices
+        .remove(attempt.namespace.as_str())
+        .unwrap_or_default();
     if let Some(table) = observe(netfilter)? {
         if table.chains.contains_key(attempt.namespace.as_str()) {
             netfilter.execute(remove_attempt(&table, attempt))?;
         }
     }
-    observe(netfilter)?
-        .is_none_or(|table| is_exact(&table, attempts))
+    let table_read_back =
+        observe(netfilter)?.is_none_or(|table| is_exact(&table, &installed.attempts));
+    let in_use: Vec<u32> = installed.devices.values().flatten().copied().collect();
+    for (index, name) in records.recorded().map_err(HostEgressError::State)? {
+        if devices.contains(&index) && !in_use.contains(&index) {
+            restore(route, records, index, &name)?;
+        }
+    }
+    table_read_back
         .then_some(())
         .ok_or(HostEgressError::Readback)
 }
@@ -899,8 +1106,9 @@ impl EgressControl for HostEgress {
     }
 
     fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        let route = NetlinkSession::open(ROUTE)?;
         let netfilter = NetlinkSession::open(NETFILTER)?;
-        self.remove_with(&netfilter, attempt)
+        self.remove_with(&route, &netfilter, attempt)
     }
 }
 

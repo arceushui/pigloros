@@ -280,7 +280,8 @@ fn remove_attempt_link(
 /// The prefix of every provider-owned host veth end.
 const HOST_LINK_PREFIX: &str = "piglor-h";
 
-/// Every provider-owned host veth end the session's namespace holds.
+/// Every provider-owned host veth end the session's namespace holds: each
+/// attempt's `piglor-h…` and the egress probe's `piglor-t0`.
 fn attempt_host_links<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
 ) -> Result<Vec<ObservedLink>, NetlinkError> {
@@ -288,7 +289,8 @@ fn attempt_host_links<T: NetlinkTransport>(
         links
             .into_iter()
             .filter(|link| {
-                link.name.starts_with(HOST_LINK_PREFIX)
+                (link.name.starts_with(HOST_LINK_PREFIX)
+                    || link.name == super::attempt_network::PROBE_HOST_LINK)
                     && matches!(link.kind, LinkKind::Veth { .. })
             })
             .collect()
@@ -320,6 +322,15 @@ impl NetlinkNamespaceControl {
     /// Fails if any of them cannot be removed, or remains afterwards.
     pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
         super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
+            .and_then(|()| {
+                super::host_egress::restore_forwarding(
+                    &super::host_egress::ForwardingRecords::default(),
+                )
+                .map_err(|error| match error {
+                    super::host_egress::HostEgressError::Netlink(error) => error,
+                    _ => NetlinkError::Residual,
+                })
+            })
             .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
             .and_then(|orphans| {
                 orphans.iter().try_for_each(|link| {

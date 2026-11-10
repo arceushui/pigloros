@@ -514,25 +514,72 @@ fn route_and_link_requests_and_replies() -> TestResult {
         Err(NetlinkError::Unexpected)
     ));
     // Forwarding is set as one IFLA_INET_CONF entry, and read back from the
-    // device configuration.
-    let RouteNetlinkMessage::SetLink(set) = forward_from(5).message else {
-        return Err("not a link change".into());
-    };
-    assert_eq!(set.header.index, 5);
+    // device configuration with the device's name.
+    for on in [true, false] {
+        let RouteNetlinkMessage::SetLink(set) = set_forwarding(5, on).message else {
+            return Err("not a link change".into());
+        };
+        assert_eq!(set.header.index, 5);
+        let mut nested = vec![0; 8];
+        DefaultNla::new(1, u32::from(on).to_ne_bytes().to_vec()).emit(&mut nested);
+        assert_eq!(
+            set.attributes,
+            [LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![
+                AfSpecInet::Other(DefaultNla::new(1, nested))
+            ])])]
+        );
+    }
     let mut forwarding = LinkMessage::default();
     let mut conf = InetDevConf::default();
     conf.forwarding = 1;
-    forwarding.attributes = vec![LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![
-        AfSpecInet::DevConf(conf),
-    ])])];
-    assert!(forwards(RouteNetlinkMessage::NewLink(forwarding))?);
-    assert!(!forwards(RouteNetlinkMessage::NewLink(
-        LinkMessage::default()
-    ))?);
+    forwarding.attributes = vec![
+        LinkAttribute::IfName("eth0".to_owned()),
+        LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![AfSpecInet::DevConf(conf)])]),
+    ];
+    assert_eq!(
+        link_forwarding(RouteNetlinkMessage::NewLink(forwarding))?,
+        ("eth0".to_owned(), true)
+    );
+    let mut quiet = LinkMessage::default();
+    quiet.attributes = vec![LinkAttribute::IfName("eth0".to_owned())];
+    assert_eq!(
+        link_forwarding(RouteNetlinkMessage::NewLink(quiet))?,
+        ("eth0".to_owned(), false)
+    );
     assert!(matches!(
-        forwards(route_to(ENDPOINT.ip())),
+        link_forwarding(RouteNetlinkMessage::NewLink(LinkMessage::default())),
+        Err(NetlinkError::Unrepresentable)
+    ));
+    assert!(matches!(
+        link_forwarding(route_to(ENDPOINT.ip())),
         Err(NetlinkError::Unexpected)
     ));
+    Ok(())
+}
+
+#[test]
+fn forwarding_records_survive_as_files_and_ignore_unfinished_ones() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let records = ForwardingRecords::in_directory(directory.path().join("forwarding"));
+    assert!(records.recorded()?.is_empty());
+    records.record(7, "eth0")?;
+    records.record(9, "uplink")?;
+    std::fs::write(directory.path().join("forwarding/3.partial"), b"half")?;
+    std::fs::write(directory.path().join("forwarding/notes"), b"x")?;
+    let mut recorded = records.recorded()?;
+    recorded.sort_unstable();
+    assert_eq!(recorded, [(7, "eth0".to_owned()), (9, "uplink".to_owned())]);
+    records.forget(7)?;
+    records.forget(7)?;
+    assert_eq!(records.recorded()?, [(9, "uplink".to_owned())]);
+    // A directory that is a file holds nothing readable.
+    let file = ForwardingRecords::in_directory(directory.path().join("forwarding/9"));
+    assert!(file.recorded().is_err());
+    assert!(file.record(1, "x").is_err());
+    assert_eq!(
+        ForwardingRecords::default(),
+        ForwardingRecords::in_directory(FORWARDING_RECORDS)
+    );
     Ok(())
 }
 
@@ -553,7 +600,11 @@ fn host_egress_errors_say_what_failed() {
         ),
         (
             HostEgressError::Forwarding,
-            "a device the attempt's traffic enters by does not forward IPv4",
+            "a device the attempt's traffic enters by does not have its expected IPv4 forwarding",
+        ),
+        (
+            HostEgressError::State(std::io::ErrorKind::NotFound.into()),
+            "the provider's egress forwarding record failed",
         ),
     ] {
         assert_eq!(error.to_string(), message);
