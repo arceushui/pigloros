@@ -44,7 +44,7 @@ fn request_under(
     let budget = DeterministicBudgetV1::MAXIMA;
     let negotiated = negotiated_under(PLUGIN_ID, budget, Vec::new(), profile);
     WorkerRequestV1 {
-        component: RUST_GUEST.to_vec(),
+        component: RUST_GUEST.to_vec().into(),
         negotiation: negotiated.to_transport(),
         watchdog_millis: 600_000,
         host_inputs: HostInputs {
