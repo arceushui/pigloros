@@ -295,6 +295,15 @@ fn is_attempt_host_link(link: &ObservedLink) -> bool {
         && matches!(link.kind, LinkKind::Veth { .. })
 }
 
+/// `error` as the sweep reports it: a netlink failure as itself, and any
+/// other as residue left behind.
+fn residual(error: super::host_egress::HostEgressError) -> NetlinkError {
+    match error {
+        super::host_egress::HostEgressError::Netlink(error) => error,
+        _ => NetlinkError::Residual,
+    }
+}
+
 /// `Ok` if neither `names` nor `links` remain.
 fn none_remain(names: &[NamespaceName], links: &[ObservedLink]) -> Result<(), NetlinkError> {
     match (names, links) {
@@ -329,12 +338,12 @@ impl NetlinkNamespaceControl {
     pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
         super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
             .and_then(|()| {
-                super::host_egress::restore_forwarding(
-                    &super::host_egress::ForwardingRecords::default(),
-                )
-                .map_err(|error| match error {
-                    super::host_egress::HostEgressError::Netlink(error) => error,
-                    _ => NetlinkError::Residual,
+                NetlinkSession::open(ROUTE).and_then(|route| {
+                    super::host_egress::restore_forwarding(
+                        &route,
+                        &super::host_egress::ForwardingRecords::default(),
+                    )
+                    .map_err(residual)
                 })
             })
             .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
