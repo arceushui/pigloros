@@ -326,9 +326,16 @@ async fn a_connector_dropped_on_a_runtime_worker_is_removed() -> TestResult {
 
 // A removal on the runtime's only worker hands the worker's other tasks to
 // another thread, so the task that lets the removal finish still runs.
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn a_blocked_removal_leaves_the_worker_to_other_tasks() -> TestResult {
-    let directory = tempfile::tempdir()?;
+/// A network whose removals wait until the returned sender lets them
+/// proceed, and the receiver that reports each removal starting.
+type GatedNetwork = (
+    NamespacedLocalNetwork<FakeControl>,
+    Arc<Mutex<Journal>>,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+);
+
+fn gated(directory: &std::path::Path) -> TestResult<GatedNetwork> {
     let (started, removal_started) = std::sync::mpsc::channel();
     let (let_proceed, proceed) = std::sync::mpsc::channel();
     let control = FakeControl {
@@ -336,19 +343,34 @@ async fn a_blocked_removal_leaves_the_worker_to_other_tasks() -> TestResult {
             started,
             proceed: Mutex::new(proceed),
         }),
-        ..pinning(directory.path())
+        ..pinning(directory)
     };
-    let (network, journal) = network(directory.path(), control, 24)?;
-    let established = network.establish([1; 16], &[ENDPOINT])?;
+    let (network, journal) = network(directory, control, 24)?;
+    Ok((network, journal, removal_started, let_proceed))
+}
+
+/// Let a removal proceed once it has started, from another task.
+async fn release(
+    removal_started: std::sync::mpsc::Receiver<()>,
+    let_proceed: std::sync::mpsc::Sender<()>,
+) {
+    while removal_started.try_recv().is_err() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let_proceed.send(()).ok();
+}
+
+// A removal on the runtime's only worker hands the worker's other tasks to
+// another thread, so the task that lets the removal finish still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_blocked_removal_leaves_the_worker_to_other_tasks() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal, removal_started, let_proceed) = gated(directory.path())?;
+    let established = network.establish([1; 16], &[ENDPOINT]);
     let removal = tokio::spawn(async move { drop(established) });
-    let release = tokio::spawn(async move {
-        while removal_started.try_recv().is_err() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        let_proceed.send(()).ok();
-    });
-    removal.await?;
-    release.await?;
+    let released = tokio::spawn(release(removal_started, let_proceed));
+    let joined = (removal.await, released.await);
+    assert!(matches!(joined, (Ok(()), Ok(()))));
     // The removal succeeded, so the slot is free, not quarantined.
     assert_eq!(entries(&journal).removed, ["piglor-h0"]);
     assert!(network.establish([2; 16], &[ENDPOINT]).is_ok());
