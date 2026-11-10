@@ -42,6 +42,17 @@ fn a_host_address_or_route_in_the_probe_network_conflicts() {
         &[address(Ipv4Addr::new(198, 18, 0, 5))],
         &routes
     ));
+    // A peer address counts as much as a local one.
+    let mut peer = AddressMessage::default();
+    peer.attributes = vec![
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+        AddressAttribute::Address(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 6))),
+    ];
+    assert!(conflicts(
+        PROBE,
+        &[RouteNetlinkMessage::NewAddress(peer)],
+        &routes
+    ));
     assert!(conflicts(
         PROBE,
         &elsewhere,
@@ -49,4 +60,11 @@ fn a_host_address_or_route_in_the_probe_network_conflicts() {
     ));
     // Other replies say nothing.
     assert!(!conflicts(PROBE, &[route(PROBE, 30)], &[address(PROBE)]));
+}
+
+#[test]
+fn the_probes_veth_ends_are_valid_interface_names() {
+    for name in [PROBE_HOST_LINK, PROBE_TARGET_LINK] {
+        assert_eq!(LinkName::new(name), Ok(probe_link(name)));
+    }
 }
