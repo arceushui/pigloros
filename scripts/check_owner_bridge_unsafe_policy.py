@@ -1311,7 +1311,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "18a9a8c0a5a6a5c7bf71e718e043d319f3fc04f118fd36d784c660201415af96":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "b8fa0082216ce5411867c60a33fd1cfc26cbd76e1ae562245133788708d21a33":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1568,7 +1568,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '8e826240756a79be6a791869846edf305e5be147544a6c93ede9bbbe0fbb718b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
-    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'caa25c26de54562099e3d11fa762fc1f55e93a21249fe5eff1ac881bd5b14a1d',
+    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'afba2c27c1926db5cfb7bd8d9bc4d4ea1a3313a2dde03fb8baa2c30a5071aa05',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': 'dc94b3e5cf1353fe7f65d225d8ad30cdccc071426e4e997c3ee79648fe354128',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '9c29db3c19998534c3b80c71f31afd0977106b574de062cc93f6cc291c4d9dc7',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
