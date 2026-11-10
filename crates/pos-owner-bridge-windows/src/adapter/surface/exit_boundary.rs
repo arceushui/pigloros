@@ -53,7 +53,7 @@ impl Surface {
         };
         let record = pos_owner_bridge_codec::decode_cleanup_record(bytes).map_err(|_| ())?;
         if record.ceremony_id() != spec.ceremony_id
-            || record.folder_name() != folder
+            || record.folder_name() != folder.as_str()
             || record.browser_pid() != browser.browser_pid
             || record.creation_filetime() != browser.creation_filetime
             || record.image_path_sha256() != browser.image_path_sha256
