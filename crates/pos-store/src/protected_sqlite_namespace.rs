@@ -152,12 +152,14 @@ fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
         .iter()
         .position(|byte| *byte == b'?' || *byte == b'#')
         .unwrap_or(uri.len());
-    let raw = &uri[..end];
+    let mut raw = &uri[..end];
     let mut decoded = Vec::with_capacity(raw.len());
-    let mut position = 0;
-    while position < raw.len() {
-        let octet = if raw[position] == b'%' {
-            raw.get(position + 1..position + 3).and_then(percent_octet)
+    // Consume at least one input byte on every iteration. Malformed escapes
+    // stay literal, and output cannot grow beyond the original input length.
+    while let Some((&literal, tail)) = raw.split_first() {
+        raw = tail;
+        let octet = if literal == b'%' {
+            raw.get(..2).and_then(percent_octet)
         } else {
             None
         };
@@ -166,10 +168,9 @@ fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
                 break;
             }
             decoded.push(byte);
-            position += 3;
+            raw = &raw[2..];
         } else {
-            decoded.push(raw[position]);
-            position += 1;
+            decoded.push(literal);
         }
     }
     Ok(PathBuf::from(OsString::from_vec(decoded)))
