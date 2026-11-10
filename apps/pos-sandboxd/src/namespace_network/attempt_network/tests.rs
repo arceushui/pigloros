@@ -516,13 +516,22 @@ mod privileged {
             .map(|mut connector| {
                 let timeout = Duration::from_millis(500);
                 let admitted = connector.connect(ENDPOINT, timeout).map(drop);
+                // The IPv4-mapped form of the endpoint reaches it as IPv4.
+                let mapped = SocketAddr::from((
+                    Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(),
+                    ENDPOINT.port(),
+                ));
+                let mapped = connector.connect(mapped, timeout).map(drop);
                 let other_port = SocketAddr::new(ENDPOINT.ip(), 444);
                 let refused = connector.connect(other_port, timeout).map(drop);
-                (admitted, refused)
+                (admitted, mapped, refused)
             });
         // Dropping the connector removed the namespace.
         let removed = matches!(namespaces.open(&name), Ok(None));
-        assert!(matches!(&outcomes, Ok((Ok(()), Err(_)))), "{outcomes:?}");
+        assert!(
+            matches!(&outcomes, Ok((Ok(()), Ok(()), Err(_)))),
+            "{outcomes:?}"
+        );
         assert!(removed);
         Ok(())
     }
