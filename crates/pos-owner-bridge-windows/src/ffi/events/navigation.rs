@@ -155,12 +155,16 @@ fn completed(
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    // Capture the owning case now, not when a possibly late callback arrives.
+    #[cfg(test)]
+    let case = READINESS_CASE.with(std::cell::Cell::get);
+    #[cfg(test)]
+    let reports = std::cell::Cell::new(0_u8);
     let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
-        observe(
-            observed.as_ref(),
-            EventKind::NavigationCompleted,
-            navigation_completed(args),
-        );
+        let result = navigation_completed(args);
+        #[cfg(test)]
+        trace_completion(case, &reports, &result);
+        observe(observed.as_ref(), EventKind::NavigationCompleted, result);
         Ok(())
     }));
     subscriptions.register(
@@ -173,6 +177,62 @@ fn completed(
             unsafe { remove.remove_NavigationCompleted(token) }
         },
     )
+}
+
+// Bounded diagnostics for the subscription's original case and time origin.
+#[cfg(test)]
+fn trace_completion(
+    case: Option<(u64, std::time::Instant)>,
+    reports: &std::cell::Cell<u8>,
+    result: &Result<NativeEvent>,
+) {
+    use std::io::Write as _;
+    let Some((case, started)) = case else {
+        return;
+    };
+    let count = reports.get();
+    if count >= 9 {
+        return;
+    }
+    reports.set(count + 1);
+    if count == 8 {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} overflow=true",
+            started.elapsed()
+        );
+        return;
+    }
+    if let Ok(NativeEvent::NavigationCompleted { id, success }) = result {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} id={id} success={success}",
+            started.elapsed()
+        );
+    } else {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} observation=unavailable",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn readiness_completion_trace_is_bounded_and_disabled_without_a_case() {
+    let reports = std::cell::Cell::new(0);
+    let result = Ok(NativeEvent::NavigationCompleted {
+        id: 2,
+        success: true,
+    });
+    trace_completion(None, &reports, &result);
+    assert_eq!(reports.get(), 0);
+    let case = Some((42, std::time::Instant::now()));
+    trace_completion(case, &reports, &Err(unavailable()));
+    for _ in 0..12 {
+        trace_completion(case, &reports, &result);
+    }
+    assert_eq!(reports.get(), 9);
 }
 
 fn frame(
