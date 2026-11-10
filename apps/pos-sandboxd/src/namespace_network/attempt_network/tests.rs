@@ -506,6 +506,24 @@ fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult
 }
 
 #[test]
+fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
+        let probed = network.probe_egress(EgressProbe {
+            network: inside,
+            port: 7000,
+        });
+        assert!(
+            matches!(probed, Err(EgressProbeError::Network)),
+            "{probed:?}"
+        );
+    }
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
@@ -544,7 +562,7 @@ fn probe_errors_say_what_failed() {
         ),
         (
             EgressProbeError::Network,
-            "the egress probe's /30 is misaligned or overlaps a host address or route",
+            "the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route",
         ),
     ] {
         assert_eq!(error.to_string(), message);

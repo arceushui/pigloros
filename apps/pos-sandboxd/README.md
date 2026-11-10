@@ -348,7 +348,8 @@ policy and never changes one.
 traffic passes the host. Nothing calls it yet: the provider's startup
 composition, outside #911, must run it before admission opens and keep
 admission closed on any error. It takes an installation-configured IPv4 /30
-that must be aligned and overlap no host address or route; the probe refuses
+that must be aligned and overlap neither the attempt range nor any host
+address or route; the probe refuses
 any other. The probe establishes a real attempt network for a
 reserved probe attempt whose one endpoint is a target namespace behind the
 host on its own veth pair (`piglor-t0`), connects, and requires the

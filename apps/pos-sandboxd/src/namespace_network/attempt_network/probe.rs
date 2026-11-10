@@ -133,9 +133,9 @@ fn unused_by_host(network: Ipv4Addr) -> Result<bool, NetlinkError> {
 /// Why the egress probe failed. Each failure must keep admission closed.
 #[derive(Debug, thiserror::Error)]
 pub enum EgressProbeError {
-    /// The configured /30 is not aligned, or overlaps a host address or
-    /// route.
-    #[error("the egress probe's /30 is misaligned or overlaps a host address or route")]
+    /// The configured /30 is not aligned, or overlaps the attempt range or
+    /// a host address or route.
+    #[error("the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route")]
     Network,
     /// The probe's target could not be set up or removed.
     #[error("the egress probe's target could not be set up or removed")]
@@ -239,7 +239,12 @@ where
     /// the connection does not reach the target, the target sees an address
     /// other than the host's, or the target cannot be removed afterwards.
     pub fn probe_egress(&self, probe: EgressProbe) -> Result<(), EgressProbeError> {
-        let (host, target) = probe.addresses().ok_or(EgressProbeError::Network)?;
+        // The range and the /30 are both aligned, so they overlap exactly
+        // when the range holds the /30's network address.
+        let (host, target) = probe
+            .addresses()
+            .filter(|_| !self.range.contains(IpAddr::V4(probe.network)))
+            .ok_or(EgressProbeError::Network)?;
         if !unused_by_host(probe.network).map_err(EgressProbeError::Target)? {
             return Err(EgressProbeError::Network);
         }
