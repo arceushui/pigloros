@@ -46,8 +46,9 @@ const PROBE_TARGET_LINK: &str = "piglor-u0";
 /// How long the probe's connection may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The installation-configured IPv4 /30 the probe's target lives in: the
-/// host takes `network + 1` and the target `network + 2`. It must be
+/// The installation-configured IPv4 /30 the probe's target lives in.
+///
+/// The host takes `network + 1` and the target `network + 2`. It must be
 /// /30-aligned and lie outside the attempt range and every address and route
 /// the host has; the probe refuses it otherwise.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +64,7 @@ impl EgressProbe {
     /// a /30's network address.
     pub(super) fn addresses(self) -> Option<(Ipv4Addr, SocketAddrV4)> {
         let network = self.network.to_bits();
-        (network & 3 == 0)
+        (network.trailing_zeros() >= 2)
             .then_some(network)
             .and_then(|network| network.checked_add(1).zip(network.checked_add(2)))
             .map(|(host, target)| {
