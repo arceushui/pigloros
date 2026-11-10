@@ -107,7 +107,7 @@ fn a_missing_namespace_is_not_observed_and_removes_as_nothing() -> TestResult {
 }
 
 #[test]
-fn only_prefixed_veth_ends_are_the_providers_and_nothing_may_remain() {
+fn only_attempt_and_probe_veth_ends_are_the_providers_and_nothing_may_remain() {
     let link = |name: &str, kind| ObservedLink {
         index: 1,
         name: name.to_owned(),
@@ -121,6 +121,9 @@ fn only_prefixed_veth_ends_are_the_providers_and_nothing_may_remain() {
     assert!(is_attempt_host_link(&link("piglor-h3", veth)));
     assert!(!is_attempt_host_link(&link("piglor-h3", LinkKind::Other)));
     assert!(!is_attempt_host_link(&link("other-h0", veth)));
+    assert!(is_attempt_host_link(&link("piglor-t0", veth)));
+    assert!(!is_attempt_host_link(&link("piglor-t0", LinkKind::Other)));
+    assert!(!is_attempt_host_link(&link("piglor-t1", veth)));
     assert!(none_remain(&[], &[]).is_ok());
     assert!(matches!(
         none_remain(&[NamespaceName::for_attempt([1; 16])], &[]),
@@ -352,6 +355,7 @@ mod privileged {
         let namespaces = NetworkNamespaces::system();
         let control = NetlinkNamespaceControl::new(namespaces.clone());
         let (first, second, other_host, other_inner) = orphan_fixture()?;
+        let (probe_host, probe_inner) = (LinkName::new("piglor-t0")?, LinkName::new("piglor-u0")?);
         // Both ends of the other pair stay in the host namespace.
         let created = namespaces.create(&first.name).and_then(|peer| {
             namespaces.create(&second.name).and_then(|_| {
@@ -360,6 +364,8 @@ mod privileged {
                         session.execute(vec![
                             route::veth_pair(&first.host_link, &first.inner_link, peer.as_fd()),
                             route::veth_pair(&other_host, &other_inner, host.as_fd()),
+                            // An egress probe's target pair left by a crash.
+                            route::veth_pair(&probe_host, &probe_inner, host.as_fd()),
                         ])
                     })
                 })
@@ -370,6 +376,7 @@ mod privileged {
         assert!(removed.is_ok(), "{removed:?}");
         assert!(matches!(namespaces.attempt_names(), Ok(names) if names.is_empty()));
         assert!(matches!(host_link(&first.host_link), Ok(None)));
+        assert!(matches!(host_link(&probe_host), Ok(None)));
         // A veth end of another name is not the provider's.
         assert!(matches!(host_link(&other_host), Ok(Some(_))));
         Ok(())

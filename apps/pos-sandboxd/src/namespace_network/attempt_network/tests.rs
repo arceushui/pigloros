@@ -1,12 +1,21 @@
 use std::{
+    cell::RefCell,
+    collections::VecDeque,
     error::Error,
     net::{Ipv4Addr, Ipv6Addr},
     sync::MutexGuard,
 };
 
+use netlink_packet_core::{
+    DoneMessage, NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_MULTIPART,
+};
+use netlink_packet_route::address::{AddressAttribute, AddressMessage};
+use netlink_packet_route::RouteNetlinkMessage;
+
 use rustix::io::Errno;
 
 use super::*;
+use crate::namespace_network::netlink::{NetlinkSession, NetlinkTransport};
 use crate::namespace_network::{
     FirewallTableFamily, IpPrefix, LinkKind, LinkName, NamespaceName, ObservedAddress,
     ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
@@ -465,6 +474,194 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
     Ok(())
 }
 
+#[test]
+fn the_probe_target_takes_the_second_address_of_an_aligned_slash_30() {
+    let probe = |network| EgressProbe {
+        network,
+        port: 7000,
+    };
+    assert_eq!(
+        probe(Ipv4Addr::new(198, 18, 0, 4)).addresses(),
+        Some((
+            Ipv4Addr::new(198, 18, 0, 5),
+            std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
+        ))
+    );
+    assert_eq!(
+        probe(Ipv4Addr::new(255, 255, 255, 252))
+            .addresses()
+            .map(|(host, _)| host),
+        Some(Ipv4Addr::new(255, 255, 255, 253))
+    );
+    for misaligned in [Ipv4Addr::new(198, 18, 0, 5), Ipv4Addr::BROADCAST] {
+        assert_eq!(probe(misaligned).addresses(), None);
+    }
+}
+
+#[test]
+fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probed = network.probe_egress(EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 5),
+        port: 7000,
+    });
+    assert!(
+        matches!(probed, Err(EgressProbeError::Network)),
+        "{probed:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
+        let probed = network.probe_egress(EgressProbe {
+            network: inside,
+            port: 7000,
+        });
+        assert!(
+            matches!(probed, Err(EgressProbeError::Network)),
+            "{probed:?}"
+        );
+    }
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+/// A host route session that answers with scripted datagrams, then fails.
+struct HostReplies(RefCell<VecDeque<Vec<u8>>>);
+
+impl NetlinkTransport for HostReplies {
+    fn send(&self, _datagram: &[u8]) -> Result<(), NetlinkError> {
+        Ok(())
+    }
+
+    fn receive(&self) -> Result<Vec<u8>, NetlinkError> {
+        self.0
+            .borrow_mut()
+            .pop_front()
+            .ok_or(NetlinkError::Truncated)
+    }
+}
+
+/// One message of host dump `sequence`.
+fn dumped(sequence: u32, payload: NetlinkPayload<RouteNetlinkMessage>) -> Vec<u8> {
+    let mut header = NetlinkHeader::default();
+    header.sequence_number = sequence;
+    header.flags = NLM_F_MULTIPART;
+    let mut message = NetlinkMessage::new(header, payload);
+    message.finalize();
+    let mut bytes = vec![0; message.buffer_len()];
+    message.serialize(&mut bytes);
+    bytes
+}
+
+/// A host whose address dump reports exactly `addresses` and whose route
+/// dump reports none.
+fn host_with(addresses: &[Ipv4Addr]) -> NetlinkSession<HostReplies> {
+    let done = |sequence| dumped(sequence, NetlinkPayload::Done(DoneMessage::default()));
+    let mut replies: VecDeque<Vec<u8>> = addresses
+        .iter()
+        .map(|&address| {
+            let mut message = AddressMessage::default();
+            message.attributes = vec![AddressAttribute::Local(std::net::IpAddr::V4(address))];
+            dumped(
+                1,
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(message)),
+            )
+        })
+        .collect();
+    replies.extend([done(1), done(2)]);
+    NetlinkSession::new(HostReplies(RefCell::new(replies)))
+}
+
+#[test]
+fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+    let used = Ipv4Addr::new(198, 18, 0, 5);
+    let probed = network.probe_egress_through(|| Ok(host_with(&[used])), probe);
+    assert!(
+        matches!(probed, Err(EgressProbeError::Network)),
+        "{probed:?}"
+    );
+    // A host that cannot be read fails closed as well.
+    let unread = network.probe_egress_through(
+        || -> Result<NetlinkSession<HostReplies>, _> { Err(NetlinkError::Unexpected) },
+        probe,
+    );
+    assert!(
+        matches!(
+            unread,
+            Err(EgressProbeError::Target(NetlinkError::Unexpected))
+        ),
+        "{unread:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    assert!(std::fs::read_dir(directory.path())?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+    // Unsharing a namespace needs `CAP_SYS_ADMIN`; the host has no address
+    // in the probe's /30.
+    let probed =
+        network.probe_egress_through(|| Ok(host_with(&[Ipv4Addr::new(10, 0, 0, 1)])), probe);
+    assert!(
+        matches!(probed, Err(EgressProbeError::Target(_))),
+        "{probed:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[test]
+fn probe_errors_say_what_failed() {
+    for (error, message) in [
+        (
+            EgressProbeError::Target(NetlinkError::Unexpected),
+            "the egress probe's target could not be set up or removed",
+        ),
+        (
+            EgressProbeError::Listen(io::ErrorKind::AddrInUse.into()),
+            "the egress probe's target could not listen",
+        ),
+        (
+            EgressProbeError::Establish(AttemptNetworkError::InUse),
+            "the egress probe's attempt network could not be established",
+        ),
+        (
+            EgressProbeError::Blocked(io::ErrorKind::TimedOut.into()),
+            "forwarded sandbox traffic did not pass the host",
+        ),
+        (
+            EgressProbeError::NotMasqueraded,
+            "forwarded sandbox traffic was not masqueraded",
+        ),
+        (
+            EgressProbeError::Network,
+            "the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
 /// A network whose removals wait until the returned sender lets them
 /// proceed, and the receiver that reports each removal starting.
 type GatedNetwork = (
@@ -900,6 +1097,66 @@ mod privileged {
         assert_eq!(records, Ok(Vec::new()));
         assert!(swept.is_ok(), "{swept:?}");
         assert!(matches!(host_chains(), Ok(None)));
+        Ok(())
+    }
+
+    /// The probe's dedicated /30.
+    const PROBE: EgressProbe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+
+    /// A network over the real kernel, pinned in `/run/netns`.
+    fn real_network() -> TestResult<NamespacedLocalNetwork<NetlinkNamespaceControl>> {
+        let namespaces = NetworkNamespaces::system();
+        Ok(NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        ))
+    }
+
+    #[test]
+    fn the_egress_probe_passes_and_leaves_nothing() -> TestResult {
+        if !isolated("the_egress_probe_passes_and_leaves_nothing")? {
+            return Ok(());
+        }
+        let probed = real_network()?.probe_egress(PROBE);
+        assert!(probed.is_ok(), "{probed:?}");
+        let left = NetworkNamespaces::system().attempt_names();
+        assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_foreign_forward_drop_fails_the_egress_probe() -> TestResult {
+        if !isolated("a_foreign_forward_drop_fails_the_egress_probe")? {
+            return Ok(());
+        }
+        // Another owner's table, as Docker or ufw would install it.
+        let foreign = crate::namespace_network::FirewallChain {
+            name: "forward".to_owned(),
+            base: Some(crate::namespace_network::FirewallBaseChain {
+                hook: crate::namespace_network::FirewallHook::Forward,
+                priority: 0,
+                policy: crate::namespace_network::FirewallVerdict::Drop,
+            }),
+            rules: Vec::new(),
+        };
+        let installed = NetlinkSession::open(crate::namespace_network::netlink::NETFILTER)
+            .and_then(|session| {
+                session.execute(crate::namespace_network::firewall::install(
+                    "foreign",
+                    &[foreign],
+                ))
+            });
+        let probed = real_network()?.probe_egress(PROBE);
+        assert!(installed.is_ok(), "{installed:?}");
+        assert!(
+            matches!(probed, Err(EgressProbeError::Blocked(_))),
+            "{probed:?}"
+        );
         Ok(())
     }
 }

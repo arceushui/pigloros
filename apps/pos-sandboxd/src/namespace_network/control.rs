@@ -279,7 +279,8 @@ fn remove_attempt_link(
 /// The prefix of every provider-owned host veth end.
 const HOST_LINK_PREFIX: &str = "piglor-h";
 
-/// Every provider-owned host veth end the session's namespace holds.
+/// Every provider-owned host veth end the session's namespace holds: each
+/// attempt's `piglor-h…` and the egress probe's `piglor-t0`.
 fn attempt_host_links<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
 ) -> Result<Vec<ObservedLink>, NetlinkError> {
@@ -288,7 +289,9 @@ fn attempt_host_links<T: NetlinkTransport>(
 
 /// Whether `link` is a provider-owned host veth end.
 fn is_attempt_host_link(link: &ObservedLink) -> bool {
-    link.name.starts_with(HOST_LINK_PREFIX) && matches!(link.kind, LinkKind::Veth { .. })
+    (link.name.starts_with(HOST_LINK_PREFIX)
+        || link.name == super::attempt_network::PROBE_HOST_LINK)
+        && matches!(link.kind, LinkKind::Veth { .. })
 }
 
 /// Why [`NetlinkNamespaceControl::remove_orphans`] failed.
