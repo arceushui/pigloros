@@ -10,7 +10,7 @@
 //! backed by a provider image, by the canonical and device/inode rules of the
 //! provider loop sweep. The loop's backing file must be the image whose
 //! device and inode the PAI2 stage recorded from the attempt's admission, and
-//! a PAI3 record must also match every recorded mount, mapper, loop and image
+//! a PAI3 record must also match every recorded mount, mapper and loop
 //! identity. Anything else is refused and left
 //! mounted. A root with any submount, or an unreadable mount table, is also
 //! refused. After the descriptor-bound lazy detach, the root descriptor closes
@@ -146,7 +146,6 @@ fn provider_root(
             && recorded.mapper_uuid == uuid
             && recorded.loop_name == loop_name
             && recorded.loop_device == (loop_identity.device, loop_identity.diskseq.get())
-            && loop_device.backing == Some(recorded.image)
     });
     (private_root && verity && provider_loop && as_recorded)
         .then_some([mapper_identity, loop_identity])

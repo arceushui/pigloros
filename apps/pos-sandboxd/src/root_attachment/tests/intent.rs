@@ -23,7 +23,7 @@ mod cases {
                 .join(component(&tree.prepared)),
         )?;
         assert_eq!(&bytes[..4], b"PAI3");
-        assert_eq!(bytes.len(), 409);
+        assert_eq!(bytes.len(), 393);
         assert!(count > 0);
         Ok(count)
     }
@@ -44,7 +44,7 @@ mod cases {
         let key = component(&tree.prepared);
         let path = tree.runtime.path().join("registry").join(&key);
         let expected = root_record_fixture(fs::read(&path)?, &key);
-        assert_eq!(expected.len(), 409);
+        assert_eq!(expected.len(), 393);
 
         let checked = recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
             Ok(())

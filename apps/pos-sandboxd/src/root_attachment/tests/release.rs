@@ -26,7 +26,7 @@ mod cases {
             let retained = identity.clone();
             assert_eq!(identity.mount_id(), 41);
             assert_eq!(identity.root_identity(), ((253, 3), 1));
-            assert_eq!(identity.image_identity(), (5, 6));
+            assert_eq!(identity.image_identity(), crate::FIXTURE_IMAGE);
             assert_eq!(identity.mapper_uuid(), "CRYPT-VERITY-5f0e5a1c-root");
             assert_eq!(identity.mapper_generation(), ((253, 3), 102));
             assert_eq!(identity.loop_name(), "loop7");
@@ -167,7 +167,7 @@ mod cases {
             );
             assert_eq!(kernel.detached(), usize::from(fault == 8));
             assert_eq!(retained.mount_id(), 41);
-            assert_eq!(retained.image_identity(), (5, 6));
+            assert_eq!(retained.image_identity(), crate::FIXTURE_IMAGE);
             assert_eq!(fs::read(record)?, bytes);
             tree.prepared.verify_directory()?;
             assert!(tree
@@ -335,7 +335,7 @@ mod cases {
         })?;
         let key = component(&tree.prepared);
         let record = tree.runtime.path().join("registry").join(&key);
-        assert_eq!(fs::read(&record)?.len(), 409);
+        assert_eq!(fs::read(&record)?.len(), 393);
         let released = release_owned(root, &kernel, &tree.prepared).await?;
         let completed = tree
             .prepared

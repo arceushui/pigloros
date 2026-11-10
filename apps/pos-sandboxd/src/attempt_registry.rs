@@ -560,7 +560,7 @@ mod tests {
     pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
         assert_eq!(directory.len(), 100);
         directory[..4].copy_from_slice(b"PAI3");
-        for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
+        for value in [41_u64, 253, 3, 1, 253, 3, 102, 7, 7, 101] {
             directory.extend_from_slice(&value.to_le_bytes());
         }
         directory.extend_from_slice(
@@ -574,7 +574,7 @@ mod tests {
             directory.resize(start + capacity, 0);
             directory[start..start + text.len()].copy_from_slice(text);
         }
-        assert_eq!(directory.len(), 409);
+        assert_eq!(directory.len(), 393);
         directory
     }
 

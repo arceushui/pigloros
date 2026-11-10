@@ -83,7 +83,10 @@ impl RecoveredAttemptIntent {
                 word.copy_from_slice(chunk);
                 *slot = u64::from_le_bytes(word);
             }
-            if identities[0] != identities[2] || identities[1] == identities[3] {
+            if identities[0] != identities[2]
+                || identities[1] == identities[3]
+                || identities[4..].contains(&0)
+            {
                 return Err(SystemdAttemptRegistryError::InvalidIntent);
             }
             (
@@ -532,7 +535,14 @@ mod tests {
     fn directory_record() -> TestResult<Vec<u8>> {
         let mut bytes = planned()?;
         bytes[..4].copy_from_slice(b"PAI2");
-        for value in [7_u64, 11, 7, 13, 5, 6] {
+        for value in [
+            7_u64,
+            11,
+            7,
+            13,
+            crate::FIXTURE_IMAGE.0,
+            crate::FIXTURE_IMAGE.1,
+        ] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         Ok(bytes)
@@ -550,8 +560,19 @@ mod tests {
             .ok_or("a complete directory stage")?;
         assert_eq!(intent.planned().attempt_id(), [1; 16]);
         assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
-        assert_eq!(intent.recorded_image(), Some((5, 6)));
+        assert_eq!(intent.recorded_image(), Some(crate::FIXTURE_IMAGE));
         assert!(intent.recorded_root().is_none());
+        // A zero image device or inode is refused.
+        for start in [84, 92] {
+            let (runtime, held) = fixture()?;
+            let mut zero = bytes.clone();
+            zero[start..start + 8].fill(0);
+            write_record(runtime.path(), KEY, &zero)?;
+            assert!(matches!(
+                SystemdAttemptRecovery::from_directory(held),
+                Err(SystemdAttemptRegistryError::InvalidIntent)
+            ));
+        }
         // A planned-only stage records neither.
         let (runtime, held) = fixture()?;
         write_record(runtime.path(), KEY, &planned()?)?;
@@ -588,7 +609,7 @@ mod tests {
             .ok_or("complete root claims")?;
         assert_eq!(intent.planned().attempt_id(), [1; 16]);
         assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
-        assert_eq!(intent.recorded_image(), Some((5, 6)));
+        assert_eq!(intent.recorded_image(), Some(crate::FIXTURE_IMAGE));
         assert_eq!(
             intent
                 .root
@@ -614,7 +635,7 @@ mod tests {
         // value, so the recorded generations carry the bound as a type fact.
         for (value, component) in [(0, 0), (u64::from(u32::MAX), u32::MAX)] {
             let mut bytes = valid.clone();
-            for index in [1, 2, 6, 7, 9, 10] {
+            for index in [1, 2, 4, 5, 7, 8] {
                 bytes[100 + index * 8..100 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
@@ -628,14 +649,16 @@ mod tests {
                 "device limit {value}"
             );
         }
-        for index in [0, 3, 5, 8, 11] {
+        // A zero mount ID, root inode or generation of PAI3, or a zero
+        // image device or inode of its PAI2 prefix (bytes 84 and 92).
+        for start in [100, 124, 148, 172, 84, 92] {
             let mut bytes = valid.clone();
-            bytes[100 + index * 8..100 + (index + 1) * 8].fill(0);
+            bytes[start..start + 8].fill(0);
             write_record(runtime.path(), KEY, &bytes)?;
-            assert!(read_entry(&held, KEY).is_err(), "zero word {index}");
+            assert!(read_entry(&held, KEY).is_err(), "zero word at {start}");
         }
         // Keep matching pairs coherent so device correlation cannot mask width.
-        for indices in [&[1, 6][..], &[2, 7], &[9], &[10]] {
+        for indices in [&[1, 4][..], &[2, 5], &[7], &[8]] {
             let mut bytes = valid.clone();
             for &index in indices {
                 bytes[100 + index * 8..100 + (index + 1) * 8]
@@ -644,7 +667,7 @@ mod tests {
             write_record(runtime.path(), KEY, &bytes)?;
             assert!(read_entry(&held, KEY).is_err(), "device words {indices:?}");
         }
-        for index in [6, 7] {
+        for index in [4, 5] {
             let mut wrong_mapper = valid.clone();
             wrong_mapper[100 + index * 8..100 + (index + 1) * 8]
                 .copy_from_slice(&254_u64.to_le_bytes());
@@ -652,10 +675,10 @@ mod tests {
             assert!(read_entry(&held, KEY).is_err(), "mapper word {index}");
         }
         let mut wrong_path = valid.clone();
-        wrong_path[196] ^= 1;
+        wrong_path[180] ^= 1;
         write_record(runtime.path(), KEY, &wrong_path)?;
         assert!(read_entry(&held, KEY).is_err());
-        for (start, end) in [(264, 393), (393, 409)] {
+        for (start, end) in [(248, 377), (377, 393)] {
             for fault in 0..4 {
                 let mut bytes = valid.clone();
                 match fault {

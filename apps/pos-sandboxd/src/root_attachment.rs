@@ -350,12 +350,7 @@ where
                 .zip(ActivationImage::from_admission(admission).ok())
                 .ok_or(ImageActivationError::Transport)
         })
-        .and_then(|prepared| {
-            // The directory's PAI2 record must name exactly this held image.
-            (prepared.0.held == directory.image())
-                .then_some(prepared)
-                .ok_or(ImageActivationError::AttachFailure)
-        });
+        .and_then(|prepared| recorded_image_is_held(directory, &prepared.0).map(|()| prepared));
     match prepared {
         Ok((expected, image)) => {
             // The connection gets its own 60 s bound, like the call (owner decision Q7.4).
@@ -378,6 +373,16 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+/// The directory's PAI2 record must name exactly the admission's held image.
+fn recorded_image_is_held(
+    directory: &PreparedAttemptDirectory,
+    expected: &Expected,
+) -> Result<(), ImageActivationError> {
+    (expected.held == directory.image())
+        .then_some(())
+        .ok_or(ImageActivationError::AttachFailure)
 }
 
 /// Durably record the request's boot and time, so a restart can wait it out

@@ -154,14 +154,13 @@ pub(crate) struct LauncherFacts {
 #[cfg(target_os = "linux")]
 /// The root facts a PAI3 record retained at activation, decoded for
 /// comparison with a fresh kernel readback. These are claims, not evidence.
+/// The held image's identity is PAI2's, not repeated here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordedRoot {
     /// The attached root's mount ID.
     pub(crate) mount_id: u64,
     /// The root inode on the mapper device.
     pub(crate) inode: u64,
-    /// The held image's device and inode.
-    pub(crate) image: (u64, u64),
     /// The mapper's device and disk sequence.
     pub(crate) mapper: ((u32, u32), u64),
     /// The mapper's UUID.
@@ -171,6 +170,10 @@ pub(crate) struct RecordedRoot {
     /// The loop device's device and disk sequence.
     pub(crate) loop_device: ((u32, u32), u64),
 }
+
+/// The held image `(device, inode)` the test fixtures record and read back.
+#[cfg(test)]
+pub(crate) const FIXTURE_IMAGE: (u64, u64) = (5, 6);
 
 /// An attempt's `root` is opened only as a directory path, never through a
 /// symlink: the root readback and the restart root inventory share this.

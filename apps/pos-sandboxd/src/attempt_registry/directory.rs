@@ -20,11 +20,6 @@ use pos_reference::provider_admission::HeldImageAdmission;
 
 pub(super) const DIRECTORY_RECORD_SIZE: usize = 100;
 
-/// The image identity the directory fixtures record: the fake kernel
-/// fixture's held image.
-#[cfg(test)]
-const FIXTURE_IMAGE: (u64, u64) = (5, 6);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DirectoryIdentity {
     device: u64,
@@ -108,7 +103,7 @@ impl CommittedPlannedAttempt {
     pub(crate) fn prepare_fixture_directory(
         self,
     ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
-        self.prepare_for_image(FIXTURE_IMAGE)
+        self.prepare_for_image(crate::FIXTURE_IMAGE)
     }
 
     fn prepare_for_image(
@@ -501,8 +496,8 @@ mod tests {
                     expected.extend_from_slice(&metadata.ino().to_le_bytes());
                 }
                 // The admitted image's device and inode close the stage.
-                expected.extend_from_slice(&5_u64.to_le_bytes());
-                expected.extend_from_slice(&6_u64.to_le_bytes());
+                expected.extend_from_slice(&crate::FIXTURE_IMAGE.0.to_le_bytes());
+                expected.extend_from_slice(&crate::FIXTURE_IMAGE.1.to_le_bytes());
                 assert_eq!(record, expected);
             } else {
                 assert_eq!(record, planned.encode());
@@ -641,8 +636,8 @@ mod tests {
                 expected.extend_from_slice(&metadata.ino().to_le_bytes());
             }
             // The admitted image's device and inode close the 100-byte stage.
-            expected.extend_from_slice(&5_u64.to_le_bytes());
-            expected.extend_from_slice(&6_u64.to_le_bytes());
+            expected.extend_from_slice(&crate::FIXTURE_IMAGE.0.to_le_bytes());
+            expected.extend_from_slice(&crate::FIXTURE_IMAGE.1.to_le_bytes());
             assert_eq!(bytes.len(), 100);
             assert_eq!(bytes, expected);
             assert_eq!(fs::read_dir(path.join("root"))?.count(), 0);
@@ -811,7 +806,7 @@ mod tests {
             .join(prepared.intent().unit_name().attempt_component());
         let bytes = fs::read(record)?;
         assert_eq!(&bytes[..4], b"PAI3");
-        assert_eq!(bytes.len(), 409);
+        assert_eq!(bytes.len(), 393);
         assert!(registry.commit_planned(&intent(2)?).is_err());
         Ok(())
     }

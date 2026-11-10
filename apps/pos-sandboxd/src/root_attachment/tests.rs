@@ -471,7 +471,7 @@ fn expected(component: &str) -> Expected {
             start: 10_485_760,
             length: 16_384,
         },
-        held: (5, 6),
+        held: crate::FIXTURE_IMAGE,
         executable_path: "/usr/bin/adapter".to_owned(),
         executable_digest: [11; 32],
     }
@@ -1933,6 +1933,21 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
 }
 
 #[test]
+fn only_the_image_pai2_recorded_is_activated() -> TestResult {
+    let tree = prepared_tree()?;
+    let mut expected = expected(&component(&tree.prepared));
+    assert_eq!(recorded_image_is_held(&tree.prepared, &expected), Ok(()));
+    for held in [(5, 7), (4, 6)] {
+        expected.held = held;
+        assert_eq!(
+            recorded_image_is_held(&tree.prepared, &expected),
+            Err(ImageActivationError::AttachFailure)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn an_entry_binds_only_the_root_its_admission_activated() -> TestResult {
     let tree = prepared_tree()?;
     let expected = expected(&component(&tree.prepared));
@@ -1994,7 +2009,7 @@ fn check_admitted_recheck(
     let checked = verified.recheck_with(kernel, prepared, &entry)?;
     let committed = fs::read(&record)?;
     assert_eq!(&committed[..4], b"PAI3");
-    assert_eq!(committed.len(), 409);
+    assert_eq!(committed.len(), 393);
     assert_eq!(checked.root_directory(), verified.root_directory());
     assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
     let foreign = registry

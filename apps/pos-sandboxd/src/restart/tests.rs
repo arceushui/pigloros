@@ -930,6 +930,17 @@ mod cases {
         Ok(())
     }
 
+    /// Cleanup bounds `base` plus 100, 200 and 300 ms of shutdown, then 400 ms
+    /// for unit absence and 500 ms for root release, all `offset` later.
+    fn cleanup_from(base: Instant, offset: Duration) -> TestResult<AttemptCleanupDeadlines> {
+        let at = |millis| base + offset + Duration::from_millis(millis);
+        Ok(AttemptCleanupDeadlines::new(
+            AttemptShutdownDeadlines::new(at(100), at(200), at(300))?,
+            at(400),
+            at(500),
+        )?)
+    }
+
     #[tokio::test]
     async fn the_overall_deadline_caps_a_hanging_stop_or_detach() -> TestResult {
         if !in_lock_test_process(
@@ -937,8 +948,9 @@ mod cases {
         )? {
             return Ok(());
         }
-        // The overall deadline comes before the cleanup's unit and release
-        // bounds (400 ms and 450 ms), so it ends a hanging stop or detach.
+        // The overall deadline, 100 ms after setup, comes long before the
+        // cleanup's unit and release bounds (at least 2 s), so only it can
+        // end a hanging stop or detach.
         let runtime = seed_with(Some(started_without_cgroup))?;
         for (stop, detach) in [
             (Outcome::Hangs, Outcome::Succeeds),
@@ -947,13 +959,17 @@ mod cases {
             let host = host(Listing::Surviving, vec![unit(ROOT_ATTEMPT)?]).await?;
             let survivors = FakeSurvivors::new(&host, stop, detach);
             let network = Network::new(Cleanup::Removes);
+            let recovered = recovery(runtime.path())?;
             let started = Instant::now();
             let result = reconcile_with(
                 &host.transport,
-                recovery(runtime.path())?,
+                recovered,
                 &network,
                 &survivors,
-                (cleanup()?, started + Duration::from_millis(100)),
+                (
+                    cleanup_from(started, Duration::from_secs(2))?,
+                    started + Duration::from_millis(100),
+                ),
                 (|_| std::future::ready(Ok(true)), swept(), this_boot()),
             )
             .await;
@@ -963,10 +979,18 @@ mod cases {
                 "{stop:?}/{detach:?}: {result:?}"
             );
             assert!(
-                elapsed >= Duration::from_millis(100) && elapsed < Duration::from_millis(350),
+                elapsed < Duration::from_millis(1500),
                 "{stop:?}/{detach:?} ended after {elapsed:?}"
             );
             assert_eq!(survivors.stopped()?, vec![unit(ROOT_ATTEMPT)?]);
+            // The hanging detach was entered for both recorded roots; a
+            // hanging stop reaches no detach.
+            let detached = if matches!(detach, Outcome::Hangs) {
+                vec![[2; 16], [ROOT_ATTEMPT; 16]]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(survivors.detached()?, detached);
             assert_eq!(network.calls.load(Ordering::SeqCst), 0);
             assert_untouched(runtime.path(), 5)?;
         }
@@ -980,28 +1004,24 @@ mod cases {
         )? {
             return Ok(());
         }
-        // The roots are released by 50 ms; the network cleanup then hangs and
-        // is ended only by the overall deadline at 300 ms.
+        // The roots are released well within the 500 ms release bound; the
+        // network cleanup then hangs and is ended only by the overall
+        // deadline, 1.5 s after setup.
         let runtime = seed(true)?;
         let host = host(Listing::Empty, Vec::new()).await?;
         let survivors = FakeSurvivors::succeeding(&host);
         let network = Network::new(Cleanup::Hangs);
+        let recovered = recovery(runtime.path())?;
         let started = Instant::now();
-        let cleanup = AttemptCleanupDeadlines::new(
-            AttemptShutdownDeadlines::new(
-                started + Duration::from_millis(10),
-                started + Duration::from_millis(20),
-                started + Duration::from_millis(30),
-            )?,
-            started + Duration::from_millis(40),
-            started + Duration::from_millis(50),
-        )?;
         let result = reconcile_with(
             &host.transport,
-            recovery(runtime.path())?,
+            recovered,
             &network,
             &survivors,
-            (cleanup, started + Duration::from_millis(300)),
+            (
+                cleanup_from(started, Duration::ZERO)?,
+                started + Duration::from_millis(1500),
+            ),
             (|_| std::future::ready(Ok(true)), swept(), this_boot()),
         )
         .await;
@@ -1011,7 +1031,7 @@ mod cases {
             "{result:?}"
         );
         assert!(
-            elapsed >= Duration::from_millis(300),
+            elapsed >= Duration::from_millis(1500),
             "ended after {elapsed:?}"
         );
         assert_eq!(survivors.detached()?, vec![[2; 16], [ROOT_ATTEMPT; 16]]);
