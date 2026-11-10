@@ -715,29 +715,54 @@ fn forwards(reply: RouteNetlinkMessage) -> Result<bool, NetlinkError> {
     }
 }
 
-/// Every link index the IPv4 traffic of `attempt` enters the host by, or
-/// [`HostEgressError::Ipv6Egress`] for an IPv6 endpoint the host does not
-/// hold: the attempt's veth end, `host_link`, and the link each off-host
-/// endpoint's replies come back by.
+/// Every link index the IPv4 traffic of an attempt enters the host by: its
+/// veth end, `host_link`, and the link each off-host IPv4 endpoint's
+/// replies come back by. IPv6 endpoints, admitted only on the host, need
+/// none.
 fn ingress_links<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
     host_link: u32,
     endpoints: &[SocketAddr],
 ) -> Result<Vec<u32>, HostEgressError> {
     let mut links = vec![host_link];
-    for endpoint in endpoints {
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_ipv4()) {
         let (local, link) = session
             .request(route_to(endpoint.ip()))
             .and_then(route_reply)?;
-        match (local, endpoint.is_ipv4()) {
-            (true, _) => {}
-            (false, true) => links.push(link),
-            (false, false) => return Err(HostEgressError::Ipv6Egress),
+        if !local {
+            links.push(link);
         }
     }
     links.sort_unstable();
     links.dedup();
     Ok(links)
+}
+
+/// Refuse every IPv6 endpoint the host does not hold, by the session's
+/// route lookups: egress is IPv4 only.
+fn admit_on<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+    endpoints: &[SocketAddr],
+) -> Result<(), HostEgressError> {
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_ipv6()) {
+        let (local, _) = session
+            .request(route_to(endpoint.ip()))
+            .and_then(route_reply)?;
+        if !local {
+            return Err(HostEgressError::Ipv6Egress);
+        }
+    }
+    Ok(())
+}
+
+/// The chains of the host table, by name, or `None` if it does not exist.
+///
+/// # Errors
+/// Fails if the table cannot be read.
+pub(super) fn host_chains<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+) -> Result<Option<Vec<String>>, NetlinkError> {
+    observe(session).map(|table| table.map(|table| table.chains.into_keys().collect()))
 }
 
 /// The host side of attempt networks: it admits endpoints, gives an
@@ -861,7 +886,7 @@ fn remove_locked<N: NetlinkTransport>(
 impl EgressControl for HostEgress {
     fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
         let session = NetlinkSession::open(ROUTE)?;
-        ingress_links(&session, 0, endpoints).map(drop)
+        admit_on(&session, endpoints)
     }
 
     fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
