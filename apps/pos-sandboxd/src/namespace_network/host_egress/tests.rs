@@ -791,6 +791,16 @@ fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
     let absent = || vec![done(1), done(2), done(3)];
     let present =
         || -> TestResult<Vec<Vec<u8>>> { Ok(vec![our_table(1)?, done(1), done(2), done(3)]) };
+    let forwarding = || {
+        vec![
+            leaves(),
+            link_named(2, "eth0", true),
+            link_named(3, "piglor-h0", true),
+            link_named(4, "eth0", true),
+            link_named(5, "piglor-h0", true),
+        ]
+    };
+    let installing = acks(4, &install_attempt(&attempt(1, 0, vec![ENDPOINT])?));
     let failures = [
         // No route to the endpoint.
         (Vec::new(), Vec::new()),
@@ -809,18 +819,21 @@ fn an_install_stops_at_the_first_exchange_that_fails() -> TestResult {
             ],
             present()?,
         ),
-        // Every device already forwards, so none is written to; the
-        // attempt's rules then cannot be installed.
+        // Every device already forwards, so none is written to, but one
+        // cannot be read back.
         (
             vec![
                 leaves(),
                 link_named(2, "eth0", true),
                 link_named(3, "piglor-h0", true),
-                link_named(4, "eth0", true),
-                link_named(5, "piglor-h0", true),
             ],
             present()?,
         ),
+        // Every device already forwards; the attempt's rules then cannot be
+        // installed.
+        (forwarding(), present()?),
+        // The rules are installed, but the table cannot be read back.
+        (forwarding(), [present()?, vec![installing]].concat()),
     ];
     for (route, netfilter) in failures {
         assert!(matches!(
@@ -927,4 +940,282 @@ fn an_expression_that_is_not_one_named_element_has_no_canonical_form() {
     let unnamed = ListAttribute::Element(vec![ExpressionAttribute::Name("masq".to_owned())]);
     assert_eq!(canonical(&[unnamed]), None);
     assert_eq!(canonical(&[ListAttribute::Unspec]), None);
+}
+
+/// The acknowledgement, in one datagram, of every acknowledged one of
+/// `requests`, numbered from `first`.
+fn acks(first: u32, requests: &[Request<NetfilterMessage>]) -> Vec<u8> {
+    (first..)
+        .zip(requests)
+        .filter(|(_, request)| request.acknowledged)
+        .flat_map(|(sequence, _)| ack(sequence, 0))
+        .collect()
+}
+
+/// The three dumps of [`observe`], numbered from `first`, reporting what
+/// `batches` created.
+fn dumps_of(first: u32, batches: &[Vec<Request<NetfilterMessage>>]) -> Vec<Vec<u8>> {
+    let (tables, chains, rules) = as_dumped(batches);
+    let mut replies = Vec::new();
+    for (sequence, objects) in (first..).zip([tables, chains, rules]) {
+        replies.extend(objects.into_iter().map(|object| {
+            message(
+                sequence,
+                NLM_F_MULTIPART,
+                NetlinkPayload::InnerMessage(object),
+            )
+        }));
+        replies.push(done(sequence));
+    }
+    replies
+}
+
+/// The host table `batches` created, as [`observe`] reads it.
+fn table_of(batches: &[Vec<Request<NetfilterMessage>>]) -> TestResult<ReadTable> {
+    let (tables, chains, rules) = as_dumped(batches);
+    Ok(read_table(tables, chains, rules)?.ok_or("no host table")?)
+}
+
+/// The reply to request `sequence` for the veth end `piglor-h0`, link 9.
+fn host_end(sequence: u32) -> Vec<u8> {
+    let mut link = LinkMessage::default();
+    link.header.index = 9;
+    link.attributes = vec![LinkAttribute::IfName("piglor-h0".to_owned())];
+    message(
+        sequence,
+        0,
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)),
+    )
+}
+
+/// Opens, in turn, a session for each of `sessions`' protocols that
+/// answers with its replies; opening one more fails.
+fn opened(
+    sessions: Vec<(SessionProtocol, Vec<Vec<u8>>)>,
+) -> impl Fn(SessionProtocol) -> Result<NetlinkSession<Scripted>, NetlinkError> {
+    let sessions = RefCell::new(VecDeque::from(sessions));
+    move |protocol| {
+        let (expected, replies) = sessions
+            .borrow_mut()
+            .pop_front()
+            .ok_or(NetlinkError::Unexpected)?;
+        assert_eq!(protocol, expected, "a session of another protocol");
+        Ok(scripted(replies))
+    }
+}
+
+/// Host egress recording in `records`, with nothing installed.
+fn egress_recording_in(records: ForwardingRecords) -> HostEgress {
+    HostEgress {
+        installed: Mutex::default(),
+        records,
+    }
+}
+
+#[test]
+fn admission_and_changes_fail_when_a_session_cannot_be_opened() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let egress = egress_recording_in(ForwardingRecords::in_directory(directory.path()));
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    let ipv6 = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443));
+    // Admission looks an IPv6 endpoint up through a route session.
+    HostEgress::admit_through(opened(vec![(ROUTE, Vec::new())]), &[ENDPOINT])?;
+    assert!(matches!(
+        HostEgress::admit_through(
+            opened(vec![(ROUTE, vec![route_found(1, RouteType::Unicast, 7)])]),
+            &[ipv6]
+        ),
+        Err(HostEgressError::Ipv6Egress)
+    ));
+    assert!(matches!(
+        HostEgress::admit_through(opened(Vec::new()), &[ENDPOINT]),
+        Err(HostEgressError::Netlink(NetlinkError::Unexpected))
+    ));
+    // Neither session, or only the route session, opens.
+    for sessions in [Vec::new(), vec![(ROUTE, Vec::new())]] {
+        assert!(matches!(
+            egress.install_through(opened(sessions.clone()), &attempt),
+            Err(HostEgressError::Netlink(NetlinkError::Unexpected))
+        ));
+        assert!(matches!(
+            egress.remove_through(opened(sessions), &attempt),
+            Err(HostEgressError::Netlink(NetlinkError::Unexpected))
+        ));
+    }
+    // The veth end cannot be read, or is gone.
+    let unreadable = vec![(ROUTE, Vec::new()), (NETFILTER, Vec::new())];
+    assert!(matches!(
+        egress.install_through(opened(unreadable), &attempt),
+        Err(HostEgressError::Netlink(NetlinkError::Truncated))
+    ));
+    let gone = vec![
+        (ROUTE, vec![ack(1, super::super::route::NO_SUCH_LINK)]),
+        (NETFILTER, Vec::new()),
+    ];
+    assert!(matches!(
+        egress.install_through(opened(gone), &attempt),
+        Err(HostEgressError::Netlink(NetlinkError::Unrepresentable))
+    ));
+    assert!(std::fs::read_dir(directory.path())?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn an_attempt_installed_through_fresh_sessions_reads_back_and_is_removed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let records = ForwardingRecords::in_directory(directory.path().join("forwarding"));
+    let egress = egress_recording_in(records.clone());
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    let table = create_table();
+    let rules = install_attempt(&attempt);
+    let after_rules = 10 + u32::try_from(rules.len())?;
+    // Neither the egress device, link 7, nor the veth end, link 9,
+    // forwards yet; both are turned on in one change.
+    let route = vec![
+        host_end(1),
+        route_found(2, RouteType::Unicast, 7),
+        link_named(3, "eth0", false),
+        link_named(4, "piglor-h0", false),
+        ack(5, 0),
+        ack(6, 0),
+        link_named(7, "eth0", true),
+        link_named(8, "piglor-h0", true),
+    ];
+    let netfilter = [
+        vec![done(1), done(2), done(3), acks(4, &table), acks(10, &rules)],
+        dumps_of(after_rules, &[table.clone(), rules.clone()]),
+    ]
+    .concat();
+    egress.install_through(
+        opened(vec![(ROUTE, route), (NETFILTER, netfilter)]),
+        &attempt,
+    )?;
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // Removal deletes the attempt's rules, reads back the bare table and
+    // turns the egress device's forwarding back off.
+    let installed = table_of(&[table.clone(), rules.clone()])?;
+    let removal = remove_attempt(&installed, &attempt);
+    let after_removal = 4 + u32::try_from(removal.len())?;
+    let restoring = vec![
+        link_named(1, "eth0", true),
+        ack(2, 0),
+        link_named(3, "eth0", false),
+    ];
+    let netfilter = [
+        dumps_of(1, &[table.clone(), rules]),
+        vec![acks(4, &removal)],
+        dumps_of(after_removal, &[table]),
+    ]
+    .concat();
+    egress.remove_through(
+        opened(vec![(ROUTE, restoring), (NETFILTER, netfilter)]),
+        &attempt,
+    )?;
+    assert!(records.recorded()?.is_empty());
+    Ok(())
+}
+
+/// Remove an attempt through link 9 to [`ENDPOINT`] from `installed`
+/// against `route` and `netfilter` replies, restoring from `records`.
+fn remove_against(
+    installed: &mut Installed,
+    records: &ForwardingRecords,
+    route: Vec<Vec<u8>>,
+    netfilter: Vec<Vec<u8>>,
+) -> TestResult<Result<(), HostEgressError>> {
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    Ok(remove_locked(
+        installed,
+        records,
+        (&scripted(route), &scripted(netfilter)),
+        &attempt,
+    ))
+}
+
+/// What is installed when the attempt of [`remove_against`] and, if
+/// `shared`, another attempt return by link 7.
+fn returning_by_link_7(shared: bool) -> TestResult<Installed> {
+    let name = attempt(1, 0, vec![ENDPOINT])?.namespace.as_str().to_owned();
+    let mut devices = BTreeMap::from([(name, vec![7])]);
+    if shared {
+        let other = attempt(2, 1, vec![ENDPOINT])?.namespace.as_str().to_owned();
+        devices.insert(other, vec![7]);
+    }
+    Ok(Installed {
+        attempts: BTreeMap::new(),
+        devices,
+    })
+}
+
+#[test]
+fn a_removal_stops_at_the_first_exchange_that_fails() -> TestResult {
+    let (directory, records) = eth0_recorded()?;
+    let attempt = attempt(1, 0, vec![ENDPOINT])?;
+    let with_attempt = dumps_of(1, &[create_table(), install_attempt(&attempt)]);
+    let absent: Vec<Vec<u8>> = (1..=6).map(done).collect();
+    // The table cannot be read, the attempt's rules cannot be deleted, or
+    // the table cannot be read back.
+    for netfilter in [Vec::new(), with_attempt, absent[..3].to_vec()] {
+        assert!(matches!(
+            remove_against(&mut Installed::default(), &records, Vec::new(), netfilter)?,
+            Err(HostEgressError::Netlink(_))
+        ));
+    }
+    // The records cannot be read.
+    let unreadable = ForwardingRecords::in_directory(directory.path().join("forwarding/7"));
+    assert!(matches!(
+        remove_against(
+            &mut Installed::default(),
+            &unreadable,
+            Vec::new(),
+            absent.clone()
+        )?,
+        Err(HostEgressError::State(_))
+    ));
+    // The attempt's egress device cannot be restored, and stays recorded.
+    assert!(matches!(
+        remove_against(
+            &mut returning_by_link_7(false)?,
+            &records,
+            Vec::new(),
+            absent.clone()
+        )?,
+        Err(HostEgressError::Netlink(_))
+    ));
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // An egress device another attempt still returns by is left as it is.
+    let mut shared = returning_by_link_7(true)?;
+    remove_against(&mut shared, &records, Vec::new(), absent)??;
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    assert_eq!(shared.devices.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn the_host_table_is_deleted_if_it_exists_and_read_back_absent() -> TestResult {
+    let deleted = acks(1, &delete_table());
+    let absent = || (1..=3).map(done).collect::<Vec<_>>();
+    let present =
+        || -> TestResult<Vec<Vec<u8>>> { Ok(vec![our_table(1)?, done(1), done(2), done(3)]) };
+    let removed = |sessions: Vec<Vec<Vec<u8>>>| {
+        let open = opened(
+            sessions
+                .into_iter()
+                .map(|replies| (NETFILTER, replies))
+                .collect(),
+        );
+        remove_table(|| open(NETFILTER))
+    };
+    removed(vec![vec![deleted.clone()], absent()])?;
+    // A table that is already gone needs no deletion.
+    removed(vec![vec![ack(2, NO_SUCH_OBJECT)], absent()])?;
+    assert!(matches!(
+        removed(vec![vec![deleted], present()?]),
+        Err(NetlinkError::Residual)
+    ));
+    assert!(matches!(
+        removed(vec![vec![ack(2, -1)]]),
+        Err(NetlinkError::Kernel(-1))
+    ));
+    Ok(())
 }

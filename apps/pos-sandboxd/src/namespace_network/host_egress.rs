@@ -40,6 +40,10 @@ use super::netlink::{
 };
 use super::{encode_firewall_rule, FirewallRule, LinkName, NamespaceName};
 
+/// The netlink protocol a session is opened for: [`ROUTE`] or
+/// [`NETFILTER`].
+type SessionProtocol = Option<rustix::net::Protocol>;
+
 /// The provider's host table, of family `inet`.
 pub const HOST_TABLE: &str = "piglor_sandbox";
 /// The base chain every forwarded attempt packet passes.
@@ -964,49 +968,61 @@ impl HostEgress {
         Self::default()
     }
 
-    /// Give `attempt`, whose host veth end has index `host_link`, egress
-    /// through `route` and `netfilter`, holding the installed attempts for
-    /// the whole change.
-    fn install_with<R: NetlinkTransport, N: NetlinkTransport>(
+    /// Check `endpoints` through a route session from `open`.
+    fn admit_through<T: NetlinkTransport>(
+        open: impl Fn(SessionProtocol) -> Result<NetlinkSession<T>, NetlinkError>,
+        endpoints: &[SocketAddr],
+    ) -> Result<(), HostEgressError> {
+        let route = open(ROUTE)?;
+        admit_on(&route, endpoints)
+    }
+
+    /// Give `attempt` egress through route and netfilter sessions from
+    /// `open`, holding the installed attempts for the whole change.
+    fn install_through<T: NetlinkTransport>(
         &self,
-        route: &NetlinkSession<R>,
-        netfilter: &NetlinkSession<N>,
-        host_link: u32,
+        open: impl Fn(SessionProtocol) -> Result<NetlinkSession<T>, NetlinkError>,
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
+        let route = open(ROUTE)?;
+        let netfilter = open(NETFILTER)?;
+        let host_link =
+            super::route::link_reply(route.request(super::route::get_link(&attempt.host_link)))?
+                .ok_or(NetlinkError::Unrepresentable)?;
         install_locked(
             &mut self
                 .installed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
             &self.records,
-            (route, netfilter),
-            host_link,
+            (&route, &netfilter),
+            host_link.index,
             attempt,
         )
     }
 
-    /// Take `attempt`'s egress away through `route` and `netfilter`,
-    /// holding the installed attempts for the whole change.
-    fn remove_with<R: NetlinkTransport, N: NetlinkTransport>(
+    /// Take `attempt`'s egress away through route and netfilter sessions
+    /// from `open`, holding the installed attempts for the whole change.
+    fn remove_through<T: NetlinkTransport>(
         &self,
-        route: &NetlinkSession<R>,
-        netfilter: &NetlinkSession<N>,
+        open: impl Fn(SessionProtocol) -> Result<NetlinkSession<T>, NetlinkError>,
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
+        let route = open(ROUTE)?;
+        let netfilter = open(NETFILTER)?;
         remove_locked(
             &mut self
                 .installed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
             &self.records,
-            (route, netfilter),
+            (&route, &netfilter),
             attempt,
         )
     }
 }
 
-/// [`HostEgress::install_with`] with what is `installed`.
+/// [`HostEgress::install_through`] with what is `installed`.
 ///
 /// The table, with its final drop, exists before any forwarding is turned
 /// on, so a forwarded packet never meets a host without the drop. An egress
@@ -1071,7 +1087,7 @@ fn enable_forwarding<R: NetlinkTransport>(
     Ok(())
 }
 
-/// [`HostEgress::remove_with`] with what is `installed`: the attempt's rules
+/// [`HostEgress::remove_through`] with what is `installed`: the attempt's rules
 /// go first, then each recorded egress device no other attempt still uses
 /// gets its forwarding back.
 fn remove_locked<R: NetlinkTransport, N: NetlinkTransport>(
@@ -1105,23 +1121,15 @@ fn remove_locked<R: NetlinkTransport, N: NetlinkTransport>(
 
 impl EgressControl for HostEgress {
     fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
-        let session = NetlinkSession::open(ROUTE)?;
-        admit_on(&session, endpoints)
+        Self::admit_through(NetlinkSession::open, endpoints)
     }
 
     fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
-        let route = NetlinkSession::open(ROUTE)?;
-        let netfilter = NetlinkSession::open(NETFILTER)?;
-        let host_link =
-            super::route::link_reply(route.request(super::route::get_link(&attempt.host_link)))?
-                .ok_or(NetlinkError::Unrepresentable)?;
-        self.install_with(&route, &netfilter, host_link.index, attempt)
+        self.install_through(NetlinkSession::open, attempt)
     }
 
     fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
-        let route = NetlinkSession::open(ROUTE)?;
-        let netfilter = NetlinkSession::open(NETFILTER)?;
-        self.remove_with(&route, &netfilter, attempt)
+        self.remove_through(NetlinkSession::open, attempt)
     }
 }
 
