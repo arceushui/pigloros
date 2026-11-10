@@ -253,6 +253,29 @@ impl NativeOperations for Session {
     }
 
     #[cfg(test)]
+    fn lose_controller_parent(&mut self, seal: crate::ControllerParentLossSeal) -> Result<(), ()> {
+        if std::time::Instant::now() >= seal.deadline
+            || !self.pending_opening_owners_retained()
+            || self.recordless_controller_completion().is_some()
+            || !self
+                .window_ref()
+                .map_err(|_| ())?
+                .snapshot()
+                .map_err(|_| ())?
+                .exists
+        {
+            return Err(());
+        }
+        // No callback-result borrow survives the call: the SDK may complete
+        // controller creation reentrantly inside DestroyWindow.
+        self.window
+            .as_mut()
+            .ok_or(())?
+            .lose_controller_parent()
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
     fn pending_opening_owners_retained(&self) -> bool {
         self.check().is_ok()
             && self

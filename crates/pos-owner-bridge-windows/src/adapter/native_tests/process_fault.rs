@@ -3988,6 +3988,14 @@ fn sdk_controller_result(
                 && *controller_b == ControllerReturned(true)))
 }
 
+fn sdk_controller_pending(order: &[crate::NativeCreationMoment]) -> bool {
+    let [first, second, controller] = order else {
+        return false;
+    };
+    sdk_environment_result(&[*first, *second], crate::CreationCallback::Success)
+        && *controller == crate::NativeCreationMoment::ControllerReturned(true)
+}
+
 #[test]
 fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
     use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
@@ -4001,6 +4009,14 @@ fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
         ControllerReturned(true),
         ControllerCallback(NativeFailure),
     ];
+    assert!(sdk_controller_pending(&expected[..3]));
+    assert!(!sdk_controller_pending(&expected));
+    assert!(!sdk_controller_pending(&[
+        environment[0],
+        environment[1],
+        ControllerReturned(false)
+    ]));
+    assert!(!sdk_controller_pending(&[environment[0], environment[1]]));
     assert!(sdk_controller_result(&expected, NativeFailure));
     assert!(sdk_controller_result(
         &[
@@ -4098,6 +4114,8 @@ impl Fixture {
     fn drive_controller_input(
         &mut self,
         driver: &mut CeremonyDriver,
+        lose_parent: bool,
+        lost_blocked: &mut bool,
     ) -> Result<(CeremonyResult, bool), Box<dyn std::error::Error>> {
         loop {
             let step = driver.step(&mut readiness::env(
@@ -4113,6 +4131,43 @@ impl Fixture {
                     || !self.surface.recordless_opening_ready()
                 {
                     return Err("controller input did not retain active opening owners".into());
+                }
+                let ceremony = CeremonyId::from_bytes([self.number; 16]);
+                use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
+                if !sdk_controller_pending(&crate::Native::creation_order())
+                    || self.surface.controller_creation_retention(&ceremony) != Some(Active)
+                    || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                    || self.surface.controller_creation_retention(&ceremony) != Some(Active)
+                {
+                    return Err(
+                        "uninvoked controller callback and retained owners not established".into(),
+                    );
+                }
+                if lose_parent {
+                    self.surface
+                        .lose_pending_controller_parent(&ceremony)
+                        .map_err(|()| "owned controller parent loss failed")?;
+                    if self.surface.lost_controller_parent_retention(&ceremony) != Some(Active)
+                        || !sdk_controller_result(
+                            &crate::Native::creation_order(),
+                            crate::CreationCallback::NativeFailure,
+                        )
+                    {
+                        return Err("parent loss did not produce actual native failure".into());
+                    }
+                    self.surface.abandon_opening();
+                    *lost_blocked = self.surface.lost_controller_parent_retention(&ceremony)
+                        == Some(Abandoned)
+                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && self.surface.lost_controller_parent_retention(&ceremony)
+                            == Some(Abandoned);
+                    let result = readiness::cancel_driver(
+                        driver,
+                        &mut self.surface,
+                        &mut self.loopback,
+                        &mut self.store,
+                    );
+                    return Ok((result, false));
                 }
                 loop {
                     if let Some(success) = self.surface.pending_opening_completion() {
@@ -4153,20 +4208,17 @@ fn run_controller_input_case(
     runtime: &Path,
     root: &Path,
     number: u8,
-    obstruct: bool,
+    lose_parent: bool,
 ) -> TestResult {
     let _creation = CreationOrderGuard::arm();
     crate::Native::reset_process_failure_observations();
-    let mut fixture = if obstruct {
-        Fixture::new_obstructed(runtime, root, number)?
-    } else {
-        Fixture::new(runtime, root, number, FixtureProfile::Pending)?
-    };
+    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
     let mut completion = None;
+    let mut lost_blocked = false;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture
-            .drive_controller_input(&mut driver)
+            .drive_controller_input(&mut driver, lose_parent, &mut lost_blocked)
             .map(|(result, success)| {
                 completion = Some(success);
                 result
@@ -4179,7 +4231,11 @@ fn run_controller_input_case(
         !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
     fixture.surface.abandon_opening();
     let ceremony = CeremonyId::from_bytes([number; 16]);
-    let blocked = fixture.held_controller_result_blocked(&ceremony, completion);
+    let blocked = if lose_parent {
+        lost_blocked
+    } else {
+        fixture.held_controller_result_blocked(&ceremony, completion)
+    };
     let selected = if completion == Some(true) {
         fixture.surface.abandoned_completed_browser(&ceremony).ok()
     } else {
@@ -4195,7 +4251,7 @@ fn run_controller_input_case(
         |_, _, _| {},
     );
     let order = crate::Native::creation_order();
-    let callback = if obstruct {
+    let callback = if lose_parent {
         crate::CreationCallback::NativeFailure
     } else {
         crate::CreationCallback::Success
@@ -4211,7 +4267,7 @@ fn run_controller_input_case(
             [number; 16],
         ))];
     let orphan_count = folders.len();
-    let _logged = writeln!(std::io::stderr(), "NATIVE_CONTROLLER_INPUT case={number} obstruct={obstruct} completion={completion:?} order={order:?} sdk={sdk} blocked={blocked} wiped={wiped} idle={idle} no_record={no_record} orphans={orphan_count}");
+    let _logged = writeln!(std::io::stderr(), "NATIVE_CONTROLLER_INPUT case={number} lose_parent={lose_parent} completion={completion:?} order={order:?} sdk={sdk} blocked={blocked} wiped={wiped} idle={idle} no_record={no_record} orphans={orphan_count}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("controller factory still shared")?
@@ -4222,7 +4278,7 @@ fn run_controller_input_case(
         return Err(error);
     }
     if !sdk
-        || completion != Some(!obstruct)
+        || completion != Some(!lose_parent)
         || !blocked
         || !wiped
         || !failed
@@ -4230,22 +4286,24 @@ fn run_controller_input_case(
         || !plan_wiped
         || !idle
         || !no_record
-        || (obstruct && !expected_orphan)
-        || (!obstruct && !matched_exit)
+        || (lose_parent && !expected_orphan)
+        || (!lose_parent && !matched_exit)
     {
         return Err("actual controller input outcome or ownership was not established".into());
     }
     Ok(())
 }
 
-#[test]
-fn native_controller_failure_from_fixed_owned_input() -> TestResult {
-    let _port = crate::Native::fixed_port_fixture();
-    let root = FixtureRoot::new()?;
-    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
-        .ok_or("canonical retained runtime is required by process qualification")?;
-    run_controller_input_case(Path::new(&runtime), &root.0, 0xd0, false)?;
-    run_controller_input_case(Path::new(&runtime), &root.0, 0xd1, true)
+impl crate::Native {
+    pub(crate) fn native_controller_failure_from_owned_parent_loss() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .ok_or("canonical retained runtime is required by process qualification")?;
+        run_controller_input_case(Path::new(&runtime), &root.0, 0xd0, false)?;
+        run_controller_input_case(Path::new(&runtime), &root.0, 0xd1, true)?;
+        fresh_success_after_retirement(Path::new(&runtime), &root.0, 0xd4)
+    }
 }
 
 struct PendingControllerEvidence {

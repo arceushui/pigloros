@@ -291,6 +291,19 @@ impl Window {
         .map_err(|_| unavailable())
     }
 
+    #[cfg(test)]
+    pub(super) fn lose_controller_parent(&mut self) -> Result<()> {
+        if self.hwnd.0.is_null() || self.signals.destroyed.get() {
+            return Err(unavailable());
+        }
+        // SAFETY: the sealed caller checked the creating STA, the exact owned
+        // live parent, and an uninvoked controller callback before its deadline.
+        // Keep this Window and all session owners alive across reentrant callback.
+        unsafe { DestroyWindow(self.hwnd) }.map_err(|_| unavailable())?;
+        self.signals.destroyed.set(true);
+        Ok(())
+    }
+
     pub(super) fn destroy(&mut self) -> Result<()> {
         if self.hwnd.0.is_null() {
             return Ok(());

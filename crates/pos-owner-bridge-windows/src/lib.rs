@@ -626,6 +626,12 @@ impl FaultSeal {
     }
 }
 
+/// One-use authority for the current owned parent during controller creation.
+#[cfg(test)]
+struct ControllerParentLossSeal {
+    deadline: std::time::Instant,
+}
+
 /// Bound to the exact Surface observer and validated process identity.
 #[cfg(test)]
 struct FaultAuthority {
@@ -674,6 +680,11 @@ pub(crate) trait NativeOperations {
 
     #[cfg(test)]
     fn early_renderer_presence(&self) -> Result<RendererPresence, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn lose_controller_parent(&mut self, _seal: ControllerParentLossSeal) -> Result<(), ()> {
         Err(())
     }
 
@@ -838,6 +849,12 @@ mod tests {
     #[test]
     fn native_verified_owned_process_faults_retire() -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::native_verified_owned_process_faults_retire()
+    }
+
+    #[test]
+    fn native_controller_failure_from_owned_parent_loss() -> Result<(), Box<dyn std::error::Error>>
+    {
+        crate::Native::native_controller_failure_from_owned_parent_loss()
     }
 
     #[test]

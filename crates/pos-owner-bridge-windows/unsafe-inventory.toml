@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 352
+line = 375
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 357
+line = 380
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 417
+line = 440
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 429
+line = 452
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 458
+line = 481
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 519
+line = 542
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1333,7 +1333,15 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 301
+line = 302
+function = "lose_controller_parent"
+operation = "DestroyWindow(self.hwnd)"
+invariant = "Creating STA and exact live session-owned parent, with uninvoked real controller callback before the original deadline; retain Window, environment, callback and apartment through reentrant completion and ordinary retirement."
+hosted_test = "native_controller_failure_from_owned_parent_loss"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 314
 function = "destroy"
 operation = "DestroyWindow(self.hwnd)"
 invariant = "exactly one successful destruction of this STA-owned window after normal controller/buffer/environment cleanup."
@@ -1341,7 +1349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 318
+line = 331
 function = "initial_dpi"
 operation = "GetDpiForWindow(owner)"
 invariant = "query the supplied opaque owner HWND; a zero readback fails later checked dimension conversion rather than selecting a fallback."
@@ -1349,7 +1357,7 @@ hosted_test = "native_owned_window_reads_owner_dpi"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 313
+line = 326
 function = "initial_dpi"
 operation = "GetDpiForSystem()"
 invariant = "scalar system DPI query for placement on the primary monitor."
@@ -1357,7 +1365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 338
+line = 351
 function = "outer_rectangle"
 operation = "AdjustWindowRectExForDpi( &raw mut rectangle, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0), dpi, )"
 invariant = "initialized writable client RECT, fixed top-level style, no menu, checked nonzero DPI and no retained pointer."
@@ -1365,7 +1373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 363
+line = 376
 function = "centered"
 operation = "MonitorFromWindow(owner.unwrap_or_default(), MONITOR_DEFAULTTOPRIMARY)"
 invariant = "opaque optional owner HWND; Windows selects its monitor or the primary monitor when no window is supplied. No application pointer."
@@ -1373,7 +1381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 370
+line = 383
 function = "centered"
 operation = "GetMonitorInfoW(monitor, &raw mut information)"
 invariant = "monitor returned by Windows, initialized MONITORINFO of its documented 40-byte layout, distinct writable output."

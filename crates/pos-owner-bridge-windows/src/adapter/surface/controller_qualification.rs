@@ -9,6 +9,7 @@ impl Surface {
     fn controller_creation_custody(
         &mut self,
         ceremony: &CeremonyId,
+        window_exists: bool,
     ) -> Option<PreEnvironmentRetention> {
         if self.ownership != Ownership::CreatingController
             || self.opening_spec.as_ref()?.ceremony_id != *ceremony
@@ -20,7 +21,7 @@ impl Surface {
             || self.close != CloseState::Idle
             || !self.store.records().ok()?.is_empty()
             || !self.native.pending_opening_owners_retained()
-            || !self.native.window().ok()?.exists
+            || self.native.window().ok()?.exists != window_exists
             || !self.native.pending()
         {
             return None;
@@ -38,7 +39,7 @@ impl Surface {
         &mut self,
         ceremony: &CeremonyId,
     ) -> Option<PreEnvironmentRetention> {
-        let state = self.controller_creation_custody(ceremony)?;
+        let state = self.controller_creation_custody(ceremony, true)?;
         if self.native.recordless_controller_completion().is_some() {
             None
         } else {
@@ -50,9 +51,32 @@ impl Surface {
         &mut self,
         ceremony: &CeremonyId,
     ) -> Option<(PreEnvironmentRetention, bool)> {
-        let state = self.controller_creation_custody(ceremony)?;
+        let state = self.controller_creation_custody(ceremony, true)?;
         let result = self.native.recordless_controller_completion()?;
         Some((state, result))
+    }
+
+    pub(in crate::adapter) fn lose_pending_controller_parent(
+        &mut self,
+        ceremony: &CeremonyId,
+    ) -> std::result::Result<(), ()> {
+        if self.controller_creation_retention(ceremony) != Some(PreEnvironmentRetention::Active)
+            || std::time::Instant::now() >= self.deadline
+        {
+            return Err(());
+        }
+        self.native
+            .lose_controller_parent(crate::ControllerParentLossSeal {
+                deadline: self.deadline,
+            })
+    }
+
+    pub(in crate::adapter) fn lost_controller_parent_retention(
+        &mut self,
+        ceremony: &CeremonyId,
+    ) -> Option<PreEnvironmentRetention> {
+        let state = self.controller_creation_custody(ceremony, false)?;
+        (self.native.recordless_controller_completion() == Some(false)).then_some(state)
     }
 
     pub(in crate::adapter) fn abandoned_completed_browser(
