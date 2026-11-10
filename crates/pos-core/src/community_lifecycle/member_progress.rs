@@ -407,7 +407,7 @@ fn read_u32(cursor: &mut CborCursor<'_>) -> Result<u32> {
     read_head(cursor, 0).and_then(|value| u32::try_from(value).map_err(|_| Error::BoundsExceeded))
 }
 
-fn read_node<'a>(bytes: &'a [u8]) -> Result<CommunityFactualNodeReferenceV1<'a>> {
+fn read_node(bytes: &[u8]) -> Result<CommunityFactualNodeReferenceV1<'_>> {
     let mut cursor = CborCursor::new(bytes);
     cursor
         .fixed(&[0x86])
