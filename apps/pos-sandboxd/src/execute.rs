@@ -690,6 +690,32 @@ impl<K: UnitKiller> Drop for SubmissionGuard<K> {
     }
 }
 
+/// The distinct endpoints `admission` plans exchanges with, in order, each
+/// in canonical form.
+///
+/// LPS1 decoding admits only four- and sixteen-byte addresses, so every
+/// admitted capability names one.
+fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<std::net::SocketAddr> {
+    admission
+        .exchanges()
+        .filter_map(|(_, capability)| {
+            <[u8; 4]>::try_from(capability.address.as_slice())
+                .map(std::net::IpAddr::from)
+                .or_else(|_| {
+                    <[u8; 16]>::try_from(capability.address.as_slice()).map(std::net::IpAddr::from)
+                })
+                .ok()
+                // An IPv4-mapped IPv6 address is the IPv4 endpoint it maps,
+                // as the namespace plan reads it.
+                .map(|address| {
+                    std::net::SocketAddr::new(address.to_canonical(), capability.destination_port)
+                })
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn prepare<B, N>(
     barrier: &mut B,
     network: &N,
@@ -714,7 +740,7 @@ where
             let (adapter_end, channel) = HostServiceChannel::pair(attempt.attempt_id())
                 .map_err(ExecuteError::HostService)?;
             let established = network
-                .establish(attempt.attempt_id())
+                .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
                 .map_err(|error| ExecuteError::Network(Box::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;

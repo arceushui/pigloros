@@ -23,7 +23,7 @@ def require(text: str, fragment: str, source: Path) -> None:
 # moved to a runner that drops them.
 RUNNER_DIGESTS = {
     "run-isolated-test.sh": "af2939a6ecdf3fc38d058bea21ff9e89304634c7d1c21e7d3253fa95bbf4f33c",
-    "run-isolated-with-net-admin-test.sh": "d0706f205e5e978d27ce4ed3bfb6b2a4b494bab08f883afd817750945ae9cc7c",
+    "run-isolated-with-net-admin-test.sh": "50568c1ee22a21e0e0eaa03a39a54db2b93d9e47fce22bff8badec9c04ee733a",
 }
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
@@ -69,14 +69,14 @@ NET_ADMIN_GUARDS = (
     '  echo "only the pos-sandboxd library test harness may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
-    "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
+    "readonly TEST_PATTERN='^namespace_network::(netlink|control|attempt_network)::tests::privileged::[a-z0-9_]+$'",
     "if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then\n"
     '  echo "only the #911 namespace adapter tests may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
     "if [[ $REPOSITORY_ROOT == *,* ]]; then",
     "  if [[ $profile_directory == *,* ]]; then",
-    "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'\n"
+    "readonly UNCONFINED_PATTERN='^namespace_network::(control|attempt_network)::tests::privileged::[a-z0-9_]+$'\n"
     "if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then\n"
     "  docker_arguments+=(--security-opt apparmor=unconfined)\n"
     "fi",

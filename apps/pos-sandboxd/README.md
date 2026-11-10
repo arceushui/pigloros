@@ -180,9 +180,13 @@ are ports, so the composition is exercised without systemd.
   planned endpoints against the admitted attempt and its launch policy, and
   the namespace's and the channel's attempt; the token carries the attempt it
   checked. The proxy serves on a blocking thread that the attempt watchdog
-  closes. The namespace, veth pair and nftables rules belong to a
-  separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
-  connection.
+  closes. `NamespacedLocalNetwork` (#911) establishes the attempt's network
+  namespace, veth pair and nftables firewall for exactly the admitted
+  endpoints, in the lowest free slot of the installation's reserved range, and
+  reads it all back before it returns; its connector opens each connection
+  from a thread inside the namespace, and dropping it removes the namespace
+  and frees the slot. `FailClosedLocalNetwork` establishes none and refuses
+  every connection.
 - Replay: every captured exchange is resolved from the durable capture store
   before launch; a missing or mismatched capture is unavailable and nothing
   starts.
@@ -256,7 +260,8 @@ readback-set digest itself (#443 owns the kernel observations and their
 digest, and the provider must supply an `ObservedReadback` before it can
 release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
-(#1199/#1200), adapter stdin and stdout transport, and the real Local namespace.
+(#1199/#1200), adapter stdin and stdout transport, and the host egress table
+and orphan sweep of the Local namespace (#911 slice 4).
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
 view and the authority heads the attempt was admitted with; that the recheck
 closure belongs to the same admitted entry is the caller's contract
@@ -296,3 +301,30 @@ process.
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the
 `ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.
+
+## Local attempt namespaces (#911)
+
+The Local network is built in-process over netlink (owner decisions of
+2026-11-09): `netlink-packet-route`, `netlink-packet-netfilter` and
+`netlink-packet-core` encode and decode, rustix carries the sockets, and no
+process is created. Each attempt namespace is created by a dedicated thread
+that unshares its network namespace and is pinned by a bind mount under
+`/run/netns/piglor-<attempt>`; the veth pair is `piglor-h<slot>` on the host
+and `piglor-n<slot>` inside. The namespace holds one `inet piglor_attempt`
+table whose chains drop everything except TCP to the admitted endpoints,
+return traffic and neighbour discovery with the host end.
+
+Kernel requirements: network namespaces (`CONFIG_NET_NS`), veth
+(`CONFIG_VETH`), nf_tables with the `inet` family, the `meta`, `payload`,
+`bitwise`, `cmp`, `immediate` and `ct` expressions (`CONFIG_NF_TABLES`,
+`CONFIG_NF_TABLES_INET`, `CONFIG_NFT_CT`) and conntrack, and IPv6. The
+provider needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` and a writable `/run/netns`.
+The kernel should not create fallback tunnel devices in new namespaces
+(`net.core.fb_tunnels_only_for_init_net=1` when the `sit`, `ipip`, `gre` or
+`ip6_tunnel` modules are loaded), because the read-back accepts only the
+loopback and the attempt's veth end.
+
+The privileged tests run in `scripts/run-isolated-with-net-admin-test.sh`,
+which adds exactly `NET_ADMIN` and `SYS_ADMIN` to an isolated container
+without network, and drops Docker's AppArmor profile only for the tests that
+pin namespaces.

@@ -508,7 +508,7 @@ def check_repinned_runners(temporary: Path) -> None:
         (PRIMARY_RUNNER, "  --rm\n", "  --rm\n  --security-opt apparmor=unconfined\n"),
         (
             NET_ADMIN_RUNNER,
-            "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'",
+            "readonly UNCONFINED_PATTERN='^namespace_network::(control|attempt_network)::tests::privileged::[a-z0-9_]+$'",
             "readonly UNCONFINED_PATTERN='^namespace_network::'",
         ),
         (NET_ADMIN_RUNNER, "--security-opt apparmor=unconfined", "--security-opt seccomp=unconfined"),

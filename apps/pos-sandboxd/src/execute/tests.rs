@@ -458,6 +458,7 @@ impl LocalNetworkPort for LoopbackNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, LoopbackConnector))
     }
@@ -473,6 +474,7 @@ impl LocalNetworkPort for ForeignNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(OTHER, LoopbackConnector))
     }
@@ -488,6 +490,7 @@ impl LocalNetworkPort for BrokenNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Err(Injected)
     }
@@ -525,6 +528,7 @@ impl LocalNetworkPort for TornDownNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<TornDownConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,
@@ -1483,6 +1487,7 @@ impl LocalNetworkPort for PanickingNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<PanickingConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, PanickingConnector))
     }
@@ -1561,6 +1566,7 @@ impl LocalNetworkPort for KillAwareNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<KillAwareConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,
@@ -1630,4 +1636,42 @@ fn the_failure_names_its_cause_and_the_unit_state() {
         "execution failed with the unit KillFailed"
     );
     assert!(std::error::Error::source(&failure).is_some());
+}
+
+#[test]
+fn a_namespace_reaches_each_distinct_admitted_endpoint_once() -> TestResult {
+    let endpoint = |address: Vec<u8>, destination_port| NetworkCapability {
+        address,
+        destination_port,
+        ..capability(SocketAddr::from(([127, 0, 0, 1], 1)))
+    };
+    let ipv6 = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let admission = crate::test_fixtures::admission(
+        ATTEMPT,
+        grant_authority(),
+        [4, 5, 6],
+        vec![
+            (plan()?, endpoint(ipv6.to_vec(), 8443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            // The same endpoint as an IPv4-mapped IPv6 address.
+            (
+                plan()?,
+                endpoint(
+                    vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 10],
+                    443,
+                ),
+            ),
+        ],
+    );
+    assert_eq!(
+        admitted_endpoints(&admission),
+        [
+            SocketAddr::from(([192, 0, 2, 10], 443)),
+            SocketAddr::from((ipv6, 8443)),
+        ]
+    );
+    Ok(())
 }
