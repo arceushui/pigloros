@@ -390,14 +390,14 @@ impl NetlinkNamespaceControl {
 /// [`NetlinkNamespaceControl::remove_orphans`] on Tokio's blocking pool, so
 /// the reconciling task's worker keeps running other tasks.
 impl crate::OrphanNetworkCleanup for NetlinkNamespaceControl {
-    type Error = NetlinkError;
+    type Error = OrphanSweepError;
 
-    fn remove_orphans(&self) -> impl Future<Output = Result<(), NetlinkError>> + Send {
+    fn remove_orphans(&self) -> impl Future<Output = Result<(), OrphanSweepError>> + Send {
         let control = self.clone();
         async move {
             tokio::task::spawn_blocking(move || control.remove_orphans())
                 .await
-                .unwrap_or(Err(NetlinkError::Panicked))
+                .unwrap_or(Err(OrphanSweepError::Netlink(NetlinkError::Panicked)))
         }
     }
 }
