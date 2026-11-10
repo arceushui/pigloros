@@ -119,14 +119,16 @@ fn conflicts(
     address_conflict || route_conflict
 }
 
-/// Check that the /30 at `network` is free on the host.
-fn unused_by_host(network: Ipv4Addr) -> Result<bool, NetlinkError> {
-    NetlinkSession::open(ROUTE).and_then(|session| {
-        session.dump(route::addresses()).and_then(|addresses| {
-            session
-                .dump(route::routes())
-                .map(|routes| !conflicts(network, &addresses, &routes))
-        })
+/// Check, through the host's route `session`, that the /30 at `network` is
+/// free on the host.
+fn unused_by_host<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+    network: Ipv4Addr,
+) -> Result<bool, NetlinkError> {
+    session.dump(route::addresses()).and_then(|addresses| {
+        session
+            .dump(route::routes())
+            .map(|routes| !conflicts(network, &addresses, &routes))
     })
 }
 
@@ -242,13 +244,24 @@ where
     /// the connection does not reach the target, the target sees an address
     /// other than the host's, or the target cannot be removed afterwards.
     pub fn probe_egress(&self, probe: EgressProbe) -> Result<(), EgressProbeError> {
+        self.probe_egress_through(|| NetlinkSession::open(ROUTE), probe)
+    }
+
+    /// [`Self::probe_egress`], reading the host's addresses and routes
+    /// through a session from `host_session`.
+    pub(super) fn probe_egress_through<T: NetlinkTransport>(
+        &self,
+        host_session: impl FnOnce() -> Result<NetlinkSession<T>, NetlinkError>,
+        probe: EgressProbe,
+    ) -> Result<(), EgressProbeError> {
         // The range and the /30 are both aligned, so they overlap exactly
         // when the range holds the /30's network address.
         let (host, target) = probe
             .addresses()
             .filter(|_| !self.range.contains(IpAddr::V4(probe.network)))
             .ok_or(EgressProbeError::Network)?;
-        unused_by_host(probe.network)
+        host_session()
+            .and_then(|session| unused_by_host(&session, probe.network))
             .map_err(EgressProbeError::Target)
             .and_then(|unused| unused.then_some(()).ok_or(EgressProbeError::Network))?;
         let probe = Placed { host, target };

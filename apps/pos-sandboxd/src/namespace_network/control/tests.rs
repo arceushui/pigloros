@@ -1,8 +1,96 @@
-use std::error::Error;
+use std::{cell::RefCell, collections::VecDeque, error::Error, num::NonZeroI32};
 
+use netlink_packet_core::{ErrorMessage, NetlinkHeader, NetlinkMessage, NetlinkPayload};
+use netlink_packet_route::RouteNetlinkMessage;
+
+use super::super::host_egress::{ForwardingRecords, HostEgressError};
 use super::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+/// A transport that answers with scripted datagrams, then fails.
+struct Scripted(RefCell<VecDeque<Vec<u8>>>);
+
+impl NetlinkTransport for Scripted {
+    fn send(&self, _datagram: &[u8]) -> Result<(), NetlinkError> {
+        Ok(())
+    }
+
+    fn receive(&self) -> Result<Vec<u8>, NetlinkError> {
+        self.0
+            .borrow_mut()
+            .pop_front()
+            .ok_or(NetlinkError::Truncated)
+    }
+}
+
+/// A session that answers each request with the next of `replies`.
+fn scripted(replies: Vec<Vec<u8>>) -> NetlinkSession<Scripted> {
+    NetlinkSession::new(Scripted(RefCell::new(VecDeque::from(replies))))
+}
+
+/// The kernel's refusal of request `sequence` with `code`.
+fn refusal(sequence: u32, code: i32) -> Vec<u8> {
+    let mut error = ErrorMessage::default();
+    error.code = NonZeroI32::new(code);
+    let mut header = NetlinkHeader::default();
+    header.sequence_number = sequence;
+    let mut message =
+        NetlinkMessage::<RouteNetlinkMessage>::new(header, NetlinkPayload::Error(error));
+    message.finalize();
+    let mut bytes = vec![0; message.buffer_len()];
+    message.serialize(&mut bytes);
+    bytes
+}
+
+#[test]
+fn the_sweep_restores_forwarding_before_it_touches_the_host_table() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let control = NetlinkNamespaceControl::new(NetworkNamespaces::pinned_under(
+        directory.path().join("netns"),
+    ));
+    let records = ForwardingRecords::in_directory(directory.path().join("forwarding"));
+    records.record(7, "eth0")?;
+    let opened = RefCell::new(Vec::new());
+    let route_opened = |replies: Vec<Vec<u8>>| -> Result<NetlinkSession<Scripted>, NetlinkError> {
+        opened.borrow_mut().push("route");
+        Ok(scripted(replies))
+    };
+    let netfilter = || -> Result<NetlinkSession<Scripted>, NetlinkError> {
+        opened.borrow_mut().push("netfilter");
+        Ok(scripted(Vec::new()))
+    };
+    // Link 7 cannot be read, so its forwarding cannot be restored: the host
+    // table, whose drop rule still guards, is never opened, and the record
+    // stays.
+    let unrestored =
+        control.remove_orphans_through(|| route_opened(Vec::new()), netfilter, &records);
+    assert!(
+        matches!(
+            unrestored,
+            Err(OrphanSweepError::Forwarding(HostEgressError::Netlink(
+                NetlinkError::Truncated
+            )))
+        ),
+        "{unrestored:?}"
+    );
+    assert_eq!(*opened.borrow(), ["route"]);
+    assert_eq!(records.recorded()?, [(7, "eth0".to_owned())]);
+    // Link 7 is gone, so its record goes; only then is the table deleted,
+    // here by a session that never answers.
+    let gone = || route_opened(vec![refusal(1, route::NO_SUCH_LINK)]);
+    let swept = control.remove_orphans_through(gone, netfilter, &records);
+    assert!(
+        matches!(
+            swept,
+            Err(OrphanSweepError::Netlink(NetlinkError::Truncated))
+        ),
+        "{swept:?}"
+    );
+    assert_eq!(*opened.borrow(), ["route", "route", "netfilter"]);
+    assert!(records.recorded()?.is_empty());
+    Ok(())
+}
 
 #[test]
 fn a_missing_namespace_is_not_observed_and_removes_as_nothing() -> TestResult {

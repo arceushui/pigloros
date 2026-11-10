@@ -1086,18 +1086,17 @@ fn enable_forwarding<R: NetlinkTransport>(
 
 /// [`HostEgress::remove_through`] with what is `installed`: the attempt's rules
 /// go first, then each recorded egress device no other attempt still uses
-/// gets its forwarding back.
+/// gets its forwarding back. The attempt's devices are forgotten only once
+/// all of them are restored, so a retried removal restores what is left.
 fn remove_locked<R: NetlinkTransport, N: NetlinkTransport>(
     installed: &mut Installed,
     records: &ForwardingRecords,
     (route, netfilter): (&NetlinkSession<R>, &NetlinkSession<N>),
     attempt: &AttemptEgress,
 ) -> Result<(), HostEgressError> {
-    installed.attempts.remove(attempt.namespace.as_str());
-    let devices = installed
-        .devices
-        .remove(attempt.namespace.as_str())
-        .unwrap_or_default();
+    let name = attempt.namespace.as_str();
+    installed.attempts.remove(name);
+    let devices = installed.devices.get(name).cloned().unwrap_or_default();
     if let Some(table) = observe(netfilter)? {
         if table.chains.contains_key(attempt.namespace.as_str()) {
             netfilter.execute(remove_attempt(&table, attempt))?;
@@ -1105,12 +1104,19 @@ fn remove_locked<R: NetlinkTransport, N: NetlinkTransport>(
     }
     let table_read_back =
         observe(netfilter)?.is_none_or(|table| is_exact(&table, &installed.attempts));
-    let in_use: Vec<u32> = installed.devices.values().flatten().copied().collect();
-    for (index, name) in records.recorded().map_err(HostEgressError::State)? {
+    let in_use: Vec<u32> = installed
+        .devices
+        .iter()
+        .filter(|(other, _)| other.as_str() != name)
+        .flat_map(|(_, used)| used)
+        .copied()
+        .collect();
+    for (index, device) in records.recorded().map_err(HostEgressError::State)? {
         if devices.contains(&index) && !in_use.contains(&index) {
-            restore(route, records, index, &name)?;
+            restore(route, records, index, &device)?;
         }
     }
+    installed.devices.remove(name);
     table_read_back
         .then_some(())
         .ok_or(HostEgressError::Readback)
