@@ -621,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 265
+line = 302
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -629,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 297
+line = 334
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 301
+line = 338
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 304
+line = 341
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 315
+line = 352
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 323
+line = 360
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 326
+line = 363
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 341
+line = 378
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 354
+line = 391
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 357
+line = 394
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."

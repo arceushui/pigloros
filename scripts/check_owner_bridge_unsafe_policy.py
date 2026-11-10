@@ -1542,7 +1542,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': 'aba89304f72a45a9abc2d7bba58e20161c2019a5db053988214640e342332c10',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': '7500dd634adfe7b3cd6b53ed92175749fd02e144d7f3b4b99957727761159f3a',
-    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'bccfa3eaab7aa2a0778a7150f7a0ee4f7578a4f36873a739839f45d5f42abe12',
+    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'caa25c26de54562099e3d11fa762fc1f55e93a21249fe5eff1ac881bd5b14a1d',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '3f461807a6362e771c37015b42d3e33bfdb1ba911b408f35dddd98f4286b0f79',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '9c29db3c19998534c3b80c71f31afd0977106b574de062cc93f6cc291c4d9dc7',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
