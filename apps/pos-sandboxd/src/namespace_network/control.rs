@@ -284,16 +284,22 @@ const HOST_LINK_PREFIX: &str = "piglor-h";
 fn attempt_host_links<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
 ) -> Result<Vec<ObservedLink>, NetlinkError> {
-    links(session).map(|links| {
-        links
-            .into_iter()
-            .filter(|link| {
-                (link.name.starts_with(HOST_LINK_PREFIX)
-                    || link.name == super::attempt_network::PROBE_HOST_LINK)
-                    && matches!(link.kind, LinkKind::Veth { .. })
-            })
-            .collect()
-    })
+    links(session).map(|links| links.into_iter().filter(is_attempt_host_link).collect())
+}
+
+/// Whether `link` is a provider-owned host veth end.
+fn is_attempt_host_link(link: &ObservedLink) -> bool {
+    (link.name.starts_with(HOST_LINK_PREFIX)
+        || link.name == super::attempt_network::PROBE_HOST_LINK)
+        && matches!(link.kind, LinkKind::Veth { .. })
+}
+
+/// `Ok` if neither `names` nor `links` remain.
+fn none_remain(names: &[NamespaceName], links: &[ObservedLink]) -> Result<(), NetlinkError> {
+    match (names, links) {
+        ([], []) => Ok(()),
+        _ => Err(NetlinkError::Residual),
+    }
 }
 
 /// `deleted`, with a link that no longer exists counted as deleted.
@@ -348,12 +354,7 @@ impl NetlinkNamespaceControl {
             .and_then(|names| {
                 consistent(|| with_session(ROUTE, attempt_host_links)).map(|links| (names, links))
             })
-            .and_then(
-                |(names, links)| match (names.as_slice(), links.as_slice()) {
-                    ([], []) => Ok(()),
-                    _ => Err(NetlinkError::Residual),
-                },
-            )
+            .and_then(|(names, links)| none_remain(&names, &links))
     }
 }
 
