@@ -214,6 +214,69 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                                '}}/owner-windows-ffi-full.json\n',
                                                        'if-no-files-found': 'error'}}]}}}
 
+# Independently reviewed failure-only diagnostics; never accepted by the gates.
+EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Export failed native coverage diagnostics',
+  'if': "${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}",
+  'shell': 'pwsh',
+  'run': "$ErrorActionPreference = 'Stop'\n"
+         "$directory = Join-Path $env:RUNNER_TEMP 'owner-windows-failed-diagnostic'\n"
+         'New-Item -ItemType Directory -Path $directory -Force | Out-Null\n'
+         '$receipt = [ordered]@{\n'
+         '  version = 1\n'
+         "  qualification = 'failed-measurement-diagnostic-only'\n"
+         '  expected_checkout = $env:GITHUB_SHA\n'
+         '  checkout = $null\n'
+         "  cargo_llvm_cov_version = 'unavailable'\n"
+         '  profile_files = 0\n'
+         "  json = 'unavailable'\n"
+         "  lcov = 'unavailable'\n"
+         "  detail = 'profile unavailable'\n"
+         '}\n'
+         'try {\n'
+         '  $checkout = git rev-parse HEAD\n'
+         '  $receipt.checkout = $checkout\n'
+         "  if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'checkout "
+         "mismatch' }\n"
+         '  $version = cargo llvm-cov --version\n'
+         '  if ($LASTEXITCODE -eq 0 -and $version) { $receipt.cargo_llvm_cov_version = $version }\n'
+         '  $rawMetadata = Get-Content -Raw "$env:RUNNER_TEMP/owner-windows-metadata.json"\n'
+         '  $metadata = $rawMetadata | ConvertFrom-Json\n'
+         '  $ignore = $rawMetadata | python scripts/owner_bridge_windows_cov_ignore.py\n'
+         "  if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'coverage scope unavailable' }\n"
+         '  $profiles = @(Get-ChildItem -LiteralPath $metadata.target_directory -Filter '
+         "'*.profraw' -File | Where-Object { $_.Length -gt 0 })\n"
+         '  $receipt.profile_files = $profiles.Count\n'
+         "  if ($profiles.Count -eq 0) { throw 'profile unavailable' }\n"
+         '  cargo llvm-cov report -p pos-owner-bridge-windows --locked --json '
+         '--ignore-filename-regex "$ignore" --output-path "$directory/diagnostic.json"\n'
+         '  if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath "$directory/diagnostic.json") '
+         '-and (Get-Item -LiteralPath "$directory/diagnostic.json").Length -gt 0) { $receipt.json '
+         "= 'available' }\n"
+         '  cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov '
+         '--no-default-ignore-filename-regex --ignore-filename-regex "$ignore" --output-path '
+         '"$directory/diagnostic.lcov"\n'
+         '  if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath "$directory/diagnostic.lcov") '
+         '-and (Get-Item -LiteralPath "$directory/diagnostic.lcov").Length -gt 0) { $receipt.lcov '
+         "= 'available' }\n"
+         "  $receipt.detail = 'export attempted; available reports reflect failed test execution "
+         "and are not qualification evidence'\n"
+         '} catch {\n'
+         '  $receipt.detail = "diagnostic export unavailable: $($_.Exception.Message)"\n'
+         '} finally {\n'
+         "  if ($receipt.json -ne 'available') { Remove-Item -LiteralPath "
+         '"$directory/diagnostic.json" -ErrorAction SilentlyContinue }\n'
+         "  if ($receipt.lcov -ne 'available') { Remove-Item -LiteralPath "
+         '"$directory/diagnostic.lcov" -ErrorAction SilentlyContinue }\n'
+         '  $receipt | ConvertTo-Json | Set-Content -LiteralPath "$directory/failure-receipt.json" '
+         '-Encoding utf8\n'
+         '}\n'},
+ {'name': 'Retain failed native coverage diagnostics',
+  'if': "${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}",
+  'uses': 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+  'with': {'name': 'owner-windows-failed-diagnostic-${{ github.sha }}',
+           'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
+           'if-no-files-found': 'error'}}])
+
 PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '4f7ee2d410f3dbcb4630ab705d48a65e6f25b3c13215d836d995f9328292db07',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}

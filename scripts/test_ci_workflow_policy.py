@@ -843,6 +843,30 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     )
                     self.assertEqual(actual.returncode == 0, result == expected)
 
+    def test_failed_native_diagnostics_cannot_qualify_or_weaken_measurement(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for name, field, before, after in (
+            ("Export failed native coverage diagnostics", "if", "steps.coverage.outcome == 'failure'", "steps.coverage.outcome == 'success'"),
+            ("Export failed native coverage diagnostics", "run", "cargo llvm-cov report -p", "cargo llvm-cov -p"),
+            ("Export failed native coverage diagnostics", "run", "failed-measurement-diagnostic-only", "qualified"),
+            ("Retain failed native coverage diagnostics", "name", "owner-windows-failed-diagnostic-", "owner-windows-lcov-"),
+            ("Retain failed native coverage diagnostics", "path", "owner-windows-failed-diagnostic/", "owner-windows.lcov"),
+        ):
+            changed = copy.deepcopy(native)
+            step = next(s for s in changed["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            target = step["with"] if field in ("name", "path") else step
+            self.assertIn(before, target[field])
+            target[field] = target[field].replace(before, after)
+            with self.subTest(name=name, field=field), self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        measurement = next(s for s in steps if s.get("id") == "coverage")
+        self.assertNotIn("continue-on-error", measurement)
+        report = next(s for s in steps if s.get("name") == "Export failed native coverage diagnostics")
+        self.assertIn("profile unavailable", report["run"])
+        self.assertIn("failure()", report["if"])
+        self.assertNotIn("--fail-under", report["run"])
+
     def test_windows_single_native_run_keeps_fixtures_and_documentation_required(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
