@@ -147,9 +147,9 @@ impl NetlinkTransport for NetlinkSocket {
 /// One request of a [`NetlinkSession::execute`] datagram.
 #[derive(Debug)]
 pub struct Request<I> {
-    message: I,
-    flags: u16,
-    acknowledged: bool,
+    pub(super) message: I,
+    pub(super) flags: u16,
+    pub(super) acknowledged: bool,
 }
 
 impl<I> Request<I> {
@@ -253,6 +253,36 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
         Ok(())
     }
 
+    /// Send `request`, which the kernel answers with exactly one message,
+    /// such as a `GET` of one object, and return that message.
+    ///
+    /// # Errors
+    /// Fails if the kernel refuses the request or the reply is not exactly
+    /// one message answering it.
+    pub fn request<I>(&self, request: I) -> Result<I, NetlinkError>
+    where
+        I: NetlinkSerializable + NetlinkDeserializable,
+    {
+        let header = self.header(NLM_F_REQUEST);
+        let sequence = header.sequence_number;
+        let mut datagram = Vec::new();
+        emit(header, request, &mut datagram);
+        self.transport.send(&datagram)?;
+        let replies = parse::<I>(&self.transport.receive()?)?;
+        let [reply] =
+            <[NetlinkMessage<I>; 1]>::try_from(replies).map_err(|_| NetlinkError::Unexpected)?;
+        let answered = reply.header.sequence_number == sequence;
+        match reply.payload {
+            NetlinkPayload::InnerMessage(message) if answered => Ok(message),
+            NetlinkPayload::Error(error) if answered => {
+                Err(error.code.map_or(NetlinkError::Unexpected, |code| {
+                    NetlinkError::Kernel(code.get())
+                }))
+            }
+            _ => Err(NetlinkError::Unexpected),
+        }
+    }
+
     /// Send `request` as a dump and return every message of the reply.
     ///
     /// # Errors
@@ -290,6 +320,25 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
             }
         }
     }
+}
+
+/// How often [`consistent`] reads state that keeps changing.
+const DUMP_ATTEMPTS: usize = 3;
+
+/// Run `read`, which opens its own session, again while a dump it makes is
+/// interrupted by a concurrent change, at most three times in all.
+///
+/// Another namespace's changes interrupt dumps of the shared host
+/// namespace; a fresh session discards the interrupted dump's replies.
+///
+/// # Errors
+/// Fails with `read`'s first other error, or if every attempt is
+/// interrupted.
+pub fn consistent<T>(mut read: impl FnMut() -> Result<T, NetlinkError>) -> Result<T, NetlinkError> {
+    (1..DUMP_ATTEMPTS).fold(read(), |result, _| match result {
+        Err(NetlinkError::Interrupted) => read(),
+        settled => settled,
+    })
 }
 
 /// Append `message` with `header` to `datagram`.
@@ -378,7 +427,7 @@ pub fn links<T: NetlinkTransport>(
 }
 
 /// The link `message` reports.
-fn observed_link(message: LinkMessage) -> Result<ObservedLink, NetlinkError> {
+pub(super) fn observed_link(message: LinkMessage) -> Result<ObservedLink, NetlinkError> {
     let mut name = None;
     let mut veth = false;
     let mut peer_index = None;

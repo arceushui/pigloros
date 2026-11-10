@@ -6,9 +6,19 @@
 # no-new-privileges and a read-only root, and sees only the test binary,
 # read-only: not the worktree.
 #
+# The adapter's own tests (namespace_network::control) pin namespaces with
+# bind mounts under /run/netns, which Docker's AppArmor profile refuses, so
+# they alone also run unconfined by AppArmor.
+#
+# Neither capability can go: unshare(CLONE_NEWNET) and setns(2) into a
+# network namespace need SYS_ADMIN, as does the bind mount that pins one,
+# and the pinning tests need AppArmor off because Docker's profile denies
+# mount(2) outright.
+#
 # This container is NOT a security boundary against hostile test code. With
-# SYS_ADMIN a test can remount filesystems inside the container, and without
-# a user namespace no mount flag is locked against that: hostile code could
+# SYS_ADMIN, and AppArmor off for the pinning tests, a test can remount
+# filesystems inside the container, and without a user namespace no mount
+# flag is locked against that: hostile code could
 # remount the binary's bind or /proc/sys writable and reach the host (a
 # core_pattern or modprobe path, a cgroup v1 release_agent), then remount
 # them read-only again before the final check. The trust boundary is code
@@ -69,7 +79,7 @@ if [[ ! $TEST_RELATIVE =~ $TEST_TARGET || ! -f $TEST_BINARY || ! -x $TEST_BINARY
   echo "only the pos-sandboxd library test harness may use this runner" >&2
   exit 2
 fi
-readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'
+readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'
 if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then
   echo "only the #911 namespace adapter tests may use this runner" >&2
   exit 2
@@ -100,6 +110,13 @@ docker_arguments=(
   --env PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1
 )
 profile_output=
+
+# Owner decision 2026-11-09 (#911): only the tests that pin namespaces run
+# without Docker's AppArmor profile.
+readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'
+if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then
+  docker_arguments+=(--security-opt apparmor=unconfined)
+fi
 
 for variable in ASAN_OPTIONS LSAN_OPTIONS; do
   if [[ -n ${!variable:-} ]]; then

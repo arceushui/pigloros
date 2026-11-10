@@ -176,9 +176,10 @@ pub use namespace_network::{
     decode_firewall_rule, encode_firewall_rule, establish_namespace, EstablishError,
     EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
     FirewallRule, FirewallTableFamily, FirewallVerdict, InvalidLinkName, IpPrefix, LinkKind,
-    LinkName, NamespaceControl, NamespaceName, NamespaceRoute, NetworkPlanError, NetworkRange,
-    ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
-    ReadbackMismatch, UndecodableRule, NAMESPACE_TABLE,
+    LinkName, NamespaceControl, NamespaceName, NamespaceRoute, NetlinkNamespaceControl,
+    NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress, ObservedLink,
+    ObservedNamespace, ObservedRoute, ObservedTable, ReadbackMismatch, UndecodableRule,
+    NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{

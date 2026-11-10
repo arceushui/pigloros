@@ -23,12 +23,16 @@ def require(text: str, fragment: str, source: Path) -> None:
 # moved to a runner that drops them.
 RUNNER_DIGESTS = {
     "run-isolated-test.sh": "af2939a6ecdf3fc38d058bea21ff9e89304634c7d1c21e7d3253fa95bbf4f33c",
-    "run-isolated-with-net-admin-test.sh": "02cec7a2f5e4907dfe1f732dee767a0d06ac5239d1515ae2d80dca0a2c8fb2e2",
+    "run-isolated-with-net-admin-test.sh": "d0706f205e5e978d27ce4ed3bfb6b2a4b494bab08f883afd817750945ae9cc7c",
 }
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
 NET_ADMIN_RUNNER = "run-isolated-with-net-admin-test.sh"
 CAPABILITIES = {NET_ADMIN_RUNNER: ["NET_ADMIN", "SYS_ADMIN"]}
+# Every runner keeps no-new-privileges; only the NET_ADMIN runner may also
+# drop AppArmor, and only behind the guard that admits the namespace-pinning
+# tests (owner decision 2026-11-09, #911; NET_ADMIN_GUARDS).
+SECURITY_OPTIONS = {NET_ADMIN_RUNNER: ["no-new-privileges", "apparmor=unconfined"]}
 NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
 # Where Rust sources live; every one is scanned for runner references.
 RUST_ROOTS = ("apps", "crates", "fuzz", "plugins", "scripts")
@@ -65,13 +69,17 @@ NET_ADMIN_GUARDS = (
     '  echo "only the pos-sandboxd library test harness may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
-    "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
+    "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
     "if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then\n"
     '  echo "only the #911 namespace adapter tests may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
     "if [[ $REPOSITORY_ROOT == *,* ]]; then",
     "  if [[ $profile_directory == *,* ]]; then",
+    "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'\n"
+    "if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then\n"
+    "  docker_arguments+=(--security-opt apparmor=unconfined)\n"
+    "fi",
     "readonly READ_ONLY_PROBE='if [ -w \"$1\" ]; then echo \"the test binary bind is writable\" >&2; "
     'exit 1; fi; "$@"; status=$?; if [ -w "$1" ]; then '
     'echo "the test binary bind became writable" >&2; exit 1; fi; exit "$status"\'',
@@ -184,6 +192,9 @@ def check_runner(runner_path: Path) -> None:
     added = re.findall(r"--cap-add[ =]+(\S+)", runner)
     if added != CAPABILITIES.get(runner_path.name, []):
         raise SystemExit(f"{runner_path}: adds capabilities other than its own: {added}")
+    options = re.findall(r"--security-opt[ =]+([^\s)]+)", runner)
+    if options != SECURITY_OPTIONS.get(runner_path.name, ["no-new-privileges"]):
+        raise SystemExit(f"{runner_path}: security options other than its own: {options}")
     if runner_path.name == NET_ADMIN_RUNNER:
         for fragment in NET_ADMIN_GUARDS:
             require(runner, fragment, runner_path)

@@ -117,6 +117,13 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
             {},
             name_refusal,
         ),
+        "a privileged test of another module": (
+            root,
+            harness,
+            "namespace_network::route::tests::privileged::a_test",
+            {},
+            name_refusal,
+        ),
         "an extra flag after the test name": (
             root,
             harness,
@@ -378,6 +385,11 @@ def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> 
             raise SystemExit(f"NET_ADMIN runner omitted {required}: {options}")
     if any(option.startswith("apparmor") for option in options):
         raise SystemExit(f"NET_ADMIN runner dropped AppArmor for {named}: {options}")
+    # The namespace-pinning tests, and only they, run without AppArmor.
+    pinning = named.replace("::netlink::", "::control::")
+    pinned = docker_run_arguments(root, harness, pinning, {})
+    if "apparmor=unconfined" not in pinned or pinned.count("--security-opt") != 2:
+        raise SystemExit(f"NET_ADMIN runner kept AppArmor for {pinning}: {pinned}")
     # The container sees the test binary and its profile, not the worktree.
     binds = [option for option in options if "source=" in option]
     if len(binds) != 2 or any(str(harness) not in bind and "profraw" not in bind for bind in binds):
@@ -492,6 +504,15 @@ def check_repinned_runners(temporary: Path) -> None:
         (NET_ADMIN_RUNNER, "readonly TEST_PATTERN=", "readonly UNUSED_PATTERN="),
         (NET_ADMIN_RUNNER, "if [[ $REPOSITORY_ROOT == *,* ]]; then", "if false; then"),
         (NET_ADMIN_RUNNER, "if [ -w \"$1\" ]; then", "if false; then"),
+        # AppArmor stays for every other test and every other runner.
+        (PRIMARY_RUNNER, "  --rm\n", "  --rm\n  --security-opt apparmor=unconfined\n"),
+        (
+            NET_ADMIN_RUNNER,
+            "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'",
+            "readonly UNCONFINED_PATTERN='^namespace_network::'",
+        ),
+        (NET_ADMIN_RUNNER, "--security-opt apparmor=unconfined", "--security-opt seccomp=unconfined"),
+        (NET_ADMIN_RUNNER, "  --rm\n", "  --rm\n  --security-opt seccomp=unconfined\n"),
         (NET_ADMIN_RUNNER, '"$@"; status=$?; if [ -w "$1" ]; then', 'exec "$@"; if false; then'),
         (NET_ADMIN_RUNNER, "source=$TEST_BINARY,target=$TEST_BINARY", "source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT"),
         (
