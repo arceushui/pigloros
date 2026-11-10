@@ -12,6 +12,7 @@ pub const PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1: &str = "pigloros.plugin.releas
 
 pub mod cbor;
 mod contract;
+mod durable_initialization;
 mod durable_invocation;
 mod durable_tuple;
 mod error;

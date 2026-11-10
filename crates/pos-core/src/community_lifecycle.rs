@@ -12,6 +12,7 @@ mod failure;
 mod guest_claim;
 mod guest_error;
 mod host_error;
+mod initialization;
 mod invocation;
 mod member;
 mod metadata_envelope;
@@ -58,6 +59,11 @@ pub use guest_error::{
 pub use host_error::{
     AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
     RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+};
+pub use initialization::{
+    CommunityInitializationProducerInputV1, CommunityInitializationProducerV1,
+    CommunityInitializationRequestInputV1, CommunityInitializationRequestV1,
+    CommunityInitializationSourceV1,
 };
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,

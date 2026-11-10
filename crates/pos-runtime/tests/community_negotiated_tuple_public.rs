@@ -19,6 +19,9 @@ use pos_runtime::community_plugin_host::{
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
 
+#[path = "support/community_initialization_binding.rs"]
+mod initialization_binding;
+
 fn uint(value: u64) -> Value {
     Value::Integer(value.into())
 }

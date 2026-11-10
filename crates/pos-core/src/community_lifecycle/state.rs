@@ -67,6 +67,12 @@ impl<'a> CommunityStateContentV1<'a> {
         out
     }
 
+    /// Exact CSC1 identity, including schema and the complete State bytes.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        super::digest(b"PiglorOS.Community.CSC1.v1\0", &self.to_canonical_cbor())
+    }
+
     /// Decode a complete preferred CSC1, borrowing its exact state byte range.
     ///
     /// # Errors
