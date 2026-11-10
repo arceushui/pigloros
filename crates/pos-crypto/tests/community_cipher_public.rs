@@ -1,7 +1,7 @@
 //! Unqualified primitive tests; no native vault, owner or authority is implied.
 
 #[path = "support/community_cipher_vectors.rs"]
-mod known_answers;
+pub mod known_answers;
 
 use pos_crypto::community_cipher::{
     CommunityArtifactCipherV1 as Cipher, CommunityCipherErrorV1 as Error,
