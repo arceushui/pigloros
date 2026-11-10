@@ -466,16 +466,46 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
 }
 
 #[test]
-fn the_probe_target_takes_the_second_address_of_its_slash_30() {
-    let probe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
+fn the_probe_target_takes_the_second_address_of_an_aligned_slash_30() {
+    let probe = |network| EgressProbe {
+        network,
         port: 7000,
     };
-    assert_eq!(probe.host(), Ipv4Addr::new(198, 18, 0, 5));
     assert_eq!(
-        probe.target(),
-        std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
+        probe(Ipv4Addr::new(198, 18, 0, 4)).addresses(),
+        Some((
+            Ipv4Addr::new(198, 18, 0, 5),
+            std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
+        ))
     );
+    assert_eq!(
+        probe(Ipv4Addr::new(255, 255, 255, 252))
+            .addresses()
+            .map(|(host, _)| host),
+        Some(Ipv4Addr::new(255, 255, 255, 253))
+    );
+    for misaligned in [
+        Ipv4Addr::new(198, 18, 0, 5),
+        Ipv4Addr::new(255, 255, 255, 255),
+    ] {
+        assert_eq!(probe(misaligned).addresses(), None);
+    }
+}
+
+#[test]
+fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probed = network.probe_egress(EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 5),
+        port: 7000,
+    });
+    assert!(
+        matches!(probed, Err(EgressProbeError::Network)),
+        "{probed:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
 }
 
 #[test]
@@ -514,6 +544,10 @@ fn probe_errors_say_what_failed() {
         (
             EgressProbeError::NotMasqueraded,
             "forwarded sandbox traffic was not masqueraded",
+        ),
+        (
+            EgressProbeError::Network,
+            "the egress probe's /30 is misaligned or overlaps a host address or route",
         ),
     ] {
         assert_eq!(error.to_string(), message);

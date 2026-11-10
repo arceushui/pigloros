@@ -1,8 +1,10 @@
-//! The startup egress probe (#911, owner decision 2026-11-10): before
-//! admission opens, prove that forwarded sandbox traffic actually passes
-//! the host, so a host firewall the provider does not own (Docker's, ufw's,
-//! an `iptables` FORWARD policy of DROP) closes admission instead of
-//! silently blocking attempts.
+//! The startup egress probe (#911, owner decision 2026-11-10): prove that
+//! forwarded sandbox traffic actually passes the host, so that a host
+//! firewall the provider does not own (Docker's, ufw's, an `iptables`
+//! FORWARD policy of DROP) can keep admission closed instead of silently
+//! blocking attempts. The provider's startup composition, which is not part
+//! of #911, must run it before admission opens and keep admission closed on
+//! any error; nothing calls it yet.
 //!
 //! The probe establishes a real attempt network, through the same path as
 //! every attempt, for a reserved probe attempt whose one endpoint lies in a
@@ -29,21 +31,25 @@ use crate::namespace_network::netlink::{
     in_namespace, NetlinkError, NetlinkSession, NetlinkTransport, ROUTE,
 };
 use crate::namespace_network::{route, IpPrefix, LinkName, NamespaceControl, NamespaceName};
+use netlink_packet_route::address::AddressAttribute;
+use netlink_packet_route::route::{RouteAddress, RouteAttribute};
+use netlink_packet_route::RouteNetlinkMessage;
 
 /// The reserved attempt identity of the probe's attempt network.
 const PROBE_ATTEMPT: [u8; 16] = [0xff; 16];
 /// The reserved identity whose namespace holds the probe's target.
 const PROBE_TARGET: [u8; 16] = [0xfe; 16];
 /// The probe target's veth end in the host namespace.
-const PROBE_HOST_LINK: &str = "piglor-t0";
+pub(in crate::namespace_network) const PROBE_HOST_LINK: &str = "piglor-t0";
 /// The probe target's veth end in its namespace.
 const PROBE_TARGET_LINK: &str = "piglor-u0";
 /// How long the probe's connection may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The installation-configured IPv4 /30 the probe's target lives in: the
-/// host takes `network + 1` and the target `network + 2`. It must lie
-/// outside the attempt range and every network the host uses.
+/// host takes `network + 1` and the target `network + 2`. It must be
+/// /30-aligned and lie outside the attempt range and every address and route
+/// the host has; the probe refuses it otherwise.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EgressProbe {
     /// The /30's network address.
@@ -53,18 +59,83 @@ pub struct EgressProbe {
 }
 
 impl EgressProbe {
-    pub(super) fn host(self) -> Ipv4Addr {
-        Ipv4Addr::from(u32::from(self.network) + 1)
-    }
-
-    pub(super) fn target(self) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::from(u32::from(self.network) + 2), self.port)
+    /// The host's and the target's address, or `None` unless `network` is
+    /// a /30's network address.
+    pub(super) fn addresses(self) -> Option<(Ipv4Addr, SocketAddrV4)> {
+        let network = self.network.to_bits();
+        (network & 3 == 0)
+            .then_some(network)
+            .and_then(|network| network.checked_add(1).zip(network.checked_add(2)))
+            .map(|(host, target)| {
+                (
+                    Ipv4Addr::from_bits(host),
+                    SocketAddrV4::new(Ipv4Addr::from_bits(target), self.port),
+                )
+            })
     }
 }
 
-/// Why the egress probe failed. Each failure keeps admission closed.
+/// Whether the prefix `address/length` overlaps the /30 at `network`.
+fn overlaps(address: Ipv4Addr, length: u8, network: Ipv4Addr) -> bool {
+    let shared = u32::from(length.min(30));
+    let mask = u32::MAX.checked_shl(32 - shared).unwrap_or(0);
+    address.to_bits() & mask == network.to_bits() & mask
+}
+
+/// Whether any IPv4 address or route the host's `addresses` and `routes`
+/// dumps report lies in the /30 at `network`. A default route, which covers
+/// everything, is no conflict.
+fn conflicts(
+    network: Ipv4Addr,
+    addresses: &[RouteNetlinkMessage],
+    routes: &[RouteNetlinkMessage],
+) -> bool {
+    let address_conflict = addresses.iter().any(|reply| match reply {
+        RouteNetlinkMessage::NewAddress(message) => message.attributes.iter().any(|attribute| {
+            matches!(
+                attribute,
+                AddressAttribute::Local(IpAddr::V4(address))
+                    | AddressAttribute::Address(IpAddr::V4(address))
+                    if overlaps(*address, 32, network)
+            )
+        }),
+        _ => false,
+    });
+    let route_conflict = routes.iter().any(|reply| match reply {
+        RouteNetlinkMessage::NewRoute(message) => {
+            let length = message.header.destination_prefix_length;
+            length > 0
+                && message.attributes.iter().any(|attribute| {
+                    matches!(
+                        attribute,
+                        RouteAttribute::Destination(RouteAddress::Inet(address))
+                            if overlaps(*address, length, network)
+                    )
+                })
+        }
+        _ => false,
+    });
+    address_conflict || route_conflict
+}
+
+/// Check that the /30 at `network` is free on the host.
+fn unused_by_host(network: Ipv4Addr) -> Result<bool, NetlinkError> {
+    NetlinkSession::open(ROUTE).and_then(|session| {
+        session.dump(route::addresses()).and_then(|addresses| {
+            session
+                .dump(route::routes())
+                .map(|routes| !conflicts(network, &addresses, &routes))
+        })
+    })
+}
+
+/// Why the egress probe failed. Each failure must keep admission closed.
 #[derive(Debug, thiserror::Error)]
 pub enum EgressProbeError {
+    /// The configured /30 is not aligned, or overlaps a host address or
+    /// route.
+    #[error("the egress probe's /30 is misaligned or overlaps a host address or route")]
+    Network,
     /// The probe's target could not be set up or removed.
     #[error("the egress probe's target could not be set up or removed")]
     Target(#[source] NetlinkError),
@@ -77,6 +148,13 @@ pub enum EgressProbeError {
     /// The target saw the attempt's own address, not the host's.
     #[error("forwarded sandbox traffic was not masqueraded")]
     NotMasqueraded,
+}
+
+/// The probe's addresses, checked.
+#[derive(Clone, Copy)]
+struct Placed {
+    host: Ipv4Addr,
+    target: SocketAddrV4,
 }
 
 /// Give link `name` of the session's namespace `address` and bring it up.
@@ -102,7 +180,7 @@ const fn on_probe_network(address: Ipv4Addr) -> IpPrefix {
 
 /// Create the target's veth pair with its far end in `target`, address
 /// both ends, and listen on the target.
-fn set_up_target(target: BorrowedFd<'_>, probe: EgressProbe) -> Result<TcpListener, NetlinkError> {
+fn set_up_target(target: BorrowedFd<'_>, probe: Placed) -> Result<TcpListener, NetlinkError> {
     let host_link = LinkName::new(PROBE_HOST_LINK).map_err(|_| NetlinkError::Unrepresentable)?;
     let target_link =
         LinkName::new(PROBE_TARGET_LINK).map_err(|_| NetlinkError::Unrepresentable)?;
@@ -110,20 +188,16 @@ fn set_up_target(target: BorrowedFd<'_>, probe: EgressProbe) -> Result<TcpListen
         .and_then(|session| {
             session
                 .execute(vec![route::veth_pair(&host_link, &target_link, target)])
-                .and_then(|()| link_up(&session, &host_link, on_probe_network(probe.host())))
+                .and_then(|()| link_up(&session, &host_link, on_probe_network(probe.host)))
         })
         .and_then(|()| {
             in_namespace(target, || {
                 NetlinkSession::open(ROUTE)
                     .and_then(|session| {
-                        link_up(
-                            &session,
-                            &target_link,
-                            on_probe_network(*probe.target().ip()),
-                        )
+                        link_up(&session, &target_link, on_probe_network(*probe.target.ip()))
                     })
                     .and_then(|()| {
-                        TcpListener::bind(probe.target()).map_err(|error| {
+                        TcpListener::bind(probe.target).map_err(|error| {
                             NetlinkError::Io(
                                 rustix::io::Errno::from_io_error(&error)
                                     .unwrap_or(rustix::io::Errno::IO),
@@ -156,13 +230,19 @@ where
 {
     /// Prove that forwarded sandbox traffic passes the host and is
     /// masqueraded, through a probe attempt to a target in `probe`'s /30.
-    /// The startup composition opens admission only once this succeeds.
+    /// The startup composition must run this before admission opens, and
+    /// keep admission closed on any error.
     ///
     /// # Errors
     /// Fails if the target or the probe's attempt network cannot be set up,
     /// the connection does not reach the target, the target sees an address
     /// other than the host's, or the target cannot be removed afterwards.
     pub fn probe_egress(&self, probe: EgressProbe) -> Result<(), EgressProbeError> {
+        let (host, target) = probe.addresses().ok_or(EgressProbeError::Network)?;
+        if !unused_by_host(probe.network).map_err(EgressProbeError::Target)? {
+            return Err(EgressProbeError::Network);
+        }
+        let probe = Placed { host, target };
         let target_name = NamespaceName::for_attempt(PROBE_TARGET);
         let probed = self
             .namespaces
@@ -170,17 +250,17 @@ where
             .and_then(|target| set_up_target(target.as_fd(), probe))
             .map_err(EgressProbeError::Target)
             .and_then(|listener| {
-                self.connector(PROBE_ATTEMPT, &[SocketAddr::V4(probe.target())])
+                self.connector(PROBE_ATTEMPT, &[SocketAddr::V4(probe.target)])
                     .map_err(EgressProbeError::Establish)
                     .and_then(|mut connector| {
                         connector
-                            .connect(SocketAddr::V4(probe.target()), PROBE_TIMEOUT)
+                            .connect(SocketAddr::V4(probe.target), PROBE_TIMEOUT)
                             .and_then(|_| listener.accept())
                             .map_err(EgressProbeError::Blocked)
                     })
             })
             .and_then(|(_, peer)| {
-                (peer.ip() == IpAddr::V4(probe.host()))
+                (peer.ip() == IpAddr::V4(probe.host))
                     .then_some(())
                     .ok_or(EgressProbeError::NotMasqueraded)
             });
@@ -188,3 +268,7 @@ where
         probed.and(removed)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
