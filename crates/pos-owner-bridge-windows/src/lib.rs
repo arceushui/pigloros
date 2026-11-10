@@ -487,6 +487,7 @@ pub(crate) enum RendererPresence {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultLifecycle {
+    Quarantined,
     PostedReceipt,
     PostedEmpty,
     PostedWriting,
@@ -568,6 +569,7 @@ pub(crate) struct ProcessExitState {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultMark {
+    ReachedQuarantined(ProcessExitState),
     Reached(ProcessFaultState),
     ReachedExit(ProcessExitState),
     RendererPresence(RendererPresence),

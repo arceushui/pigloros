@@ -127,6 +127,14 @@ impl NativeOperations for Session {
             return Err(());
         }
         match authority.lifecycle() {
+            crate::ProcessFaultLifecycle::Quarantined => {
+                if !self.preload_fault_owners_retained()
+                    || self.window.is_none()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
             crate::ProcessFaultLifecycle::PostedReceipt
             | crate::ProcessFaultLifecycle::PostedEmpty
             | crate::ProcessFaultLifecycle::PostedWriting

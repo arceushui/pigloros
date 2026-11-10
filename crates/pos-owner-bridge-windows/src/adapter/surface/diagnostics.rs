@@ -1,11 +1,83 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
 use crate::NativeResult;
+
+use super::{CloseState, Ownership, Surface};
+use std::rc::Rc;
+
+impl Surface {
+    pub(in crate::adapter) fn quarantined_fault_state(
+        &mut self,
+    ) -> Result<crate::ProcessExitState, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || self.buffers
+            || !self.navigation_issued
+            || self.events.loaded().is_none()
+            || self.loopback.served().count != 1
+            || !self.loopback.served().integrity_ok
+            || !crate::Native::process_failure_observations().is_empty()
+            || self.native.buffer_close_uncertain()
+            || !self.native.preload_fault_owners_retained()
+            || !self.native.window().map_err(|_| ())?.exists
+            || self.native.early_renderer_presence()? != crate::RendererPresence::Unique
+        {
+            return Err(());
+        }
+        let browser = self.identity.ok_or(())?;
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        let state = crate::ProcessExitState {
+            generation: self.generation.ok_or(())?,
+            record_count: self.store.records().map_err(|_| ())?.len(),
+        };
+        if state.generation != 1 || state.record_count != 1 {
+            return Err(());
+        }
+        Ok(state)
+    }
+
+    pub(in crate::adapter) fn inject_quarantined_fault(
+        &mut self,
+        target: crate::ProcessFaultTarget,
+        seal: crate::FaultSeal,
+        keeper_held: Rc<Cell<bool>>,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if !keeper_held.get() {
+            return Err(());
+        }
+        self.quarantined_fault_state()?;
+        let browser = self.identity.ok_or(())?;
+        let events = Rc::clone(&self.events);
+        let (trace, deadline) = seal.into_parts();
+        let authority = crate::FaultAuthority {
+            browser,
+            target,
+            lifecycle: crate::ProcessFaultLifecycle::Quarantined,
+            valid: Rc::new(move || {
+                std::time::Instant::now() < deadline
+                    && keeper_held.get()
+                    && !events.invalid()
+                    && events.exited().is_none()
+            }),
+            trace,
+        };
+        self.native.inject_process_fault(&authority)
+    }
+}
 
 // Temporary hosted-hang probe. Logarithmic sampling bounds retry output without
 // adding a clock, deadline, cleanup action or permission to release an owner.

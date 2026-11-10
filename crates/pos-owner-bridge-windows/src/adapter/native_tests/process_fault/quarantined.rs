@@ -1,0 +1,287 @@
+#![cfg(windows)]
+#![forbid(unsafe_code)]
+
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::os::windows::fs::OpenOptionsExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
+use std::task::Poll;
+use std::time::Instant;
+
+use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
+use pos_owner_bridge::ceremony::plan::Verified;
+use pos_owner_bridge::{
+    BridgeError, CleanupStore, NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity,
+    QuarantineCode, QuarantineKeeper, ReplyImage, RequestImage, SurfaceError, SurfaceEvent,
+    SurfaceSpec, SystemClock, UnavailableCode,
+};
+use pos_owner_bridge_codec::CeremonyId;
+
+use super::{
+    check_final_process_failures, competing_spec, native_zeroing_observed, readiness, Fixture,
+    FixtureProfile, ProcessFaultMark, ProcessFaultTarget, TestResult, ZeroWitness,
+};
+
+// This is a modeled port refusal, never an SDK HRESULT or a native Close claim.
+struct RefuseClose<'a> {
+    surface: &'a mut super::Surface,
+    refused: &'a mut bool,
+}
+
+impl OwnerWebSurface for RefuseClose<'_> {
+    fn open(&mut self, spec: &SurfaceSpec) -> Poll<Result<ProcessIdentity, SurfaceError>> {
+        self.surface.open(spec)
+    }
+    fn navigate(&mut self) -> Poll<Result<NavigationId, SurfaceError>> {
+        self.surface.navigate()
+    }
+    fn create_and_write(
+        &mut self,
+        request: &RequestImage,
+        header: &[u8; 64],
+    ) -> Result<(), SurfaceError> {
+        self.surface.create_and_write(request, header)
+    }
+    fn post(&mut self, guard: &PostGuard) -> Result<(), SurfaceError> {
+        self.surface.post(guard)
+    }
+    fn reply_load_state(&self) -> Result<u32, SurfaceError> {
+        self.surface.reply_load_state()
+    }
+    fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool, SurfaceError> {
+        self.surface.reply_compare_exchange(current, new)
+    }
+    fn reply_copy(&self, out: &mut ReplyImage) -> Result<(), SurfaceError> {
+        self.surface.reply_copy(out)
+    }
+    fn zero_close_buffers(&mut self) -> Result<(), SurfaceError> {
+        self.surface.zero_close_buffers()
+    }
+    fn close_controller(&mut self) -> Result<(), SurfaceError> {
+        *self.refused = true;
+        Err(SurfaceError::new(BridgeError::Unavailable(
+            UnavailableCode::InterfaceUnavailable,
+        )))
+    }
+    fn take_event(&mut self) -> Option<SurfaceEvent> {
+        self.surface.take_event()
+    }
+    fn finish(&mut self) -> Result<(), SurfaceError> {
+        self.surface.finish()
+    }
+}
+
+fn drive_to_quarantine(
+    fixture: &mut Fixture,
+    driver: &mut CeremonyDriver,
+    refused: &mut bool,
+) -> Result<Verified, BridgeError> {
+    loop {
+        let step = {
+            let mut surface = RefuseClose {
+                surface: &mut fixture.surface,
+                refused: &mut *refused,
+            };
+            let mut env = StepEnv {
+                surface: &mut surface,
+                clock: &SystemClock,
+                loopback: &mut fixture.loopback,
+                store: &mut fixture.store,
+            };
+            driver.step(&mut env)
+        };
+        match step {
+            Step::Finished(result) => return result,
+            Step::Done => {
+                return Err(BridgeError::Unavailable(
+                    UnavailableCode::InterfaceUnavailable,
+                ))
+            }
+            Step::Pending => readiness::pump_retaining(&fixture.surface),
+        }
+    }
+}
+
+fn keeper_poll(
+    keeper: &mut QuarantineKeeper,
+    fixture: &mut Fixture,
+) -> pos_owner_bridge::QuarantinePoll {
+    keeper.poll(|driver| {
+        driver.poll_cleanup(&mut readiness::env(
+            &mut fixture.surface,
+            &mut fixture.loopback,
+            &mut fixture.store,
+        ))
+    })
+}
+
+fn blocked(keeper: &mut QuarantineKeeper, fixture: &mut Fixture, folder: &Path) -> TestResult {
+    let polled = keeper_poll(keeper, fixture);
+    if !polled.remaining
+        || polled.driver.is_some()
+        || !folder.is_dir()
+        || !folder.join("quarantine-held").is_file()
+        || fixture.store.records()?.len() != 1
+        || !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+        || fixture.store.records()?.len() != 1
+        || !folder.is_dir()
+    {
+        return Err("quarantined owners or held folder were not retained".into());
+    }
+    Ok(())
+}
+
+fn run_case(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    target: ProcessFaultTarget,
+    inject: bool,
+) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = Fixture::new(
+        runtime,
+        root,
+        number,
+        FixtureProfile::SuccessfulGetReleaseDelay,
+    )?;
+    let _zero = ZeroWitness::arm();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut refused = false;
+    let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
+    let expected = Err(BridgeError::Quarantine(
+        QuarantineCode::ControllerCloseFailed,
+    ));
+    if result != expected {
+        fixture.retire(driver, result, None)?;
+        return Err("modeled close refusal did not quarantine".into());
+    }
+    let wiped = driver.request_clear()
+        && driver.prf().iter().all(|byte| *byte == 0)
+        && driver.plan_secrets_clear();
+    let observations = crate::Native::take_native_zero_observations();
+    let native_wiped = native_zeroing_observed(&observations);
+    let folder = root
+        .join(format!("process-fault-{number}"))
+        .join(pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
+            [number; 16],
+        )));
+    let held_path = folder.join("quarantine-held");
+    let held = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(&held_path)
+    {
+        Ok(held) => held,
+        Err(error) => {
+            let _closed_or_retained = fixture.surface.close_controller();
+            fixture.retire(driver, result, None)?;
+            return Err(error.into());
+        }
+    };
+    let mut keeper = QuarantineKeeper::new();
+    let reply = keeper.finish(driver, result);
+    if reply.driver.is_some() || reply.result != expected {
+        return Err("keeper did not retain modeled quarantine".into());
+    }
+    let keeper_held = std::rc::Rc::new(std::cell::Cell::new(refused));
+    let attempt = catch_unwind(AssertUnwindSafe(
+        || -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
+            if !refused || !wiped || !native_wiped {
+                return Err("quarantine mappings or secrets were not wiped".into());
+            }
+            let state = fixture
+                .surface
+                .quarantined_fault_state()
+                .map_err(|()| "quarantined owners not established")?;
+            fixture
+                .trace
+                .borrow_mut()
+                .push(ProcessFaultMark::ReachedQuarantined(state));
+            if !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                || fixture.surface.quarantined_fault_state().ok() != Some(state)
+            {
+                return Err("competing admission changed quarantined owners".into());
+            }
+            if inject {
+                let seal = crate::FaultSeal {
+                    trace: std::rc::Rc::clone(&fixture.trace),
+                    deadline: fixture.deadline,
+                };
+                fixture.handle = Some(
+                    fixture
+                        .surface
+                        .inject_quarantined_fault(target, seal, std::rc::Rc::clone(&keeper_held))
+                        .map_err(|()| "quarantined target was not validated")?,
+                );
+                fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state))?;
+            }
+            blocked(&mut keeper, &mut fixture, &folder)?;
+        if inject && target == ProcessFaultTarget::Browser {
+            let name = folder.file_name().and_then(std::ffi::OsStr::to_str)
+                .ok_or("quarantined folder name unavailable")?;
+            if fixture.store.remove_folder(name).is_ok()
+                || !folder.join("quarantine-held").is_file()
+                || fixture.store.records()?.len() != 1
+            {
+                return Err("held owned file did not refuse ordinary folder cleanup".into());
+            }
+        }
+        let _logged = writeln!(std::io::stderr(),
+            "NATIVE_QUARANTINED case={number} target={target:?} inject={inject} modeled_close_refusal=true keeper_remaining=true record_retained=true held_file=true");
+            Ok(state)
+        },
+    ))
+    .unwrap_or_else(|_| Err("quarantined fixture panicked".into()));
+    keeper_held.set(false);
+    // Release only the fixture's own file, then perform the ordinary real Close.
+    drop(held);
+    let closed = fixture.surface.close_controller();
+    let close_observation = fixture.surface.initial_close_observation();
+    let mut returned = None;
+    loop {
+        let polled = keeper_poll(&mut keeper, &mut fixture);
+        if let Some(driver) = polled.driver {
+            returned = Some(driver);
+        }
+        if !polled.remaining && fixture.surface.idle() {
+            break;
+        }
+        readiness::pump_retaining(&fixture.surface);
+    }
+    if let Some(driver) = returned {
+        drop(driver.into_slots());
+    }
+    drop(fixture.handle.take());
+    drop(fixture.surface);
+    std::rc::Rc::get_mut(&mut fixture.factory)
+        .ok_or("quarantined factory still shared")?
+        .stop()?;
+    let state = attempt?;
+    let _logged = writeln!(
+        std::io::stderr(),
+        "NATIVE_QUARANTINED_CLOSE case={number} result={closed:?} observation={close_observation:?}"
+    );
+    check_final_process_failures(inject.then_some(target))?;
+    if !fixture.store.records()?.is_empty() || folder.exists() {
+        return Err("ordinary quarantine retirement was incomplete".into());
+    }
+    Ok(state)
+}
+
+pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
+    for (number, target) in [
+        (0xe0, ProcessFaultTarget::Renderer),
+        (0xe2, ProcessFaultTarget::Browser),
+    ] {
+        let control = run_case(runtime, root, number, target, false)?;
+        let fault = run_case(runtime, root, number + 1, target, true)?;
+        if control != fault {
+            return Err("quarantined control and fault reached different states".into());
+        }
+    }
+    Ok(())
+}
