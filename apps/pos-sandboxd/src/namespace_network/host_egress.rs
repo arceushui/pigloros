@@ -1026,34 +1026,49 @@ fn install_locked<R: NetlinkTransport, N: NetlinkTransport>(
         .collect();
     let name = attempt.namespace.as_str().to_owned();
     installed.attempts.insert(name.clone(), attempt.clone());
-    installed.devices.insert(name, egress.clone());
+    installed.devices.insert(name, egress);
     if observe(netfilter)?.is_none() {
         netfilter.execute(create_table())?;
     }
-    for &link in &egress {
-        let (device, forwarding) = route.request(get_link(link)).and_then(link_forwarding)?;
-        if !forwarding {
-            records
-                .record(link, &device)
-                .map_err(HostEgressError::State)?;
-        }
-    }
-    route.execute(
-        links
-            .iter()
-            .map(|&link| set_forwarding(link, true))
-            .collect(),
-    )?;
-    for &link in &links {
-        if !route.request(get_link(link)).and_then(link_forwarding)?.1 {
-            return Err(HostEgressError::Forwarding);
-        }
-    }
+    enable_forwarding(route, records, host_link, &links)?;
     netfilter.execute(install_attempt(attempt))?;
     observe(netfilter)?
         .is_some_and(|table| is_exact(&table, &installed.attempts))
         .then_some(())
         .ok_or(HostEgressError::Readback)
+}
+
+/// Turn IPv4 forwarding on for every one of `links` that does not forward
+/// yet, recording each such egress device first, and read it back on all of
+/// them. A device that already forwards is never written to, and the veth
+/// end `host_link` leaves with its attempt, so it is never recorded.
+fn enable_forwarding<R: NetlinkTransport>(
+    route: &NetlinkSession<R>,
+    records: &ForwardingRecords,
+    host_link: u32,
+    links: &[u32],
+) -> Result<(), HostEgressError> {
+    let mut off = Vec::new();
+    for &link in links {
+        let (device, forwarding) = route.request(get_link(link)).and_then(link_forwarding)?;
+        if !forwarding {
+            if link != host_link {
+                records
+                    .record(link, &device)
+                    .map_err(HostEgressError::State)?;
+            }
+            off.push(set_forwarding(link, true));
+        }
+    }
+    if !off.is_empty() {
+        route.execute(off)?;
+    }
+    for &link in links {
+        if !route.request(get_link(link)).and_then(link_forwarding)?.1 {
+            return Err(HostEgressError::Forwarding);
+        }
+    }
+    Ok(())
 }
 
 /// [`HostEgress::remove_with`] with what is `installed`: the attempt's rules
