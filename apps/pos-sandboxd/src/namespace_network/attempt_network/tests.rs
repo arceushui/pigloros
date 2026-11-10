@@ -941,6 +941,10 @@ mod privileged {
         let namespaces = NetworkNamespaces::system();
         let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
         host_side(target.as_fd())?;
+        // A new link inherits the namespace's default forwarding, which a
+        // host that already routes has on; start from off so the provider
+        // has to turn it on and back off.
+        set_forwarding_of("tgt-h0", false)?;
         let listener = target_listener(target.as_fd())?;
         let control = NetlinkNamespaceControl::new(namespaces.clone());
         let network = NamespacedLocalNetwork::new(
