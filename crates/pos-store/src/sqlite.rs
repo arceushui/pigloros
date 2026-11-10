@@ -19797,7 +19797,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn bounded_read_rejects_aggregate_event_bytes_before_full_event_query() {
         let mut store = new_store();
         let timeline = store.create_timeline("aggregate-bytes").test_ok();
@@ -19843,6 +19843,16 @@ mod tests {
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
         BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(20));
+        // A successful read with no elapsed cap reaches the pause regardless of
+        // host scheduling; the deadline probes below keep their original caps.
+        let delayed_events = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
+            )
+            .test_ok();
+        assert_eq!(delayed_events, events);
         let time_error = store
             .read_bounded(
                 timeline.id(),
