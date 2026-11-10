@@ -16,9 +16,25 @@ use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+mod attempt_network;
+mod control;
+mod firewall;
+mod host_egress;
+pub mod netlink;
+mod pinned;
 mod plan;
+mod route;
 mod rule_codec;
 
+pub use attempt_network::{
+    AttemptNetworkError, EgressProbe, EgressProbeError, NamespaceConnector, NamespacedLocalNetwork,
+};
+pub use control::{NetlinkNamespaceControl, OrphanSweepError};
+pub use host_egress::{
+    AttemptEgress, EgressControl, ForwardingRecords, HostEgress, HostEgressError,
+    FORWARDING_RECORDS, HOST_TABLE,
+};
+pub use pinned::NetworkNamespaces;
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
 pub use rule_codec::{decode_firewall_rule, encode_firewall_rule, UndecodableRule};
 
@@ -48,6 +64,20 @@ impl NamespaceName {
     #[must_use]
     pub const fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// The attempt namespace named `name`, if `name` is `piglor-` followed
+    /// by 32 lowercase hexadecimal digits.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        name.strip_prefix("piglor-")
+            .filter(|hex| {
+                hex.len() == 32
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(|_| Self(name.to_owned()))
     }
 }
 
