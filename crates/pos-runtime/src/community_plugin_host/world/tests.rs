@@ -334,6 +334,7 @@ fn staged_world() -> BoxResult<(Rig, CommunityPluginHostV1<FakeMember>)> {
 fn unavailable_trusted_time_reports_and_records_every_member_refusal() -> TestResult {
     let mut rig = Rig::ready()?;
     let members = members(&rig, 2)?;
+    register_staging(&mut rig, members[0].plugin)?;
     let ids: Vec<_> = members.iter().map(|member| member.plugin).collect();
     let offers: Vec<_> = members
         .iter()
@@ -373,6 +374,7 @@ fn unavailable_trusted_time_reports_and_records_every_member_refusal() -> TestRe
 fn failed_authorization_offer_refuses_pass_and_never_offers_later_members() -> TestResult {
     let mut rig = Rig::ready()?;
     let mut members = members(&rig, 3)?;
+    register_staging(&mut rig, members[0].plugin)?;
     members[1].reject_offer = true;
     let ids: Vec<_> = members.iter().map(|member| member.plugin).collect();
     let offers: Vec<_> = members
