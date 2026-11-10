@@ -793,8 +793,10 @@ pub(super) fn host_chains<T: NetlinkTransport>(
 pub const FORWARDING_RECORDS: &str = "/run/pigloros/sandbox/egress-forwarding";
 
 /// The provider's durable record of every egress device whose IPv4
-/// forwarding it turned on: one file per device, named by its index and
-/// holding its name. A record is written and synced before forwarding is
+/// forwarding it turned on.
+///
+/// There is one file per device, named by its index and holding its
+/// name. A record is written and synced before forwarding is
 /// turned on, and removed only after it is turned off again, so after a
 /// crash restart reconciliation knows what to restore. A device that
 /// already forwarded is never recorded, and so never turned off.
