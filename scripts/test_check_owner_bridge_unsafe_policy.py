@@ -2012,7 +2012,7 @@ def test_external_qualification_is_sealed() -> None:
         raise SystemExit("resource callback diagnostic source binding was removed")
     mutations = (
         (resource, 'if count >= 9', 'if false'),
-        (resource, 'case: super::navigation::readiness_context(),', 'case: None,'),
+        (resource, 'prefix: "NATIVE_RESOURCE",\n        case: super::navigation::readiness_context(),', 'prefix: "NATIVE_RESOURCE",\n        case: None,'),
         (resource, 'prefix: "NATIVE_RESOURCE",', 'prefix: "NATIVE_RESOURCE_UNIT",'),
         (resource, 'trace.returning(reporting, false);', 'trace.returning(reporting, true);'),
         (resource, 'let selected = observe(signals, EventKind::Resource, request);', 'let selected = NativeAction::Allow;'),
