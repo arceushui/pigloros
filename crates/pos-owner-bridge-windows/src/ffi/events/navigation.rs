@@ -293,6 +293,11 @@ thread_local! {
 }
 
 #[cfg(test)]
+pub(super) fn readiness_context() -> Option<(u64, std::time::Instant)> {
+    READINESS_CASE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 impl crate::Native {
     pub(crate) fn readiness_navigation_case(case: Option<(u64, std::time::Instant)>) {
         READINESS_CASE.with(|current| current.set(case));

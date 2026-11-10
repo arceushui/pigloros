@@ -32,6 +32,96 @@ pub(super) fn fixture() -> crate::ResourceDenialFixture {
     DENIAL_FIXTURE.with(std::cell::Cell::get)
 }
 
+/// One subscription's bounded, case-bound readiness observations.
+#[cfg(test)]
+struct ResourceTrace {
+    case: Option<(u64, std::time::Instant)>,
+    callbacks: std::cell::Cell<u8>,
+}
+
+#[cfg(test)]
+impl ResourceTrace {
+    fn begin(&self) -> Option<u8> {
+        use std::io::Write as _;
+        let Some((case, started)) = self.case else {
+            return None;
+        };
+        let count = self.callbacks.get();
+        if count >= 9 {
+            return None;
+        }
+        self.callbacks.set(count + 1);
+        if count == 8 {
+            let _logged_or_unavailable = writeln!(
+                std::io::stderr(),
+                "NATIVE_RESOURCE case={case} elapsed={:?} overflow=true",
+                started.elapsed()
+            );
+            return None;
+        }
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_RESOURCE case={case} elapsed={:?} callback={} stage=entered",
+            started.elapsed(),
+            count + 1
+        );
+        Some(count + 1)
+    }
+
+    fn decision(&self, report: Option<u8>, document: Option<bool>, selected: NativeAction) {
+        let Some(callback) = report else {
+            return;
+        };
+        if let Some((case, started)) = self.case {
+            use std::io::Write as _;
+            let _logged_or_unavailable = writeln!(std::io::stderr(),
+                "NATIVE_RESOURCE case={case} elapsed={:?} callback={callback} stage=decision document={document:?} allow={}",
+                started.elapsed(), selected == NativeAction::Allow);
+        }
+    }
+
+    fn returned(&self, report: Option<u8>, success: bool) {
+        let Some(callback) = report else {
+            return;
+        };
+        if let Some((case, started)) = self.case {
+            use std::io::Write as _;
+            let _logged_or_unavailable = writeln!(
+                std::io::stderr(),
+                "NATIVE_RESOURCE case={case} elapsed={:?} callback={callback} stage=returned success={success}",
+                started.elapsed()
+            );
+        }
+    }
+}
+
+#[test]
+fn resource_trace_retains_its_case_and_bounds_callback_output() {
+    let start = std::time::Instant::now();
+    crate::Native::readiness_navigation_case(Some((11, start)));
+    let trace = ResourceTrace {
+        case: super::navigation::readiness_context(),
+        callbacks: std::cell::Cell::new(0),
+    };
+    crate::Native::readiness_navigation_case(Some((12, start)));
+    assert_eq!(trace.case, Some((11, start)));
+    for _ in 0..8 {
+        assert!(trace.begin().is_some());
+    }
+    assert!(trace.begin().is_none());
+    assert!(trace.begin().is_none());
+    assert_eq!(trace.callbacks.get(), 9);
+    trace.decision(Some(1), Some(true), NativeAction::Allow);
+    trace.returned(Some(1), true);
+    let disabled = ResourceTrace {
+        case: None,
+        callbacks: std::cell::Cell::new(0),
+    };
+    assert!(disabled.begin().is_none());
+    assert_eq!(disabled.callbacks.get(), 0);
+    crate::Native::readiness_navigation_case(None);
+}
+
 pub(super) fn install(
     view: &ICoreWebView2,
     environment: &ICoreWebView2Environment,
@@ -56,8 +146,21 @@ pub(super) fn install(
     let cancellation = Rc::clone(recovery);
     let intercepted = view.clone();
     let remove = view.clone();
+    #[cfg(test)]
+    let trace = ResourceTrace {
+        case: super::navigation::readiness_context(),
+        callbacks: std::cell::Cell::new(0),
+    };
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-        if let Err(error) = filter(args.clone(), &response, observed.as_ref()) {
+        #[cfg(test)]
+        let reporting = trace.begin();
+        if let Err(error) = filter(
+            args.clone(),
+            &response,
+            observed.as_ref(),
+            #[cfg(test)]
+            (&trace, reporting),
+        ) {
             observed.failed(EventKind::Resource, error);
             // The negative control deliberately reproduces the former swallowed
             // failure. It exists only in the native qualification test binary.
@@ -65,11 +168,16 @@ pub(super) fn install(
             if DENIAL_FIXTURE
                 .with(|mode| mode.get() == crate::ResourceDenialFixture::SwallowFailure)
             {
+                trace.returned(reporting, true);
                 return Ok(());
             }
             cancellation.deny(args, intercepted.clone(), Rc::clone(&observed));
+            #[cfg(test)]
+            trace.returned(reporting, false);
             return Err(windows::core::Error::from_hresult(E_ABORT));
         }
+        #[cfg(test)]
+        trace.returned(reporting, true);
         Ok(())
     }));
     subscriptions.register(
@@ -92,9 +200,16 @@ fn filter(
     args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
     response: &ICoreWebView2WebResourceResponse,
     signals: &dyn EventSink,
+    #[cfg(test)] diagnostic: (&ResourceTrace, Option<u8>),
 ) -> Result<()> {
     let args = args.ok_or_else(unavailable)?;
-    let selected = observe(signals, EventKind::Resource, owner_request(&args));
+    let request = owner_request(&args);
+    #[cfg(test)]
+    let document = match &request {
+        Ok(NativeEvent::Resource { document, .. }) => Some(*document),
+        _ => None,
+    };
+    let selected = observe(signals, EventKind::Resource, request);
     // Reach the production Surface/driver/keeper cleanup chain with a real
     // request/deferral, without changing the pinned owner asset or network URL.
     #[cfg(test)]
@@ -103,6 +218,8 @@ fn filter(
     } else {
         selected
     };
+    #[cfg(test)]
+    diagnostic.0.decision(diagnostic.1, document, selected);
     if selected != NativeAction::Allow {
         action(
             signals,

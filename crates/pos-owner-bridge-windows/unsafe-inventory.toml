@@ -621,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 362
+line = 367
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -629,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 394
+line = 399
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 398
+line = 403
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 401
+line = 406
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 412
+line = 417
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 420
+line = 425
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 423
+line = 428
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 438
+line = 443
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 451
+line = 456
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 454
+line = 459
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -701,7 +701,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 78
+line = 186
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -709,7 +709,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 82
+line = 190
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
@@ -717,7 +717,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 87
+line = 195
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
@@ -725,7 +725,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 46
+line = 136
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
@@ -733,7 +733,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 119
+line = 236
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
@@ -741,7 +741,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 126
+line = 243
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
@@ -749,7 +749,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 129
+line = 246
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
@@ -757,7 +757,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 133
+line = 250
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
