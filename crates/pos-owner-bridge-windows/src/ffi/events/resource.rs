@@ -35,6 +35,7 @@ pub(super) fn fixture() -> crate::ResourceDenialFixture {
 /// One subscription's bounded, case-bound readiness observations.
 #[cfg(test)]
 struct ResourceTrace {
+    prefix: &'static str,
     case: Option<(u64, std::time::Instant)>,
     callbacks: std::cell::Cell<u8>,
 }
@@ -54,14 +55,16 @@ impl ResourceTrace {
         if count == 8 {
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
-                "NATIVE_RESOURCE case={case} elapsed={:?} overflow=true",
+                "{} case={case} elapsed={:?} overflow=true",
+                self.prefix,
                 started.elapsed()
             );
             return None;
         }
         let _logged_or_unavailable = writeln!(
             std::io::stderr(),
-            "NATIVE_RESOURCE case={case} elapsed={:?} callback={} stage=entered",
+            "{} case={case} elapsed={:?} callback={} stage=entered",
+            self.prefix,
             started.elapsed(),
             count + 1
         );
@@ -75,8 +78,8 @@ impl ResourceTrace {
         if let Some((case, started)) = self.case {
             use std::io::Write as _;
             let _logged_or_unavailable = writeln!(std::io::stderr(),
-                "NATIVE_RESOURCE case={case} elapsed={:?} callback={callback} stage=decision document={document:?} allow={}",
-                started.elapsed(), selected == NativeAction::Allow);
+                "{} case={case} elapsed={:?} callback={callback} stage=decision document={document:?} allow={}",
+                self.prefix, started.elapsed(), selected == NativeAction::Allow);
         }
     }
 
@@ -88,7 +91,8 @@ impl ResourceTrace {
             use std::io::Write as _;
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
-                "NATIVE_RESOURCE case={case} elapsed={:?} callback={callback} stage=returned success={success}",
+                "{} case={case} elapsed={:?} callback={callback} stage=returned success={success}",
+                self.prefix,
                 started.elapsed()
             );
         }
@@ -100,6 +104,7 @@ fn resource_trace_retains_its_case_and_bounds_callback_output() {
     let start = std::time::Instant::now();
     crate::Native::readiness_navigation_case(Some((11, start)));
     let trace = ResourceTrace {
+        prefix: "NATIVE_RESOURCE_UNIT",
         case: super::navigation::readiness_context(),
         callbacks: std::cell::Cell::new(0),
     };
@@ -114,6 +119,7 @@ fn resource_trace_retains_its_case_and_bounds_callback_output() {
     trace.decision(Some(1), Some(true), NativeAction::Allow);
     trace.returned(Some(1), true);
     let disabled = ResourceTrace {
+        prefix: "NATIVE_RESOURCE_UNIT",
         case: None,
         callbacks: std::cell::Cell::new(0),
     };
@@ -148,6 +154,7 @@ pub(super) fn install(
     let remove = view.clone();
     #[cfg(test)]
     let trace = ResourceTrace {
+        prefix: "NATIVE_RESOURCE",
         case: super::navigation::readiness_context(),
         callbacks: std::cell::Cell::new(0),
     };

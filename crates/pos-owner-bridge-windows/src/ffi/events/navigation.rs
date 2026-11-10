@@ -163,7 +163,7 @@ fn completed(
     let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
         let result = navigation_completed(args);
         #[cfg(test)]
-        trace_completion(case, &reports, &result);
+        trace_completion("NATIVE_NAVIGATION_COMPLETED", case, &reports, &result);
         observe(observed.as_ref(), EventKind::NavigationCompleted, result);
         Ok(())
     }));
@@ -182,6 +182,7 @@ fn completed(
 // Bounded diagnostics for the subscription's original case and time origin.
 #[cfg(test)]
 fn trace_completion(
+    prefix: &'static str,
     case: Option<(u64, std::time::Instant)>,
     reports: &std::cell::Cell<u8>,
     result: &Result<NativeEvent>,
@@ -198,7 +199,7 @@ fn trace_completion(
     if count == 8 {
         let _logged_or_unavailable = writeln!(
             std::io::stderr(),
-            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} overflow=true",
+            "{prefix} case={case} elapsed={:?} overflow=true",
             started.elapsed()
         );
         return;
@@ -206,13 +207,13 @@ fn trace_completion(
     if let Ok(NativeEvent::NavigationCompleted { id, success }) = result {
         let _logged_or_unavailable = writeln!(
             std::io::stderr(),
-            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} id={id} success={success}",
+            "{prefix} case={case} elapsed={:?} id={id} success={success}",
             started.elapsed()
         );
     } else {
         let _logged_or_unavailable = writeln!(
             std::io::stderr(),
-            "NATIVE_NAVIGATION_COMPLETED case={case} elapsed={:?} observation=unavailable",
+            "{prefix} case={case} elapsed={:?} observation=unavailable",
             started.elapsed()
         );
     }
@@ -225,12 +226,17 @@ fn readiness_completion_trace_is_bounded_and_disabled_without_a_case() {
         id: 2,
         success: true,
     });
-    trace_completion(None, &reports, &result);
+    trace_completion("NATIVE_NAVIGATION_COMPLETED_UNIT", None, &reports, &result);
     assert_eq!(reports.get(), 0);
     let case = Some((42, std::time::Instant::now()));
-    trace_completion(case, &reports, &Err(unavailable()));
+    trace_completion(
+        "NATIVE_NAVIGATION_COMPLETED_UNIT",
+        case,
+        &reports,
+        &Err(unavailable()),
+    );
     for _ in 0..12 {
-        trace_completion(case, &reports, &result);
+        trace_completion("NATIVE_NAVIGATION_COMPLETED_UNIT", case, &reports, &result);
     }
     assert_eq!(reports.get(), 9);
 }
