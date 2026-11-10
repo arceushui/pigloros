@@ -232,6 +232,38 @@ fn public_proof_verification_rejects_signed_non_profile_rsa_moduli() -> TestResu
 }
 
 #[test]
+fn public_proof_verification_accepts_signed_rsa_2048_minimum_leading_modulus_byte() -> TestResult {
+    #[derive(der::Sequence)]
+    struct FixtureRsaKey<'a> {
+        modulus: der::asn1::UintRef<'a>,
+        exponent: der::asn1::UintRef<'a>,
+    }
+
+    let proof = include_bytes!("../vectors/sim1-pkcs7/rsa-2048-0x80-proof.der");
+    let certificate = include_bytes!("../vectors/sim1-pkcs7/rsa-2048-0x80-signer.der");
+    let parsed = Certificate::from_der(certificate)?;
+    let tbs = &parsed.tbs_certificate;
+    assert!(tbs.validity.not_before.to_unix_duration().as_secs() < NOW);
+    assert!(tbs.validity.not_after.to_unix_duration().as_secs() > NOW);
+    let key_bytes = tbs
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .ok_or("unaligned fixture public key")?;
+    let key = FixtureRsaKey::from_der(key_bytes)?;
+    // 0x80 is the smallest leading byte of a 256-byte, 2048-bit modulus.
+    assert_eq!(key.modulus.as_bytes().len(), 256);
+    assert_eq!(key.modulus.as_bytes().first(), Some(&0x80));
+    assert_eq!(key.exponent.as_bytes(), &[1, 0, 1]);
+    let result = verify(&fixture(proof, certificate)?, NOW)?;
+    assert!(
+        result.is_ok(),
+        "signed RSA-2048 proof with leading modulus byte 0x80 rejected: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn public_proof_verification_rejects_invalid_certificate_identity_and_crypto() -> TestResult {
     for (defect, expected) in [
         (

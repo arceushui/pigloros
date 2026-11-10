@@ -190,6 +190,58 @@ mod envelope_cases {
         Ok(())
     }
 
+    // Edits the sole SignerInfo's first issuer RDN and appends a trailing
+    // field after its signature, which alone is an unsupported profile.
+    fn trailing_signer_field_with_issuer_rdn(
+        edit_rdn: impl FnOnce(&mut der::Any) -> TestResult,
+    ) -> TestResult<Vec<u8>> {
+        edit_field(PROOF, 4, |signers| {
+            edit_children(signers, |entries| {
+                edit_children(entries.get_mut(0).ok_or("missing signer")?, |fields| {
+                    edit_children(fields.get_mut(1).ok_or("missing SID")?, |sid| {
+                        edit_children(sid.get_mut(0).ok_or("missing issuer")?, |rdns| {
+                            edit_rdn(rdns.get_mut(0).ok_or("missing RDN")?)
+                        })
+                    })?;
+                    fields.push(der::Any::null());
+                    Ok(())
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn public_proof_verification_rejects_malformed_issuer_rdn_before_signer_fields() -> TestResult {
+        let unchanged_issuer = trailing_signer_field_with_issuer_rdn(|_| Ok(()))?;
+        assert_eq!(
+            verify(&fixture(&unchanged_issuer, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::UnsupportedProfile)
+        );
+        // The borrowed SID issuer check runs before the remaining SignerInfo
+        // fields, so each malformed RDN is reported as Malformed.
+        let sequence_rdn = trailing_signer_field_with_issuer_rdn(|rdn| {
+            *rdn = der::Any::new(Tag::Sequence, rdn.value())?;
+            Ok(())
+        })?;
+        let duplicate_attribute = trailing_signer_field_with_issuer_rdn(|rdn| {
+            edit_children(rdn, |attributes| {
+                let [attribute] = attributes.as_slice() else {
+                    return Err("expected one issuer attribute".into());
+                };
+                let duplicate = attribute.clone();
+                attributes.push(duplicate);
+                Ok(())
+            })
+        })?;
+        for proof in [sequence_rdn, duplicate_attribute] {
+            assert_eq!(
+                verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+                Err(SandboxImageProofError::Malformed)
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn public_proof_verification_bounds_near_limit_digest_set_before_decoding() -> TestResult {
         let proof = edit_field(PROOF, 1, |digests| {
