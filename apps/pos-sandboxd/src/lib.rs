@@ -171,11 +171,12 @@ pub use local_network::{
 };
 #[cfg(target_os = "linux")]
 pub use namespace_network::{
-    establish_namespace, EstablishError, EstablishFailure, ExpectedNamespace, FirewallBaseChain,
-    FirewallChain, FirewallHook, FirewallRule, FirewallTableFamily, FirewallVerdict,
-    InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceControl, NamespaceName, NamespaceRoute,
-    NetworkPlanError, NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace,
-    ObservedRoute, ObservedTable, ReadbackMismatch, NAMESPACE_TABLE,
+    decode_firewall_rule, encode_firewall_rule, establish_namespace, EstablishError,
+    EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
+    FirewallRule, FirewallTableFamily, FirewallVerdict, InvalidLinkName, IpPrefix, LinkKind,
+    LinkName, NamespaceControl, NamespaceName, NamespaceRoute, NetworkPlanError, NetworkRange,
+    ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
+    ReadbackMismatch, UndecodableRule, NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{

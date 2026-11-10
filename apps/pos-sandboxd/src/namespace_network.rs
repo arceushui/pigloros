@@ -17,8 +17,10 @@ use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 mod plan;
+mod rule_codec;
 
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
+pub use rule_codec::{decode_firewall_rule, encode_firewall_rule, UndecodableRule};
 
 /// The name of one attempt's network namespace: `piglor-` followed by the
 /// attempt identity in lowercase hexadecimal.
