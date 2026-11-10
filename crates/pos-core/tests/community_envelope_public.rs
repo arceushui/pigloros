@@ -1,7 +1,7 @@
 //! Independent COH1/COE1 wire fixtures; parsing is not authenticated admission.
 
 #[path = "support/community_nonce_properties.rs"]
-mod nonce_properties;
+pub mod nonce_properties;
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{

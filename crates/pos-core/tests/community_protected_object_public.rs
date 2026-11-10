@@ -1,7 +1,7 @@
 //! Independent COW1/CAR1/COA1 oracles; parsed records never authorize use.
 
 #[path = "support/community_nonce_properties.rs"]
-mod nonce_properties;
+pub mod nonce_properties;
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
