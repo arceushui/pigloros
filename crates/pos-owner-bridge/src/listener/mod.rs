@@ -147,9 +147,6 @@ pub struct ListenerObservation {
     pub silent_timeout: usize,
     /// Silent reads ended by another I/O failure.
     pub silent_error: usize,
-    /// Latest accepted-to-silent-read duration in milliseconds, if observed. This is
-    /// shared across connections and is not paired atomically with the outcome counts.
-    pub last_silent_ms: Option<u64>,
     /// Connections with a complete header.
     pub complete: usize,
     /// Connections whose header filled the buffer.
@@ -165,7 +162,6 @@ struct Observations {
     silent_eof: AtomicUsize,
     silent_timeout: AtomicUsize,
     silent_error: AtomicUsize,
-    last_silent_ms_plus_one: std::sync::atomic::AtomicU64,
     complete: AtomicUsize,
     too_large: AtomicUsize,
 }
@@ -199,8 +195,6 @@ struct SlotGuard {
     shared: Arc<Shared>,
     #[cfg(feature = "test-support")]
     accepted: bool,
-    #[cfg(feature = "test-support")]
-    accepted_at: Option<std::time::Instant>,
 }
 
 impl SlotGuard {
@@ -209,8 +203,6 @@ impl SlotGuard {
             shared: Arc::clone(shared),
             #[cfg(feature = "test-support")]
             accepted: false,
-            #[cfg(feature = "test-support")]
-            accepted_at: None,
         })
     }
 }
@@ -243,12 +235,7 @@ fn dispatch(
     let work: Work = Box::new(move || {
         let _slot = slot;
         if stream.set_nonblocking(false).is_ok() {
-            serve_connection(
-                stream,
-                &context,
-                #[cfg(feature = "test-support")]
-                _slot.accepted_at,
-            );
+            serve_connection(stream, &context);
         }
     });
     // A failed spawn has already dropped the work, so there is nothing further to do.
@@ -310,7 +297,6 @@ fn accept_loop(listener: &TcpListener, context: &Arc<ServeContext>, shared: &Arc
                 #[cfg(feature = "test-support")]
                 {
                     slot.accepted = true;
-                    slot.accepted_at = Some(std::time::Instant::now());
                     shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
                     shared.observations.handling.fetch_add(1, Ordering::SeqCst);
                 }
@@ -415,10 +401,6 @@ impl LoopbackListener {
             silent_eof: o.silent_eof.load(Ordering::SeqCst),
             silent_timeout: o.silent_timeout.load(Ordering::SeqCst),
             silent_error: o.silent_error.load(Ordering::SeqCst),
-            last_silent_ms: o
-                .last_silent_ms_plus_one
-                .load(Ordering::SeqCst)
-                .checked_sub(1),
             complete: o.complete.load(Ordering::SeqCst),
             too_large: o.too_large.load(Ordering::SeqCst),
         }

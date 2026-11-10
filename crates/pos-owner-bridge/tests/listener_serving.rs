@@ -253,7 +253,6 @@ fn aggregate_connection_observations_track_silent_and_served_sockets() -> TestRe
     assert_eq!(observation.silent_eof, 1);
     assert_eq!(observation.silent_timeout, 0);
     assert_eq!(observation.silent_error, 0);
-    assert!(observation.last_silent_ms.is_some());
     assert_eq!(observation.complete, 1);
     assert_eq!(listener.received_request_count(), 1);
     assert_eq!(listener.served().count, 1);
@@ -270,7 +269,6 @@ fn a_silent_socket_timeout_is_distinguished_from_eof() -> TestResult {
     assert_eq!(observation.silent_timeout, 1);
     assert_eq!(observation.silent_eof, 0);
     assert_eq!(observation.silent_error, 0);
-    assert!(observation.last_silent_ms.is_some_and(|ms| ms >= 900));
     assert_eq!(listener.received_request_count(), 0);
     Ok(())
 }

@@ -103,9 +103,11 @@ pub(super) fn read_request<S: TimedRead>(
                 silent(SilentReason::Eof);
                 return ReadOutcome::Silent;
             }
-            Err(_error) => {
+            Err(error) => {
+                #[cfg(not(feature = "test-support"))]
+                drop(error);
                 #[cfg(feature = "test-support")]
-                silent(match _error.kind() {
+                silent(match error.kind() {
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SilentReason::Timeout,
                     _ => SilentReason::Other,
                 });
@@ -198,11 +200,7 @@ pub(super) fn respond<W: Write>(
 }
 
 /// Serve one accepted connection to completion, then close it.
-pub(super) fn serve_connection(
-    mut stream: TcpStream,
-    context: &ServeContext,
-    #[cfg(feature = "test-support")] accepted_at: Option<Instant>,
-) {
+pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
     let outcome = read_request(
         &mut stream,
@@ -223,12 +221,6 @@ pub(super) fn serve_connection(
                 SilentReason::Timeout => &observations.silent_timeout,
                 SilentReason::Other => &observations.silent_error,
             };
-            if let Some(started) = accepted_at {
-                let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
-                observations
-                    .last_silent_ms_plus_one
-                    .store(millis.saturating_add(1), Ordering::SeqCst);
-            }
             counter.fetch_add(1, Ordering::SeqCst);
         },
     );
