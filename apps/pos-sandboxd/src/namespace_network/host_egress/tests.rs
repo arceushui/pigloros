@@ -133,7 +133,8 @@ fn host_rules_match_the_veth_end_and_the_exact_endpoint() -> TestResult {
         link,
         endpoint: ENDPOINT,
     });
-    assert_eq!(masquerade.len(), 2 + tcp_to(ENDPOINT).len() + 1);
+    let tcp = encode_firewall_rule(&FirewallRule::AcceptTcp(ENDPOINT));
+    assert_eq!(masquerade[2..masquerade.len() - 1], tcp[..tcp.len() - 1]);
     assert_eq!(
         masquerade.last(),
         Some(&expression(Expressions::Other {
@@ -148,7 +149,8 @@ fn host_rules_match_the_veth_end_and_the_exact_endpoint() -> TestResult {
 fn the_table_and_an_attempt_are_installed_in_one_batch_each() -> TestResult {
     let table = create_table();
     let flags: Vec<u16> = table.iter().map(|request| request.flags).collect();
-    assert_eq!(flags, [0, CREATE_NEW, CREATE_NEW, CREATE_NEW, APPEND, 0]);
+    let (create_new, append) = (NLM_F_CREATE | NLM_F_EXCL, NLM_F_CREATE | NLM_F_APPEND);
+    assert_eq!(flags, [0, create_new, create_new, create_new, append, 0]);
     let attempt = attempt(
         1,
         3,
@@ -158,7 +160,7 @@ fn the_table_and_an_attempt_are_installed_in_one_batch_each() -> TestResult {
     let flags: Vec<u16> = installed.iter().map(|request| request.flags).collect();
     // The chain, its one IPv4 rule, one masquerade and the dispatch at the
     // forward chain's head; the on-host IPv6 endpoint needs neither.
-    assert_eq!(flags, [0, CREATE_NEW, APPEND, APPEND, NLM_F_CREATE, 0]);
+    assert_eq!(flags, [0, create_new, append, append, NLM_F_CREATE, 0]);
     assert_eq!(
         installed[4].message,
         inet(new_rule(
@@ -216,7 +218,33 @@ fn the_dumps_read_back_exactly_the_installed_attempts() -> TestResult {
 #[test]
 fn a_changed_host_table_reads_back_differently() -> TestResult {
     let (table, attempts) = two_attempts()?;
-    let mutations: [fn(&mut ReadTable); 6] = [
+    let mutations: [fn(&mut ReadTable); 9] = [
+        // A dispatch twice while the drop stays last.
+        |table| {
+            if let Some(forward) = table.chains.get_mut(FORWARD) {
+                forward.rules[0] = forward.rules[1].clone();
+            }
+        },
+        // An attempt chain that became a base chain, rules unchanged.
+        |table| {
+            for chain in table
+                .chains
+                .values_mut()
+                .filter(|chain| chain.base.is_none())
+            {
+                chain.base = Some((0, 0, 0, "filter".to_owned()));
+            }
+        },
+        // An attempt chain whose one rule differs.
+        |table| {
+            for chain in table
+                .chains
+                .values_mut()
+                .filter(|chain| chain.base.is_none())
+            {
+                chain.rules[0].1.clear();
+            }
+        },
         |table| table.flags = 1,
         |table| {
             table
@@ -254,6 +282,21 @@ fn a_changed_host_table_reads_back_differently() -> TestResult {
         mutate(&mut changed);
         assert!(!is_exact(&changed, &attempts), "{changed:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_dormant_host_table_reads_back_its_flags() -> TestResult {
+    let (_, chains, rules) = as_dumped(&[create_table()]);
+    let dormant = inet(NfTablesMessage::NewTable(TableMessage {
+        attributes: vec![
+            TableAttribute::Name(HOST_TABLE.to_owned()),
+            TableAttribute::Flags(TableFlags::Dormant),
+        ],
+    }));
+    let table = read_table(vec![dormant], chains, rules)?.ok_or("no host table")?;
+    assert_eq!(table.flags, 1);
+    assert!(!is_exact(&table, &BTreeMap::new()));
     Ok(())
 }
 
@@ -410,33 +453,42 @@ fn route_found(sequence: u32, kind: RouteType, index: u32) -> Vec<u8> {
     bytes
 }
 
+/// A session that answers each request with the next of `replies`.
+fn scripted(replies: Vec<Vec<u8>>) -> NetlinkSession<Scripted> {
+    NetlinkSession::new(Scripted {
+        replies: RefCell::new(VecDeque::from(replies)),
+    })
+}
+
 #[test]
-fn ingress_links_are_the_veth_end_and_each_off_host_endpoints_link() -> TestResult {
-    let session = NetlinkSession::new(Scripted {
-        replies: RefCell::new(VecDeque::from([
-            route_found(1, RouteType::Unicast, 7),
-            route_found(2, RouteType::Local, 1),
-            route_found(3, RouteType::Unicast, 7),
-            route_found(4, RouteType::Local, 1),
-        ])),
-    });
+fn ingress_links_are_the_veth_end_and_each_off_host_ipv4_endpoints_link() -> TestResult {
+    let session = scripted(vec![
+        route_found(1, RouteType::Unicast, 7),
+        route_found(2, RouteType::Local, 1),
+        route_found(3, RouteType::Unicast, 7),
+    ]);
+    // The IPv6 endpoint is looked up by admission, not here.
     let endpoints = [
         ENDPOINT,
         SocketAddr::from(([127, 0, 0, 1], 80)),
-        SocketAddr::from(([198, 51, 100, 7], 443)),
         SocketAddr::from((Ipv6Addr::LOCALHOST, 80)),
+        SocketAddr::from(([198, 51, 100, 7], 443)),
     ];
     assert_eq!(ingress_links(&session, 9, &endpoints)?, [7, 9]);
-    // An IPv6 endpoint off the host is refused.
-    let remote = NetlinkSession::new(Scripted {
-        replies: RefCell::new(VecDeque::from([route_found(1, RouteType::Unicast, 7)])),
-    });
-    let ipv6 = [SocketAddr::from((
-        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-        443,
-    ))];
+    Ok(())
+}
+
+#[test]
+fn admission_refuses_only_ipv6_endpoints_off_the_host() -> TestResult {
+    let ipv6 = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443));
+    // IPv4 endpoints need no lookup; an on-host IPv6 endpoint passes.
+    admit_on(
+        &scripted(vec![route_found(1, RouteType::Local, 1)]),
+        &[ENDPOINT, ipv6],
+    )?;
+    let remote = scripted(vec![route_found(1, RouteType::Unicast, 7)]);
     assert!(matches!(
-        ingress_links(&remote, 9, &ipv6),
+        admit_on(&remote, &[ENDPOINT, ipv6]),
         Err(HostEgressError::Ipv6Egress)
     ));
     Ok(())

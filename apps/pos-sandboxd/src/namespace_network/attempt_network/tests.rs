@@ -667,6 +667,54 @@ mod privileged {
         Ok(listener?)
     }
 
+    /// The chains of the host egress table, or `None` without it.
+    fn host_chains() -> Result<Option<Vec<String>>, NetlinkError> {
+        NetlinkSession::open(crate::namespace_network::netlink::NETFILTER)
+            .and_then(|session| crate::namespace_network::host_egress::host_chains(&session))
+    }
+
+    #[test]
+    fn an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed() -> TestResult {
+        if !isolated("an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // The host routes the endpoint's network, so only admission refuses
+        // it.
+        let routed = IpPrefix {
+            address: std::net::IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1)),
+            length: 64,
+        };
+        let host = LinkName::new("tgt-h0")?;
+        NetlinkSession::open(ROUTE).and_then(|session| {
+            route::link_reply(session.request(route::get_link(&host)))
+                .and_then(|link| link.ok_or(NetlinkError::Unexpected))
+                .and_then(|link| session.execute(vec![route::address(link.index, routed)]))
+        })?;
+        let network = NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces.clone(),
+            range(24, 120)?,
+        );
+        let endpoint = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 10), 8443));
+        let refused = network.connector([8; 16], &[endpoint]).map(drop);
+        assert!(
+            matches!(
+                refused,
+                Err(AttemptNetworkError::Egress(HostEgressError::Ipv6Egress))
+            ),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            namespaces.open(&NamespaceName::for_attempt([8; 16])),
+            Ok(None)
+        ));
+        Ok(())
+    }
+
     #[test]
     fn a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint() -> TestResult {
         if !isolated("a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint")? {
@@ -690,12 +738,19 @@ mod privileged {
             let peer = listener.accept().map(|(_, peer)| peer.ip());
             (connected, peer)
         });
+        // Dropping the connector took the attempt's chain away again.
+        let left = host_chains();
         let swept = control.remove_orphans();
         assert!(
             matches!(&outcome, Ok((Ok(()), Ok(peer))) if *peer == std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
             "{outcome:?}"
         );
+        assert_eq!(
+            left.map_err(|error| error.to_string()),
+            Ok(Some(vec!["forward".to_owned(), "postrouting".to_owned()]))
+        );
         assert!(swept.is_ok(), "{swept:?}");
+        assert!(matches!(host_chains(), Ok(None)));
         Ok(())
     }
 }
