@@ -16,7 +16,7 @@ use rustix::io::{self, Errno};
 
 use crate::owner_store_admission::OwnerStoreOperationV1;
 
-const NAMESPACE: &str = ".pigloros-store-namespace-v1";
+const NAMESPACE: &str = crate::protected_sqlite_namespace::COORDINATION_DIRECTORY;
 const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_XDEV);
