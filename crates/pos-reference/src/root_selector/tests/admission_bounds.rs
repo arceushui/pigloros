@@ -121,7 +121,9 @@ fn snapshot_open_enforces_gpt_bounds_on_both_architectures() -> TestResult {
             } else {
                 Err(SelectorBoundaryError::ArtifactInvalid)
             };
-            match snapshot_open(architecture, &original, &partitions, edit) {
+            // A local, so no match temporary changes drop order across editions.
+            let outcome = snapshot_open(architecture, &original, &partitions, edit);
+            match outcome {
                 Ok(outcome) if outcome == expected => {}
                 Ok(outcome) => mismatches.push(format!(
                     "{architecture}: {case}: expected {expected:?}, snapshot open {outcome:?}"
