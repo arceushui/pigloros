@@ -43,7 +43,7 @@ mod exit_boundary;
 pub(in crate::adapter) use exit_boundary::ExitBoundary;
 
 #[cfg(test)]
-mod tests;
+pub(in crate::adapter) mod tests;
 
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 640;

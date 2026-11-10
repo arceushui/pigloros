@@ -17,7 +17,7 @@ use pos_owner_bridge::ReplyImage;
 use pos_owner_bridge_codec::CeremonyKind;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum Creation {
+pub(in crate::adapter) enum Creation {
     SynchronousFailure,
     CallbackFailure,
     MissingView,
@@ -25,12 +25,12 @@ pub(super) enum Creation {
     Ready,
 }
 
-pub(super) struct Factory {
-    pub(super) creation: Cell<Creation>,
+pub(in crate::adapter) struct Factory {
+    pub(in crate::adapter) creation: Cell<Creation>,
     pub(super) environment_creation: Cell<Creation>,
     pub(super) environment_completions: Cell<u32>,
     pub(super) controller_completions: Cell<u32>,
-    pub(super) calls: RefCell<Vec<&'static str>>,
+    pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
     pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
     pub(super) navigation_succeeds: Cell<bool>,
@@ -47,7 +47,7 @@ pub(super) struct Factory {
 }
 
 impl Factory {
-    pub(super) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
+    pub(in crate::adapter) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
         Rc::new(Self {
             creation: Cell::new(creation),
             environment_creation: Cell::new(Creation::Ready),

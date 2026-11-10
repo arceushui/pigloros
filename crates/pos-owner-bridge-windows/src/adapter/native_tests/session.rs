@@ -41,8 +41,10 @@ impl<'a> Session<'a> {
 
     pub(super) fn browser_pid(&self) -> NativeResult<u32> {
         self.native.browser_pid().inspect(|pid| {
-            self.browser_pid.set(Some(*pid));
-            self.events.expect_browser(*pid);
+            if *pid != 0 {
+                self.browser_pid.set(Some(*pid));
+                self.events.expect_browser(*pid);
+            }
         })
     }
 
@@ -91,11 +93,10 @@ impl Drop for Session<'_> {
                     if has_controller && self.browser_pid.get().is_none() {
                         let _identity_or_retained = self.browser_pid();
                     }
-                    let exited = self.events.exited().is_some_and(|pid| {
-                        self.browser_pid
-                            .get()
-                            .is_none_or(|expected| expected == pid)
-                    });
+                    let exited = self
+                        .browser_pid
+                        .get()
+                        .is_some_and(|expected| self.events.exited() == Some(expected));
                     if !self.had_controller.get() || exited {
                         // A failed pre-controller creation leaves its recordless
                         // folder intact. A controller requires its own exit event.
@@ -106,7 +107,7 @@ impl Drop for Session<'_> {
                         {
                             break;
                         }
-                    } else {
+                    } else if self.browser_pid.get().is_some() {
                         let _subscribed_or_removed = self.native.unsubscribe_view();
                         let _closed_or_retained = self.native.close_controller();
                     }
@@ -114,5 +115,98 @@ impl Drop for Session<'_> {
             }
             self.pump_retaining();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::surface::tests::native::{Creation, Factory};
+    use crate::{EventSink, NativeEvent, StaPump};
+    use pos_owner_bridge::fake::clock::FakeClock;
+
+    struct RecoveringFactory {
+        native: Rc<Factory>,
+        events: Rc<Events>,
+        pumps: Cell<u8>,
+    }
+
+    impl StaPump for RecoveringFactory {
+        fn next(&self) -> NativeResult<NativePulse> {
+            let calls = self.native.calls.borrow();
+            assert!(!calls.contains(&"unsubscribe_exit"));
+            assert!(!calls.contains(&"drop_environment"));
+            let pump = self.pumps.get();
+            self.pumps.set(pump + 1);
+            match pump {
+                0 => {
+                    // The getter must be recoverable: the controller is still held.
+                    assert!(!calls.contains(&"close_controller"));
+                    self.native.creation.set(Creation::Ready);
+                }
+                1 => {
+                    assert!(calls.contains(&"close_controller"));
+                    self.events.event(NativeEvent::BrowserExited { pid: 42 });
+                }
+                _ => panic!("raw session did not retire after the matching exit"),
+            }
+            Ok(NativePulse::Timer)
+        }
+
+        fn stop(&mut self) -> NativeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeFactory for RecoveringFactory {
+        fn session(&self) -> NativeResult<Box<dyn NativeOperations>> {
+            self.native.session()
+        }
+    }
+
+    #[test]
+    fn raw_session_retains_unknown_pid_until_its_matching_exit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let native = Factory::new(Creation::Ready, FakeClock::start());
+        let events = Rc::new(Events::default());
+        let factory = RecoveringFactory {
+            native: Rc::clone(&native),
+            events: Rc::clone(&events),
+            pumps: Cell::new(0),
+        };
+        let mut session =
+            Session::new(&factory, Rc::clone(&events)).map_err(|e| format!("{e:?}"))?;
+        session.create_controller().map_err(|e| format!("{e:?}"))?;
+        assert!(matches!(session.controller_completion(), Some(Ok(()))));
+        native.creation.set(Creation::MissingView);
+        events.event(NativeEvent::BrowserExited { pid: 99 });
+        drop(session);
+        assert_eq!(factory.pumps.get(), 2);
+        let calls = native.calls.borrow();
+        let close = calls
+            .iter()
+            .position(|call| *call == "close_controller")
+            .ok_or("no close")?;
+        let unsubscribe = calls
+            .iter()
+            .position(|call| *call == "unsubscribe_exit")
+            .ok_or("no exit unsubscribe")?;
+        let drop_environment = calls
+            .iter()
+            .position(|call| *call == "drop_environment")
+            .ok_or("no environment drop")?;
+        assert!(close < unsubscribe && unsubscribe < drop_environment);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_session_without_controller_retires_without_an_exit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let native = Factory::new(Creation::Ready, FakeClock::start());
+        let events = Rc::new(Events::default());
+        let session = Session::new(&native, events).map_err(|e| format!("{e:?}"))?;
+        drop(session);
+        assert!(native.calls.borrow().contains(&"drop_environment"));
+        Ok(())
     }
 }
