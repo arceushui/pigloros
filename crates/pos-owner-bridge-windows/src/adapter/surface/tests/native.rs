@@ -195,9 +195,13 @@ impl NativeOperations for Session {
         {
             return Err(());
         }
+        let mut identity = authority.browser();
+        if self.factory.failure.get() == Some("mismatched_exit_handle") {
+            identity.creation_filetime += 1;
+        }
         Ok(Box::new(ExitHandle {
             factory: Rc::clone(&self.factory),
-            identity: authority.browser(),
+            identity,
         }))
     }
     fn exit_fault_owners_retained(&self) -> bool {

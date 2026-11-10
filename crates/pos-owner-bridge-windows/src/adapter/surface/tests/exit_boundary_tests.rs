@@ -10,6 +10,12 @@ use super::{spec, Creation, Fixture, TestResult};
 use crate::adapter::surface::ExitBoundary;
 
 fn closed_fixture() -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
+    closed_fixture_with_failure(None)
+}
+
+fn closed_fixture_with_failure(
+    failure: Option<&'static str>,
+) -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
     let selected = spec(40);
@@ -46,6 +52,7 @@ fn closed_fixture() -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
         .surface
         .zero_close_buffers()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.factory.failure.set(failure);
     let deadline = Instant::now() + Duration::from_secs(10);
     fixture
         .surface
@@ -56,6 +63,26 @@ fn closed_fixture() -> Result<(Fixture, Instant), Box<dyn std::error::Error>> {
         .close_controller()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     Ok((fixture, deadline))
+}
+
+#[test]
+fn exit_capture_refuses_unavailable_or_mismatched_handle_without_releasing_owner() -> TestResult {
+    for failure in ["retain_exit", "mismatched_exit_handle"] {
+        let (mut fixture, deadline) = closed_fixture_with_failure(Some(failure))?;
+        fixture.factory.failure.set(None);
+        assert!(fixture.surface.classify_exit_boundary(deadline).is_err());
+        assert!(fixture
+            .surface
+            .consume_exit_capture(deadline, true)
+            .is_err());
+        assert!(matches!(
+            fixture.surface.open(&spec(41)),
+            std::task::Poll::Ready(Err(_))
+        ));
+        assert!(!fixture.store.records_now().is_empty());
+        assert!(fixture.surface.finish().is_err());
+    }
+    Ok(())
 }
 
 #[test]
