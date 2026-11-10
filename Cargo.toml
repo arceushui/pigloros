@@ -61,7 +61,7 @@ bytes = "1"
 serde_bytes = "0.11"
 
 # Crypto
-blake3 = "1"
+blake3 = { version = "1", features = ["zeroize"] }
 ed25519-dalek = { version = "3", features = ["serde", "rand_core", "zeroize"] }
 hpke = { version = "=0.15.1", default-features = false, features = [
   "alloc",
