@@ -44,9 +44,7 @@ struct ResourceTrace {
 impl ResourceTrace {
     fn begin(&self) -> Option<u8> {
         use std::io::Write as _;
-        let Some((case, started)) = self.case else {
-            return None;
-        };
+        let (case, started) = self.case?;
         let count = self.callbacks.get();
         if count >= 9 {
             return None;
