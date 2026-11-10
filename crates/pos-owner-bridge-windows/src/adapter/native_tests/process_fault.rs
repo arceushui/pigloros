@@ -3561,6 +3561,9 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     drop(callback_order_guard);
     drop(creation_order_guard);
     if matches!(case, EnvironmentCase::Timeout) {
+        // Surface held one clone; release the fixture's last listener owner
+        // before the next ceremony binds the same exclusive loopback port.
+        drop(fixture.loopback);
         fresh_success_after_retirement(runtime, &root.0, 0xd2)?;
     }
     Ok(())
