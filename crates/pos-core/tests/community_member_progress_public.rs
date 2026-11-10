@@ -97,18 +97,12 @@ fn expected() -> Value {
 }
 
 #[test]
-fn exact_nine_field_record_hash_and_borrowed_rows_have_independent_oracles() -> TestResult {
+fn exact_nine_field_record_and_borrowed_rows_have_an_independent_oracle() -> TestResult {
     let rows = [event(3, 4, 5), event(6, 7, 8)];
     let record = Progress::new(input(&rows))?;
     let wire = encode(&expected())?;
     assert_eq!(&wire[..7], &[0x89, 0x44, b'C', b'M', b'S', b'1', 1]);
     assert_eq!(record.to_canonical_cbor().as_slice(), wire);
-    let mut preimage = b"PiglorOS.Community.CMS1.v1\0".to_vec();
-    preimage.extend_from_slice(&wire);
-    assert_eq!(
-        record.digest(),
-        Hash::from_bytes(*blake3::hash(&preimage).as_bytes())
-    );
     let decoded = Progress::from_canonical_cbor(&wire)?;
     assert!(decoded.as_input() == record.as_input());
     assert_eq!(decoded.to_canonical_cbor().as_slice(), wire);

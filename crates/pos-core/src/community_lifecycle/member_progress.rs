@@ -1,8 +1,8 @@
 //! Complete CMS1 metadata; a decoded progress record cannot restore live cells.
 
 use super::{
-    bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, read_hash, read_hashes,
-    read_head, record_cursor, record_prefix, CommunityLifecycleErrorV1 as Error, Result,
+    bounded_bytes, bounded_text, canonical_end, fixed_bytes, read_hash, read_hashes, read_head,
+    record_cursor, record_prefix, CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, DependencyNodeCoordinateV1, Hash, Seq,
@@ -57,7 +57,7 @@ impl<'a> CommunityFactualNodeReferenceV1<'a> {
 /// Exact progress reference tags; no tag confers source or restoration authority.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum CommunityProgressReferenceV1<'a> {
-    /// `[0]`: independently established absence of a prior reference.
+    /// `[0]`: claimed absence; the actual owner must independently establish it.
     None,
     /// `[1,digest]`: original pending content, not a newly produced factual Tick.
     Pending(Hash),
@@ -203,6 +203,18 @@ pub struct CommunityMemberProgressInputV1<'a> {
 }
 
 /// Nine-field CMS1 data; it cannot read private State or adopt registry progress.
+///
+/// CMS1 may contain personal metadata. Its normative H(CMS1) identity must be
+/// computed inside the qualified owner's audited hashing/copy boundary, not
+/// through this portable codec. A zeroizing hasher alone does not cover hidden
+/// plaintext copies inside the hash implementation.
+///
+/// ```compile_fail,E0599
+/// use pos_core::community_lifecycle::CommunityMemberProgressV1;
+/// fn unqualified_identity(record: &CommunityMemberProgressV1<'_>) {
+///     let _ = record.digest();
+/// }
+/// ```
 pub struct CommunityMemberProgressV1<'a>(CommunityMemberProgressInputV1<'a>);
 
 impl<'a> CommunityMemberProgressV1<'a> {
@@ -247,12 +259,6 @@ impl<'a> CommunityMemberProgressV1<'a> {
         encode_reference(&mut out, input.step_chain);
         encode_reference(&mut out, input.history_input);
         out
-    }
-
-    /// Exact CMS1 metadata identity, never a live-progress or State-use permit.
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        digest(b"PiglorOS.Community.CMS1.v1\0", &self.to_canonical_cbor())
     }
 
     /// Read a whole preferred CMS1, borrowing Event rows and factual owner text.
