@@ -73,32 +73,11 @@ impl RecoveredAttemptIntent {
         planned_bytes.copy_from_slice(&bytes[..52]);
         planned_bytes[..4].copy_from_slice(b"PAI1");
         let planned = PlannedAttemptIntent::decode(&planned_bytes)?;
-        let (directory_identities, image) = if bytes.len() >= DIRECTORY_RECORD_SIZE {
-            let mut identities = [0; 6];
-            for (slot, chunk) in identities
-                .iter_mut()
-                .zip(bytes[52..DIRECTORY_RECORD_SIZE].chunks_exact(8))
-            {
-                let mut word = [0; 8];
-                word.copy_from_slice(chunk);
-                *slot = u64::from_le_bytes(word);
-            }
-            if identities[0] != identities[2]
-                || identities[1] == identities[3]
-                || identities[4..].contains(&0)
-            {
-                return Err(SystemdAttemptRegistryError::InvalidIntent);
-            }
-            (
-                Some([
-                    (identities[0], identities[1]),
-                    (identities[2], identities[3]),
-                ]),
-                Some((identities[4], identities[5])),
-            )
-        } else {
-            (None, None)
-        };
+        let (directory_identities, image) = bytes
+            .get(52..DIRECTORY_RECORD_SIZE)
+            .map(directory_stage)
+            .transpose()?
+            .unzip();
         RootRecord::decode_extension(bytes, &planned).map(|root| Self {
             planned,
             directory_identities,
@@ -106,6 +85,30 @@ impl RecoveredAttemptIntent {
             root,
         })
     }
+}
+
+/// The PAI2 stage's attempt and root `(device, inode)` pairs, which share a
+/// device and differ in inode, and its nonzero admitted image identity.
+type DirectoryStage = ([(u64, u64); 2], (u64, u64));
+
+fn directory_stage(words: &[u8]) -> RegistryResult<DirectoryStage> {
+    let mut identities = [0; 6];
+    for (slot, chunk) in identities.iter_mut().zip(words.chunks_exact(8)) {
+        let mut word = [0; 8];
+        word.copy_from_slice(chunk);
+        *slot = u64::from_le_bytes(word);
+    }
+    let [attempt_device, attempt_inode, root_device, root_inode, image_device, image_inode] =
+        identities;
+    (attempt_device == root_device
+        && attempt_inode != root_inode
+        && image_device != 0
+        && image_inode != 0)
+        .then_some((
+            [(attempt_device, attempt_inode), (root_device, root_inode)],
+            (image_device, image_inode),
+        ))
+        .ok_or(SystemdAttemptRegistryError::InvalidIntent)
 }
 
 /// One retained observation of a committed key or recognizable interrupted write.
