@@ -147,6 +147,10 @@ impl<'a> CborCursor<'a> {
         self.offset == self.bytes.len()
     }
 
+    pub(crate) const fn position(&self) -> usize {
+        self.offset
+    }
+
     pub(crate) fn consume_if(&mut self, byte: u8) -> bool {
         if self.bytes.get(self.offset) == Some(&byte) {
             self.offset += 1;
