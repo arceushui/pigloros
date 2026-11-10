@@ -512,7 +512,7 @@ fn expiration_during_mapping_or_retry_retirement_prevents_late_posts() -> TestRe
                 .iter()
                 .filter(|entry| matches!(entry, LogEntry::Post { .. }))
                 .count();
-            assert_eq!(posts, if matches!(scenario, 1 | 2) { 1 } else { 0 });
+            assert_eq!(posts, usize::from(matches!(scenario, 1 | 2)));
             assert_eq!(driver.posts(), u8::from(matches!(scenario, 1 | 2)));
             assert_eq!(
                 rig.handle.pair_count(),

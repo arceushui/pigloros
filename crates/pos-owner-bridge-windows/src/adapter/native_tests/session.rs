@@ -138,17 +138,17 @@ mod tests {
             assert!(!calls.contains(&"drop_environment"));
             let pump = self.pumps.get();
             self.pumps.set(pump + 1);
-            match pump {
-                0 => {
-                    // The getter must be recoverable: the controller is still held.
-                    assert!(!calls.contains(&"close_controller"));
-                    self.native.creation.set(Creation::Ready);
-                }
-                1 => {
-                    assert!(calls.contains(&"close_controller"));
-                    self.events.event(NativeEvent::BrowserExited { pid: 42 });
-                }
-                _ => panic!("raw session did not retire after the matching exit"),
+            if pump == 0 {
+                // The getter must be recoverable: the controller is still held.
+                assert!(!calls.contains(&"close_controller"));
+                self.native.creation.set(Creation::Ready);
+            } else {
+                assert_eq!(
+                    pump, 1,
+                    "raw session did not retire after the matching exit"
+                );
+                assert!(calls.contains(&"close_controller"));
+                self.events.event(NativeEvent::BrowserExited { pid: 42 });
             }
             Ok(NativePulse::Timer)
         }
