@@ -2020,6 +2020,10 @@ def test_external_qualification_is_sealed() -> None:
         (controls, 'assert!(!before.overflowed);', ''),
         (controls, 'assert!(!after.overflowed);', ''),
         (f"{SHIM}/src/adapter/native_tests/session.rs", '.is_some_and(|expected| self.events.exited() == Some(expected))', '.is_none_or(|expected| self.events.exited() == Some(expected))'),
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'std::time::Instant::now() >= self.deadline', 'false'),
+        (f"{SHIM}/src/ffi/session.rs", 'std::time::Instant::now() >= seal.deadline', 'false'),
+        (f"{SHIM}/src/ffi/session.rs", 'self.recordless_controller_completion().is_some()', 'false'),
+        (f"{SHIM}/src/ffi/window.rs", 'self.hwnd.0.is_null() || self.signals.destroyed.get()', 'false'),
         (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'self.native.recordless_controller_completion().is_some()', 'false'),
         (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
@@ -2059,6 +2063,15 @@ def test_external_qualification_is_sealed() -> None:
             raise SystemExit(f"External fixture accepted mutation: {old}")
     if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
         raise SystemExit("External allowance escaped into product source")
+    for escaped in (
+        "type Escaped = crate::ControllerParentLossSeal;",
+        "fn escaped() { let call = crate::NativeOperations::lose_controller_parent; }",
+        "fn escaped() { let call = Surface::lose_pending_controller_parent; }",
+        "fn escaped() { let call = Surface::lost_controller_parent_retention; }",
+    ):
+        found = errors(dict(sources, **{"crates/product/src/lib.rs": escaped}))
+        if not any("controller parent loss capability outside sealed test fixture" in item for item in found):
+            raise SystemExit("Controller parent-loss authority escaped its sealed fixture")
 
 
 def main() -> None:

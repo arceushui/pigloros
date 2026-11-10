@@ -1125,7 +1125,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "63dae2baa6c61e76a59bdc6c3592ef45ddaa95841994eff6e78e772da2b89819":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "eb641355f1a1dada245fa58d108ac8bdbc75f0cc62e79fb05e3d6f945b8a760b":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
@@ -1311,7 +1311,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "508301b37e3ffa3bfe855e083a21dc0c853f80213d19f15ac63871d4696d1a59":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "c29d9da3087b458169a975128eb369dd95c5d590f53e95b9d4be2eb59e149a65":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1501,7 +1501,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "aad1a47128c6d405c790e4bfa6e4308245926b1f4d96d72da67f43190077a158",
+        lib: "4bb8199e41563a874b4e1560434266ca1d311ea5589d34df066781a0b31f17ad",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
         prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
@@ -1551,19 +1551,20 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
+    'crates/pos-owner-bridge-windows/src/ffi/window.rs': '9c1d388cc1cc1f14519d03e9626976cf3e8f7afb21d7a0cd1c8cbd5c1649b683',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '2fd540f86b5bcf37a49f82c5b47b0013983b4a611b1f672a00bf506e1b208afc',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': 'e73b98d2fa4a1a752f2bb570786f8e70c04bcdc4a728b2d68fca40ce77ded702',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'a87fcd13d875548127097aa8e9869757d3fb9c7d3bc925df1a9fef293b545cdc',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '896e3a9540e8fa5e6dec4f8acfda95aa9b7976114027fffc08bb1d1a1d77853d',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '64d74f81a3f4da8d44f24d5aabe56604a98bbd53152cb8dfd7a3880656ada139',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '5c1c5089376e14d9d5567ef933c85595f406454559bc81476e832aad64f00789',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'c1752082929bbf3d2edea82a46f10e542a2863e182c819027bc512e1e8b46e03',
-    'crates/pos-owner-bridge-windows/src/lib.rs': 'aad1a47128c6d405c790e4bfa6e4308245926b1f4d96d72da67f43190077a158',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': '883fe71e694cd9b877988534f61cb3d13bfafbb3f8a757abd5f7b622f13f2119',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '4bb8199e41563a874b4e1560434266ca1d311ea5589d34df066781a0b31f17ad',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '8e826240756a79be6a791869846edf305e5be147544a6c93ede9bbbe0fbb718b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
@@ -1584,9 +1585,24 @@ def _check_external_fixture(sources: dict[str, str], found: list[str]) -> None:
         if digest != expected:
             found.append(f"{path}: External URI qualification differs from reviewed source")
     controls = "crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs"
+    parent_loss_sources = {
+        f"{SHIM}/src/lib.rs",
+        f"{SHIM}/src/ffi/session.rs",
+        f"{SHIM}/src/ffi/window.rs",
+        f"{SHIM}/src/adapter/surface/controller_qualification.rs",
+        f"{SHIM}/src/adapter/native_tests/process_fault.rs",
+    }
     for path, source in sources.items():
-        if path != controls and path.endswith(".rs") and re.search(r"\b(?:ExternalAllowance|EXTERNAL_URI)\b", scan(source).code):
+        if not path.endswith(".rs"):
+            continue
+        code = scan(source).code
+        if path != controls and re.search(r"\b(?:ExternalAllowance|EXTERNAL_URI)\b", code):
             found.append(f"{path}: External allowance capability outside private fixture")
+        if path not in parent_loss_sources and re.search(
+            r"\b(?:ControllerParentLossSeal|lose_controller_parent|"
+            r"lose_pending_controller_parent|lost_controller_parent_retention)\b", code
+        ):
+            found.append(f"{path}: controller parent loss capability outside sealed test fixture")
 
 
 def violations(root: Path, *, component_fixture: bool = False) -> list[str]:

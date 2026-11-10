@@ -4117,6 +4117,8 @@ impl Fixture {
         lose_parent: bool,
         lost_blocked: &mut bool,
     ) -> Result<(CeremonyResult, bool), Box<dyn std::error::Error>> {
+        use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
+
         loop {
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
@@ -4133,7 +4135,6 @@ impl Fixture {
                     return Err("controller input did not retain active opening owners".into());
                 }
                 let ceremony = CeremonyId::from_bytes([self.number; 16]);
-                use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
                 if !sdk_controller_pending(&crate::Native::creation_order())
                     || self.surface.controller_creation_retention(&ceremony) != Some(Active)
                     || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
@@ -4147,7 +4148,8 @@ impl Fixture {
                     self.surface
                         .lose_pending_controller_parent(&ceremony)
                         .map_err(|()| "owned controller parent loss failed")?;
-                    if self.surface.lost_controller_parent_retention(&ceremony) != Some(Active)
+                    if Instant::now() >= self.deadline
+                        || self.surface.lost_controller_parent_retention(&ceremony) != Some(Active)
                         || !sdk_controller_result(
                             &crate::Native::creation_order(),
                             crate::CreationCallback::NativeFailure,
