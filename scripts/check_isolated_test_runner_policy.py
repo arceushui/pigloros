@@ -22,8 +22,8 @@ def require(text: str, fragment: str, source: Path) -> None:
 # structural checks below still hold over the pinned text, so a pin cannot be
 # moved to a runner that drops them.
 RUNNER_DIGESTS = {
-    "run-isolated-test.sh": "e8b3c9c9183b410abd099dd74498d51c25defc4ef3ed934f5258b88a8983c980",
-    "run-isolated-with-net-admin-test.sh": "9522f6012f21b811c049eb72d22fd473c2d03841d4dfe80ab40418869183037f",
+    "run-isolated-test.sh": "af2939a6ecdf3fc38d058bea21ff9e89304634c7d1c21e7d3253fa95bbf4f33c",
+    "run-isolated-with-net-admin-test.sh": "d0706f205e5e978d27ce4ed3bfb6b2a4b494bab08f883afd817750945ae9cc7c",
 }
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
@@ -45,12 +45,16 @@ RUST_TOKEN = re.compile(
     r"|/\*(?:[^*]|\*(?!/))*\*/"
     r'|(?<![A-Za-z0-9_])b?r(?P<hashes>#*)"(?P<raw>.*?)"(?P=hashes)'
     r'|(?<![A-Za-z0-9_])b?"(?P<text>(?:[^"\\]|\\.)*)"'
-    r"|(?<![A-Za-z0-9_])b?'(?:[^'\\\n]|\\[^'\n]{1,10})'",
+    r"|(?<![A-Za-z0-9_])b?'(?P<char>[^'\\\n]|\\[^'\n]{1,10})'",
     re.S,
 )
-# The distinctive pieces of a runner name, as they read once every string
-# literal of a source is joined and stripped of all but letters and digits:
-# no concatenation, macro or format string can split a name past them.
+# The distinctive pieces of a runner name, as they read once every string and
+# char literal of a source is joined in order and stripped of all but letters
+# and digits. This is a best-effort lint against accidental references, such
+# as a runner named through concat! or char by char; code that sets out to
+# evade it can (format!("run-{}-test.sh", "isolated") reorders the pieces).
+# The enforcement is the runner's own guards on its test harness and test
+# names.
 ISOLATED_FRAGMENT = "runisolated"
 NET_ADMIN_FRAGMENT = "netadmin"
 # The guards that run before Docker: only a pos-sandboxd test harness under
@@ -90,11 +94,21 @@ RUNNER_SHEBANG = "#!/bin/bash -p\n"
 # Docker daemon, context or configuration.
 RUNNER_ENVIRONMENT = (
     "set -euo pipefail\n"
-    "readonly RUNNER_PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+    "readonly RUNNER_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
     "export PATH=$RUNNER_PATH\n"
 )
+# The daemon is the system socket, or a unix socket at an absolute path the
+# runner's own override names; DOCKER_HOST, DOCKER_CONTEXT and DOCKER_CONFIG
+# never reach Docker.
+RUNNER_DOCKER_SOCKET = (
+    "readonly DOCKER_SOCKET=${PIGLOR_ISOLATED_DOCKER_HOST:-unix:///var/run/docker.sock}\n"
+    "if [[ ! $DOCKER_SOCKET =~ ^unix:///[A-Za-z0-9._/-]+$ || $DOCKER_SOCKET == *..* ]]; then\n"
+    '  echo "PIGLOR_ISOLATED_DOCKER_HOST must be unix:// and an absolute socket path" >&2\n'
+    "  exit 2\n"
+    "fi\n"
+)
 RUNNER_DOCKER = (
-    'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent DOCKER_HOST=unix:///var/run/docker.sock \\\n'
+    'env -i "PATH=$RUNNER_PATH" HOME=/nonexistent "DOCKER_HOST=$DOCKER_SOCKET" \\\n'
     '  docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE"'
 )
 # What the container sees of the host: the worktree read-only, or for the
@@ -105,6 +119,7 @@ WORKTREE_SOURCE = "$REPOSITORY_ROOT"
 # drops every capability and sees the host read-only.
 RUNNER_FRAGMENTS = (
     RUNNER_ENVIRONMENT,
+    RUNNER_DOCKER_SOCKET,
     RUNNER_DOCKER,
     "[[ $# -ne 2 ]]",
     "timeout --signal=TERM --kill-after=5s 30s",
@@ -186,10 +201,10 @@ def check_runner(runner_path: Path) -> None:
 
 
 def literal_text(text: str) -> str:
-    """Every string and char literal of a Rust source joined, lowercased and
-    stripped of all but letters and digits."""
+    """Every string and char literal of a Rust source joined in order,
+    lowercased and stripped of all but letters and digits."""
     joined = "".join(
-        (token.group("raw") or "") + (token.group("text") or "")
+        (token.group("raw") or "") + (token.group("text") or "") + (token.group("char") or "")
         for token in RUST_TOKEN.finditer(text)
     )
     return re.sub(r"[^a-z0-9]", "", joined.lower())
