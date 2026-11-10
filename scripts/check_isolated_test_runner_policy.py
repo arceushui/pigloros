@@ -177,9 +177,60 @@ NET_ADMIN_GUARDS = (
     '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \\\n'
     '  "$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
 )
-def reject(text: str, pattern: str, description: str, source: Path) -> None:
-    if re.search(pattern, text, flags=re.MULTILINE):
-        raise SystemExit(f"{source}: forbidden Docker policy override: {description}")
+# Shell constructs whose quoting the comment stripper cannot follow (ANSI-C
+# quotes, heredocs, backticks) or that run arbitrary code (command
+# substitution) are allowed only on these exact lines, and in the guards.
+SPECIAL_SEQUENCES = ("$'", "<<", "`", "$(")
+SPECIAL_LINES = {
+    'readonly SCRIPT_DIRECTORY=$(realpath -- "$(dirname -- "$0")")',
+    'readonly REPOSITORY_ROOT=$(realpath -- "$SCRIPT_DIRECTORY/..")',
+    'readonly TEST_BINARY=$(realpath -- "$1")',
+    'profile_directory=$(realpath -- "$(dirname -- "$LLVM_PROFILE_FILE")")',
+    'profile_output=$(mktemp "$profile_directory/isolated-profile.XXXXXX.profraw")',
+}
+# The only additions to the Docker argument array after its definition.
+DOCKER_APPENDS = {
+    'docker_arguments+=(--env "$variable=${!variable}")',
+    "docker_arguments+=(\n"
+    "--env LLVM_PROFILE_FILE=/pigloros-profile.profraw\n"
+    '--mount "type=bind,source=$profile_output,target=/pigloros-profile.profraw"\n'
+    ")",
+}
+NET_ADMIN_DOCKER_APPENDS: set[str] = set()
+
+
+def special_constructs(raw: str, allowed: set[str], source: Path) -> None:
+    """Fail on any line with a special construct outside `allowed`."""
+    for line in raw.splitlines():
+        if any(sequence in line for sequence in SPECIAL_SEQUENCES) and line.strip() not in allowed:
+            raise SystemExit(f"{source}: unrecognised shell construct on line: {line.strip()}")
+
+
+def appends(code: str, allowed: set[str], source: Path) -> None:
+    """Fail on any addition to the Docker argument array outside `allowed`."""
+    for match in re.finditer(r"\bdocker_arguments\+=\(", code):
+        end = closing_parenthesis(code, match.end(), source)
+        block = "\n".join(line.strip() for line in code[match.start() : end + 1].splitlines())
+        if block not in allowed:
+            raise SystemExit(f"{source}: unrecognised Docker argument addition: {block}")
+
+
+# Words that open and close a shell compound command.
+OPENERS = re.compile(r"(?<![\w$-])(if|case|for|while|until)(?![\w-])")
+CLOSERS = re.compile(r"(?<![\w$-])(fi|esac|done)(?![\w-])")
+
+
+def at_top_level(code: str, fragment: str, source: Path) -> None:
+    """Fail unless `fragment` starts a line outside every compound command,
+    so no `if false`, loop or case arm can make a guard inert."""
+    start = code.find(fragment)
+    if start < 0 or (start > 0 and code[start - 1] != "\n") or fragment[:1].isspace():
+        raise SystemExit(f"{source}: guard is not at the top level: {fragment.splitlines()[0]}")
+    before = code[:start]
+    if len(OPENERS.findall(before)) != len(CLOSERS.findall(before)):
+        raise SystemExit(f"{source}: guard is inside a compound command: {fragment.splitlines()[0]}")
+    if re.search(r"(?m)^\s*(function\s|[A-Za-z_]\w*\s*\(\)|\{\s*$|\(\s*$)", code):
+        raise SystemExit(f"{source}: functions and grouping commands are forbidden")
 
 
 def main() -> None:
@@ -228,7 +279,16 @@ def main() -> None:
                 )
 
     for runner_path in runners:
-        runner = strip_comments(runner_path.read_text(encoding="utf-8"))
+        raw = runner_path.read_text(encoding="utf-8")
+        runner = strip_comments(raw)
+        net_admin = runner_path.name == NET_ADMIN_RUNNER
+        guard_lines = {
+            line.strip() for fragment in NET_ADMIN_GUARDS for line in fragment.splitlines()
+        }
+        special_constructs(raw, SPECIAL_LINES | (guard_lines if net_admin else set()), runner_path)
+        appends(
+            runner, DOCKER_APPENDS | (NET_ADMIN_DOCKER_APPENDS if net_admin else set()), runner_path
+        )
         if not runner_path.stat().st_mode & stat.S_IXUSR:
             raise SystemExit(f"{runner_path}: isolated test runner must be executable")
         if re.search(r"\bsudo\b", runner):
@@ -273,6 +333,8 @@ def main() -> None:
             expected = NET_ADMIN_DOCKER_OPTIONS
             for fragment in NET_ADMIN_GUARDS:
                 require(runner, fragment, runner_path)
+                if fragment.startswith(("readonly ", "if ")):
+                    at_top_level(runner, fragment, runner_path)
         options = sorted(map(option_key, docker_options(runner, runner_path)))
         if options != sorted(map(option_key, expected)):
             unexpected = [option for option in options if option not in map(option_key, expected)]
