@@ -142,6 +142,75 @@ pub fn attached_fixture_root(
         .map_err(|error| error.to_string())
 }
 
+/// Restart detachment of recorded roots, each over its own fake kernel that
+/// reads back the fixture provider root of the entry's attempt. That root is
+/// mounted only on the one `mounted` attempt; every other root is unmounted.
+pub struct FakeRecoveredRoots {
+    mounted: [u8; 16],
+    detached: Mutex<Vec<([u8; 16], usize)>>,
+}
+
+impl FakeRecoveredRoots {
+    /// Fake kernels with the fixture provider root mounted on `attempt_id`.
+    #[must_use]
+    pub const fn mounted_on(attempt_id: [u8; 16]) -> Self {
+        Self {
+            mounted: attempt_id,
+            detached: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Detach `entry`'s root through restart detachment over a fake kernel,
+    /// recording how many detaches that kernel saw.
+    ///
+    /// # Errors
+    /// Returns the detachment's error, or a fixture failure as
+    /// [`ImageActivationError::Transport`].
+    pub(crate) async fn detach(
+        &self,
+        entry: crate::RecordedRootEntry,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ImageActivationError> {
+        let attempt_id = entry.intent.planned().attempt_id();
+        let mut observed = matching(&expected(
+            entry.intent.planned().unit_name().attempt_component(),
+        ));
+        if attempt_id != self.mounted {
+            // An unmounted root is on the attempt directory's own mount.
+            observed.parent_mount_id = observed.mount.map(|mount| mount.mount_id);
+        }
+        let mount_path = tempfile::NamedTempFile::new()
+            .map_err(|_| ImageActivationError::Transport)?
+            .into_temp_path();
+        let kernel = FakeKernel {
+            mount_path: Some(mount_path),
+            ..FakeKernel::accepting(observed)
+        };
+        let detached =
+            super::recovered::detach_with(&kernel, entry, Path::new("/"), deadline).await;
+        self.detached
+            .lock()
+            .map_err(|_| ImageActivationError::Transport)?
+            .push((attempt_id, kernel.detached()));
+        detached
+    }
+
+    /// Each detached entry's attempt and its kernel's detach count, in
+    /// attempt order.
+    ///
+    /// # Errors
+    /// Returns a poisoned fixture lock.
+    pub fn detached(&self) -> Result<Vec<([u8; 16], usize)>, String> {
+        let mut detached = self
+            .detached
+            .lock()
+            .map_err(|_| "poisoned fixture".to_owned())?
+            .clone();
+        detached.sort_unstable();
+        Ok(detached)
+    }
+}
+
 #[tokio::test]
 async fn recorded_generations_are_absent_only_when_neither_device_remains() -> TestResult {
     let host = tempfile::tempdir()?;

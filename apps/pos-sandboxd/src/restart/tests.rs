@@ -14,7 +14,7 @@ mod cases {
     use zbus::{fdo, BoxDBusError, OwnedObjectPath};
 
     use super::super::*;
-    use crate::test_fixtures::{in_lock_test_process, peer_connections};
+    use crate::test_fixtures::{in_lock_test_process, peer_connections, FakeRecoveredRoots};
     use crate::{
         AttemptCleanupDeadlines, AttemptShutdownDeadlines, AttemptUnitTermination,
         PreparedAttemptDirectory, SystemdAttemptRegistry,
@@ -625,6 +625,107 @@ mod cases {
             }
             Err(error) => return Err(format!("unexpected refusal: {error:?}").into()),
         }
+        Ok(())
+    }
+
+    /// The host's surviving-resource steps over the fakes: each listed unit
+    /// goes through the systemd stop path against the fake manager, and each
+    /// recorded root through restart detachment over a fake kernel.
+    struct HostOverFakes<'a> {
+        transport: &'a SystemdTransientUnitTransport,
+        roots: FakeRecoveredRoots,
+    }
+
+    impl Survivors for HostOverFakes<'_> {
+        fn stop(
+            &self,
+            unit: &SystemdAttemptUnitObservation,
+            shutdown: AttemptShutdownDeadlines,
+            deadline: Instant,
+        ) -> impl std::future::Future<Output = Result<(), SystemdAttemptUnitTeardownError>> + Send
+        {
+            self.transport.stop_listed_unit(unit, shutdown, deadline)
+        }
+
+        fn detach(
+            &self,
+            entry: RecordedRootEntry,
+            deadline: Instant,
+        ) -> impl std::future::Future<Output = Result<(), ImageActivationError>> + Send {
+            self.roots.detach(entry, deadline)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_surviving_unit_and_a_mounted_root_are_released_before_any_removal() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_surviving_unit_and_a_mounted_root_are_released_before_any_removal",
+        )? {
+            return Ok(());
+        }
+        // Attempt 2's recorded unit survived failed, its cgroup removed by
+        // systemd (owner decision A), and attempt 4's PAI3 provider root is
+        // still mounted on its attempt directory.
+        let runtime = seed(true)?;
+        let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
+        let survivors = HostOverFakes {
+            transport: &host.transport,
+            roots: FakeRecoveredRoots::mounted_on([ROOT_ATTEMPT; 16]),
+        };
+        let network = Network::new(Cleanup::Removes);
+        let probed = Mutex::new(Vec::new());
+        // Whether every record and directory was still present at the last
+        // proof, the provider loop sweep.
+        let kept_until_swept = Mutex::new(None);
+        let reconciled = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            &network,
+            &survivors,
+            deadlines()?,
+            (
+                |generations| {
+                    let pushed = probed.lock().map(|mut probed| probed.push(generations));
+                    std::future::ready(
+                        pushed
+                            .map(|()| true)
+                            .map_err(|_| ImageActivationError::Transport),
+                    )
+                },
+                || {
+                    let kept = assert_untouched(runtime.path(), 5).is_ok();
+                    let recorded = kept_until_swept.lock().map(|mut swept| *swept = Some(kept));
+                    std::future::ready(
+                        recorded
+                            .map(|()| true)
+                            .map_err(|_| ImageActivationError::Transport),
+                    )
+                },
+                this_boot(),
+            ),
+        )
+        .await?;
+        // The unit was reset and observed unloaded. Only attempt 4's root was
+        // mounted, and only it was detached; its devices were then probed.
+        assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
+        assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
+        assert_eq!(
+            survivors.roots.detached()?,
+            vec![([2; 16], 0), ([ROOT_ATTEMPT; 16], 1)]
+        );
+        assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *probed.lock().map_err(|_| "probes")?,
+            vec![FIXTURE_GENERATIONS]
+        );
+        assert_eq!(*kept_until_swept.lock().map_err(|_| "sweep")?, Some(true));
+        // Every attempt was then removed, each intent after its directories:
+        // only the activation marker remains.
+        let expected = (1..=4).map(intent).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(reconciled.attempts(), expected.as_slice());
+        assert_eq!(count(&runtime.path().join("registry"))?, 1);
+        assert!(runtime.path().join("registry/activation").is_file());
+        assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         Ok(())
     }
 
