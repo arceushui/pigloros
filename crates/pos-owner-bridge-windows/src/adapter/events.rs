@@ -23,6 +23,8 @@ pub(super) struct Events {
     content_seen: Cell<bool>,
     expected_pid: Cell<Option<u32>>,
     exited: Cell<Option<u32>>,
+    #[cfg(test)]
+    exit_boundary_invalid: Cell<bool>,
     blocked_resources: Cell<u32>,
 }
 
@@ -50,8 +52,17 @@ impl Events {
     pub(super) fn expect_browser(&self, pid: u32) {
         self.expected_pid.set(Some(pid));
         if self.exited.get() == Some(pid) {
+            #[cfg(test)]
+            self.exit_boundary_invalid.set(true);
             self.invalid.set(true);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn matching_exit_at_boundary(&self, pid: u32) -> bool {
+        !self.exit_boundary_invalid.get()
+            && self.expected_pid.get() == Some(pid)
+            && self.exited.get() == Some(pid)
     }
 
     pub(super) fn take(&self) -> Option<SurfaceEvent> {
@@ -69,6 +80,12 @@ impl Events {
         if event == SurfaceEvent::ControllerLost && self.lost_emitted.replace(true) {
             return;
         }
+        #[cfg(test)]
+        if !matches!(event, SurfaceEvent::DomContentLoaded(_))
+            && !matches!(event, SurfaceEvent::BrowserExited { browser_pid } if self.expected_pid.get() == Some(browser_pid))
+        {
+            self.exit_boundary_invalid.set(true);
+        }
         let invalid = match event {
             SurfaceEvent::DomContentLoaded(_) => false,
             SurfaceEvent::BrowserExited { browser_pid } => {
@@ -81,6 +98,8 @@ impl Events {
         }
         let mut queue = self.queue.borrow_mut();
         if queue.len() == MAX_EVENTS {
+            #[cfg(test)]
+            self.exit_boundary_invalid.set(true);
             self.invalid.set(true);
             self.lost_emitted.set(true);
             queue.clear();
@@ -150,6 +169,10 @@ impl Events {
     }
 
     fn browser_exit(&self, pid: u32) {
+        #[cfg(test)]
+        if self.exited.get().is_some() {
+            self.exit_boundary_invalid.set(true);
+        }
         if pid == 0 {
             self.controller_lost();
             return;

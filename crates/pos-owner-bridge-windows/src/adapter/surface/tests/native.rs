@@ -131,6 +131,12 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn exit_fault_owners_retained(&self) -> bool {
+        self.factory.sink.borrow().is_some()
+            && !self.controller
+            && self.factory.failure.get() != Some("exit_owners")
+    }
+
     fn pending_opening_owners_retained(&self) -> bool {
         self.controller_pending
             && (self.factory.failure.get() != Some("pending-owner-after")

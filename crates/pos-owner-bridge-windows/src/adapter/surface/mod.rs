@@ -34,6 +34,12 @@ mod retirement;
 mod diagnostics;
 
 #[cfg(test)]
+mod exit_boundary;
+
+#[cfg(test)]
+pub(in crate::adapter) use exit_boundary::ExitBoundary;
+
+#[cfg(test)]
 mod tests;
 
 const WIDTH: u32 = 480;
