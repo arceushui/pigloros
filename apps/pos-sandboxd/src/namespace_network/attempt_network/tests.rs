@@ -67,7 +67,15 @@ struct FakeControl {
     pins: Option<std::path::PathBuf>,
     refuse: bool,
     refuse_removal: bool,
+    gate: Option<RemovalGate>,
     current: Mutex<Option<ExpectedNamespace>>,
+}
+
+/// Holds a removal until another task lets it proceed.
+#[derive(Debug)]
+struct RemovalGate {
+    started: std::sync::mpsc::Sender<()>,
+    proceed: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 fn entries(journal: &Mutex<Journal>) -> MutexGuard<'_, Journal> {
@@ -163,7 +171,14 @@ impl NamespaceControl for FakeControl {
             // A pin that was never made is not there to remove.
             std::fs::remove_file(pins.join(name.as_str())).ok();
         }
-        (!self.refuse_removal)
+        let released = self.gate.as_ref().map_or(Ok(()), |gate| {
+            gate.started.send(()).ok();
+            gate.proceed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv_timeout(Duration::from_secs(2))
+        });
+        (!self.refuse_removal && released.is_ok())
             .then_some(())
             .ok_or(NetlinkError::Kernel(-16))
     }
@@ -466,6 +481,37 @@ fn probe_errors_say_what_failed() {
     }
 }
 
+// A removal on the runtime's only worker hands the worker's other tasks to
+// another thread, so the task that lets the removal finish still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_blocked_removal_leaves_the_worker_to_other_tasks() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (started, removal_started) = std::sync::mpsc::channel();
+    let (let_proceed, proceed) = std::sync::mpsc::channel();
+    let control = FakeControl {
+        gate: Some(RemovalGate {
+            started,
+            proceed: Mutex::new(proceed),
+        }),
+        ..pinning(directory.path())
+    };
+    let (network, journal) = network(directory.path(), control, 24)?;
+    let established = network.establish([1; 16], &[ENDPOINT])?;
+    let removal = tokio::spawn(async move { drop(established) });
+    let release = tokio::spawn(async move {
+        while removal_started.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let_proceed.send(()).ok();
+    });
+    removal.await?;
+    release.await?;
+    // The removal succeeded, so the slot is free, not quarantined.
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    assert!(network.establish([2; 16], &[ENDPOINT]).is_ok());
+    Ok(())
+}
+
 // A current-thread runtime has no other worker to hand its tasks to, so
 // removal runs in place there.
 #[tokio::test]
@@ -676,6 +722,54 @@ mod privileged {
         Ok(listener?)
     }
 
+    /// The chains of the host egress table, or `None` without it.
+    fn host_chains() -> Result<Option<Vec<String>>, NetlinkError> {
+        NetlinkSession::open(crate::namespace_network::netlink::NETFILTER)
+            .and_then(|session| crate::namespace_network::host_egress::host_chains(&session))
+    }
+
+    #[test]
+    fn an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed() -> TestResult {
+        if !isolated("an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // The host routes the endpoint's network, so only admission refuses
+        // it.
+        let routed = IpPrefix {
+            address: std::net::IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1)),
+            length: 64,
+        };
+        let host = LinkName::new("tgt-h0")?;
+        NetlinkSession::open(ROUTE).and_then(|session| {
+            route::link_reply(session.request(route::get_link(&host)))
+                .and_then(|link| link.ok_or(NetlinkError::Unexpected))
+                .and_then(|link| session.execute(vec![route::address(link.index, routed)]))
+        })?;
+        let network = NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces.clone(),
+            range(24, 120)?,
+        );
+        let endpoint = SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 10), 8443));
+        let refused = network.connector([8; 16], &[endpoint]).map(drop);
+        assert!(
+            matches!(
+                refused,
+                Err(AttemptNetworkError::Egress(HostEgressError::Ipv6Egress))
+            ),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            namespaces.open(&NamespaceName::for_attempt([8; 16])),
+            Ok(None)
+        ));
+        Ok(())
+    }
+
     #[test]
     fn a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint() -> TestResult {
         if !isolated("a_forwarded_connection_is_masqueraded_to_exactly_its_endpoint")? {
@@ -699,12 +793,19 @@ mod privileged {
             let peer = listener.accept().map(|(_, peer)| peer.ip());
             (connected, peer)
         });
+        // Dropping the connector took the attempt's chain away again.
+        let left = host_chains();
         let swept = control.remove_orphans();
         assert!(
             matches!(&outcome, Ok((Ok(()), Ok(peer))) if *peer == std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
             "{outcome:?}"
         );
+        assert_eq!(
+            left.map_err(|error| error.to_string()),
+            Ok(Some(vec!["forward".to_owned(), "postrouting".to_owned()]))
+        );
         assert!(swept.is_ok(), "{swept:?}");
+        assert!(matches!(host_chains(), Ok(None)));
         Ok(())
     }
 
