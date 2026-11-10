@@ -632,6 +632,13 @@ struct ControllerParentLossSeal {
     deadline: std::time::Instant,
 }
 
+#[cfg(test)]
+impl ControllerParentLossSeal {
+    const fn into_deadline(self) -> std::time::Instant {
+        self.deadline
+    }
+}
+
 /// Bound to the exact Surface observer and validated process identity.
 #[cfg(test)]
 struct FaultAuthority {

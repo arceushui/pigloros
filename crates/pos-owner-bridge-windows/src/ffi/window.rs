@@ -292,8 +292,15 @@ impl Window {
     }
 
     #[cfg(test)]
-    pub(super) fn lose_controller_parent(&mut self) -> Result<()> {
-        if self.hwnd.0.is_null() || self.signals.destroyed.get() {
+    pub(super) fn lose_controller_parent(
+        &mut self,
+        seal: crate::ControllerParentLossSeal,
+    ) -> Result<()> {
+        let deadline = seal.into_deadline();
+        if self.hwnd.0.is_null()
+            || self.signals.destroyed.get()
+            || std::time::Instant::now() >= deadline
+        {
             return Err(unavailable());
         }
         // SAFETY: the sealed caller checked the creating STA, the exact owned

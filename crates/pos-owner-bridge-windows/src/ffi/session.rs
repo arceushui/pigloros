@@ -271,7 +271,7 @@ impl NativeOperations for Session {
         self.window
             .as_mut()
             .ok_or(())?
-            .lose_controller_parent()
+            .lose_controller_parent(seal)
             .map_err(|_| ())
     }
 
