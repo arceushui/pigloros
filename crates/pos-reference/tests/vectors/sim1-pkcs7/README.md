@@ -130,9 +130,9 @@ structure and algorithm parameter encodings as the original fixture.
 `rsa-2048-0x80-*` is an independently signed positive fixture for the lower
 edge of the RSA-2048 profile: its modulus has 256 unsigned bytes beginning
 with `0x80`, the smallest leading byte of a 2048-bit modulus. The public test
-checks that geometry, exponent 65537 and dates, then requires acceptance.
-Test vector only; never a trust anchor; private key destroyed.
-Random RSA-2048 key generation bounds each prime independently at or above
+checks that geometry, exponent 65537 and dates, then requires acceptance. Like
+the other vectors here, it is test-only and never a trust anchor, and its
+private key was destroyed after signing. Random RSA-2048 key generation bounds each prime independently at or above
 `sqrt(2) * 2^1023`, so this leading byte occurs in only about 1 in several
 thousand random keys (roughly 2e-4); the primes were chosen directly instead
 of searching.
