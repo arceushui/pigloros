@@ -1,7 +1,7 @@
 //! Exact closed metadata framing is separate from authenticated/current use.
 
 #[path = "support/community_nonce_properties.rs"]
-mod nonce_properties;
+pub mod nonce_properties;
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
