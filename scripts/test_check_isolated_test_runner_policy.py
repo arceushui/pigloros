@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -43,9 +44,9 @@ PRIMARY_OWNER = OWNER_PATHS[0]
 PRIMARY_RUNNER = RUNNER_PATHS[0]
 
 
-def invoke(root: Path) -> subprocess.CompletedProcess[str]:
+def invoke(root: Path, checker: Path = CHECKER) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(CHECKER), "--root", str(root)],
+        [sys.executable, str(checker), "--root", str(root)],
         check=False,
         capture_output=True,
         text=True,
@@ -222,6 +223,93 @@ def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> 
         raise SystemExit(f"NET_ADMIN runner dropped AppArmor for {named}: {options}")
 
 
+def edited_bytes(content: bytes) -> list[bytes]:
+    """`content` with one byte changed, added or removed, at its start,
+    middle and end."""
+    middle = len(content) // 2
+    flipped = [
+        content[:index] + bytes([content[index] ^ 0x01]) + content[index + 1 :]
+        for index in (0, middle, len(content) - 1)
+    ]
+    return [*flipped, content + b" ", content[:-1], content[:middle] + content[middle + 1 :]]
+
+
+def check_runner_pins(temporary: Path) -> None:
+    """A runner passes only as exactly its pinned content: any one-byte edit,
+    an unpinned runner and a missing pinned runner all fail."""
+    for runner in RUNNER_PATHS:
+        content = (ROOT / runner).read_bytes()
+        for index, edited in enumerate(edited_bytes(content)):
+            root = temporary / f"edited-{runner.name}-{index}"
+            copy_fixture(root)
+            (root / runner).write_bytes(edited)
+            if invoke(root).returncode == 0:
+                raise SystemExit(f"checker accepted a one-byte edit {index} of {runner}")
+    unpinned = temporary / "unpinned"
+    copy_fixture(unpinned)
+    shutil.copy2(ROOT / PRIMARY_RUNNER, unpinned / "scripts/run-isolated-extra-test.sh")
+    if invoke(unpinned).returncode == 0:
+        raise SystemExit("checker accepted a runner without a pin")
+    missing = temporary / "missing"
+    copy_fixture(missing)
+    (missing / PRIMARY_RUNNER).unlink()
+    if invoke(missing).returncode == 0:
+        raise SystemExit("checker accepted a missing pinned runner")
+    unexecutable = temporary / "unexecutable"
+    copy_fixture(unexecutable)
+    (unexecutable / PRIMARY_RUNNER).chmod(0o644)
+    if invoke(unexecutable).returncode == 0:
+        raise SystemExit("checker accepted a runner that is not executable")
+
+
+def repinned(
+    temporary: Path, name: str, runner: Path, old: str, new: str
+) -> subprocess.CompletedProcess[str]:
+    """The checker's verdict on `runner` edited from `old` to `new` with its
+    pin moved to the edited content."""
+    root = temporary / f"repinned-{name}"
+    copy_fixture(root)
+    target = root / runner
+    text = target.read_text(encoding="utf-8")
+    if old not in text:
+        raise SystemExit(f"fixture fragment missing in {runner}: {old}")
+    target.write_text(text.replace(old, new, 1), encoding="utf-8")
+    checker = root / "scripts/check_isolated_test_runner_policy.py"
+    pin = hashlib.sha256((ROOT / runner).read_bytes()).hexdigest()
+    moved = hashlib.sha256(target.read_bytes()).hexdigest()
+    source = CHECKER.read_text(encoding="utf-8")
+    if pin not in source:
+        raise SystemExit(f"the checker does not pin {runner}")
+    checker.write_text(source.replace(pin, moved), encoding="utf-8")
+    return invoke(root, checker)
+
+
+def check_repinned_runners(temporary: Path) -> None:
+    """A pin moved to a runner that drops a structural guarantee still fails,
+    and one moved to a harmless edit passes."""
+    harmless = repinned(
+        temporary, "comment", NET_ADMIN_RUNNER, "set -euo pipefail\n", "set -euo pipefail\n# reviewed\n"
+    )
+    if harmless.returncode != 0:
+        raise SystemExit(f"checker refused a re-pinned harmless edit: {harmless.stderr}")
+    unsafe = (
+        (PRIMARY_RUNNER, "--network none", "--network host"),
+        (PRIMARY_RUNNER, "  --cap-drop ALL\n", "  --cap-drop ALL\n  --cap-add SYS_ADMIN\n"),
+        (PRIMARY_RUNNER, "  --rm\n", "  --rm\n  --privileged\n"),
+        (PRIMARY_RUNNER, "@sha256:", ":latest@x"),
+        (PRIMARY_RUNNER, "docker run", "sudo -n docker run"),
+        (NET_ADMIN_RUNNER, "  --cap-drop ALL\n", "  --cap-add ALL\n"),
+        (NET_ADMIN_RUNNER, "  --cap-add NET_ADMIN\n", "  --cap-add NET_RAW\n"),
+        (NET_ADMIN_RUNNER, "  --read-only\n", "\n"),
+        (NET_ADMIN_RUNNER, "readonly TEST_PATTERN=", "readonly UNUSED_PATTERN="),
+        (NET_ADMIN_RUNNER, "if [[ $REPOSITORY_ROOT == *,* ]]; then", "if false; then"),
+        (NET_ADMIN_RUNNER, "if [ -w \"$1\" ]; then", "if false; then"),
+    )
+    for index, (runner, old, new) in enumerate(unsafe):
+        if repinned(temporary, str(index), runner, old, new).returncode == 0:
+            raise SystemExit(f"checker accepted re-pinned unsafe {runner}: {old} -> {new}")
+
+
 def main() -> None:
     baseline = invoke(ROOT)
     if baseline.returncode != 0:
@@ -243,253 +331,12 @@ def main() -> None:
             PRIMARY_RUNNER.name,
             "missing-isolated-runner.sh",
         ),
-        (
-            PRIMARY_RUNNER,
-            "--network none",
-            "--network host",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "timeout --signal=TERM --kill-after=5s 30s",
-            "timeout 30s",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "docker run",
-            "sudo -n docker run",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m",
-            "rm -rf /run",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--memory 2g",
-            "--memory 0",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--memory-swap 2g",
-            "--memory-swap -1",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--ulimit fsize=268435456:268435456",
-            "--ulimit fsize=-1:-1",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m",
-            "--tmpfs /tmp:rw,nosuid,nodev,mode=1777",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--read-only",
-            "--read-write",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "--cap-drop ALL",
-            "--cap-drop NET_ADMIN",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "source=$profile_output,target=/pigloros-profile.profraw",
-            "source=$profile_directory,target=/pigloros-profile",
-        ),
-        (
-            PRIMARY_RUNNER,
-            'chmod 0666 "$profile_output"',
-            'chmod 0600 "$profile_output"',
-        ),
-        (
-            PRIMARY_RUNNER,
-            "@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254",
-            ":latest",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "set +e",
-            "docker_arguments+=(--memory 0)\nset +e",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "set +e",
-            "docker_arguments+=(--read-only=false)\nset +e",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "set +e",
-            "docker_arguments+=(--cap-add SYS_ADMIN)\nset +e",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "set +e",
-            "docker_arguments+=(--cap-add SYS_PTRACE)\nset +e",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --cap-add NET_ADMIN\n",
-            "  --cap-add NET_RAW\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
-            "readonly TEST_PATTERN='^namespace_network::'",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "--network none",
-            "--network host",
-        ),
-        # A commented-out capability cannot stand in for a widened one.
-        (
-            NET_ADMIN_RUNNER,
-            "  --cap-add NET_ADMIN\n",
-            "  # --cap-add NET_ADMIN\n  --cap-add ALL\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --cap-add SYS_ADMIN\n",
-            "  --cap-add=ALL\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            " ||\n  $TEST_BINARY -ef $TEST_DIRECTORY/../pos-sandboxd ]]; then",
-            " ]]; then",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "pos_sandboxd-[0-9a-f]{16}$'",
-            "pos_sandboxd-.*$'",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "if [ -w \"$1\" ]; then",
-            "if false; then",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "if [[ $REPOSITORY_ROOT == *,* ]]; then",
-            "if false; then",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --device /dev/kmsg\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --pid host\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  -v /:/host\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --mount type=bind,source=/,target=/host\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --userns host\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --env-file /etc/environment\n",
-        ),
-        (
-            PRIMARY_RUNNER,
-            "  --rm\n",
-            "  --rm\n  --security-opt apparmor=unconfined\n",
-        ),
-        # The allowlist refuses every option it does not name.
-        *(
-            (runner, "  --rm\n", f"  --rm\n  {option}\n")
-            for runner in (PRIMARY_RUNNER, NET_ADMIN_RUNNER)
-            for option in (
-                "--net host",
-                "--net=host",
-                "--volumes-from other",
-                "--sysctl net.ipv4.ip_forward=1",
-                "--cgroup-parent /",
-                "--runtime runc",
-                "--tmpfs /dev/shm",
-                "-e DOCKER=1",
-            )
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            'docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE"',
-            'docker run "${docker_arguments[@]}" --net host "$ISOLATION_IMAGE"',
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "profile_output=\n",
-            "profile_output=\ndocker_arguments[0]=--privileged\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "profile_output=\n",
-            "profile_output=\nextra=(--privileged)\ndocker_arguments+=(\"${extra[@]}\")\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "set +e\n",
-            "set +e\ndocker create --privileged \"$ISOLATION_IMAGE\"\n",
-        ),
-        # Quoting the checker cannot follow hides nothing: an ANSI-C quote
-        # and a heredoc are refused outright.
-        (
-            NET_ADMIN_RUNNER,
-            "profile_output=\n",
-            "profile_output=\nx=$'\\''\necho 'a #' ; docker_arguments+=(--network host)\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "profile_output=\n",
-            "profile_output=\ncat >/dev/null <<'X'\nX\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "profile_output=\n",
-            "profile_output=\nextra=`echo --privileged`\n",
-        ),
-        # A guard that never runs is absent.
-        (
-            NET_ADMIN_RUNNER,
-            "readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'\n",
-            "if false; then\n"
-            "readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'\n"
-            "fi\n",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "readonly TEST_DIRECTORY=",
-            "guards() {\n:\n}\nreadonly TEST_DIRECTORY=",
-        ),
-        # A guard that only a comment mentions is absent.
-        (
-            NET_ADMIN_RUNNER,
-            "if [[ $REPOSITORY_ROOT == *,* ]]; then",
-            "# if [[ $REPOSITORY_ROOT == *,* ]]; then\nif false; then",
-        ),
-        (
-            NET_ADMIN_RUNNER,
-            "readonly TEST_PATTERN=",
-            "# readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'\n"
-            "readonly TEST_PATTERN='.*'\n# readonly TEST_PATTERN=",
-        ),
     )
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
         check_net_admin_runner_guards(temporary)
+        check_runner_pins(temporary)
+        check_repinned_runners(temporary)
         # A changed caller must still be rejected when another caller retains
         # the valid runner reference, so owner discovery cannot hide the fault.
         multiple_owners = temporary / "multiple-owners"
