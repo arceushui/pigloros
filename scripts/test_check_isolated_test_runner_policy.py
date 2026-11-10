@@ -444,6 +444,36 @@ def main() -> None:
             "set +e\n",
             "set +e\ndocker create --privileged \"$ISOLATION_IMAGE\"\n",
         ),
+        # Quoting the checker cannot follow hides nothing: an ANSI-C quote
+        # and a heredoc are refused outright.
+        (
+            NET_ADMIN_RUNNER,
+            "profile_output=\n",
+            "profile_output=\nx=$'\\''\necho 'a #' ; docker_arguments+=(--network host)\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "profile_output=\n",
+            "profile_output=\ncat >/dev/null <<'X'\nX\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "profile_output=\n",
+            "profile_output=\nextra=`echo --privileged`\n",
+        ),
+        # A guard that never runs is absent.
+        (
+            NET_ADMIN_RUNNER,
+            "readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'\n",
+            "if false; then\n"
+            "readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'\n"
+            "fi\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "readonly TEST_DIRECTORY=",
+            "guards() {\n:\n}\nreadonly TEST_DIRECTORY=",
+        ),
         # A guard that only a comment mentions is absent.
         (
             NET_ADMIN_RUNNER,
