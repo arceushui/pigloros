@@ -85,6 +85,7 @@ use pos_runtime::{
     PluginRegistrationV1, PluginRegistry, ProjectionKey, RuntimeError, ScheduledDriverBindingV1,
     StepOutput,
 };
+use zeroize::Zeroizing;
 
 use self::output::{mapped_output, output_usage};
 use self::state::Shared;
@@ -438,11 +439,15 @@ impl ReceiptParts {
 
 /// `invocation` with the Plugin state the adapter holds.
 fn with_prior_state(
-    mut invocation: PluginInvocationV1,
-    state: CommunityStateV1,
-) -> PluginInvocationV1 {
-    invocation.prior_state_schema = state.schema;
-    invocation.prior_state_bytes = state.bytes;
+    invocation: PluginInvocationV1,
+    mut state: CommunityStateV1,
+) -> Zeroizing<PluginInvocationV1> {
+    let mut invocation = Zeroizing::new(invocation);
+    // The consumed State owns the replaced slot and clears it on drop. The
+    // guarded invocation receives the selected allocation without another copy
+    // and keeps its cleanup ownership through every drive result.
+    std::mem::swap(&mut invocation.prior_state_schema, &mut state.schema);
+    std::mem::swap(&mut invocation.prior_state_bytes, &mut state.bytes);
     invocation
 }
 
