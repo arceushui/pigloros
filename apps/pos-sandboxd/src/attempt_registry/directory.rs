@@ -78,7 +78,7 @@ impl CommittedPlannedAttempt {
     ///
     /// # Errors
     /// Rejects an admission of another SIM1, or an unreadable image
-    /// descriptor, before creating anything; the planned intent is left for
+    /// descriptor or one with a zero device or inode, before creating anything; the planned intent is left for
     /// recovery. Also rejects changed intent, unsafe parents, existing
     /// components and uncertain writes; each of these closes new commits and
     /// leaves owned state for recovery.
@@ -110,6 +110,10 @@ impl CommittedPlannedAttempt {
         self,
         image: (u64, u64),
     ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
+        // Recovery refuses a zero image identity, so none is ever recorded.
+        if image.0 == 0 || image.1 == 0 {
+            return Err(SystemdAttemptRegistryError::InvalidIntent);
+        }
         let owner = Arc::clone(&self.state);
         let mut state = owner
             .lock()
@@ -609,6 +613,33 @@ mod tests {
             SystemdAttemptRegistry::open(),
             Err(SystemdAttemptRegistryError::ReconciliationRequired)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_zero_image_identity_prepares_nothing() -> TestResult {
+        let (directory, registry) = fixture()?;
+        for (id, image) in [
+            (1, (0, crate::FIXTURE_IMAGE.1)),
+            (2, (crate::FIXTURE_IMAGE.0, 0)),
+        ] {
+            let planned = intent(id)?;
+            let result = registry.commit_planned(&planned)?.prepare_for_image(image);
+            assert!(matches!(
+                result,
+                Err(SystemdAttemptRegistryError::InvalidIntent)
+            ));
+            let key = planned.unit_name().attempt_component();
+            assert!(!directory.path().join("attempts").join(key).exists());
+            assert_eq!(
+                fs::read(directory.path().join("registry").join(key))?,
+                planned.encode()
+            );
+        }
+        // Nothing closed new commits.
+        registry
+            .commit_planned(&intent(3)?)?
+            .prepare_fixture_directory()?;
         Ok(())
     }
 

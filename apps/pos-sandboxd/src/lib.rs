@@ -172,8 +172,15 @@ pub(crate) struct RecordedRoot {
 }
 
 /// The held image `(device, inode)` the test fixtures record and read back.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) const FIXTURE_IMAGE: (u64, u64) = (5, 6);
+/// Other images than the fixture's: another inode on its device, and the
+/// same inode on another device.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const OTHER_IMAGES: [(u64, u64); 2] = [
+    (FIXTURE_IMAGE.0, FIXTURE_IMAGE.1 + 1),
+    (FIXTURE_IMAGE.0 - 1, FIXTURE_IMAGE.1),
+];
 
 /// An attempt's `root` is opened only as a directory path, never through a
 /// symlink: the root readback and the restart root inventory share this.

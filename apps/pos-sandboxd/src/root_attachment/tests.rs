@@ -1031,7 +1031,7 @@ fn device_mutations() -> Vec<Mutation> {
             edit_slaves(o, |s| s[0].loop_device = None);
         }),
         ("substituted image", |o| {
-            edit_loop(o, |d| d.backing = Some((5, 7)));
+            edit_loop(o, |d| d.backing = Some(crate::OTHER_IMAGES[0]));
         }),
         ("unknown backing", |o| edit_loop(o, |d| d.backing = None)),
         ("offset", |o| edit_loop(o, |d| d.offset = Some(512))),
@@ -1937,7 +1937,7 @@ fn only_the_image_pai2_recorded_is_activated() -> TestResult {
     let tree = prepared_tree()?;
     let mut expected = expected(&component(&tree.prepared));
     assert_eq!(recorded_image_is_held(&tree.prepared, &expected), Ok(()));
-    for held in [(5, 7), (4, 6)] {
+    for held in crate::OTHER_IMAGES {
         expected.held = held;
         assert_eq!(
             recorded_image_is_held(&tree.prepared, &expected),

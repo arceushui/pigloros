@@ -326,15 +326,19 @@ mod cases {
     /// The loop is backed by another image than the one PAI2 recorded from
     /// the admission, or its backing file cannot be read.
     fn backing_edits() -> Vec<Edit> {
-        [Some((5, 7)), Some((4, 6)), None]
-            .into_iter()
-            .map(|backing| {
-                edit(
-                    move |observed| edit_loop(observed, |device| device.backing = backing),
-                    false,
-                )
-            })
-            .collect()
+        [
+            Some(crate::OTHER_IMAGES[0]),
+            Some(crate::OTHER_IMAGES[1]),
+            None,
+        ]
+        .into_iter()
+        .map(|backing| {
+            edit(
+                move |observed| edit_loop(observed, |device| device.backing = backing),
+                false,
+            )
+        })
+        .collect()
     }
 
     /// Edits of only the PAI3 record's identities: another activation of the

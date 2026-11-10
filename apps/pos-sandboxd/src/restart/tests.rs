@@ -949,8 +949,9 @@ mod cases {
             return Ok(());
         }
         // The overall deadline, 100 ms after setup, comes long before the
-        // cleanup's unit and release bounds (at least 2 s), so only it can
-        // end a hanging stop or detach.
+        // cleanup's unit and release bounds (at least 5 s), so only it can
+        // end a hanging stop or detach. A cleanup bound would also end it
+        // with `DeadlineElapsed`; the elapsed bound tells the two apart.
         let runtime = seed_with(Some(started_without_cgroup))?;
         for (stop, detach) in [
             (Outcome::Hangs, Outcome::Succeeds),
@@ -967,7 +968,7 @@ mod cases {
                 &network,
                 &survivors,
                 (
-                    cleanup_from(started, Duration::from_secs(2))?,
+                    cleanup_from(started, Duration::from_secs(5))?,
                     started + Duration::from_millis(100),
                 ),
                 (|_| std::future::ready(Ok(true)), swept(), this_boot()),
@@ -979,7 +980,7 @@ mod cases {
                 "{stop:?}/{detach:?}: {result:?}"
             );
             assert!(
-                elapsed < Duration::from_millis(1500),
+                elapsed < Duration::from_secs(3),
                 "{stop:?}/{detach:?} ended after {elapsed:?}"
             );
             assert_eq!(survivors.stopped()?, vec![unit(ROOT_ATTEMPT)?]);
@@ -1004,9 +1005,9 @@ mod cases {
         )? {
             return Ok(());
         }
-        // The roots are released well within the 500 ms release bound; the
+        // The roots are released well within the 1.5 s release bound; the
         // network cleanup then hangs and is ended only by the overall
-        // deadline, 1.5 s after setup.
+        // deadline, 2.5 s after setup.
         let runtime = seed(true)?;
         let host = host(Listing::Empty, Vec::new()).await?;
         let survivors = FakeSurvivors::succeeding(&host);
@@ -1019,8 +1020,8 @@ mod cases {
             &network,
             &survivors,
             (
-                cleanup_from(started, Duration::ZERO)?,
-                started + Duration::from_millis(1500),
+                cleanup_from(started, Duration::from_secs(1))?,
+                started + Duration::from_millis(2500),
             ),
             (|_| std::future::ready(Ok(true)), swept(), this_boot()),
         )
@@ -1031,7 +1032,7 @@ mod cases {
             "{result:?}"
         );
         assert!(
-            elapsed >= Duration::from_millis(1500),
+            elapsed >= Duration::from_millis(2500),
             "ended after {elapsed:?}"
         );
         assert_eq!(survivors.detached()?, vec![[2; 16], [ROOT_ATTEMPT; 16]]);
