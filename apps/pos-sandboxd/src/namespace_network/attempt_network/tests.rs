@@ -20,6 +20,7 @@ struct Journal {
     installed: Vec<String>,
     removed: Vec<String>,
     egress: Vec<String>,
+    endpoints: Vec<Vec<SocketAddr>>,
 }
 
 /// Host egress that records what it is asked to do, or refuses.
@@ -39,11 +40,15 @@ impl FakeEgress {
 }
 
 impl EgressControl for FakeEgress {
-    fn admit(&self, _endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+    fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+        entries(&self.journal).endpoints.push(endpoints.to_vec());
         self.record("admit", self.refuse_admission)
     }
 
     fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        entries(&self.journal)
+            .endpoints
+            .push(attempt.endpoints.clone());
         self.record(
             &format!("install {}", attempt.host_link.as_str()),
             self.refuse_install,
@@ -399,6 +404,19 @@ fn egress_is_admitted_first_installed_last_and_removed_first() -> TestResult {
 }
 
 #[test]
+fn host_egress_sees_an_ipv4_mapped_endpoint_as_ipv4() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let mapped = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10).to_ipv6_mapped(), 443));
+    drop(network.establish([1; 16], &[mapped])?);
+    assert_eq!(
+        entries(&journal).endpoints,
+        [vec![ENDPOINT], vec![ENDPOINT]]
+    );
+    Ok(())
+}
+
+#[test]
 fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() -> TestResult {
     let directory = tempfile::tempdir()?;
     let unadmitted = FakeEgress {
@@ -614,7 +632,7 @@ mod privileged {
 
     use super::*;
     use crate::namespace_network::netlink::{NetlinkSession, ROUTE};
-    use crate::namespace_network::{route, NetlinkNamespaceControl};
+    use crate::namespace_network::{route, ForwardingRecords, NetlinkNamespaceControl};
 
     /// Whether this process is the isolated one; otherwise run `name` there
     /// and require it to pass.
@@ -749,6 +767,76 @@ mod privileged {
             .and_then(|session| crate::namespace_network::host_egress::host_chains(&session))
     }
 
+    /// Whether host link `name` forwards IPv4.
+    fn forwarding_of(name: &str) -> TestResult<bool> {
+        let link = LinkName::new(name)?;
+        let forwarding = NetlinkSession::open(ROUTE).and_then(|session| {
+            session
+                .request(route::get_link(&link))
+                .and_then(crate::namespace_network::host_egress::link_forwarding)
+        })?;
+        Ok(forwarding.1)
+    }
+
+    /// Turn forwarding on or off for host link `name`.
+    fn set_forwarding_of(name: &str, on: bool) -> TestResult {
+        let link = LinkName::new(name)?;
+        NetlinkSession::open(ROUTE).and_then(|session| {
+            route::link_reply(session.request(route::get_link(&link)))
+                .and_then(|found| found.ok_or(NetlinkError::Unexpected))
+                .and_then(|found| {
+                    session.execute(vec![crate::namespace_network::host_egress::set_forwarding(
+                        found.index,
+                        on,
+                    )])
+                })
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_device_that_already_forwarded_is_left_forwarding() -> TestResult {
+        if !isolated("a_device_that_already_forwarded_is_left_forwarding")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        set_forwarding_of("tgt-h0", true)?;
+        let network = NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        );
+        let established = network.connector([9; 16], &[TARGET]).map(drop);
+        assert!(established.is_ok(), "{established:?}");
+        assert!(forwarding_of("tgt-h0")?);
+        assert!(ForwardingRecords::default().recorded()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn the_sweep_restores_recorded_forwarding() -> TestResult {
+        if !isolated("the_sweep_restores_recorded_forwarding")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let target = namespaces.create(&NamespaceName::for_attempt([0xee; 16]))?;
+        host_side(target.as_fd())?;
+        // A crash after the record and the change, before the teardown.
+        let session = NetlinkSession::open(ROUTE)?;
+        let link = route::link_reply(session.request(route::get_link(&LinkName::new("tgt-h0")?)))?
+            .ok_or("no such link")?;
+        ForwardingRecords::default().record(link.index, "tgt-h0")?;
+        set_forwarding_of("tgt-h0", true)?;
+        let swept = NetlinkNamespaceControl::new(namespaces).remove_orphans();
+        assert!(swept.is_ok(), "{swept:?}");
+        assert!(!forwarding_of("tgt-h0")?);
+        assert!(ForwardingRecords::default().recorded()?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed() -> TestResult {
         if !isolated("an_off_host_ipv6_endpoint_is_refused_before_anything_is_installed")? {
@@ -814,8 +902,13 @@ mod privileged {
             let peer = listener.accept().map(|(_, peer)| peer.ip());
             (connected, peer)
         });
-        // Dropping the connector took the attempt's chain away again.
+        // Dropping the connector took the attempt's chain away again, and
+        // turned the target link's forwarding back off.
         let left = host_chains();
+        let forwarding = forwarding_of("tgt-h0");
+        let records = ForwardingRecords::default()
+            .recorded()
+            .map_err(|error| error.to_string());
         let swept = control.remove_orphans();
         assert!(
             matches!(&outcome, Ok((Ok(()), Ok(peer))) if *peer == std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
@@ -825,6 +918,8 @@ mod privileged {
             left.map_err(|error| error.to_string()),
             Ok(Some(vec!["forward".to_owned(), "postrouting".to_owned()]))
         );
+        assert!(matches!(forwarding, Ok(false)), "{forwarding:?}");
+        assert_eq!(records, Ok(Vec::new()));
         assert!(swept.is_ok(), "{swept:?}");
         assert!(matches!(host_chains(), Ok(None)));
         Ok(())

@@ -319,6 +319,15 @@ impl NetlinkNamespaceControl {
     /// Fails if any of them cannot be removed, or remains afterwards.
     pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
         super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
+            .and_then(|()| {
+                super::host_egress::restore_forwarding(
+                    &super::host_egress::ForwardingRecords::default(),
+                )
+                .map_err(|error| match error {
+                    super::host_egress::HostEgressError::Netlink(error) => error,
+                    _ => NetlinkError::Residual,
+                })
+            })
             .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
             .and_then(|orphans| {
                 orphans.iter().try_for_each(|link| {
