@@ -1551,7 +1551,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '1d2c969744d05e1b78163d43da023e05484e4e46a15f380b7ad71693faea5cb6',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '325e26461e331f804c810140858791205246c09c118995e537f1d129340acfe5',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': 'b602b19fcffe9dd47c694737603ac5de0fe7f24370f402ac3c215694d75c0a31',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '2fd540f86b5bcf37a49f82c5b47b0013983b4a611b1f672a00bf506e1b208afc',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',
@@ -1569,8 +1569,8 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '8e826240756a79be6a791869846edf305e5be147544a6c93ede9bbbe0fbb718b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
-    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': 'a161d5f03a06cc291d27bdeba1d9c6feb4394a2ebae9c97985d9509653a180fd',
-    'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': 'cd85193609c3a404dd745118d87b585cca401ee1385ba9765d97f2929275dd66',
+    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '09e8b45996cff36d5dda6f2e1bd0ace799171a5b32a926f30b44be5d31a59624',
+    'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': 'dc94b3e5cf1353fe7f65d225d8ad30cdccc071426e4e997c3ee79648fe354128',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '9c29db3c19998534c3b80c71f31afd0977106b574de062cc93f6cc291c4d9dc7',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',

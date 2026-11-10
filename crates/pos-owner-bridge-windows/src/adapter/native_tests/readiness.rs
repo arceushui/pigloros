@@ -282,9 +282,12 @@ fn run_ceremony(
         }
     }
     surface.report_readiness_timing();
+    let resource = crate::Native::readiness_resource_snapshot();
+    let _logged = writeln!(std::io::stderr(),
+        "NATIVE_G3_RESOURCE_SNAPSHOT case={number} fields=(captured_case,entries,overflow,subscriptions) snapshot={resource:?}");
     crate::Native::readiness_navigation_case(None);
     if let Some(error) = failure {
-        return Err(error);
+        return Err(format!("{error}; resource snapshot={resource:?}").into());
     }
     if receipt.is_none_or(|received| received >= deadline)
         || !matches!(
@@ -294,7 +297,7 @@ fn run_ceremony(
             ))
         )
     {
-        return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}").into());
+        return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}, resource snapshot={resource:?}").into());
     }
     Ok(())
 }

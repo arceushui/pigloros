@@ -17,6 +17,7 @@ use crate::{EventKind, EventSink, NativeAction, NativeEvent};
 std::thread_local! {
     static DENIAL_FIXTURE: std::cell::Cell<crate::ResourceDenialFixture> =
         const { std::cell::Cell::new(crate::ResourceDenialFixture::Normal) };
+    static READINESS_RESOURCE: std::cell::RefCell<ResourceRegistry> = const { std::cell::RefCell::new(ResourceRegistry::new()) };
 }
 
 #[cfg(test)]
@@ -24,6 +25,47 @@ impl crate::Native {
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
         super::denial::reset_fixture();
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ResourceRegistry {
+    trace: Option<Rc<ResourceTrace>>,
+    subscriptions: u8,
+}
+
+#[cfg(test)]
+impl ResourceRegistry {
+    const fn new() -> Self {
+        Self {
+            trace: None,
+            subscriptions: 0,
+        }
+    }
+
+    fn register(&mut self, trace: Rc<ResourceTrace>) {
+        self.trace = Some(trace);
+        self.subscriptions = self.subscriptions.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> Option<(Option<u64>, u8, bool, u8)> {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.snapshot(self.subscriptions))
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reset_readiness_resource() {
+    READINESS_RESOURCE.with(|current| *current.borrow_mut() = ResourceRegistry::new());
+}
+
+#[cfg(test)]
+impl crate::Native {
+    // None means no recorded subscription; a captured case may also be absent.
+    pub(crate) fn readiness_resource_snapshot() -> Option<(Option<u64>, u8, bool, u8)> {
+        READINESS_RESOURCE.with(|current| current.borrow().snapshot())
     }
 }
 
@@ -42,14 +84,24 @@ struct ResourceTrace {
 
 #[cfg(test)]
 impl ResourceTrace {
+    fn snapshot(&self, subscriptions: u8) -> (Option<u64>, u8, bool, u8) {
+        let count = self.callbacks.get();
+        (
+            self.case.map(|(case, _)| case),
+            count.min(8),
+            count > 8,
+            subscriptions,
+        )
+    }
+
     fn begin(&self) -> Option<u8> {
         use std::io::Write as _;
-        let (case, started) = self.case?;
         let count = self.callbacks.get();
         if count >= 9 {
             return None;
         }
         self.callbacks.set(count + 1);
+        let (case, started) = self.case?;
         if count == 8 {
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
@@ -101,11 +153,13 @@ impl ResourceTrace {
 fn resource_trace_retains_its_case_and_bounds_callback_output() {
     let start = std::time::Instant::now();
     crate::Native::readiness_navigation_case(Some((11, start)));
-    let trace = ResourceTrace {
+    let trace = Rc::new(ResourceTrace {
         prefix: "NATIVE_RESOURCE_UNIT",
         case: super::navigation::readiness_context(),
         callbacks: std::cell::Cell::new(0),
-    };
+    });
+    let mut registry = ResourceRegistry::new();
+    registry.register(Rc::clone(&trace));
     crate::Native::readiness_navigation_case(Some((12, start)));
     assert_eq!(trace.case, Some((11, start)));
     for _ in 0..8 {
@@ -114,6 +168,11 @@ fn resource_trace_retains_its_case_and_bounds_callback_output() {
     assert!(trace.begin().is_none());
     assert!(trace.begin().is_none());
     assert_eq!(trace.callbacks.get(), 9);
+    assert_eq!(registry.snapshot(), Some((Some(11), 8, true, 1)));
+    registry.register(Rc::clone(&trace));
+    assert_eq!(registry.snapshot(), Some((Some(11), 8, true, 2)));
+    registry = ResourceRegistry::new();
+    assert!(registry.snapshot().is_none());
     trace.decision(Some(1), Some(true), NativeAction::Allow);
     trace.returning(Some(1), true);
     let disabled = ResourceTrace {
@@ -122,7 +181,13 @@ fn resource_trace_retains_its_case_and_bounds_callback_output() {
         callbacks: std::cell::Cell::new(0),
     };
     assert!(disabled.begin().is_none());
-    assert_eq!(disabled.callbacks.get(), 0);
+    assert_eq!(disabled.callbacks.get(), 1);
+    for _ in 0..10 {
+        assert!(disabled.begin().is_none());
+    }
+    assert_eq!(disabled.callbacks.get(), 9);
+    assert_eq!(disabled.snapshot(1), (None, 8, true, 1));
+    assert!(crate::Native::readiness_resource_snapshot().is_none());
     crate::Native::readiness_navigation_case(None);
 }
 
@@ -151,11 +216,13 @@ pub(super) fn install(
     let intercepted = view.clone();
     let remove = view.clone();
     #[cfg(test)]
-    let trace = ResourceTrace {
+    let trace = Rc::new(ResourceTrace {
         prefix: "NATIVE_RESOURCE",
         case: super::navigation::readiness_context(),
         callbacks: std::cell::Cell::new(0),
-    };
+    });
+    #[cfg(test)]
+    let retained_trace = Rc::clone(&trace);
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
         #[cfg(test)]
         let reporting = trace.begin();
@@ -195,6 +262,10 @@ pub(super) fn install(
             unsafe { remove.remove_WebResourceRequested(token) }
         },
     )?;
+    #[cfg(test)]
+    {
+        READINESS_RESOURCE.with(|current| current.borrow_mut().register(retained_trace));
+    }
     // SAFETY: fixed wildcard and ALL context; the installed handler selects
     // the pre-created denial unless the exact owner document is admitted.
     unsafe { view.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) }

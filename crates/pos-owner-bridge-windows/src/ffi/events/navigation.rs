@@ -306,6 +306,7 @@ pub(super) fn readiness_context() -> Option<(u64, std::time::Instant)> {
 #[cfg(test)]
 impl crate::Native {
     pub(crate) fn readiness_navigation_case(case: Option<(u64, std::time::Instant)>) {
+        super::resource::reset_readiness_resource();
         READINESS_CASE.with(|current| current.set(case));
         READINESS_OPERATIONS.with(|operations| operations.borrow_mut().clear());
     }

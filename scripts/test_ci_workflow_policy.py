@@ -883,6 +883,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         for name, before, after in (
             (
                 "Measure only shim source coverage",
+                "--no-fail-fast",
+                "",
+            ),
+            (
+                "Measure only shim source coverage",
                 "-- --include-ignored",
                 "-- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle",
             ),

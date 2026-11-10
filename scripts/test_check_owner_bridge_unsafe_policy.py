@@ -2011,6 +2011,10 @@ def test_external_qualification_is_sealed() -> None:
     if resource not in CHECKER.EXTERNAL_FIXTURE_SOURCES:
         raise SystemExit("resource callback diagnostic source binding was removed")
     mutations = (
+        (resource, 'current.borrow_mut().register(retained_trace)', 'drop(retained_trace)'),
+        (resource, 'self.callbacks.set(count + 1);', ''),
+        (navigation, 'super::resource::reset_readiness_resource();', ''),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'let resource = crate::Native::readiness_resource_snapshot();', 'let resource: Option<(Option<u64>, u8, bool, u8)> = None;'),
         (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'timing.report(number);', ''),
         (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'timing.after_receipt.last_step_return =\n                            timing.before_receipt.last_step_return;', ''),
         (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'let step = driver.step(&mut env(surface, loopback, store));', 'let step = Step::Pending;'),
