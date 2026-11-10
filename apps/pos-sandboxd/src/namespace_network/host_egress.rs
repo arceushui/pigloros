@@ -989,11 +989,12 @@ impl HostEgress {
         let host_link =
             super::route::link_reply(route.request(super::route::get_link(&attempt.host_link)))?
                 .ok_or(NetlinkError::Unrepresentable)?;
+        let mut installed = self
+            .installed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         install_locked(
-            &mut self
-                .installed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            &mut installed,
             &self.records,
             (&route, &netfilter),
             host_link.index,
@@ -1010,15 +1011,11 @@ impl HostEgress {
     ) -> Result<(), HostEgressError> {
         let route = open(ROUTE)?;
         let netfilter = open(NETFILTER)?;
-        remove_locked(
-            &mut self
-                .installed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            &self.records,
-            (&route, &netfilter),
-            attempt,
-        )
+        let mut installed = self
+            .installed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        remove_locked(&mut installed, &self.records, (&route, &netfilter), attempt)
     }
 }
 
