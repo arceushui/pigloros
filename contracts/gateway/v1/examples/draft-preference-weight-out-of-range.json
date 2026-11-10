@@ -10,7 +10,7 @@
       "weights": [
         {
           "dimension": "nature",
-          "weight": 1.5
+          "weight_micro": 1500000
         }
       ]
     }

@@ -46,7 +46,7 @@
           "state_schema_id": "society.means.v1",
           "state_digest": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
           "value": {
-            "trust": 0.6
+            "trust_micro": 600000
           }
         },
         {

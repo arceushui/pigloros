@@ -33,11 +33,11 @@
       "weights": [
         {
           "dimension": "nature",
-          "weight": 0.8
+          "weight_micro": 800000
         },
         {
           "dimension": "cost",
-          "weight": -0.4
+          "weight_micro": -400000
         }
       ],
       "parent_revision": null,

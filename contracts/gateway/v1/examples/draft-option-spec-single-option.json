@@ -15,7 +15,7 @@
             "nature",
             "quiet"
           ],
-          "lean_hint": 0.2
+          "lean_hint_micro": 200000
         }
       ]
     }

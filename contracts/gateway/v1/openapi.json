@@ -1513,7 +1513,7 @@
         "tags": [
           "simulated-action"
         ],
-        "description": "Draft (#306): Submit one typed simulated ProposedAction: Principal decision, host-owned ActionApprover, then an atomic commit. No Actuation. Not served yet; only its golden examples validate. #306 turns it into a served, drift-checked operation.",
+        "description": "Draft (#306): Submit one typed simulated ProposedAction: Principal decision, host-owned ActionApprover, then an atomic commit. No Actuation. It answers synchronously with the committed receipt, not a 202 admission, because ADR-057 has the call await a bounded truthful native result (Visible acceptance or a typed denial) and the Golden Path returns the Event receipt with its Projection cursor; an indeterminate commit is a retryable 503 that the same key resolves. Not served yet; only its golden examples validate. #306 turns it into a served, drift-checked operation.",
         "parameters": [
           {
             "$ref": "#/components/parameters/PreviewId"
@@ -1671,7 +1671,8 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 9007199254740991
             },
             "description": "The Projection Cut to read; the latest when absent."
           },
@@ -3262,7 +3263,8 @@
           },
           "seq": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "event_schema_id": {
             "type": "string",
@@ -3306,7 +3308,7 @@
         "minLength": 1,
         "maxLength": 128,
         "pattern": "^[a-z][a-z0-9_.-]*$",
-        "description": "A canonical lower-case identifier: a capability, dimension, Plugin, rule or option key."
+        "description": "A canonical lower-case ASCII identifier (so its length in characters is its length in bytes): a capability, dimension, Plugin, rule or option key."
       },
       "Label": {
         "$id": "urn:pigloros:gateway:v1:schema:label",
@@ -3315,7 +3317,7 @@
         "minLength": 1,
         "maxLength": 128,
         "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
-        "description": "Participant-authored display text without control characters."
+        "description": "Participant-authored display text without control characters. Its UTF-8 encoding is at most 128 bytes (`x-pigloros-limits.label_bytes`, enforced at admission); `maxLength` is the coarse character bound that follows from it."
       },
       "ExecutionProfileId": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile-id",
@@ -3527,12 +3529,14 @@
           "revision": {
             "type": "integer",
             "minimum": 1,
-            "description": "An immutable revision; a change is a new revision."
+            "description": "An immutable revision; a change is a new revision.",
+            "maximum": 9007199254740991
           },
           "generation": {
             "type": "integer",
             "minimum": 0,
-            "description": "A monotonic generation; it never decreases."
+            "description": "A monotonic generation; it never decreases.",
+            "maximum": 9007199254740991
           },
           "provenance": {
             "$ref": "urn:pigloros:gateway:v1:schema:provenance-reference"
@@ -3585,7 +3589,7 @@
           "unverifiable-artifacts-missing",
           "incompatible-profile"
         ],
-        "description": "The ADR-060 ReplayClaim. Erasure and revocation only preserve or weaken it; a later generation never presents a stronger claim."
+        "description": "The ADR-060 ReplayClaim, strongest first: `exact`, then `exact-authoritative-with-redacted-views` (authoritative Events and Projections still reproduce; some views are redacted), then `structural-only`, then `unverifiable-artifacts-missing`; `incompatible-profile` is orthogonal. Erasure and revocation only preserve or weaken it, so a `degraded` resource never claims `exact`. That a later generation never strengthens the claim is a runtime obligation (#307/#309); a single document cannot show it."
       },
       "RevisionRef": {
         "$id": "urn:pigloros:gateway:v1:schema:revision-ref",
@@ -3604,7 +3608,8 @@
           },
           "revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "digest": {
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
@@ -3627,7 +3632,8 @@
           },
           "revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           }
         }
       },
@@ -3813,14 +3819,17 @@
               "additionalProperties": false,
               "required": [
                 "rule_id",
-                "value"
+                "value_micro"
               ],
               "properties": {
                 "rule_id": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "value": {
-                  "type": "number"
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                 }
               }
             }
@@ -3860,7 +3869,7 @@
               "required": [
                 "entity_id",
                 "dimension",
-                "value"
+                "value_micro"
               ],
               "properties": {
                 "entity_id": {
@@ -3869,8 +3878,11 @@
                 "dimension": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "value": {
-                  "type": "number"
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                 }
               }
             }
@@ -3910,7 +3922,8 @@
         "properties": {
           "parent_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "descriptor": {
             "$ref": "urn:pigloros:gateway:v1:schema:scenario-room-input"
@@ -3949,7 +3962,8 @@
           },
           "revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "schema_version": {
             "const": 1
@@ -4010,14 +4024,17 @@
               "additionalProperties": false,
               "required": [
                 "rule_id",
-                "value"
+                "value_micro"
               ],
               "properties": {
                 "rule_id": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "value": {
-                  "type": "number"
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                 }
               }
             }
@@ -4057,7 +4074,7 @@
               "required": [
                 "entity_id",
                 "dimension",
-                "value"
+                "value_micro"
               ],
               "properties": {
                 "entity_id": {
@@ -4066,8 +4083,11 @@
                 "dimension": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "value": {
-                  "type": "number"
+                "value_micro": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                 }
               }
             }
@@ -4128,7 +4148,8 @@
               "integer",
               "null"
             ],
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "commit": {
             "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
@@ -4155,20 +4176,20 @@
               "additionalProperties": false,
               "required": [
                 "dimension",
-                "weight"
+                "weight_micro"
               ],
               "properties": {
                 "dimension": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "weight": {
-                  "type": "number",
-                  "minimum": -1,
-                  "maximum": 1
+                "weight_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
                 }
               }
             },
-            "description": "Named dimension weights in [-1, 1]; a dimension appears once."
+            "description": "Named dimension weights in [-1, 1] as integer micro-units; a dimension appears once (checked at admission)."
           },
           "parent": {
             "$ref": "urn:pigloros:gateway:v1:schema:revision-parent"
@@ -4213,27 +4234,28 @@
               "additionalProperties": false,
               "required": [
                 "dimension",
-                "weight"
+                "weight_micro"
               ],
               "properties": {
                 "dimension": {
                   "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                 },
-                "weight": {
-                  "type": "number",
-                  "minimum": -1,
-                  "maximum": 1
+                "weight_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
                 }
               }
             },
-            "description": "Named dimension weights in [-1, 1]; a dimension appears once."
+            "description": "Named dimension weights in [-1, 1] as integer micro-units; a dimension appears once (checked at admission)."
           },
           "parent_revision": {
             "type": [
               "integer",
               "null"
             ],
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "digest": {
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
@@ -4277,24 +4299,30 @@
                     "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                   }
                 },
-                "lean_hint": {
-                  "type": "number",
-                  "minimum": -1,
-                  "maximum": 1
+                "lean_hint_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
                 },
                 "coordinates": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "x",
-                    "z"
+                    "x_micro",
+                    "z_micro"
                   ],
                   "properties": {
-                    "x": {
-                      "type": "number"
+                    "x_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                     },
-                    "z": {
-                      "type": "number"
+                    "z_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                     }
                   }
                 }
@@ -4359,24 +4387,30 @@
                     "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
                   }
                 },
-                "lean_hint": {
-                  "type": "number",
-                  "minimum": -1,
-                  "maximum": 1
+                "lean_hint_micro": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
                 },
                 "coordinates": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "x",
-                    "z"
+                    "x_micro",
+                    "z_micro"
                   ],
                   "properties": {
-                    "x": {
-                      "type": "number"
+                    "x_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                     },
-                    "z": {
-                      "type": "number"
+                    "z_micro": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "description": "A value in integer micro-units (10^-6) for deterministic Replay."
                     }
                   }
                 }
@@ -4389,7 +4423,8 @@
               "integer",
               "null"
             ],
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "digest": {
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
@@ -4428,7 +4463,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:decision-preview",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One Decision Preview. Admission (`admitted`) is never a commit claim; only `committed` names an Event sequence. Every proposal is inert and no route creates a real-world effect.",
+        "description": "One Decision Preview. Admission (`admitted`) is never a commit claim; only `committed` names an Event sequence. `committed` is null exactly while the preview is `admitted` or `failed` (pre-commit); every later state, including `degraded`, follows a commit. Every proposal is inert and no route creates a real-world effect.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -4606,7 +4641,31 @@
             "const": "none"
           }
         },
-        "unevaluatedProperties": false
+        "unevaluatedProperties": false,
+        "if": {
+          "properties": {
+            "state": {
+              "enum": [
+                "admitted",
+                "failed"
+              ]
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "committed": {
+              "type": "null"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "committed": {
+              "$ref": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+            }
+          }
+        }
       },
       "SimulatedActionRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:simulated-action-request",
@@ -4637,7 +4696,8 @@
           "observed_seq": {
             "type": "integer",
             "minimum": 0,
-            "description": "The Logical Head the client observed; a moved head is `append-conflict`."
+            "description": "The Logical Head the client observed; a moved head is `append-conflict`.",
+            "maximum": 9007199254740991
           }
         }
       },
@@ -4673,12 +4733,14 @@
           },
           "at_seq": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "fold_cursor": {
             "type": "integer",
             "minimum": 0,
-            "description": "The Projection Cut: the last sequence folded."
+            "description": "The Projection Cut: the last sequence folded.",
+            "maximum": 9007199254740991
           },
           "entries": {
             "type": "array",
@@ -4738,7 +4800,7 @@
           "target_entity_id",
           "field",
           "operation",
-          "value"
+          "value_micro"
         ],
         "properties": {
           "ordinal": {
@@ -4748,7 +4810,8 @@
           },
           "effective_tick": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "target_entity_id": {
             "$ref": "urn:pigloros:gateway:v1:schema:ulid"
@@ -4762,8 +4825,11 @@
               "add"
             ]
           },
-          "value": {
-            "type": "number"
+          "value_micro": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "A value in integer micro-units (10^-6) for deterministic Replay."
           }
         }
       },
@@ -4792,7 +4858,8 @@
               },
               "seq": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 9007199254740991
               }
             }
           },
@@ -4852,10 +4919,50 @@
         "$id": "urn:pigloros:gateway:v1:schema:ensemble",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "An ordered ensemble of generation-isolated Forks with complete endogenous suffix recomputation (ADR-064). A Fork that is not `complete` exposes no suffix digest: no partial suffix is authoritative.",
+        "description": "An ordered ensemble of generation-isolated Forks with complete endogenous suffix recomputation (ADR-064). A Fork that is not `complete` exposes no suffix digest: no partial suffix is authoritative, and an `incomplete` Fork names its failure. A `complete` ensemble has only complete Forks. Fork ordinals are unique and contiguous from 0 in array order; JSON Schema cannot express that, so the contract check enforces it on every example.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "complete"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "forks": {
+                  "items": {
+                    "properties": {
+                      "state": {
+                        "const": "complete"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "degraded"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "replay_claim": {
+                  "not": {
+                    "const": "exact"
+                  }
+                }
+              }
+            }
           }
         ],
         "required": [
@@ -4905,7 +5012,8 @@
               },
               "seq": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 9007199254740991
               }
             }
           },
@@ -4952,7 +5060,8 @@
                 },
                 "fork_generation": {
                   "type": "integer",
-                  "minimum": 0
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 },
                 "state": {
                   "enum": [
@@ -4976,7 +5085,8 @@
                     "integer",
                     "null"
                   ],
-                  "minimum": 0
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 },
                 "failure_code": {
                   "enum": [
@@ -4987,30 +5097,61 @@
                   ]
                 }
               },
-              "if": {
-                "properties": {
-                  "state": {
-                    "const": "complete"
-                  }
-                }
-              },
-              "then": {
-                "properties": {
-                  "suffix_digest": {
-                    "$ref": "urn:pigloros:gateway:v1:schema:digest"
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "complete"
+                      }
+                    }
                   },
-                  "failure_code": {
-                    "const": null
+                  "then": {
+                    "properties": {
+                      "suffix_digest": {
+                        "$ref": "urn:pigloros:gateway:v1:schema:digest"
+                      },
+                      "failure_code": {
+                        "const": null
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "suffix_digest": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "incomplete"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "failure_code": {
+                        "enum": [
+                          "counterfactual-incomplete",
+                          "dependency-graph-incomplete",
+                          "resource-limit-exceeded"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "failure_code": {
+                        "const": null
+                      }
+                    }
                   }
                 }
-              },
-              "else": {
-                "properties": {
-                  "suffix_digest": {
-                    "type": "null"
-                  }
-                }
-              }
+              ]
             },
             "contains": {
               "properties": {
@@ -5062,10 +5203,50 @@
         "$id": "urn:pigloros:gateway:v1:schema:replay",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One Replay: the ADR-058 class and outcome with its ADR-060 ReplayClaim. A computational match never strengthens the claim.",
+        "description": "One Replay: the ADR-058 class and outcome with its ADR-060 ReplayClaim, an independent tuple. A computational match never strengthens the claim. `verified-exact` with `exact-authoritative-with-redacted-views` is coherent (the authoritative outputs matched; views are redacted), but `verified-exact` is impossible once only structural or no artifact evidence remains or the profile is incompatible. A `degraded` Replay never claims `exact`.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "degraded"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "replay_claim": {
+                  "not": {
+                    "const": "exact"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "replay_claim": {
+                  "enum": [
+                    "structural-only",
+                    "unverifiable-artifacts-missing",
+                    "incompatible-profile"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "verification_outcome": {
+                  "not": {
+                    "const": "verified-exact"
+                  }
+                }
+              }
+            }
           }
         ],
         "required": [
@@ -5186,11 +5367,13 @@
               },
               "minimum_samples": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 9007199254740991
               },
               "observed_samples": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             }
           },
@@ -5319,7 +5502,8 @@
                 },
                 "seq": {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 1,
+                  "maximum": 9007199254740991
                 },
                 "event_id": {
                   "$ref": "urn:pigloros:gateway:v1:schema:ulid"
@@ -5359,7 +5543,8 @@
               "properties": {
                 "ordinal": {
                   "type": "integer",
-                  "minimum": 0
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 },
                 "kind": {
                   "enum": [
@@ -5373,7 +5558,8 @@
                 },
                 "seq": {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 1,
+                  "maximum": 9007199254740991
                 },
                 "node_digest": {
                   "$ref": "urn:pigloros:gateway:v1:schema:digest"
@@ -5549,10 +5735,44 @@
         "$id": "urn:pigloros:gateway:v1:schema:export",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "A minimized, content-addressed, subject-authorized export and its ReproManifest closure, paged by `next_cursor`. Later erasure redacts managed records and weakens the ReplayClaim; it does not claim that external copies vanished.",
+        "description": "A minimized, content-addressed, subject-authorized export and its ReproManifest closure, paged by `next_cursor`. An `exported` export names its ReproManifest. Later erasure redacts managed records and weakens the ReplayClaim (a `degraded` export never claims `exact`); it does not claim that external copies vanished.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "exported"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "repro_manifest": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "degraded"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "replay_claim": {
+                  "not": {
+                    "const": "exact"
+                  }
+                }
+              }
+            }
           }
         ],
         "required": [
@@ -5784,7 +6004,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:erasure",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "The authenticated subject's own monotonic erasure. Destroyed values are never reconstructed and the ReplayClaim never strengthens.",
+        "description": "The authenticated subject's own erasure. The ADR-060 lifecycle is monotonic, a `complete` erasure has as many positive acknowledgements as required, destroyed values are never reconstructed and the ReplayClaim never strengthens: these are runtime obligations of #309 that a single document cannot show, not schema rules.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -5965,7 +6185,8 @@
         "required": true,
         "schema": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "PageCursor": {
@@ -6228,26 +6449,27 @@
     },
     "identifier_length": {
       "value": 128,
-      "unit": "characters",
+      "unit": "bytes",
       "scope": "structural",
       "origin": "code",
-      "source": "pos-core MAX_AUTHORITY_TEXT_BYTES; ADR-064 owner IDs 1-128 bytes",
+      "source": "pos-core MAX_AUTHORITY_TEXT_BYTES; ADR-064 owner IDs 1-128 bytes; identifiers are ASCII, so maxLength in characters is the byte bound",
       "enforced_by": {
         "schema": [
           "/components/schemas/DomainKey/maxLength"
         ]
       }
     },
-    "label_length": {
+    "label_bytes": {
       "value": 128,
-      "unit": "characters",
+      "unit": "bytes",
       "scope": "structural",
       "origin": "code",
-      "source": "pos-crypto plugin_manifest MAX_LABEL_BYTES",
+      "source": "pos-crypto plugin_manifest MAX_LABEL_BYTES; UTF-8 bytes checked at admission, Label maxLength is only the coarse character bound",
       "enforced_by": {
-        "schema": [
-          "/components/schemas/Label/maxLength"
-        ]
+        "runtime": {
+          "code": "invalid-request",
+          "status": 400
+        }
       }
     },
     "idempotency_key_length": {

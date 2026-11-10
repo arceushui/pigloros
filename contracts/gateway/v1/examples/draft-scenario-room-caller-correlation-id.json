@@ -27,7 +27,7 @@
         "rules": [
           {
             "rule_id": "society.nudge.scale",
-            "value": 0.25
+            "value_micro": 250000
           }
         ],
         "participants": [
@@ -44,7 +44,7 @@
           {
             "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
             "dimension": "trust",
-            "value": 0.6
+            "value_micro": 600000
           }
         ],
         "governance_ref": "01JC0GATEWAYW90G0VERN00001",

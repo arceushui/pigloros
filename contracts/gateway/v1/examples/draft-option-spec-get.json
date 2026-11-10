@@ -37,7 +37,7 @@
             "nature",
             "quiet"
           ],
-          "lean_hint": 0.2
+          "lean_hint_micro": 200000
         },
         {
           "key": "city",
@@ -47,8 +47,8 @@
             "culture"
           ],
           "coordinates": {
-            "x": 1.5,
-            "z": -2.0
+            "x_micro": 1500000,
+            "z_micro": -2000000
           }
         }
       ],

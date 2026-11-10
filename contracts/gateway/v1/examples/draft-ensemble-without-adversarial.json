@@ -27,7 +27,7 @@
               "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
               "field": "trust",
               "operation": "set",
-              "value": 0.4
+              "value_micro": 400000
             }
           ]
         },
@@ -41,7 +41,7 @@
               "target_entity_id": "01JC0GATEWAYW90S0C1ETY0001",
               "field": "trust",
               "operation": "set",
-              "value": 0.4
+              "value_micro": 400000
             }
           ]
         }

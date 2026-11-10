@@ -356,6 +356,118 @@ class CheckGatewayContractTest(unittest.TestCase):
         partial["forks"][1]["suffix_digest"] = "0" * 64
         self.assertTrue(subject.schema_errors(partial, schema))
 
+    def test_a_preview_names_a_commit_exactly_after_committing(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/DecisionPreview"}
+        committed = example("draft-decision-preview-committed")["response"]["body"]
+        admitted = example("draft-decision-preview-admitted-not-committed")["response"]["body"]
+        self.assertEqual(subject.schema_errors(committed, schema), [])
+        self.assertEqual(subject.schema_errors(admitted, schema), [])
+        for state in ("admitted", "failed"):
+            self.assertTrue(subject.schema_errors({**committed, "state": state}, schema))
+        for state in ("committed", "projected", "complete", "exported", "degraded"):
+            self.assertTrue(subject.schema_errors({**admitted, "state": state}, schema))
+
+    def test_a_degraded_resource_never_claims_exact(self) -> None:
+        subject = contract()
+        for name, schema_name in (
+            ("draft-ensemble-complete", "Ensemble"),
+            ("draft-replay-degraded", "Replay"),
+            ("draft-export-exported", "Export"),
+        ):
+            body = example(name)["response"]["body"]
+            schema = {"$ref": f"#/components/schemas/{schema_name}"}
+            degraded = {**body, "state": "degraded"}
+            redacted = {**degraded, "replay_claim": "exact-authoritative-with-redacted-views"}
+            self.assertEqual(subject.schema_errors(redacted, schema), [])
+            self.assertTrue(subject.schema_errors({**degraded, "replay_claim": "exact"}, schema))
+
+    def test_a_replay_without_full_evidence_is_never_verified_exact(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/Replay"}
+        replay = example("draft-replay-degraded")["response"]["body"]
+        self.assertEqual(subject.schema_errors(replay, schema), [])
+        for claim in ("structural-only", "unverifiable-artifacts-missing", "incompatible-profile"):
+            self.assertTrue(subject.schema_errors({**replay, "replay_claim": claim}, schema))
+            weaker = {**replay, "replay_claim": claim, "verification_outcome": "diverged"}
+            self.assertEqual(subject.schema_errors(weaker, schema), [])
+
+    def test_a_complete_ensemble_has_only_complete_forks(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/Ensemble"}
+        incomplete = example("draft-ensemble-incomplete")["response"]["body"]
+        self.assertTrue(subject.schema_errors({**incomplete, "state": "complete"}, schema))
+        unnamed = copy.deepcopy(incomplete)
+        unnamed["forks"][1]["failure_code"] = None
+        self.assertTrue(subject.schema_errors(unnamed, schema))
+        forking = copy.deepcopy(incomplete)
+        forking["forks"][1]["state"] = "forking"
+        self.assertTrue(subject.schema_errors(forking, schema))
+        forking["forks"][1]["failure_code"] = None
+        self.assertEqual(subject.schema_errors({**forking, "state": "forking"}, schema), [])
+
+    def test_fork_ordinals_are_contiguous_in_examples(self) -> None:
+        examples = checker.load_examples()
+        for _, item in examples:
+            if item["request"].get("path", {}).get("ensemble_id"):
+                item["response"]["body"]["forks"][1]["ordinal"] = 0
+        with self.assertRaisesRegex(checker.ContractError, "ordinals"):
+            checker.check_examples(contract(), examples)
+
+    def test_an_exported_export_names_its_repro_manifest(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/Export"}
+        exported = example("draft-export-exported")["response"]["body"]
+        self.assertEqual(subject.schema_errors(exported, schema), [])
+        self.assertTrue(subject.schema_errors({**exported, "repro_manifest": None}, schema))
+        admitted = {**exported, "state": "admitted", "repro_manifest": None}
+        self.assertEqual(subject.schema_errors(admitted, schema), [])
+
+    def test_an_identifier_is_ascii_so_its_length_is_its_byte_length(self) -> None:
+        subject = contract()
+        schema = {"$ref": "urn:pigloros:gateway:v1:schema:domain-key"}
+        self.assertEqual(subject.schema_errors("cafe", schema), [])
+        self.assertTrue(subject.schema_errors("café", schema))
+        enforced = DOCUMENT["x-pigloros-limits"]["label_bytes"]["enforced_by"]
+        self.assertEqual(enforced, {"runtime": {"code": "invalid-request", "status": 400}})
+
+    def test_draft_values_are_bounded_integers(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        envelope = document["components"]["schemas"]["ResourceEnvelope"]["properties"]
+        del envelope["generation"]["maximum"]
+        with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        document["components"]["parameters"]["Revision"]["schema"].pop("maximum")
+        with self.assertRaisesRegex(checker.ContractError, "unbounded integer"):
+            checker.check_description(contract(document=document))
+        document = copy.deepcopy(DOCUMENT)
+        request = document["components"]["schemas"]["CreatePreferenceRequest"]["properties"]
+        request["weights"]["items"]["properties"]["weight_micro"]["type"] = "number"
+        with self.assertRaisesRegex(checker.ContractError, "JSON number"):
+            checker.check_description(contract(document=document))
+        subject = contract()
+        body = example("draft-preference-create")["request"]["body"]
+        schema = {"$ref": "#/components/schemas/CreatePreferenceRequest"}
+        self.assertEqual(subject.schema_errors(body, schema), [])
+        fractional = {"weights": [{"dimension": "nature", "weight_micro": 0.5}]}
+        self.assertTrue(subject.schema_errors(fractional, schema))
+        operation = DOCUMENT["paths"][
+            "/v1/preferences/{preference_id}/revisions/{revision}"
+        ]["get"]
+        path = {"preference_id": checker.SAMPLE_ULID, "revision": 2**53}
+        self.assertTrue(checker.parameter_errors(operation, subject, "path", path))
+        self.assertEqual(
+            checker.parameter_errors(operation, subject, "path", {**path, "revision": 1}), []
+        )
+
+    def test_a_draft_creation_answers_a_closed_or_enveloped_body(self) -> None:
+        document = copy.deepcopy(DOCUMENT)
+        answer = document["paths"]["/v1/preferences"]["post"]["responses"]["201"]["content"]
+        answer["application/json"]["schema"] = {"$ref": "#/components/schemas/ActionRequest"}
+        with self.assertRaisesRegex(checker.ContractError, "closed or enveloped"):
+            checker.check_description(contract(document=document))
+
     def test_path_parameters_of_an_example_are_validated(self) -> None:
         subject = contract()
         operation = self.operation(subject, "GET", "/v1/timelines/x/events")

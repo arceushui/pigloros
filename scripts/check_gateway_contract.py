@@ -142,6 +142,7 @@ class Contract:
     def operation_for(self, method: str, path: str) -> tuple[str, dict]:
         """The served operation whose path template matches a concrete request path."""
         base = path.split("?", 1)[0]
+        # The first template in document order that matches wins; no two templates overlap.
         for (op_method, template), operation in self.operations().items():
             pattern = "^" + re.sub(r"\\\{[a-z_]+\\\}", "[^/]+", re.escape(template)) + "$"
             if op_method == method and re.fullmatch(pattern, base):
@@ -264,15 +265,20 @@ def check_operation_status(contract: Contract, method: str, where: str, operatio
         for parameter in parameters
     ):
         raise ContractError(f"{where}: a Draft mutation requires Idempotency-Key")
-    if method == "GET":
-        schema_id = response_schema_id(contract, operation["responses"].get("200", {}))
+    for status in ("200", "201"):
+        if status not in operation["responses"]:
+            continue
+        schema_id = response_schema_id(contract, operation["responses"][status])
         schema = contract.schemas[contract.names[schema_id]] if schema_id else {}
-        if (
-            {"$ref": ENVELOPE_ID} not in schema.get("allOf", [])
-            or schema.get("unevaluatedProperties") is not False
-            or schema["properties"].get("schema_id", {}).get("const") != schema_id
-        ):
+        enveloped = (
+            {"$ref": ENVELOPE_ID} in schema.get("allOf", [])
+            and schema.get("unevaluatedProperties") is False
+            and schema["properties"].get("schema_id", {}).get("const") == schema_id
+        )
+        if method == "GET" and not enveloped:
             raise ContractError(f"{where} 200: a Draft read answers a closed enveloped resource")
+        if not enveloped and schema.get("additionalProperties") is not False:
+            raise ContractError(f"{where} {status}: a Draft answer is closed or enveloped")
 
 
 def response_schema_id(contract: Contract, response: dict) -> str | None:
@@ -351,10 +357,20 @@ def check_limits(contract: Contract) -> set[str]:
 
 
 def check_bounded(contract: Contract, limit_pointers: set[str]) -> None:
-    """Every array, string and map of a Draft schema is bounded; array bounds are limits."""
+    """Every array, string, integer and map of a Draft schema or Draft parameter is bounded.
+
+    Array bounds are stated limits, and a Draft schema has no JSON `number`: values that must
+    replay deterministically are integers (micro-units where fractional).
+    """
     for name, schema in contract.schemas.items():
         if schema.get("x-pigloros-maturity") == "draft":
             check_bounded_node(schema, f"/components/schemas/{name}", limit_pointers)
+    for (method, template), operation in contract.operations().items():
+        if operation["x-pigloros-status"] != "draft":
+            continue
+        for index, parameter in enumerate(operation.get("parameters", [])):
+            where = f"{method} {template} parameter {index}"
+            check_bounded_node(contract.resolve(parameter)["schema"], where, limit_pointers)
 
 
 def check_bounded_node(node: object, path: str, limit_pointers: set[str]) -> None:
@@ -366,7 +382,12 @@ def check_bounded_node(node: object, path: str, limit_pointers: set[str]) -> Non
         return
     kinds = node.get("type")
     kinds = set(kinds) if isinstance(kinds, list) else {kinds}
-    if "array" in kinds or "items" in node or "prefixItems" in node:
+    if "number" in kinds:
+        raise ContractError(f"{path}: a Draft value is a JSON number, not an integer")
+    if "integer" in kinds and not {"const", "enum", "maximum"} & set(node):
+        raise ContractError(f"{path}: an unbounded integer")
+    # Every Draft array declares `type: array`; an untyped `items` only refines one in a branch.
+    if "array" in kinds:
         if "maxItems" not in node:
             raise ContractError(f"{path}: an unbounded array")
         items = node.get("items")
@@ -483,6 +504,7 @@ def check_examples(contract: Contract, examples: list[tuple[str, dict]] | None =
         errors = contract.response_errors(
             operation, response["status"], response["body"], template
         )
+        errors += fork_ordinal_errors(response["body"])
         if errors:
             raise ContractError(f"{name}: response invalid: {errors[:3]}")
         statuses.setdefault(example["operation_id"], []).append(response["status"])
@@ -490,6 +512,20 @@ def check_examples(contract: Contract, examples: list[tuple[str, dict]] | None =
         raise ContractError("no golden examples")
     check_draft_examples(operations, statuses)
     return len(examples)
+
+
+def fork_ordinal_errors(body: object) -> list[str]:
+    """Ensemble Forks carry unique ordinals contiguous from 0 in array order.
+
+    JSON Schema cannot state uniqueness of one member, so the examples enforce it.
+    """
+    forks = body.get("forks") if isinstance(body, dict) else None
+    if not isinstance(forks, list) or not all(isinstance(fork, dict) for fork in forks):
+        return []
+    ordinals = [fork.get("ordinal") for fork in forks]
+    if "ordinal" not in forks[0] or ordinals == list(range(len(forks))):
+        return []
+    return [f"forks: ordinals {ordinals} are not 0..{len(forks) - 1} in order"]
 
 
 def check_draft_examples(operations: dict, statuses: dict[str, list[int]]) -> None:
