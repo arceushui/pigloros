@@ -223,23 +223,31 @@ mod tests {
             failure: crate::Failure::Closed,
         };
         let mut reply = pos_owner_bridge::ReplyImage::zeroed();
-        for result in [
-            session.resize_window(480, 640, 96),
-            session.show_window(),
-            session.fit_controller(),
-            session.focus_controller(),
-            session.create_controller(),
+        let assert_closed = |operation: &str, result: NativeResult<()>| {
+            assert_eq!(result, Err(closed), "{operation}");
+        };
+        assert_closed("resize_window", session.resize_window(480, 640, 96));
+        assert_closed("show_window", session.show_window());
+        assert_closed("fit_controller", session.fit_controller());
+        assert_closed("focus_controller", session.focus_controller());
+        assert_closed("create_controller", session.create_controller());
+        assert_closed(
+            "require_shared_interfaces",
             session.require_shared_interfaces(),
-            session.subscribe_view(sink),
+        );
+        assert_closed("subscribe_view", session.subscribe_view(sink));
+        assert_closed(
+            "set_bool",
             session.set_bool(crate::BoolProperty::Script, true),
-            session.navigate_owner(),
+        );
+        assert_closed("navigate_owner", session.navigate_owner());
+        assert_closed(
+            "create_buffers",
             session.create_buffers(pos_owner_bridge_codec::CeremonyKind::Get, &[], &[0; 64]),
-            session.post(crate::BufferSlot::Request),
-            session.post(crate::BufferSlot::Reply),
-            session.copy_reply(&mut reply),
-        ] {
-            assert_eq!(result, Err(closed));
-        }
+        );
+        assert_closed("post_request", session.post(crate::BufferSlot::Request));
+        assert_closed("post_reply", session.post(crate::BufferSlot::Reply));
+        assert_closed("copy_reply", session.copy_reply(&mut reply));
         assert_eq!(session.window().err(), Some(closed));
         assert_eq!(session.environment().err(), Some(closed));
         assert_eq!(session.browser_pid().err(), Some(closed));
