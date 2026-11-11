@@ -1,7 +1,7 @@
 //! Restart after a crash at every durable transition of an attempt (#1200).
 //!
 //! Attempts run through the lifecycle composition over the real registry,
-//! the real terminal cleanup, and fake systemd and kernel ports. Four courses
+//! the real terminal cleanup, and fake systemd and kernel ports. Five courses
 //! are enumerated:
 //!
 //! * the attempt executes: its planned intent, the attempt and root
@@ -9,6 +9,7 @@
 //!   in the registry's activation marker, the attached root and its PAI3
 //!   extension, the unit start and stop, the root release, the removal of both
 //!   directories, and the intent deleted last;
+//! * it is cancelled once its unit started, and ends killed;
 //! * its activation is refused before any request, so the directories and
 //!   the intent are removed without a root;
 //! * its request is sent but fails, so the live owner cannot prove cleanup
@@ -16,9 +17,8 @@
 //! * its launch is refused after the root was attached, so no unit ever
 //!   starts and the root is released before the directories are removed.
 //!
-//! Cancellation and withdrawn attempts are left to the lifecycle tests: a
-//! withdrawn attempt does no registry I/O, and a cancellation before
-//! activation leaves the same frontiers as a refused activation.
+//! An attempt withdrawn before it ran is checked to do no registry I/O at
+//! all.
 //!
 //! The transitions are not listed by hand. A clean run counts every registry
 //! I/O operation (each write, fsync, rename, mkdir, readback, rmdir and
@@ -28,9 +28,10 @@
 //! interrupted at each of them in turn:
 //!
 //! * a crash immediately before an I/O operation, or at a boundary, fails
-//!   that and every later registry operation and freezes the fake unit and
-//!   root, leaving what a real crash leaves: the disk as it was, a started
-//!   unit still loaded and an attached root still mounted;
+//!   that and every later registry operation, and every fake port then
+//!   refuses to start a unit, attach, stop or release anything, so the disk,
+//!   the fake manager's unit and the attached root stay exactly as the crash
+//!   left them; the surviving unit is then read from the fake manager;
 //! * a failed I/O operation is first handled by the live owner, which must
 //!   report cleanup only when it proved all of it and must close itself to
 //!   new intents; the process then crashes.
@@ -41,14 +42,15 @@
 //! unit, detach the surviving root, clean the network, wait out a request
 //! still pending on this boot before its loop sweep, and remove everything,
 //! the intent last; the same attempts can then be committed again. Restart
-//! itself is also crashed at each of its registry operations, and the owner
-//! open that creates the activation marker at each of its own; a second
-//! restart must converge. The counts are pinned, so an unreviewed new
-//! transition fails here.
+//! itself is also crashed at each of its registry operations over three
+//! crash states, and the owner open that creates the activation marker at
+//! each of its own; a second restart must converge. The counts are pinned,
+//! so an unreviewed new transition fails here.
 
-// The declaration in `attempts.rs` already turns coverage off; this
-// `cfg(test)` also keeps the CRAP gate, which reads each file alone, from
-// scoring the suite's helpers as production code.
+// The declaration in `attempts.rs` already turns coverage off. The CRAP gate
+// scores each file's functions without the `cfg` of the `mod` declaration
+// that includes the file, and skips only items under a `cfg(test)` in the
+// file itself, so this one keeps the suite's helpers out of its score.
 #[cfg(test)]
 mod cases {
     use std::collections::{BTreeMap, BTreeSet};
@@ -57,6 +59,7 @@ mod cases {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
 
+    use futures_util::future::{join, Either};
     use pos_reference::sandbox_provider_protocol::{RequestAuthority, SandboxExecutionMode};
 
     use super::super::*;
@@ -72,10 +75,6 @@ mod cases {
     };
 
     const SIM1: [u8; 32] = [9; 32];
-
-    /// The registry I/O operations of one restart over the attempt that
-    /// crashed when its execution ended.
-    const RESTART_IO_OPERATIONS: usize = 60;
 
     /// The registry I/O operations of opening a registry owner over an empty
     /// registry, which creates its activation marker.
@@ -103,11 +102,23 @@ mod cases {
         RootReleased,
     }
 
+    /// The boundaries of a lifecycle that starts its unit.
+    const STARTED: &[Boundary] = &[
+        Boundary::RequestSent,
+        Boundary::RootAttached,
+        Boundary::UnitSubmitted,
+        Boundary::ExecutionEnded,
+        Boundary::UnitStopped,
+        Boundary::RootReleased,
+    ];
+
     /// One course of an attempt's lifecycle.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Course {
         /// The attempt executes and is cleaned up.
         Executes,
+        /// The attempt is cancelled once its unit started, and ends killed.
+        Cancelled,
         /// Activation is refused before any `MountImage` request.
         ActivationRefused,
         /// The `MountImage` request is sent but fails.
@@ -120,7 +131,7 @@ mod cases {
         /// The registry I/O operations of one lifecycle on this course.
         const fn io_operations(self) -> usize {
             match self {
-                Self::Executes => 173,
+                Self::Executes | Self::Cancelled => 173,
                 Self::ActivationRefused => 110,
                 Self::RequestFails => 90,
                 Self::LaunchRefused => 150,
@@ -130,14 +141,7 @@ mod cases {
         /// The boundaries of one lifecycle on this course, in order.
         const fn boundaries(self) -> &'static [Boundary] {
             match self {
-                Self::Executes => &[
-                    Boundary::RequestSent,
-                    Boundary::RootAttached,
-                    Boundary::UnitSubmitted,
-                    Boundary::ExecutionEnded,
-                    Boundary::UnitStopped,
-                    Boundary::RootReleased,
-                ],
+                Self::Executes | Self::Cancelled => STARTED,
                 Self::ActivationRefused => &[],
                 Self::RequestFails => &[Boundary::RequestSent],
                 Self::LaunchRefused => &[
@@ -156,7 +160,10 @@ mod cases {
         }
     }
 
-    /// The external resources a run holds, and the boundary it crashes at.
+    /// What a run did to the fake host, and the boundary it crashes at.
+    ///
+    /// Each resource is recorded when the fake host changes it. After a crash
+    /// no fake port changes anything, so these are the crash's survivors.
     #[derive(Debug)]
     struct World {
         course: Course,
@@ -165,12 +172,13 @@ mod cases {
         /// Whether the run crashed at a boundary.
         crashed: AtomicBool,
         reached: Mutex<Vec<Boundary>>,
-        /// The attempt whose unit start was requested, crashed or not.
+        /// The attempt whose unit start was requested.
         submitted: Mutex<Option<[u8; 16]>>,
-        /// The attempt whose unit is loaded, as of the crash.
-        unit: Mutex<Option<[u8; 16]>>,
-        /// The attempt whose root is mounted, as of the crash.
-        mounted: Mutex<Option<[u8; 16]>>,
+        /// The attempt whose unit the fake manager still had loaded when its
+        /// run ended, read from that manager.
+        loaded: Mutex<Option<[u8; 16]>>,
+        /// The attempt whose root is attached and not released.
+        attached: Mutex<Option<[u8; 16]>>,
     }
 
     impl World {
@@ -181,12 +189,12 @@ mod cases {
                 crashed: AtomicBool::new(false),
                 reached: Mutex::new(Vec::new()),
                 submitted: Mutex::new(None),
-                unit: Mutex::new(None),
-                mounted: Mutex::new(None),
+                loaded: Mutex::new(None),
+                attached: Mutex::new(None),
             }
         }
 
-        /// Whether the run crashed: nothing it does afterwards happens.
+        /// Whether the run crashed: no fake port acts afterwards.
         fn frozen(&self) -> bool {
             self.crashed.load(Ordering::SeqCst) || io_crashed()
         }
@@ -201,13 +209,6 @@ mod cases {
             if self.crash_at == Some(occurrence) {
                 self.crashed.store(true, Ordering::SeqCst);
                 crash_io_now();
-            }
-        }
-
-        /// Record which attempt's resource is live, unless the run crashed.
-        fn hold(&self, resource: &Mutex<Option<[u8; 16]>>, attempt: Option<[u8; 16]>) {
-            if !self.frozen() {
-                *lock(resource) = attempt;
             }
         }
     }
@@ -254,11 +255,17 @@ mod cases {
                         "attempt {id:?} released with its unit loaded"
                     );
                 }
-                world.hold(&world.unit, None);
                 world.reach(Boundary::UnitStopped);
+                if world.frozen() {
+                    // A crashed process detaches nothing.
+                    return Err(ImageActivationError::ResourceAbsenceUnverified);
+                }
+                // A crash after the detach but before the release's final
+                // registry check reports the root still attached, so restart
+                // reads it back and detaches it again: never fewer resources.
                 let released = release_fake_root(fake, directory, deadline).await;
                 if released.is_ok() {
-                    world.hold(&world.mounted, None);
+                    *lock(&world.attached) = None;
                     world.reach(Boundary::RootReleased);
                 }
                 released
@@ -279,6 +286,9 @@ mod cases {
                 .map_err(|_| ImageActivationError::AttachFailure)
                 .and_then(|()| {
                     self.world.reach(Boundary::RequestSent);
+                    if self.world.frozen() {
+                        return Err(ImageActivationError::AttachFailure);
+                    }
                     if self.world.course == Course::RequestFails {
                         // The request reached mountfsd, which may have left
                         // loop/dm devices, and then failed.
@@ -289,8 +299,7 @@ mod cases {
                         .map_err(|_| ImageActivationError::AttachFailure)
                 })
                 .map(|fake| {
-                    self.world
-                        .hold(&self.world.mounted, Some(self.attempt_id()));
+                    *lock(&self.world.attached) = Some(self.attempt_id());
                     self.world.reach(Boundary::RootAttached);
                     CrashRoot {
                         fake,
@@ -386,6 +395,41 @@ mod cases {
         world: Arc<World>,
     }
 
+    impl CrashSteps {
+        /// Claim, recheck the root and request the unit start, as production
+        /// does, then bind the cgroup; a refused launch stops after the claim.
+        fn start(
+            &self,
+            attempt: &AdmittedAttempt,
+            recheck: Recheck<'_>,
+        ) -> Result<Option<BoundAttemptCgroup>, ExecuteError> {
+            let ownership = attempt.execution_for_test();
+            ownership
+                .claim()
+                .and_then(|()| {
+                    if self.world.course == Course::LaunchRefused {
+                        Err(ExecuteError::ModeMismatch)
+                    } else {
+                        recheck().map(|_checked| ()).map_err(ExecuteError::Recheck)
+                    }
+                })
+                .and_then(|()| {
+                    // A crashed process starts no unit.
+                    if self.world.frozen() {
+                        Err(ExecuteError::HostTimeout)
+                    } else {
+                        ownership.submit()
+                    }
+                })
+                .map(|()| {
+                    *lock(&self.world.submitted) = Some(attempt.attempt_id());
+                    self.world.reach(Boundary::UnitSubmitted);
+                    let taken = lock(&self.cgroup).take();
+                    taken.inspect(|cgroup| ownership.bind_cgroup(cgroup.identity()))
+                })
+        }
+    }
+
     impl AttemptSteps<CrashInput> for CrashSteps {
         type Launch = ();
         type Started = ();
@@ -396,55 +440,47 @@ mod cases {
             (): (),
             attempt: AdmittedAttempt,
             recheck: Recheck<'a>,
-            _cancel: CancelSignal,
+            cancel: CancelSignal,
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
-            let ownership = attempt.execution_for_test();
             let attempt_id = attempt.attempt_id();
-            let refused = self.world.course == Course::LaunchRefused;
-            // As in production: claim, recheck the root, then request the
-            // start; a refused launch stops after the claim.
-            let submitted = ownership
-                .claim()
-                .and_then(|()| {
-                    if refused {
-                        Err(ExecuteError::ModeMismatch)
-                    } else {
-                        recheck().map(|_checked| ()).map_err(ExecuteError::Recheck)
+            let started = self.start(&attempt, recheck);
+            let cancelled = self.world.course == Course::Cancelled;
+            async move {
+                let cgroup = match started {
+                    Ok(Some(cgroup)) => cgroup,
+                    Ok(None) => {
+                        return Err(ExecuteFailure {
+                            error: ExecuteError::HostTimeout,
+                            unit: UnitState::Unknown,
+                            cgroup: None,
+                        })
                     }
-                })
-                .and_then(|()| ownership.submit())
-                .map_err(|error| ExecuteFailure {
-                    error,
-                    unit: UnitState::NotStarted,
-                    cgroup: None,
-                });
-            let started = submitted.map(|()| {
-                *lock(&self.world.submitted) = Some(attempt_id);
-                self.world.hold(&self.world.unit, Some(attempt_id));
-                self.world.reach(Boundary::UnitSubmitted);
-                let taken = lock(&self.cgroup).take();
-                taken.map(|cgroup| {
-                    ownership.bind_cgroup(cgroup.identity());
-                    self.world.reach(Boundary::ExecutionEnded);
-                    AttemptExecution {
-                        attempt_id,
-                        started: (),
-                        cgroup,
-                        ending: AttemptEnding::CgroupEmpty,
-                        network: NetworkEvidence::None,
+                    Err(error) => {
+                        return Err(ExecuteFailure {
+                            error,
+                            unit: UnitState::NotStarted,
+                            cgroup: None,
+                        })
                     }
+                };
+                let ending = if cancelled {
+                    // Running until cancelled, then stopped and killed.
+                    cancel.requested().await;
+                    AttemptEnding::Cancelled {
+                        watchdog: Some(true),
+                    }
+                } else {
+                    AttemptEnding::CgroupEmpty
+                };
+                self.world.reach(Boundary::ExecutionEnded);
+                Ok(AttemptExecution {
+                    attempt_id,
+                    started: (),
+                    cgroup,
+                    ending,
+                    network: NetworkEvidence::None,
                 })
-            });
-            let executed: Executed<(), BoundAttemptCgroup> = match started {
-                Ok(Some(execution)) => Ok(execution),
-                Ok(None) => Err(ExecuteFailure {
-                    error: ExecuteError::HostTimeout,
-                    unit: UnitState::Unknown,
-                    cgroup: None,
-                }),
-                Err(failure) => Err(failure),
-            };
-            std::future::ready(executed)
+            }
         }
 
         fn finish(
@@ -455,7 +491,21 @@ mod cases {
             deadlines: AttemptCleanupDeadlines,
         ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
         {
-            finish_with(&self.transport, directory, cgroup, root, deadlines)
+            if self.world.frozen() {
+                // A crashed process stops and removes nothing.
+                drop((directory, cgroup, root));
+                Either::Left(std::future::ready(Err(AttemptCleanupError::Registry(
+                    SystemdAttemptRegistryError::ReconciliationRequired,
+                ))))
+            } else {
+                Either::Right(finish_with(
+                    &self.transport,
+                    directory,
+                    cgroup,
+                    root,
+                    deadlines,
+                ))
+            }
         }
     }
 
@@ -484,6 +534,18 @@ mod cases {
         ))
     }
 
+    /// A lifecycle over a new registry owner in `runtime`.
+    fn lifecycle(runtime: &Path) -> TestResult<AttemptLifecycle<CrashInput>> {
+        let ledger = crate::StagingLedger::new(crate::StagingLimits {
+            aggregate_bytes: 1024,
+        });
+        Ok(AttemptLifecycle::new(
+            registry(runtime)??,
+            ledger,
+            &crate::ReconciledRestart::for_test(),
+        ))
+    }
+
     /// The planned intent of the attempt `[id; 16]`.
     fn intent(id: u8) -> TestResult<PlannedAttemptIntent> {
         Ok(PlannedAttemptIntent::new([id; 16], SIM1)?)
@@ -501,17 +563,30 @@ mod cases {
         )?)
     }
 
+    const fn authority_of(attempt_id: [u8; 16]) -> RequestAuthority {
+        RequestAuthority {
+            request_id: attempt_id,
+            apt1_digest: [1; 32],
+            policy_epoch: 6,
+            nonce: attempt_id,
+        }
+    }
+
     const fn reconcile_request(attempt_id: [u8; 16]) -> SandboxReconcileRequest {
         SandboxReconcileRequest {
-            request: RequestAuthority {
-                request_id: attempt_id,
-                apt1_digest: [1; 32],
-                policy_epoch: 6,
-                nonce: attempt_id,
-            },
+            request: authority_of(attempt_id),
             attempt_id,
             agr1_digest: [attempt_id[0] ^ 0xa5; 32],
             request_digest: [4; 32],
+        }
+    }
+
+    const fn cancel_request(attempt_id: [u8; 16]) -> SandboxCancelRequest {
+        SandboxCancelRequest {
+            request: authority_of(attempt_id),
+            attempt_id,
+            agr1_digest: [attempt_id[0] ^ 0xa5; 32],
+            request_digest: [3; 32],
         }
     }
 
@@ -523,14 +598,49 @@ mod cases {
             .build()?)
     }
 
-    /// Run attempts 1 to `count` one after another, each to its end; with
-    /// each outcome, the registry operations started by then.
+    /// The result of an attempt's cancellation, if one was requested.
+    type CancelResult = Option<Result<SandboxCancellationResult, AttemptLifecycleError>>;
+
+    /// One attempt's end: its outcome, the registry operations started by
+    /// then, and its cancellation.
+    type Lived = (EndedAttempt<()>, usize, CancelResult);
+
+    /// Run `owned` to its end; on the cancelled course, cancel it once its
+    /// unit started, or once it ended without one.
+    async fn live(
+        lifecycle: &AttemptLifecycle<CrashInput>,
+        owned: OwnedAttempt<'_, CrashInput>,
+        steps: &CrashSteps,
+        id: [u8; 16],
+    ) -> TestResult<(EndedAttempt<()>, CancelResult)> {
+        let budget = budget()?;
+        if steps.world.course != Course::Cancelled {
+            return Ok((Box::pin(owned.run_with(steps, (), budget)).await, None));
+        }
+        let done = AtomicBool::new(false);
+        let run = async {
+            let ended = Box::pin(owned.run_with(steps, (), budget)).await;
+            done.store(true, Ordering::SeqCst);
+            ended
+        };
+        let cancel = async {
+            while lock(&steps.world.submitted).is_none() && !done.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Box::pin(lifecycle.cancel(&cancel_request(id))).await
+        };
+        let (ended, cancelled) = join(Box::pin(run), Box::pin(cancel)).await;
+        Ok((ended, Some(cancelled)))
+    }
+
+    /// Run attempts 1 to `count` one after another, each to its end. The unit
+    /// each leaves loaded is read from its fake manager.
     async fn lives(
         lifecycle: &AttemptLifecycle<CrashInput>,
         count: u8,
         world: &Arc<World>,
-    ) -> TestResult<Vec<(EndedAttempt<()>, usize)>> {
-        let mut ended = Vec::new();
+    ) -> TestResult<Vec<Lived>> {
+        let mut lived = Vec::new();
         for id in 1..=count {
             let fixture =
                 TeardownFixture::new(id, TeardownStop::Empty, TeardownReset::Unload).await?;
@@ -543,14 +653,23 @@ mod cases {
             let input = CrashInput {
                 id,
                 world: Arc::clone(world),
-                transport,
+                transport: Arc::clone(&transport),
             };
             let owned = lifecycle.admit_input(input)?;
-            let budget = budget()?;
-            let attempt = Box::pin(owned.run_with(&steps, (), budget)).await;
-            ended.push((attempt, io_count()));
+            let (ended, cancelled) = live(lifecycle, owned, &steps, [id; 16]).await?;
+            let ios = io_count();
+            if *lock(&world.submitted) == Some([id; 16]) {
+                let unit = TransientServiceUnitName::from_attempt_id([id; 16])?;
+                let absent = transport
+                    .wait_for_attempt_unit_absence(unit, Instant::now() + Duration::from_millis(50))
+                    .await;
+                if absent.is_err() {
+                    *lock(&world.loaded) = Some([id; 16]);
+                }
+            }
+            lived.push((ended, ios, cancelled));
         }
-        Ok(ended)
+        Ok(lived)
     }
 
     /// Where a run is interrupted.
@@ -572,6 +691,8 @@ mod cases {
         ended: Vec<EndedAttempt<()>>,
         /// The registry I/O operations started after each attempt ended.
         ios_after: Vec<usize>,
+        /// Each attempt's cancellation result, if one was requested.
+        cancelled: Vec<CancelResult>,
         /// The registry I/O operations started.
         ios: usize,
         /// The boundaries reached.
@@ -591,14 +712,7 @@ mod cases {
         let tokio = paused()?;
         // The owner open, and the activation marker it creates, are crashed
         // by their own test.
-        let ledger = crate::StagingLedger::new(crate::StagingLimits {
-            aggregate_bytes: 1024,
-        });
-        let lifecycle = AttemptLifecycle::new(
-            registry(runtime)??,
-            ledger,
-            &crate::ReconciledRestart::for_test(),
-        );
+        let lifecycle = lifecycle(runtime)?;
         let crash_at = match interruption {
             Interruption::CrashesAtBoundary(at) => Some(at),
             Interruption::None | Interruption::FailsAtIo(_) | Interruption::CrashesAtIo(_) => None,
@@ -611,14 +725,21 @@ mod cases {
             Interruption::CrashesAtIo(at) => with_io_crash(Some(at), live),
             Interruption::CrashesAtBoundary(_) => with_io_crash(None, live),
         };
-        let (ended, ios_after): (Vec<_>, Vec<_>) = lived?.into_iter().unzip();
+        let mut ended = Vec::new();
+        let mut ios_after = Vec::new();
+        let mut cancelled = Vec::new();
+        for (attempt, after, cancel) in lived? {
+            ended.push(attempt);
+            ios_after.push(after);
+            cancelled.push(cancel);
+        }
         let survivors = CrashSurvivors {
-            unit: (*lock(&world.unit))
+            unit: (*lock(&world.loaded))
                 .map(TransientServiceUnitName::from_attempt_id)
                 .transpose()?,
-            mounted: *lock(&world.mounted),
+            mounted: *lock(&world.attached),
         };
-        assert_reported_cleanup_was_complete(&ended, &survivors, runtime, interruption);
+        assert_reported_cleanup_was_complete(&ended, &cancelled, &survivors, runtime, interruption);
         if let Interruption::FailsAtIo(at) = interruption {
             assert_live_owner_fails_closed(&lifecycle, &ended, at)?;
         }
@@ -629,27 +750,38 @@ mod cases {
         Ok(Run {
             ended,
             ios_after,
+            cancelled,
             ios,
             reached,
             survivors,
         })
     }
 
-    /// Every attempt the process reported cleaned left nothing behind: no
-    /// record, no directory, no unit and no root. Proved cleanup is never
-    /// partial.
+    /// Every attempt the process reported cleaned, or cancelled and cleaned,
+    /// left nothing behind: no record, no directory, no unit and no root.
+    /// Proved cleanup is never partial.
     fn assert_reported_cleanup_was_complete(
         ended: &[EndedAttempt<()>],
+        cancelled: &[CancelResult],
         survivors: &CrashSurvivors,
         runtime: &Path,
         interruption: Interruption,
     ) {
-        for attempt in ended {
+        for (attempt, cancel) in ended.iter().zip(cancelled) {
             let id = attempt.attempt_id();
             assert!(
                 !matches!(attempt.cleanup(), Ok(None)),
                 "{interruption:?}: attempt {id:?} was withdrawn"
             );
+            if matches!(
+                cancel,
+                Some(Ok(SandboxCancellationResult::CancelledAndCleaned))
+            ) {
+                assert!(
+                    matches!(attempt.cleanup(), Ok(Some(_))),
+                    "{interruption:?}: attempt {id:?} reported cancelled and cleaned"
+                );
+            }
             if let Ok(Some(cleaned)) = attempt.cleanup() {
                 let key = cleaned.intent().unit_name().attempt_component();
                 assert!(
@@ -795,15 +927,19 @@ mod cases {
         if survivors.unit.is_some() {
             proofs.push(UncertainProof::UnitStop);
         }
+        let mut detach = false;
+        let mut devices = false;
         for (name, bytes) in records(snapshot) {
             let tag = bytes.get(..4);
             let root = Path::new("attempts").join(name).join("root");
-            if matches!(tag, Some(b"PAI2" | b"PAI3")) && snapshot.attempts.contains(&root) {
-                proofs.push(UncertainProof::RootDetach);
-            }
-            if matches!(tag, Some(b"PAI3")) {
-                proofs.push(UncertainProof::RecordedDevices);
-            }
+            detach |= matches!(tag, Some(b"PAI2" | b"PAI3")) && snapshot.attempts.contains(&root);
+            devices |= matches!(tag, Some(b"PAI3"));
+        }
+        if detach {
+            proofs.push(UncertainProof::RootDetach);
+        }
+        if devices {
+            proofs.push(UncertainProof::RecordedDevices);
         }
         proofs
     }
@@ -821,6 +957,9 @@ mod cases {
             UncertainProof::ProviderLoops => {
                 matches!(error, RestartReconciliationError::ProviderLoops(None))
             }
+            UncertainProof::SweepHangs => {
+                matches!(error, RestartReconciliationError::DeadlineElapsed)
+            }
         }
     }
 
@@ -834,6 +973,21 @@ mod cases {
         paused()?.block_on(Box::pin(restart_after_crash(
             runtime, survivors, proof, clock,
         )))
+    }
+
+    /// When the restart swept, unless it was refused before: always over an
+    /// unchanged tree, and exactly once a request pending on this boot could
+    /// no longer attach a loop device.
+    fn assert_swept_after_any_pending_request(restarted: &Restarted, label: &str) {
+        if let Some((swept_after, unchanged)) = restarted.swept {
+            assert!(unchanged, "{label}: removed before the loop sweep");
+            let wait = if restarted.request_pending {
+                PENDING_REQUEST
+            } else {
+                Duration::ZERO
+            };
+            assert_eq!(swept_after, wait, "{label}: when the loop sweep ran");
+        }
     }
 
     /// Restart over a crash state: with each consulted proof withheld it
@@ -852,33 +1006,42 @@ mod cases {
             Vec::new()
         };
         for proof in proofs {
-            let refused = restart(runtime, survivors, proof, RestartClock::OtherBoot)?.result;
+            let label = format!("{label}, {proof:?} withheld");
+            let restarted = restart(runtime, survivors, proof, RestartClock::SameBootSoon)?;
+            assert_swept_after_any_pending_request(&restarted, &label);
             assert!(
-                refused
+                restarted
+                    .result
                     .as_ref()
                     .err()
                     .is_some_and(|error| refused_by(proof, error)),
-                "{label}, {proof:?} withheld: {refused:?}"
+                "{label}: {:?}",
+                restarted.result
             );
             assert_eq!(
                 snapshot(runtime)?,
                 crashed,
-                "{label}, {proof:?} withheld: a refused restart removed state"
+                "{label}: a refused restart removed state"
             );
-            // Admission stays closed while anything but the marker remains.
-            if records(&crashed).next().is_some()
-                || crashed.registry.keys().any(|name| name.starts_with('.'))
-            {
-                assert!(
-                    matches!(
-                        registry(runtime)?,
-                        Err(SystemdAttemptRegistryError::ReconciliationRequired)
-                    ),
-                    "{label}, {proof:?} withheld: admission reopened"
-                );
-            }
+            assert_admission_closed(runtime, &crashed, &label)?;
         }
         assert_restart_succeeds(runtime, survivors, count, label, UncertainProof::None)
+    }
+
+    /// Admission stays closed while anything but the marker remains.
+    fn assert_admission_closed(runtime: &Path, crashed: &Snapshot, label: &str) -> TestResult {
+        if records(crashed).next().is_some()
+            || crashed.registry.keys().any(|name| name.starts_with('.'))
+        {
+            assert!(
+                matches!(
+                    registry(runtime)?,
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                ),
+                "{label}: admission reopened"
+            );
+        }
+        Ok(())
     }
 
     /// Restart on the activation marker's boot, with `proof` withheld though
@@ -893,8 +1056,38 @@ mod cases {
         label: &str,
         proof: UncertainProof,
     ) -> TestResult {
+        assert_restart_succeeds_at(
+            runtime,
+            survivors,
+            count,
+            label,
+            (proof, RestartClock::SameBootSoon),
+        )
+    }
+
+    /// `assert_restart_succeeds` with `proof` withheld, at `clock`.
+    fn assert_restart_succeeds_at(
+        runtime: &Path,
+        survivors: &CrashSurvivors,
+        count: u8,
+        label: &str,
+        (proof, clock): (UncertainProof, RestartClock),
+    ) -> TestResult {
         let crashed = snapshot(runtime)?;
-        let restarted = restart(runtime, survivors, proof, RestartClock::SameBootSoon)?;
+        let restarted = restart(runtime, survivors, proof, clock)?;
+        assert_swept_after_any_pending_request(&restarted, label);
+        assert!(restarted.swept.is_some(), "{label}: no loop sweep");
+        assert!(
+            restarted.still_loaded.is_empty(),
+            "{label}: {:?} still loaded",
+            restarted.still_loaded
+        );
+        assert_eq!(
+            restarted.detached,
+            survivors.mounted.into_iter().collect::<Vec<_>>(),
+            "{label}: detached roots"
+        );
+        assert!(restarted.network_cleaned, "{label}: network");
         let reconciled = restarted
             .result
             .map_err(|error| format!("{label}: restart with every proof failed: {error:?}"))?;
@@ -907,23 +1100,6 @@ mod cases {
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
         assert_eq!(removed, recorded, "{label}: reconciled attempts");
-        assert!(
-            restarted.still_loaded.is_empty(),
-            "{label}: {:?} still loaded",
-            restarted.still_loaded
-        );
-        assert_eq!(
-            restarted.detached,
-            survivors.mounted.into_iter().collect::<Vec<_>>(),
-            "{label}: detached roots"
-        );
-        assert!(restarted.network_cleaned, "{label}: network");
-        let (swept_after, unchanged) = restarted.swept.ok_or("the loop sweep did not run")?;
-        assert!(unchanged, "{label}: removed before the loop sweep");
-        assert!(
-            !restarted.request_pending || swept_after >= PENDING_REQUEST,
-            "{label}: swept {swept_after:?} after a request pending on this boot"
-        );
         let clean = snapshot(runtime)?;
         // The activation marker is kept as it was, if there was one.
         assert_eq!(
@@ -952,13 +1128,30 @@ mod cases {
         let runtime = runtime()?;
         let clean = run(runtime.path(), course, count, Interruption::None)?;
         assert_eq!(clean.ended.len(), usize::from(count));
-        for attempt in &clean.ended {
+        for (attempt, cancel) in clean.ended.iter().zip(&clean.cancelled) {
             assert_eq!(
                 matches!(attempt.cleanup(), Ok(Some(_))),
                 course.proves_cleanup(),
                 "{course:?}: {:?}",
                 attempt.cleanup()
             );
+            if course == Course::Cancelled {
+                assert!(attempt.cancelled());
+                assert!(matches!(
+                    attempt.progress(),
+                    AttemptProgress::Executed {
+                        ending: AttemptEnding::Cancelled { .. },
+                        ..
+                    }
+                ));
+                assert!(
+                    matches!(
+                        cancel,
+                        Some(Ok(SandboxCancellationResult::CancelledAndCleaned))
+                    ),
+                    "{cancel:?}"
+                );
+            }
         }
         let each = course.io_operations();
         assert_eq!(
@@ -1065,6 +1258,37 @@ mod cases {
         "PAI2 attempt root",
     ];
 
+    /// The frontiers after `PREPARED` of a lifecycle that starts its unit.
+    const STARTED_FRONTIERS: [&str; 9] = [
+        // The activation marker's interrupted write, recording the request
+        // before it is sent.
+        "tmp PAI2 attempt root",
+        "PAI2 attempt root",
+        // The attached root, its interrupted PAI3 write, then PAI3; the root
+        // release verifies the tree with the unit already stopped.
+        "PAI2 attempt root mounted",
+        "tmp PAI2 attempt root mounted",
+        "PAI3 attempt root mounted",
+        // The released root, then the root removed with the attempt present
+        // (#721), both removed, and the intent deleted last.
+        "PAI3 attempt root",
+        "PAI3 attempt",
+        "PAI3",
+        "none",
+    ];
+
+    /// The boundary frontiers of a lifecycle that starts its unit.
+    const STARTED_BOUNDARIES: [&str; 5] = [
+        // The request was sent: any loop device is the sweep's to find, after
+        // a request still pending on this boot.
+        "PAI2 attempt root",
+        "PAI2 attempt root mounted",
+        // A started unit survives until the stop, the root until release.
+        "PAI3 attempt root unit mounted",
+        "PAI3 attempt root mounted",
+        "PAI3 attempt root",
+    ];
+
     /// `PREPARED`, followed by `rest`.
     fn after_prepared(rest: &[&str]) -> Vec<String> {
         PREPARED
@@ -1088,26 +1312,7 @@ mod cases {
             (0..clean.ios).map(Interruption::CrashesAtIo),
             true,
         )?;
-        assert_eq!(
-            frontiers,
-            after_prepared(&[
-                // The activation marker's interrupted write, recording the
-                // request before it is sent.
-                "tmp PAI2 attempt root",
-                "PAI2 attempt root",
-                // The attached root, its interrupted PAI3 write, then PAI3; the
-                // root release verifies the tree with the unit already stopped.
-                "PAI2 attempt root mounted",
-                "tmp PAI2 attempt root mounted",
-                "PAI3 attempt root mounted",
-                // The released root, then the root removed with the attempt
-                // present (#721), both removed, and the intent deleted last.
-                "PAI3 attempt root",
-                "PAI3 attempt",
-                "PAI3",
-                "none",
-            ])
-        );
+        assert_eq!(frontiers, after_prepared(&STARTED_FRONTIERS));
         Ok(())
     }
 
@@ -1125,19 +1330,7 @@ mod cases {
             (0..clean.reached.len()).map(Interruption::CrashesAtBoundary),
             true,
         )?;
-        assert_eq!(
-            frontiers,
-            [
-                // The request was sent: any loop device is the sweep's to find,
-                // after a request still pending on this boot.
-                "PAI2 attempt root",
-                "PAI2 attempt root mounted",
-                // A started unit survives until the stop, the root until release.
-                "PAI3 attempt root unit mounted",
-                "PAI3 attempt root mounted",
-                "PAI3 attempt root",
-            ]
-        );
+        assert_eq!(frontiers, STARTED_BOUNDARIES);
         Ok(())
     }
 
@@ -1155,6 +1348,19 @@ mod cases {
             (0..clean.ios).map(Interruption::FailsAtIo),
             false,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancelled_attempt_reconciles_at_every_crash() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_cancelled_attempt_reconciles_at_every_crash",
+        )? {
+            return Ok(());
+        }
+        let (crashes, boundaries) = every_interruption(Course::Cancelled)?;
+        assert_eq!(crashes, after_prepared(&STARTED_FRONTIERS));
+        assert_eq!(boundaries, STARTED_BOUNDARIES);
         Ok(())
     }
 
@@ -1225,6 +1431,50 @@ mod cases {
     }
 
     #[test]
+    fn a_withdrawn_attempt_does_no_registry_io() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_withdrawn_attempt_does_no_registry_io",
+        )? {
+            return Ok(());
+        }
+        let runtime = runtime()?;
+        let tokio = paused()?;
+        let lifecycle = lifecycle(runtime.path())?;
+        let world = Arc::new(World::new(Course::Executes, None));
+        let (withdrawn, operations) = with_io_fault(None, || {
+            tokio.block_on(Box::pin(async {
+                let fixture =
+                    TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
+                let transport = Arc::new(fixture.transport);
+                let steps = CrashSteps {
+                    transport: Arc::clone(&transport),
+                    cgroup: Mutex::new(Some(fixture.bound)),
+                    world: Arc::clone(&world),
+                };
+                let owned = lifecycle.admit_input(CrashInput {
+                    id: 1,
+                    world: Arc::clone(&world),
+                    transport,
+                })?;
+                // Cancelled before it ran, the attempt is withdrawn.
+                let cancelled = Box::pin(lifecycle.cancel(&cancel_request([1; 16]))).await?;
+                let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
+                Ok::<_, Box<dyn std::error::Error>>((cancelled, ended))
+            }))
+        });
+        let (cancelled, ended) = withdrawn?;
+        assert_eq!(cancelled, SandboxCancellationResult::CancelledAndCleaned);
+        assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
+        assert!(matches!(ended.cleanup(), Ok(None)));
+        assert_eq!(operations, 0);
+        assert!(lock(&world.reached).is_empty());
+        let left = snapshot(runtime.path())?;
+        assert_eq!(left.registry.keys().collect::<Vec<_>>(), ["activation"]);
+        assert!(left.attempts.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn eight_lifecycles_reconcile_after_a_crash_at_each_operation_offset_and_boundary() -> TestResult
     {
         if !in_lock_test_process(
@@ -1251,22 +1501,65 @@ mod cases {
         Ok(())
     }
 
-    /// The state the single executing attempt leaves when it crashes as its
-    /// execution ended: PAI3, its tree, its unit and its mounted root.
-    fn crashed_running() -> TestResult<(tempfile::TempDir, CrashSurvivors)> {
-        let runtime = runtime()?;
-        let ended = Course::Executes
-            .boundaries()
+    /// A crash state for restart to crash in.
+    #[derive(Clone, Copy, Debug)]
+    enum Base {
+        /// The executing attempt, crashed as its execution ended: PAI3, its
+        /// tree, its unit and its mounted root.
+        Running,
+        /// The executing attempt, crashed once its request was sent: PAI2
+        /// and its tree, with the request pending on this boot.
+        RequestSent,
+        /// Two prepared attempts, as two concurrent owners leave them: two
+        /// PAI2 trees, so restart removes several records.
+        TwoPrepared,
+    }
+
+    impl Base {
+        /// The registry I/O operations of one restart over this state.
+        const fn restart_io_operations(self) -> usize {
+            match self {
+                Self::Running => 60,
+                Self::RequestSent => 55,
+                Self::TwoPrepared => 100,
+            }
+        }
+
+        /// The crash state, its survivors and its attempts.
+        fn crash(self) -> TestResult<(tempfile::TempDir, CrashSurvivors, u8)> {
+            let runtime = runtime()?;
+            if matches!(self, Self::TwoPrepared) {
+                let registry = registry(runtime.path())??;
+                for id in 1..=2 {
+                    drop(
+                        registry
+                            .commit_planned(&intent(id)?)?
+                            .prepare_fixture_directory()?,
+                    );
+                }
+                return Ok((runtime, CrashSurvivors::default(), 2));
+            }
+            let (course, interruption) = match self {
+                Self::Running => (
+                    Course::Executes,
+                    Interruption::CrashesAtBoundary(boundary(Boundary::ExecutionEnded)?),
+                ),
+                Self::RequestSent | Self::TwoPrepared => (
+                    Course::Executes,
+                    Interruption::CrashesAtBoundary(boundary(Boundary::RequestSent)?),
+                ),
+            };
+            let left = run(runtime.path(), course, 1, interruption)?;
+            Ok((runtime, left.survivors, 1))
+        }
+    }
+
+    /// The occurrence of `crash` in one executing lifecycle.
+    fn boundary(crash: Boundary) -> TestResult<usize> {
+        Ok(STARTED
             .iter()
-            .position(|boundary| *boundary == Boundary::ExecutionEnded)
-            .ok_or("no ended execution")?;
-        let left = run(
-            runtime.path(),
-            Course::Executes,
-            1,
-            Interruption::CrashesAtBoundary(ended),
-        )?;
-        Ok((runtime, left.survivors))
+            .position(|boundary| *boundary == crash)
+            .ok_or("no such boundary")?)
     }
 
     #[test]
@@ -1276,61 +1569,103 @@ mod cases {
         )? {
             return Ok(());
         }
-        let operations = {
-            let (runtime, survivors) = crashed_running()?;
-            let (restarted, operations) = with_io_fault(None, || {
-                restart(
-                    runtime.path(),
-                    &survivors,
-                    UncertainProof::None,
-                    RestartClock::OtherBoot,
-                )
-            });
-            restarted?.result?;
-            operations
-        };
-        assert_eq!(
-            operations, RESTART_IO_OPERATIONS,
-            "registry I/O operations of one restart: review and count the new transitions"
-        );
-        for at in 0..operations {
-            let (runtime, survivors) = crashed_running()?;
-            let (restarted, started) = with_io_crash(Some(at), || {
-                restart(
-                    runtime.path(),
-                    &survivors,
-                    UncertainProof::None,
-                    RestartClock::OtherBoot,
-                )
-            });
-            let restarted = restarted?;
-            assert!(started > at, "restart operation {at} not reached");
-            assert!(
-                restarted.result.is_err(),
-                "restart operation {at}: a crashed restart reported success"
-            );
-            // What the crashed restart had already stopped or detached is
-            // gone; everything else survives for the next restart.
-            let survivors = CrashSurvivors {
-                unit: survivors.unit.filter(|unit| {
-                    restarted
-                        .still_loaded
-                        .iter()
-                        .any(|loaded| loaded == unit.as_str())
-                }),
-                mounted: survivors
-                    .mounted
-                    .filter(|attempt| !restarted.detached.contains(attempt)),
+        for base in [Base::Running, Base::RequestSent, Base::TwoPrepared] {
+            let operations = {
+                let (runtime, survivors, _) = base.crash()?;
+                let (restarted, operations) = with_io_fault(None, || {
+                    restart(
+                        runtime.path(),
+                        &survivors,
+                        UncertainProof::None,
+                        RestartClock::OtherBoot,
+                    )
+                });
+                restarted?.result?;
+                operations
             };
-            assert_restart_reconciles(
-                runtime.path(),
-                &survivors,
-                1,
-                &format!("restart crashed at operation {at}"),
-                false,
-            )?;
+            assert_eq!(
+                operations,
+                base.restart_io_operations(),
+                "registry I/O operations of one restart over {base:?}: review and count the new transitions"
+            );
+            for at in 0..operations {
+                let (runtime, survivors, count) = base.crash()?;
+                let (restarted, started) = with_io_crash(Some(at), || {
+                    restart(
+                        runtime.path(),
+                        &survivors,
+                        UncertainProof::None,
+                        RestartClock::OtherBoot,
+                    )
+                });
+                let restarted = restarted?;
+                let label = format!("{base:?}, restart crashed at operation {at}");
+                assert!(started > at, "{label}: not reached");
+                assert!(
+                    restarted.result.is_err(),
+                    "{label}: a crashed restart reported success"
+                );
+                // What the crashed restart had already stopped or detached is
+                // gone; everything else survives for the next restart.
+                let survivors = CrashSurvivors {
+                    unit: survivors.unit.filter(|unit| {
+                        restarted
+                            .still_loaded
+                            .iter()
+                            .any(|loaded| loaded == unit.as_str())
+                    }),
+                    mounted: survivors
+                        .mounted
+                        .filter(|attempt| !restarted.detached.contains(attempt)),
+                };
+                assert_restart_reconciles(runtime.path(), &survivors, count, &label, false)?;
+            }
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_same_boot_restart_waits_out_a_pending_request_past_its_deadline() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_same_boot_restart_waits_out_a_pending_request_past_its_deadline",
+        )? {
+            return Ok(());
+        }
+        // A sweep that never returns elapses the deadline the wait extended,
+        // removing nothing.
+        let (runtime, survivors, count) = Base::RequestSent.crash()?;
+        let crashed = snapshot(runtime.path())?;
+        let hung = restart(
+            runtime.path(),
+            &survivors,
+            UncertainProof::SweepHangs,
+            RestartClock::SameBootSoonShortDeadline,
+        )?;
+        assert!(hung.request_pending);
+        assert_swept_after_any_pending_request(&hung, "a hung sweep");
+        assert!(
+            matches!(
+                hung.result,
+                Err(RestartReconciliationError::DeadlineElapsed)
+            ),
+            "{:?}",
+            hung.result
+        );
+        assert_eq!(snapshot(runtime.path())?, crashed);
+        assert_admission_closed(runtime.path(), &crashed, "a hung sweep")?;
+        // The overall deadline is far shorter than the wait, which extends
+        // it (owner decision D2): the request is still waited out, and only
+        // then are the loop devices swept and the attempt removed.
+        assert_restart_succeeds_at(
+            runtime.path(),
+            &survivors,
+            count,
+            "a short deadline",
+            (
+                UncertainProof::None,
+                RestartClock::SameBootSoonShortDeadline,
+            ),
+        )
     }
 
     #[test]
@@ -1417,23 +1752,18 @@ mod cases {
         )? {
             return Ok(());
         }
-        let boundaries = Course::Executes.boundaries();
         for (crash, proof) in [
             // No unit survives a released root.
             (Boundary::RootReleased, UncertainProof::UnitStop),
             // No PAI3 root's devices are recorded before the root attached.
             (Boundary::RequestSent, UncertainProof::RecordedDevices),
         ] {
-            let at = boundaries
-                .iter()
-                .position(|boundary| *boundary == crash)
-                .ok_or("no such boundary")?;
             let runtime = runtime()?;
             let left = run(
                 runtime.path(),
                 Course::Executes,
                 1,
-                Interruption::CrashesAtBoundary(at),
+                Interruption::CrashesAtBoundary(boundary(crash)?),
             )?;
             assert!(
                 !consulted_proofs(&snapshot(runtime.path())?, &left.survivors).contains(&proof)
@@ -1446,6 +1776,33 @@ mod cases {
                 proof,
             )?;
         }
+        // No root is recorded before the PAI2 extension.
+        let mut planned_only = false;
+        for at in 0..Course::Executes.io_operations() {
+            let runtime = runtime()?;
+            let left = run(
+                runtime.path(),
+                Course::Executes,
+                1,
+                Interruption::CrashesAtIo(at),
+            )?;
+            let crashed = snapshot(runtime.path())?;
+            if frontier(&crashed, &left.survivors, 1)? != "PAI1" {
+                continue;
+            }
+            planned_only = true;
+            assert!(
+                !consulted_proofs(&crashed, &left.survivors).contains(&UncertainProof::RootDetach)
+            );
+            assert_restart_succeeds(
+                runtime.path(),
+                &left.survivors,
+                1,
+                &format!("PAI1 at operation {at} with RootDetach withheld"),
+                UncertainProof::RootDetach,
+            )?;
+        }
+        assert!(planned_only);
         Ok(())
     }
 }
