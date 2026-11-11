@@ -6,7 +6,7 @@ permissions:
 jobs:
   diagnostic:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RUSTC_BOOTSTRAP: '1'
     steps:
@@ -22,13 +22,15 @@ jobs:
           tool: cargo-llvm-cov
       - name: Enforce the Windows unsafe inventory
         run: python scripts/check_owner_bridge_unsafe_policy.py
+      - name: Lint native adapter and portable bridge
+        run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
       - name: Prepare retained runtime
         id: runtime
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: Diagnostic interaction deadline regression
+      - name: Diagnostic phase regressions and original G4 function
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -37,5 +39,10 @@ jobs:
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
           Write-Output 'DEBUG-535-PHASE diagnostic-only, not G3/G4 qualification'
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- native_interaction_cutpoints_outlive_fixture_readiness_ceiling --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Interaction deadline regression failed' }
+          $failed = $false
+          foreach ($filter in @('interaction_cutpoint_requires_receipt_and_keeps_original_limits', 'native_interaction_cutpoints_outlive_fixture_readiness_ceiling', 'native_release_cutpoint_uses_release_window_after_fixture_readiness_ceiling', 'native_exit_cutpoint_uses_exit_window_after_fixture_readiness_ceiling', 'tests::native_verified_owned_process_faults_retire')) {
+            Write-Output "DEBUG-535-PHASE filter=$filter"
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- $filter --include-ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { throw 'One or more phase diagnostics failed' }
