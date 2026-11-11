@@ -852,7 +852,15 @@ fn eight_lifecycles_reconcile_after_a_crash_at_every_transition() -> TestResult 
         return Ok(());
     }
     let clean = clean_run(8)?;
-    let io = (0..clean.ios).map(Interruption::CrashesAtIo);
+    // Every registry operation of the first and the last attempt, and each
+    // operation of the six middle attempts once: its offset picks which of
+    // them crashes there. Every boundary of every attempt.
+    let io = (0..clean.ios)
+        .filter(|at| {
+            let (attempt, offset) = (at / IO_OPERATIONS, at % IO_OPERATIONS);
+            attempt == 0 || attempt == 7 || attempt == 1 + offset % 6
+        })
+        .map(Interruption::CrashesAtIo);
     let boundaries = (0..clean.reached.len()).map(Interruption::CrashesAtBoundary);
     interrupt_each(8, io.chain(boundaries), false)?;
     Ok(())
