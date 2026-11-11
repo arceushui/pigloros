@@ -75,6 +75,15 @@ impl AttemptCleanupDeadlines {
     pub(crate) const fn released(self) -> Instant {
         self.released
     }
+
+    /// The same phases, each `by` later.
+    pub(crate) fn shifted(self, by: std::time::Duration) -> Self {
+        Self {
+            shutdown: self.shutdown.shifted(by),
+            unit_absent: self.unit_absent + by,
+            released: self.released + by,
+        }
+    }
 }
 
 /// Why an attempt's terminal cleanup did not complete.
@@ -122,7 +131,7 @@ pub async fn finish_attempt(
 }
 
 /// The root step, behind a port so that it can be faked without a kernel.
-trait RootRelease: Send {
+pub(crate) trait RootRelease: Send {
     /// Detach the root and observe its original loop/dm generations absent.
     fn release(
         self,
@@ -161,7 +170,7 @@ type Evidence = (
     Option<ReleasedAttemptRoot>,
 );
 
-async fn finish_with<R: RootRelease>(
+pub(crate) async fn finish_with<R: RootRelease>(
     transport: &SystemdTransientUnitTransport,
     directory: PreparedAttemptDirectory,
     cgroup: Option<BoundAttemptCgroup>,
