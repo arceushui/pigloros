@@ -329,7 +329,7 @@ mod native_tests {
         let ledger = guard.open_nonce_ledger()?;
         let _result = ledger.replace_observing(b"candidate", |stage| {
             if stage == selected {
-                fs::write(&marker, b"ready").map_err(|_| ())?;
+                fs::write(&marker, requested.as_bytes()).map_err(|_| ())?;
                 let mut line = String::new();
                 io::stdin().read_line(&mut line).map_err(|_| ())?;
                 return Err(());
@@ -642,8 +642,8 @@ mod native_tests {
                     .env(BASE, base)
                     .env(MARKER, &marker)
                     .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
                     .spawn()?;
                 let deadline = Instant::now() + Duration::from_secs(30);
                 while !marker.exists() {
@@ -657,16 +657,23 @@ mod native_tests {
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
+                assert_eq!(fs::read(&marker)?, name.as_bytes());
                 if interrupted {
                     child.kill()?;
                 } else {
                     drop(child.stdin.take());
                 }
-                let status = child.wait()?;
+                let output = child.wait_with_output()?;
                 if interrupted {
-                    assert!(!status.success());
+                    assert!(!output.status.success());
                 } else {
-                    assert_eq!(status.code(), Some(101));
+                    assert_eq!(output.status.code(), Some(101));
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        stdout.contains("storage probe returned without interruption")
+                            || stderr.contains("storage probe returned without interruption")
+                    );
                 }
                 fs::remove_file(marker)?;
                 let guard = WindowsSubjectEncryptorLock::acquire(base)?;
