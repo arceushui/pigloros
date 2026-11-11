@@ -88,7 +88,7 @@ impl EgressProbe {
     /// # Errors
     /// Refuses a `network` that is not a /30's network address, a /30 in
     /// special-purpose space that cannot address a link, and port zero.
-    pub fn new(network: Ipv4Addr, port: u16) -> Result<Self, InvalidEgressProbe> {
+    pub const fn new(network: Ipv4Addr, port: u16) -> Result<Self, InvalidEgressProbe> {
         let [first, second, ..] = network.octets();
         let special = first == 0 || first == 127 || first >= 224 || (first == 169 && second == 254);
         if network.to_bits().trailing_zeros() < 2 {
@@ -105,7 +105,7 @@ impl EgressProbe {
     /// The host's and the target's address: the /30's first and second
     /// host addresses. Neither overflows, since the /30 lies below
     /// `224.0.0.0`.
-    pub(super) fn addresses(self) -> (Ipv4Addr, SocketAddrV4) {
+    pub(super) const fn addresses(self) -> (Ipv4Addr, SocketAddrV4) {
         let network = self.network.to_bits();
         (
             Ipv4Addr::from_bits(network + 1),
