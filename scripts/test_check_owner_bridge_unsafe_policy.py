@@ -1426,8 +1426,8 @@ def test_owned_process_fault_authority() -> None:
         "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
         "late identity requery restored": ("fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }", "fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }"),
         "required earlier identity query removed": ("fn observe(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }", "fn observe(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }"),
-        "required identity mismatch accepted": ("if identity != self.retained.identity {", "if false {"),
-        "required image mismatch accepted": ("if image != self.image {", "if false {"),
+        "required identity mismatch accepted": ("if identity != expected {", "if false {"),
+        "required image mismatch accepted": ("if image != expected_image {", "if false {"),
     }
     for name, (old, new) in mutations.items():
         if old not in original:

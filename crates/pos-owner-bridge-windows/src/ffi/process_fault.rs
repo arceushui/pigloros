@@ -51,23 +51,38 @@ impl ProcessFaultHandle for ExitRetained {
 
 impl ExitRetained {
     fn verified_exit_code(&self) -> Result<Option<u32>, ()> {
-        let (identity, image) =
-            super::process::read_identity(self.retained.handle, self.retained.identity.browser_pid)
-                .map_err(|()| {
-                    fault_diagnostic(
-                        "NATIVE_EXIT_QUERY stage=required_identity result=query_failed",
-                    );
-                })?;
-        if image != self.image {
-            fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=image_mismatch");
-            return Err(());
-        }
-        if identity != self.retained.identity {
-            fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=identity_mismatch");
-            return Err(());
-        }
-        self.retained.exit_code()
+        verified_exit_observation(
+            self.retained.identity,
+            &self.image,
+            || {
+                super::process::read_identity(
+                    self.retained.handle,
+                    self.retained.identity.browser_pid,
+                )
+            },
+            || self.retained.exit_code(),
+        )
     }
+}
+
+fn verified_exit_observation(
+    expected: ProcessIdentity,
+    expected_image: &std::path::Path,
+    identity: impl FnOnce() -> Result<(ProcessIdentity, std::path::PathBuf), ()>,
+    exit_code: impl FnOnce() -> Result<Option<u32>, ()>,
+) -> Result<Option<u32>, ()> {
+    let (identity, image) = identity().map_err(|()| {
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=query_failed");
+    })?;
+    if image != expected_image {
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=image_mismatch");
+        return Err(());
+    }
+    if identity != expected {
+        fault_diagnostic("NATIVE_EXIT_QUERY stage=required_identity result=identity_mismatch");
+        return Err(());
+    }
+    exit_code()
 }
 
 impl crate::RetainedExitHandle for ExitRetained {

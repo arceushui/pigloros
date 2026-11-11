@@ -910,7 +910,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "d4580bff9072b4c91328ad609e585d6fba084d3a0af745f7506371be21af35c5"
+    return hashlib.sha256(normalized).hexdigest() == "414ed2a3b2330cfbe7bc9099ba69ddde98afdb57336ea2b99ad9ee979b4e2d67"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1589,8 +1589,8 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'dbf45e552c16f360c14ac311fe5576cc877a85979c485cacd0f078fb876cb1ba',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'bf4df58f59ae3285335a67d8aa0a547786fed524a4135508b0cccd167d502e1a',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '8d8defab324f9fcc8d7b18b0c8cde6d754477f7bd741b479c9773811cb98bd87',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '6c5bf1cf82b2d134d6f3ff49e9175d5e947339adbf5141db309fb9d7a1457541',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': 'fd886a75a668b5919d45de8aa1dbf932242cb20d0030a61eed867d5647a446da',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '581f597eb720779719c30e7b5280096756d4839f52fc03ccd4ed158a90e9db45',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '2b02387cb855dd2ebbf7374ac176b06ae760566045b76316c9ca73d6bc2d8c4c',

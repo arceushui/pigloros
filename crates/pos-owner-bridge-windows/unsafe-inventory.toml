@@ -1549,7 +1549,7 @@ hosted_test = "native_readonly_write_crashes_the_exact_renderer_and_retires"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 110
+line = 125
 function = "drop"
 operation = "CloseHandle"
 invariant = "Single close of the retained process object on every exit path."
@@ -1557,7 +1557,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 122
+line = 137
 function = "exit_code"
 operation = "GetExitCodeProcess"
 invariant = "Immediate query on the live retained process handle with a writable output."
@@ -1565,7 +1565,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 138
+line = 153
 function = "candidates"
 operation = "GetProcessInfos"
 invariant = "Current retained environment on its creating STA; no other source."
@@ -1573,7 +1573,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 141
+line = 156
 function = "candidates"
 operation = "Count"
 invariant = "Live collection and initialized count; reject more than 64."
@@ -1581,7 +1581,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 148
+line = 163
 function = "candidates"
 operation = "GetValueAtIndex"
 invariant = "Index stays within the checked bounded collection."
@@ -1589,7 +1589,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 152
+line = 167
 function = "candidates"
 operation = "ProcessId"
 invariant = "Live collection item and initialized unique output."
@@ -1597,7 +1597,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 154
+line = 169
 function = "candidates"
 operation = "Kind"
 invariant = "Live collection item and initialized unique output."
@@ -1605,7 +1605,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 213
+line = 228
 function = "open_owned_process"
 operation = "OpenProcess"
 invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
@@ -1613,7 +1613,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 226
+line = 241
 function = "terminate_owned_process"
 operation = "TerminateProcess"
 invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."

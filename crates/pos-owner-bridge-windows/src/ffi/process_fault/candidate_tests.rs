@@ -8,7 +8,7 @@ use pos_owner_bridge::ProcessIdentity;
 use pos_owner_bridge_codec::ImagePathSha256;
 
 use super::{
-    browser_candidate_from_observations, COREWEBVIEW2_PROCESS_KIND,
+    browser_candidate_from_observations, verified_exit_observation, COREWEBVIEW2_PROCESS_KIND,
     COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
 
@@ -24,6 +24,52 @@ fn identity() -> ProcessIdentity {
 
 fn process_image() -> (ProcessIdentity, PathBuf) {
     (identity(), PathBuf::from("owned-browser"))
+}
+
+#[test]
+fn modeled_exit_observation_requires_matching_identity_and_image_before_exit_query() {
+    let expected = process_image();
+    let mut different_identity = expected.0;
+    different_identity.creation_filetime += 1;
+    for observation in [
+        Err(()),
+        Ok((expected.0, PathBuf::from("different-browser"))),
+        Ok((different_identity, expected.1.clone())),
+        Ok((different_identity, PathBuf::from("different-browser"))),
+    ] {
+        let calls = RefCell::new(Vec::new());
+        let result = verified_exit_observation(
+            expected.0,
+            &expected.1,
+            || {
+                calls.borrow_mut().push("identity");
+                observation
+            },
+            || {
+                calls.borrow_mut().push("exit");
+                Ok(Some(0x535))
+            },
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(calls.into_inner(), ["identity"]);
+    }
+    for exit in [Ok(None), Ok(Some(0x535)), Err(())] {
+        let calls = RefCell::new(Vec::new());
+        let result = verified_exit_observation(
+            expected.0,
+            &expected.1,
+            || {
+                calls.borrow_mut().push("identity");
+                Ok(expected.clone())
+            },
+            || {
+                calls.borrow_mut().push("exit");
+                exit
+            },
+        );
+        assert_eq!(result, exit);
+        assert_eq!(calls.into_inner(), ["identity", "exit"]);
+    }
 }
 
 fn observe(
