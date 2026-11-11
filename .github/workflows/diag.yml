@@ -12,3 +12,45 @@ jobs:
         run: cargo test -p pos-plugin-content --all-features --locked -- --include-ignored
       - name: Check content package lint policy
         run: cargo clippy -p pos-plugin-content --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+  survivor-controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mutant: [reference-subtraction, reference-accounting, array-walk]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Apply the observed survivor
+        env:
+          MUTANT: ${{ matrix.mutant }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path('crates/pos-plugin-content/src/bundle/schema.rs')
+          s = p.read_text()
+          changes = {
+              'reference-subtraction': ('MAX_REFERENCES - references_used', 'MAX_REFERENCES + references_used'),
+              'reference-accounting': ('references_used += local.references.len()', 'references_used *= local.references.len()'),
+              'array-walk': ('Value::Array(children) => pending.extend(children),', 'Value::Array(_) => {} ,'),
+          }
+          old, new = changes[os.environ['MUTANT']]
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          PY
+      - name: Verify the normal public target detects the survivor
+        env:
+          MUTANT: ${{ matrix.mutant }}
+        run: |
+          set +e
+          cargo test -p pos-plugin-content --test bundle_public --all-features --locked -- --include-ignored > /tmp/574-mutant-result.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/574-mutant-result.log
+          test "$result" -ne 0
+          case "$MUTANT" in
+            array-walk) witness=resolves_a_resource_nested_inside_a_schema_array ;;
+            *) witness=schema_reference_budget_is_shared_across_documents ;;
+          esac
+          grep -F "${witness} ... FAILED" /tmp/574-mutant-result.log
