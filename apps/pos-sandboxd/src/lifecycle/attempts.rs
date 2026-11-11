@@ -577,12 +577,12 @@ impl LiveAttemptIdentity {
 /// This is the exact identity handoff to the sealed recovery (#349).
 ///
 /// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
-/// runtime; it has no public constructor and cannot be cloned. Stable rustdoc
-/// checks only that the examples below fail to compile; nightly rustdoc, as
-/// the mutation baseline runs it, also checks their error codes.
+/// runtime; it has no public constructor and cannot be cloned.
 ///
 /// The attempts are every one that started in this runtime and was not
 /// reconciled, in strictly increasing `AttemptId` order, at most 256.
+// Stable rustdoc checks only that these examples fail to compile; nightly
+// rustdoc, as the mutation baseline runs it, also checks their error codes.
 #[cfg_attr(
     target_os = "linux",
     doc = r#"
