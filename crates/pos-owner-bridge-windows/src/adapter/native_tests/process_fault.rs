@@ -804,6 +804,13 @@ impl Fixture {
         result: Result<Verified, BridgeError>,
         restart_orphans: Option<CeremonyId>,
     ) -> TestResult {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DEBUG-535-T0 stage=before-retire case={} listener={} resource={:?}",
+            self.number,
+            self.loopback.diagnostic_timing(),
+            crate::Native::readiness_resource_snapshot()
+        );
         let mut progress = super::trace::Trace::new(u64::from(self.number), Instant::now());
         let _logged = writeln!(
             std::io::stderr(),
@@ -818,6 +825,14 @@ impl Fixture {
             result,
             |surface, driver, loopback| progress.update("retirement", surface, driver, loopback),
         );
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DEBUG-535-T0 stage=after-retire case={} listener={} resource={:?}",
+            self.number,
+            self.loopback.diagnostic_timing(),
+            crate::Native::readiness_resource_snapshot()
+        );
+        crate::Native::readiness_navigation_case(None);
         let _logged = writeln!(
             std::io::stderr(),
             "NATIVE_FAULT_RETIRE case={} stage=retired",
@@ -885,6 +900,10 @@ fn run_case(
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let _zero_witness = ZeroWitness::arm();
     let started = Instant::now();
+    fixture
+        .loopback
+        .set_diagnostic_origin(u64::from(number), started);
+    crate::Native::readiness_navigation_case(Some((u64::from(number), started)));
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive(&mut driver, target, inject)
@@ -2755,7 +2774,12 @@ fn run_posted_retry(
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::WithheldDelivery)?;
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let started = Instant::now();
+    fixture
+        .loopback
+        .set_diagnostic_origin(u64::from(number), started);
+    crate::Native::readiness_navigation_case(Some((u64::from(number), started)));
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));

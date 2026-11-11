@@ -164,6 +164,35 @@ struct Observations {
     silent_error: AtomicUsize,
     complete: AtomicUsize,
     too_large: AtomicUsize,
+    trace: std::sync::Mutex<Option<DiagnosticTrace>>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct DiagnosticTrace {
+    case: u64,
+    origin: Instant,
+    events: Vec<(&'static str, Option<Duration>, Option<Duration>)>,
+    overflow: bool,
+}
+
+#[cfg(feature = "test-support")]
+impl Observations {
+    fn stamp(&self, stage: &'static str, accepted: Instant, at: Instant) {
+        if let Ok(mut trace) = self.trace.lock() {
+            if let Some(trace) = trace.as_mut() {
+                if trace.events.len() < 32 {
+                    trace.events.push((
+                        stage,
+                        accepted.checked_duration_since(trace.origin),
+                        at.checked_duration_since(trace.origin),
+                    ));
+                } else {
+                    trace.overflow = true;
+                }
+            }
+        }
+    }
 }
 
 /// State shared by the accept threads.
@@ -304,6 +333,9 @@ fn accept_loop(
             let accepted_at = Instant::now();
             #[cfg(feature = "test-support")]
             {
+                shared
+                    .observations
+                    .stamp("accept", accepted_at, accepted_at);
                 slot.accepted = true;
                 shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
                 shared.observations.handling.fetch_add(1, Ordering::SeqCst);
@@ -330,6 +362,35 @@ pub struct LoopbackListener {
 }
 
 impl LoopbackListener {
+    /// Set a bounded, diagnostic-only trace origin for this listener.
+    #[cfg(feature = "test-support")]
+    pub fn set_diagnostic_origin(&self, case: u64, origin: Instant) {
+        if let Ok(mut trace) = self.shared.observations.trace.lock() {
+            *trace = Some(DiagnosticTrace {
+                case,
+                origin,
+                events: Vec::new(),
+                overflow: false,
+            });
+        }
+    }
+
+    /// Return bounded diagnostic observations for this listener.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn diagnostic_timing(&self) -> String {
+        self.shared.observations.trace.lock().map_or_else(
+            |_| "poisoned".to_owned(),
+            |trace| match trace.as_ref() {
+                Some(trace) => format!(
+                    "case={} events={:?} overflow={}",
+                    trace.case, trace.events, trace.overflow
+                ),
+                None => "unset".to_owned(),
+            },
+        )
+    }
+
     /// Bind the loopback sockets and start serving.
     ///
     /// # Errors

@@ -41,6 +41,21 @@ impl SharedLoopback {
             .map(|listener| listener.received_request_count())
             .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
     }
+
+    #[cfg(test)]
+    pub(super) fn set_diagnostic_origin(&self, case: u64, origin: std::time::Instant) {
+        if let Ok(listener) = self.0.lock() {
+            listener.set_diagnostic_origin(case, origin);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn diagnostic_timing(&self) -> String {
+        self.0.lock().map_or_else(
+            |_| "listener-poisoned".to_owned(),
+            |listener| listener.diagnostic_timing(),
+        )
+    }
 }
 
 impl Clone for SharedLoopback {

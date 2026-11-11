@@ -215,24 +215,46 @@ pub(super) fn serve_connection(
         context.timeouts,
         || {
             #[cfg(feature = "test-support")]
-            context
-                .received
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            {
+                context
+                    .observations
+                    .stamp("first-byte", accepted_at, Instant::now());
+                context
+                    .received
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
         },
         #[cfg(feature = "test-support")]
         |reason| {
             use std::sync::atomic::Ordering;
             let observations = &context.observations;
             let counter = match reason {
-                SilentReason::Eof => &observations.silent_eof,
-                SilentReason::Timeout => &observations.silent_timeout,
-                SilentReason::Other => &observations.silent_error,
+                SilentReason::Eof => {
+                    observations.stamp("silent-eof", accepted_at, Instant::now());
+                    &observations.silent_eof
+                }
+                SilentReason::Timeout => {
+                    observations.stamp("silent-timeout", accepted_at, Instant::now());
+                    &observations.silent_timeout
+                }
+                SilentReason::Other => {
+                    observations.stamp("silent-error", accepted_at, Instant::now());
+                    &observations.silent_error
+                }
             };
             counter.fetch_add(1, Ordering::SeqCst);
         },
     );
     #[cfg(feature = "test-support")]
     {
+        let stage = match outcome {
+            ReadOutcome::Silent => "end-silent",
+            ReadOutcome::Complete(_) => "end-complete",
+            ReadOutcome::TooLarge => "end-too-large",
+        };
+        context
+            .observations
+            .stamp(stage, accepted_at, Instant::now());
         let counter = match outcome {
             ReadOutcome::Silent => &context.observations.silent,
             ReadOutcome::Complete(_) => &context.observations.complete,
