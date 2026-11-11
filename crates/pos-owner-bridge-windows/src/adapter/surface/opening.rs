@@ -145,8 +145,13 @@ impl Surface {
     }
 
     fn check_foreground_deadline(&self, deadline: std::time::Instant) -> Result<()> {
-        self.before_deadline()?;
-        if self.clock.now() >= deadline {
+        let now = self.clock.now();
+        if now >= self.deadline {
+            return Err(SurfaceError::new(BridgeError::Lifecycle(
+                LifecycleCode::ReadinessTimeout,
+            )));
+        }
+        if now >= deadline {
             return Err(SurfaceError::new(BridgeError::Lifecycle(
                 LifecycleCode::ForegroundUnavailable,
             )));
