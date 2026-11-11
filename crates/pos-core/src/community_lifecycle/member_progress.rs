@@ -361,10 +361,9 @@ fn reference_bytes(reference: CommunityProgressReferenceV1<'_>) -> usize {
     match reference {
         CommunityProgressReferenceV1::None => 2,
         CommunityProgressReferenceV1::Pending(_) => 2 + 34,
-        CommunityProgressReferenceV1::Factual(node) => {
-            let length = node_bytes(node);
-            2 + uint_bytes(length as u64) + length
-        }
+        // Valid six-field nodes are 41..=189 bytes: two array/tag bytes and
+        // exactly two bytes for the nested byte-string head.
+        CommunityProgressReferenceV1::Factual(node) => 4 + node_bytes(node),
     }
 }
 

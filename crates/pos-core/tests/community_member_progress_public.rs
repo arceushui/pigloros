@@ -301,6 +301,7 @@ fn maximum_carried_set_and_maximum_coordinates_fit_the_enclosing_record() -> Tes
         schema_id: u32::MAX,
         artifact_digest: hash(10),
     };
+    assert_eq!(encode(&node_value(factual))?.len(), 189);
     let data = Input {
         last_step_simulation_time: Some(u64::MAX),
         forwarded_cursor: Seq::from_u64(u64::MAX),
@@ -333,6 +334,36 @@ fn maximum_carried_set_and_maximum_coordinates_fit_the_enclosing_record() -> Tes
         Progress::from_canonical_cbor(&encode(&value)?).err(),
         Some(Error::BoundsExceeded)
     );
+    Ok(())
+}
+
+#[test]
+fn smallest_factual_coordinate_preserves_the_two_byte_nested_header() -> TestResult {
+    let factual = Node {
+        tick: 0,
+        scheduler_position: 0,
+        owner_id: "x",
+        output_ordinal: 0,
+        schema_id: 1,
+        artifact_digest: hash(10),
+    };
+    assert_eq!(encode(&node_value(factual))?.len(), 41);
+    let data = Input {
+        step_chain: Reference::Factual(factual),
+        history_input: Reference::Factual(factual),
+        ..input(&[])
+    };
+    let record = Progress::new(data)?;
+    let mut value = expected();
+    fields(&mut value)?[6] = Value::Array(vec![]);
+    fields(&mut value)?[7] = reference_value(data.step_chain)?;
+    fields(&mut value)?[8] = reference_value(data.history_input)?;
+    let wire = encode(&value)?;
+    assert_eq!(wire.len(), 168);
+    assert_exact_encoding(&record, &wire);
+    let decoded = Progress::from_canonical_cbor(&wire)?;
+    assert!(decoded.as_input() == &data);
+    assert_exact_encoding(&decoded, &wire);
     Ok(())
 }
 
