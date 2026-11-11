@@ -44,13 +44,17 @@
 //! the intent last; the same attempts can then be committed again. Restart
 //! itself is also crashed at each of its registry operations over three
 //! crash states, and the owner open that creates the activation marker at
-//! each of its own; a second restart must converge. The counts are pinned,
+//! each of its own; a second restart must converge. A same-boot restart
+//! sweeps exactly when the pending request lapses, even past a shorter
+//! deadline, and a sweep that never returns elapses the deadline the wait
+//! extended without removing anything. The counts are pinned,
 //! so an unreviewed new transition fails here.
 
 // The declaration in `attempts.rs` already turns coverage off. The CRAP gate
-// scores each file's functions without the `cfg` of the `mod` declaration
-// that includes the file, and skips only items under a `cfg(test)` in the
-// file itself, so this one keeps the suite's helpers out of its score.
+// (cargo-crap 0.2.2) scores a file's functions without the `cfg` of the `mod`
+// declaration that includes it, and skips items under a `cfg(test)` in the
+// file itself: its report scored this file's helpers until this `cfg(test)`
+// was added, and has not since, while the production files stay scored.
 #[cfg(test)]
 mod cases {
     use std::collections::{BTreeMap, BTreeSet};
@@ -78,11 +82,15 @@ mod cases {
 
     /// The registry I/O operations of opening a registry owner over an empty
     /// registry, which creates its activation marker.
-    const OPEN_IO_OPERATIONS: usize = 20;
+    const OPEN_IO_OPERATIONS: usize = 18;
 
     /// How long a `MountImage` request sent one second before a same-boot
-    /// restart can still attach a loop device: 60 s plus 10 s, less 1 s.
-    const PENDING_REQUEST: Duration = Duration::from_secs(69);
+    /// restart can still attach a loop device: the activator deadline plus
+    /// the 10 s `SERVER_MARGIN` of `attempt_registry::activation`, less the
+    /// second since it was sent.
+    const PENDING_REQUEST: Duration = crate::MountfsdImageActivator::DEADLINE
+        .saturating_add(Duration::from_secs(10))
+        .saturating_sub(Duration::from_secs(1));
 
     /// A crash boundary between two lifecycle steps that are not registry I/O.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,7 +140,7 @@ mod cases {
         const fn io_operations(self) -> usize {
             match self {
                 Self::Executes | Self::Cancelled => 173,
-                Self::ActivationRefused => 110,
+                Self::ActivationRefused => 113,
                 Self::RequestFails => 90,
                 Self::LaunchRefused => 150,
             }
@@ -162,8 +170,14 @@ mod cases {
 
     /// What a run did to the fake host, and the boundary it crashes at.
     ///
-    /// Each resource is recorded when the fake host changes it. After a crash
-    /// no fake port changes anything, so these are the crash's survivors.
+    /// After a crash no fake port changes anything, so what is recorded here
+    /// is what the crash left. The loaded unit is read from each attempt's
+    /// fake manager. The attached root is bookkeeping: the fake kernel's
+    /// mount is not observable once its release consumed it, so `attached`
+    /// is set when the attach succeeded and cleared only when the release
+    /// returned. The unit is read only for an attempt whose start was
+    /// requested, because the fake manager reports its unit loaded from its
+    /// creation, before any start.
     #[derive(Debug)]
     struct World {
         course: Course,
@@ -1519,7 +1533,7 @@ mod cases {
         /// The registry I/O operations of one restart over this state.
         const fn restart_io_operations(self) -> usize {
             match self {
-                Self::Running => 60,
+                Self::Running => 132,
                 Self::RequestSent => 55,
                 Self::TwoPrepared => 100,
             }
@@ -1539,17 +1553,13 @@ mod cases {
                 }
                 return Ok((runtime, CrashSurvivors::default(), 2));
             }
-            let (course, interruption) = match self {
-                Self::Running => (
-                    Course::Executes,
-                    Interruption::CrashesAtBoundary(boundary(Boundary::ExecutionEnded)?),
-                ),
-                Self::RequestSent | Self::TwoPrepared => (
-                    Course::Executes,
-                    Interruption::CrashesAtBoundary(boundary(Boundary::RequestSent)?),
-                ),
+            let crash = if matches!(self, Self::Running) {
+                Boundary::ExecutionEnded
+            } else {
+                Boundary::RequestSent
             };
-            let left = run(runtime.path(), course, 1, interruption)?;
+            let interruption = Interruption::CrashesAtBoundary(boundary(crash)?);
+            let left = run(runtime.path(), Course::Executes, 1, interruption)?;
             Ok((runtime, left.survivors, 1))
         }
     }

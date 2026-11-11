@@ -310,6 +310,38 @@ pub(super) mod cases {
         Ok(tree)
     }
 
+    /// A transport over a fake manager that has the `loaded` units.
+    async fn fake_manager(
+        loaded: &Loaded,
+    ) -> TestResult<(zbus::Connection, SystemdTransientUnitTransport)> {
+        let subscriptions = Arc::new(AtomicUsize::new(0));
+        let manager = Manager {
+            subscriptions: Arc::clone(&subscriptions),
+            loaded: Arc::clone(loaded),
+        };
+        let (server, client) =
+            peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager))
+                .await?;
+        let transport = SystemdTransientUnitTransport::from_connection(client).await?;
+        assert_eq!(subscriptions.load(Ordering::SeqCst), 1);
+        Ok((server, transport))
+    }
+
+    /// The boot clock a restart at `clock` reads, its overall deadline from
+    /// now, and whether the activation marker's request is pending then.
+    fn restart_clock(runtime: &Path, clock: RestartClock) -> (BootInstant, Duration, bool) {
+        let pending = recorded_request(runtime).filter(|_| clock != RestartClock::OtherBoot);
+        let now = pending.map_or(([0xee; 16], Duration::from_secs(1_000)), |(boot, sent)| {
+            (boot, sent + Duration::from_secs(1))
+        });
+        let overall = if clock == RestartClock::SameBootSoonShortDeadline {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(6)
+        };
+        (now, overall, pending.is_some())
+    }
+
     /// Reconcile the registry under `runtime`, the provider's
     /// `/run/pigloros/sandbox`, after a crash that left `survivors`.
     ///
@@ -331,27 +363,8 @@ pub(super) mod cases {
                 .map(|unit| unit.as_str().to_owned())
                 .collect(),
         ));
-        let subscriptions = Arc::new(AtomicUsize::new(0));
-        let manager = Manager {
-            subscriptions: Arc::clone(&subscriptions),
-            loaded: Arc::clone(&loaded),
-        };
-        let (_server, client) =
-            peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager))
-                .await?;
-        let transport = SystemdTransientUnitTransport::from_connection(client).await?;
-        assert_eq!(subscriptions.load(Ordering::SeqCst), 1);
-        let request = recorded_request(runtime);
-        let same_boot = clock != RestartClock::OtherBoot;
-        let now: BootInstant = match request.filter(|_| same_boot) {
-            Some((boot, sent)) => (boot, sent + Duration::from_secs(1)),
-            None => ([0xee; 16], Duration::from_secs(1_000)),
-        };
-        let overall = if clock == RestartClock::SameBootSoonShortDeadline {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_secs(6)
-        };
+        let (_server, transport) = fake_manager(&loaded).await?;
+        let (now, overall, request_pending) = restart_clock(runtime, clock);
         let before = tree(runtime)?;
         let start = Instant::now();
         let swept = Mutex::new(None);
@@ -413,7 +426,7 @@ pub(super) mod cases {
             still_loaded,
             detached,
             network_cleaned: network.removed.load(Ordering::SeqCst) == 1,
-            request_pending: same_boot && request.is_some(),
+            request_pending,
             swept,
         })
     }
