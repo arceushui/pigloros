@@ -294,6 +294,12 @@ fn every_row_field_requires_its_exact_wire_type_and_shape() -> TestResult {
             Err(Error::InvalidEncoding)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn store_identity_requires_its_exact_wire_type_and_shape() -> TestResult {
+    let original = wire_fields(&row());
     for (store, error) in [
         (
             vec![Value::Integer(1.into()), Value::Integer(2.into())],
