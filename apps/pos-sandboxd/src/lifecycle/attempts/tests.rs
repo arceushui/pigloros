@@ -46,6 +46,8 @@ mod cases {
         // A run whose cancellation is requested while its directory is
         // prepared, after it started and before anything can be fenced.
         cancel_while_preparing: Option<Arc<std::sync::OnceLock<Arc<RunState>>>>,
+        // The admitted facts belong to another directory.
+        foreign: bool,
     }
 
     impl FakeInput {
@@ -57,6 +59,7 @@ mod cases {
                 activation: Activation::Released,
                 charge: None,
                 cancel_while_preparing: None,
+                foreign: false,
             }
         }
 
@@ -150,6 +153,9 @@ mod cases {
             &self,
             directory: &PreparedAttemptDirectory,
         ) -> Result<AdmittedAttempt, ExecuteError> {
+            if self.foreign {
+                return Err(ExecuteError::DirectoryIdentity);
+            }
             AdmittedAttempt::for_test(
                 self.attempt_id(),
                 authority(),
@@ -159,14 +165,17 @@ mod cases {
             .map_err(|_| ExecuteError::DirectoryIdentity)
         }
 
-        fn recheck(
+        fn checker(
             &self,
-            _root: &FakeRoot,
-            directory: &PreparedAttemptDirectory,
-        ) -> Result<CheckedRoot, ImageActivationError> {
-            self.attempt(directory)
-                .map(|attempt| checked_root(&attempt))
-                .map_err(|_| ImageActivationError::EvidenceMismatch)
+        ) -> impl Fn(&FakeRoot, &PreparedAttemptDirectory) -> Result<CheckedRoot, ImageActivationError>
+               + Send
+               + Sync
+               + '_ {
+            move |_root: &FakeRoot, directory: &PreparedAttemptDirectory| {
+                self.attempt(directory)
+                    .map(|attempt| checked_root(&attempt))
+                    .map_err(|_| ImageActivationError::EvidenceMismatch)
+            }
         }
     }
 
@@ -237,12 +246,12 @@ mod cases {
         fn execute<'a>(
             &'a self,
             (): (),
-            input: &'a FakeInput,
-            directory: &'a PreparedAttemptDirectory,
-            _root: &'a FakeRoot,
+            attempt: AdmittedAttempt,
+            _recheck: Recheck<'a>,
             cancel: CancelSignal,
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
-            let ownership = directory.execution_ownership();
+            let ownership = attempt.execution_for_test();
+            let attempt_id = attempt.attempt_id();
             async move {
                 if let Err(error) = ownership.claim().and_then(|()| ownership.submit()) {
                     return Err(ExecuteFailure {
@@ -279,7 +288,7 @@ mod cases {
                     Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
                 };
                 Ok(AttemptExecution {
-                    attempt_id: input.attempt_id(),
+                    attempt_id,
                     started: (),
                     cgroup,
                     ending,
@@ -907,6 +916,26 @@ mod cases {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn admitted_facts_of_another_directory_never_activate_a_root() -> TestResult {
+        let runtime = Runtime::new()?;
+        let fixture = manager(1).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let mut input = FakeInput::new(1);
+        input.foreign = true;
+        let ended = runtime.run(input, &steps).await?;
+        assert!(matches!(
+            ended.progress(),
+            AttemptProgress::Failed {
+                error: ExecuteError::DirectoryIdentity,
+                unit: UnitState::NotStarted
+            }
+        ));
+        cleaned(&ended)?;
+        assert!(runtime.admits()?);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_refused_activation_cleans_the_unmounted_directory() -> TestResult {
         let runtime = Runtime::new()?;
         let fixture = manager(1).await?;
@@ -1210,6 +1239,28 @@ mod cases {
         ));
         assert!(!runtime.grants());
         Ok(())
+    }
+
+    #[test]
+    fn recorded_root_facts_are_read_through_their_accessors() {
+        let root = crate::RecordedRoot {
+            mount_id: 1,
+            inode: 2,
+            mapper: ((3, 4), 5),
+            mapper_uuid: "mapper".to_owned(),
+            loop_name: "loop6".to_owned(),
+            loop_device: ((7, 8), 9),
+        };
+        assert_eq!(
+            (
+                root.mount_id(),
+                root.inode(),
+                root.mapper(),
+                root.loop_device()
+            ),
+            (1, 2, ((3, 4), 5), ((7, 8), 9))
+        );
+        assert_eq!((root.mapper_uuid(), root.loop_name()), ("mapper", "loop6"));
     }
 
     #[test]

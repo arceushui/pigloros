@@ -175,4 +175,17 @@ mod cases {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn an_unreadable_cgroup_after_a_clean_local_session_terminates_the_unit() -> TestResult {
+        let (remote, plan, mode) = local_setup()?;
+        let mut scenario = Scenario::new()?;
+        scenario.host.adapter = AdapterScript::Exchange(plan);
+        scenario.host.faults.push(Fault::ReadCgroup);
+        let failed = failure(scenario.run(SandboxExecutionMode::Local, mode).await?)?;
+        assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
+        assert_eq!(failed.unit, UnitState::Killed);
+        drop(remote);
+        Ok(())
+    }
 }
