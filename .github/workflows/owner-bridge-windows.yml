@@ -4,22 +4,32 @@ on:
 permissions:
   contents: read
 jobs:
-  nonce-cleanup-diagnostic:
+  ledger-control-diagnostic:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      RUSTC_BOOTSTRAP: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.97.1
-          components: clippy
-      - name: Verify candidate and run nonce lock witness
+          components: clippy,llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29
+        with:
+          tool: cargo-llvm-cov
+      - name: Clippy Windows native packages
+        run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: Run ledger witness and measure diagnostic coverage
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           git rev-parse HEAD
-          git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/nonce_ledger.rs
-          cargo test -p pos-owner-bridge-windows --all-features --locked --lib tests::nonce_lock_native -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'nonce lock witness failed' }
-      - name: Clippy Windows native packages all targets
-        run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+          git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/ledger_storage.rs
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/ledger-control.json" --lib tests::windows_nonce_ledger_storage_native -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'ledger control witness failed' }
+      - name: Retain diagnostic coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ledger-control-coverage
+          path: ${{ runner.temp }}/ledger-control.json
+          if-no-files-found: error
