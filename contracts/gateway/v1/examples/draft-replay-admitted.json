@@ -1,0 +1,32 @@
+{
+  "name": "draft-replay-admitted",
+  "operation_id": "createReplay",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-12",
+      "content-type": "application/json"
+    },
+    "body": {
+      "manifest_digest": "1010101010101010101010101010101010101010101010101010101010101010",
+      "reproducibility_class": "profile-recomputation",
+      "profile_id": "deterministic-local-v1",
+      "minimum_replay_claim": "exact"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 202,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt",
+      "request_id": "01JC0GATEWAYW90REQVEST0001",
+      "operation_id": "01JC0GATEWAYW90QPERAT10N01",
+      "state": "admitted",
+      "operation_url": "/v1/replays/01JC0GATEWAYW90REP1AY00001",
+      "idempotency_key_digest": "0909090909090909090909090909090909090909090909090909090909090909",
+      "bound_inputs": {
+        "manifest": "1010101010101010101010101010101010101010101010101010101010101010",
+        "execution_profile": "0101010101010101010101010101010101010101010101010101010101010101"
+      }
+    }
+  }
+}

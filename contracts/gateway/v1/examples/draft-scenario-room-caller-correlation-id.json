@@ -1,0 +1,70 @@
+{
+  "name": "draft-scenario-room-caller-correlation-id",
+  "operation_id": "createScenarioRoom",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-1",
+      "content-type": "application/json"
+    },
+    "body": {
+      "descriptor": {
+        "schema_version": 1,
+        "tick_duration_ms": 100,
+        "max_ticks": 600,
+        "scheduler_seed": "0404040404040404040404040404040404040404040404040404040404040404",
+        "scheduler_policy": 0,
+        "intervention_policy": 1,
+        "plugins": [
+          {
+            "plugin_id": "world",
+            "version": "1.0.0"
+          },
+          {
+            "plugin_id": "society",
+            "version": "1.0.0"
+          }
+        ],
+        "rules": [
+          {
+            "rule_id": "society.nudge.scale",
+            "value_micro": 250000
+          }
+        ],
+        "participants": [
+          {
+            "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+            "kind": "persona"
+          },
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "kind": "society"
+          }
+        ],
+        "initial_conditions": [
+          {
+            "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+            "dimension": "trust",
+            "value_micro": 600000
+          }
+        ],
+        "governance_ref": "01JC0GATEWAYW90G0VERN00001",
+        "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001",
+        "correlation_id": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f"
+      }
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "the correlation id is server-owned",
+      "instance": "/v1/scenario-rooms",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

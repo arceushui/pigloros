@@ -1,0 +1,24 @@
+{
+  "name": "draft-decision-preview-not-found",
+  "operation_id": "getDecisionPreview",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "not found or unavailable",
+      "instance": "/v1/decision-previews/{preview_id}",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

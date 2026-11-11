@@ -58,7 +58,14 @@ JSON Schema 2020-12) with its RFC 9457 problem-type registry
 [`examples/`](../../contracts/gateway/v1/examples/). It is Draft until Wave 9 acceptance (#301).
 `scripts/check_gateway_contract.py` fails CI when the description, the examples, or the served
 responses recorded by the gateway-client-conformance fixtures disagree. The table below is a
-summary; the contract wins.
+summary of the served routes; the contract wins.
+
+The contract also describes the Wave 9 resource families (session, Scenario Room revisions,
+Preferences, OptionSpecs, Decision Previews and simulated actions, Projections, ensembles,
+Replays, preview evidence, exports, consent revocation and erasure) as Draft operations
+(`x-pigloros-status: draft`, owner `x-pigloros-owner` #302 to #309). This Gateway does not
+serve them: only their golden examples validate, and a served-response fixture that reaches one
+fails the check. Their normative request and response limits are in `x-pigloros-limits`.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
