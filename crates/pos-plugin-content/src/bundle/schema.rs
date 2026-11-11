@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use jsonschema::{uri, Draft, Registry, Retrieve, Uri};
+use jsonschema::{uri, Draft, Retrieve, Uri};
 use serde_json::Value;
 
 use crate::bundle::Refusal;
@@ -224,22 +224,7 @@ pub(super) fn validate(inputs: &[(u16, &str, &[u8])]) -> Result<(), (u16, Refusa
         index.references.extend(local.references);
         index.locations.extend(local.locations);
     }
-    first_error = resolve_references(&documents, &index, incomplete, first_error);
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-    let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
-    for document in &documents {
-        registry = registry
-            .add(document.base.as_str(), &document.value)
-            .map_err(|_| (document.index, Refusal::ReferenceMismatch))?;
-    }
-    // The fixed retriever refuses external I/O even under feature unification.
-    let registry = registry
-        .prepare()
-        .map_err(|_| (0, Refusal::ReferenceMismatch))?;
-    drop(registry);
-    Ok(())
+    resolve_references(&documents, &index, incomplete, first_error).map_or(Ok(()), Err)
 }
 
 fn resolve_references(
