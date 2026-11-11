@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use pos_owner_bridge::ceremony::driver::CeremonyDriver;
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::listener::FixtureProfile;
 use pos_owner_bridge::{
@@ -118,6 +119,166 @@ fn modeled_completed_attempt_preserves_its_result_without_cancelling() -> TestRe
     assert!(failure.is_none());
     assert_eq!(*model.calls.borrow(), calls);
     assert!(!driver.plan_secrets_clear());
+    fixture.retire(driver, result, None)?;
+    root.remove()
+}
+
+type DriveStage = fn(&mut Fixture, &mut CeremonyDriver, ProcessFaultTarget, bool) -> DriveResult;
+
+fn assert_drive_error<T>(result: Result<T, Box<dyn std::error::Error>>, expected: &str) {
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some(expected)
+    );
+}
+
+fn completed_driver(
+    fixture: &mut Fixture,
+) -> Result<(CeremonyDriver, super::CeremonyResult), Box<dyn std::error::Error>> {
+    let mut driver =
+        readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+    let result = readiness::cancel_driver(
+        &mut driver,
+        &mut fixture.surface,
+        &mut fixture.loopback,
+        &mut fixture.store,
+    );
+    assert!(fixture.finished_driver_is_done(&mut driver));
+    Ok((driver, result))
+}
+
+#[test]
+fn modeled_fault_stages_refuse_a_completed_driver_without_native_work() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let calls = model.calls.borrow().clone();
+    let stages: [(DriveStage, &str); 6] = [
+        (Fixture::drive, "driver ended without result"),
+        (
+            Fixture::drive_success_releasing,
+            "success driver ended without result",
+        ),
+        (
+            Fixture::drive_posted_empty,
+            "empty-reply driver ended without result",
+        ),
+        (
+            Fixture::drive_posted_writing,
+            "writing driver ended without result",
+        ),
+        (
+            Fixture::drive_posted_ready,
+            "ready driver ended without result",
+        ),
+        (
+            Fixture::drive_consuming,
+            "consuming driver ended without result",
+        ),
+    ];
+    for (stage, expected) in stages {
+        assert_drive_error(
+            stage(
+                &mut fixture,
+                &mut driver,
+                ProcessFaultTarget::Browser,
+                false,
+            ),
+            expected,
+        );
+    }
+    assert_eq!(*model.calls.borrow(), calls);
+    assert!(fixture.trace.borrow().is_empty());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.idle());
+    fixture.retire(driver, result, None)?;
+    root.remove()
+}
+
+#[test]
+fn modeled_creation_and_exit_stages_refuse_a_completed_driver() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
+    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let calls = model.calls.borrow().clone();
+    assert_drive_error(
+        fixture.drive_recordless(&mut driver, false),
+        "recordless driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_success_exit(&mut driver, false),
+        "success exit driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_awaiting_load(&mut driver, false),
+        "awaiting-load driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_navigating(&mut driver, false),
+        "navigating driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_first_opening_browser(&mut driver, false),
+        "opening driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_posted_retry(
+            &mut driver,
+            ProcessFaultTarget::Browser,
+            crate::RetryPoint::Second,
+            false,
+        ),
+        "retry empty-reply driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_before_record(&mut driver, ceremony, ProcessFaultTarget::Browser, false),
+        "pre-record driver ended without result",
+    );
+    assert_drive_error(
+        fixture.drive_early_renderer(&mut driver, super::EarlyRendererPhase::Navigating, false),
+        "early renderer driver ended without result",
+    );
+    assert_eq!(*model.calls.borrow(), calls);
+    assert!(fixture.trace.borrow().is_empty());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.idle());
+    fixture.retire(driver, result, None)?;
+    root.remove()
+}
+
+#[test]
+fn modeled_controller_stages_report_a_completed_driver_without_new_provenance() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
+    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let calls = model.calls.borrow().clone();
+    let mut provenance = None;
+    let mut failure_stage = None;
+    assert_drive_error(
+        fixture.drive_fresh_success(&mut driver, ceremony, &mut provenance, &mut failure_stage),
+        "fresh success driver ended without result",
+    );
+    assert!(provenance.is_none());
+    assert_eq!(failure_stage, Some("driver_done"));
+    let mut lost_blocked = false;
+    assert_drive_error(
+        fixture.drive_controller_input(&mut driver, false, &mut lost_blocked),
+        "controller input did not reach the pending stage",
+    );
+    assert!(!lost_blocked);
+    assert_drive_error(
+        fixture.drive_outstanding_controller(&mut driver, &ceremony),
+        "controller did not remain pending",
+    );
+    assert_eq!(*model.calls.borrow(), calls);
+    assert!(fixture.trace.borrow().is_empty());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.idle());
     fixture.retire(driver, result, None)?;
     root.remove()
 }
