@@ -369,7 +369,7 @@ fn schema_pointer_fragments_use_rfc6901_and_indexed_resource_roots() -> TestResu
         fixture.schemas = vec![bytes(&schema)];
         assert_eq!(result(&fixture)?, Ok(()));
     }
-    for reference in ["#/$defs/a~2b", "#/$defs/a~", "#/allOf/01"] {
+    for reference in ["#/$defs/a~2b", "#/$defs/a~", "#/allOf/01", "#/%FF"] {
         let mut fixture = Fixture::new();
         fixture.schemas = vec![bytes(
             &json!({"$defs":{"a~2b":true},"allOf":[true,true],"$ref":reference}),
@@ -377,6 +377,30 @@ fn schema_pointer_fragments_use_rfc6901_and_indexed_resource_roots() -> TestResu
         assert_eq!(
             result(&fixture)?,
             Err(Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 }
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn each_json_node_kind_obeys_the_node_limit() -> TestResult {
+    for last in [
+        json!(true),
+        json!(-1),
+        json!(1),
+        json!(1.5),
+        json!([]),
+        json!({}),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut examples = vec![json!(0); 262_142];
+        examples.push(last);
+        fixture.schemas = vec![bytes(&json!({"examples": examples}))];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::BoundsExceeded {
                 artifact: Artifact::Schema { index: 0 }
             })
         );
