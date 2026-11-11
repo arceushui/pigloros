@@ -146,7 +146,8 @@ mod cases {
         scenario.barrier.cancel_on_release = Some(cancel);
         let recheck = root_for(&scenario.log, &job.attempt);
         let run = scenario.run_on(&LoopbackNetwork, job, recheck);
-        Ok(tokio::time::timeout(Duration::from_secs(10), run).await??)
+        let execution = tokio::time::timeout(Duration::from_secs(10), run).await??;
+        Ok(execution)
     }
 
     #[tokio::test]
