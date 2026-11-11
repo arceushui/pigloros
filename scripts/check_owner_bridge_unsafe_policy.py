@@ -1311,7 +1311,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "32ecdf2945b4f312b9e44a792fafdb947b4d865d0eda5cc053dac481b0c76031":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "b6cbb305a03c24ac31a5c36cb6158cbc39325e22cdeace732e2cac2f26cc48f7":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1570,7 +1570,8 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '53fd4bd1f85d50bebff1e462ae504de86393504fb53d46e6f0e15f4157276f61',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'b11205c3867f5a78d6b891cd5017b534affc4238b35b502027e4597f1f34ecd1',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': 'd63b838292d7a167a97384a903925d4ce67fa956978dabd2ea551a9bf7344974',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': '58339ed1ed417eba7e46174a757573de06453e33224aca5461bd5f1700b9b1bf',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
     'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': 'f987aa8a99b0e5d55e476f1b8db2e4665942dd934997269b54639f7e63030236',
@@ -1587,7 +1588,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'b4c4bb72f34ec52881856cd15933be1cde646104f1ad76eceaa9a6efb13e7139',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '8d8defab324f9fcc8d7b18b0c8cde6d754477f7bd741b479c9773811cb98bd87',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '1b5d6ae1ebe5a082ccec9b7de3abdf75f5358fe287220b1e15ddb5587d89838e',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '6c5bf1cf82b2d134d6f3ff49e9175d5e947339adbf5141db309fb9d7a1457541',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',

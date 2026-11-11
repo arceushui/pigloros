@@ -24,6 +24,7 @@ use crate::{
     ProcessFaultState, ProcessFaultTarget,
 };
 
+mod model_tests;
 mod obstruction;
 mod quarantined;
 

@@ -22,8 +22,8 @@ fn identity() -> ProcessIdentity {
     }
 }
 
-fn present() -> IdentityObservation {
-    Ok(Some((identity(), PathBuf::from("owned-browser"))))
+fn process_image() -> (ProcessIdentity, PathBuf) {
+    (identity(), PathBuf::from("owned-browser"))
 }
 
 fn observe(
@@ -54,7 +54,11 @@ fn candidate_requires_two_stable_snapshots_and_identity_reads_in_order() {
         (11, COREWEBVIEW2_PROCESS_KIND_BROWSER),
         (12, COREWEBVIEW2_PROCESS_KIND_RENDERER),
     ];
-    let (result, calls) = observe(&entries, Ok(entries.to_vec()), [present(), present()]);
+    let (result, calls) = observe(
+        &entries,
+        Ok(entries.to_vec()),
+        [Ok(Some(process_image())), Ok(Some(process_image()))],
+    );
     assert_eq!(result, Ok(identity()));
     assert_eq!(calls, ["identity", "snapshot", "identity"]);
 }
@@ -69,7 +73,11 @@ fn candidate_refuses_missing_or_ambiguous_initial_browser_before_observation() {
             (12, COREWEBVIEW2_PROCESS_KIND_BROWSER),
         ],
     ] {
-        let (result, calls) = observe(&first, Err(()), [present(), present()]);
+        let (result, calls) = observe(
+            &first,
+            Err(()),
+            [Ok(Some(process_image())), Ok(Some(process_image()))],
+        );
         assert_eq!(result, Err(()));
         assert!(calls.is_empty());
     }
@@ -81,7 +89,7 @@ fn candidate_refuses_failed_or_absent_initial_identity_before_second_snapshot() 
         let (result, calls) = observe(
             &[(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)],
             Err(()),
-            [first_identity, present()],
+            [first_identity, Ok(Some(process_image()))],
         );
         assert_eq!(result, Err(()));
         assert_eq!(calls, ["identity"]);
@@ -103,7 +111,7 @@ fn candidate_refuses_incomplete_missing_ambiguous_or_changed_second_browser() {
         let (result, calls) = observe(
             &[(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)],
             second,
-            [present(), present()],
+            [Ok(Some(process_image())), Ok(Some(process_image()))],
         );
         assert_eq!(result, Err(()));
         assert_eq!(calls, ["identity", "snapshot"]);
@@ -129,7 +137,7 @@ fn candidate_refuses_failed_absent_or_changed_second_identity_and_image() {
         let (result, calls) = observe(
             &[(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)],
             Ok(vec![(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)]),
-            [present(), second_identity],
+            [Ok(Some(process_image())), second_identity],
         );
         assert_eq!(result, Err(()));
         assert_eq!(calls, ["identity", "snapshot", "identity"]);
