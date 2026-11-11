@@ -18,11 +18,11 @@ jobs:
       - name: Observe archive hostname resolution
         run: |
           set -u
-          for archive_host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com; do
+          for archive_host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com mirrors.edge.kernel.org; do
             printf 'APT_DIAGNOSTIC hostname=%s\n' "$archive_host"
             timeout 15 getent ahostsv4 "$archive_host" || true
           done
-      - name: Use official Ubuntu archives for the isolated install probe
+      - name: Use the Ubuntu kernel.org mirror for the isolated install probe
         run: |
           set -euo pipefail
           sudo python3 - <<'PY'
@@ -35,8 +35,8 @@ jobs:
               if not path.is_file():
                   continue
               original = path.read_text()
-              updated = original.replace('mirror+file:/etc/apt/apt-mirrors.txt', 'https://archive.ubuntu.com/ubuntu')
-              updated = updated.replace('mirror+file:/etc/apt/apt-security-mirrors.txt', 'https://security.ubuntu.com/ubuntu')
+              updated = original.replace('mirror+file:/etc/apt/apt-mirrors.txt', 'https://mirrors.edge.kernel.org/ubuntu')
+              updated = updated.replace('mirror+file:/etc/apt/apt-security-mirrors.txt', 'https://mirrors.edge.kernel.org/ubuntu')
               if updated != original:
                   path.write_text(updated)
                   changed.append(str(path))
