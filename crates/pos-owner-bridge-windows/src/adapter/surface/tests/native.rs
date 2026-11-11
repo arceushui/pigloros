@@ -34,6 +34,8 @@ pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
     pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
+    pub(super) show_delay: Cell<Duration>,
+    pub(super) window_delay: Cell<Duration>,
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
     pub(super) fail_during_navigation: Cell<bool>,
     pub(in crate::adapter) failure: Cell<Option<&'static str>>,
@@ -67,6 +69,8 @@ impl Factory {
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
             foreground: Cell::new(true),
+            show_delay: Cell::new(Duration::ZERO),
+            window_delay: Cell::new(Duration::ZERO),
             navigation_succeeds: Cell::new(false),
             fail_during_navigation: Cell::new(false),
             failure: Cell::new(None),
@@ -284,6 +288,7 @@ impl NativeOperations for Session {
     }
     fn window(&self) -> NativeResult<WindowSnapshot> {
         self.check("window")?;
+        self.factory.clock.advance(self.factory.window_delay.get());
         Ok(WindowSnapshot {
             exists: self.factory.window_exists.get(),
             close_requested: self.factory.close_requested.get(),
@@ -296,7 +301,9 @@ impl NativeOperations for Session {
         self.effect("resize_window")
     }
     fn show_window(&self) -> NativeResult<()> {
-        self.effect("show_window")
+        self.effect("show_window")?;
+        self.factory.clock.advance(self.factory.show_delay.get());
+        Ok(())
     }
     fn fit_controller(&self) -> NativeResult<()> {
         self.effect("fit_controller")

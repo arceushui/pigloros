@@ -535,3 +535,72 @@ fn finish_requires_matching_exit_and_retries_each_failed_cleanup_effect() -> Tes
     assert!(fixture.surface.idle());
     Ok(())
 }
+
+#[test]
+fn foreground_budget_bounds_show_and_each_first_observation() -> TestResult {
+    use std::time::Duration;
+
+    for case in [
+        "late_true",
+        "boundary",
+        "show",
+        "query",
+        "readiness",
+        "on_time",
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.navigation_succeeds.set(true);
+        if case == "show" {
+            fixture.factory.show_delay.set(Duration::from_secs(1));
+        }
+        if case == "late_true" {
+            fixture.factory.foreground.set(false);
+        }
+        fixture
+            .open(&super::spec(125))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        match case {
+            "late_true" => {
+                assert!(fixture.surface.navigate().is_pending());
+                fixture.clock.advance(Duration::from_millis(1001));
+                fixture.factory.foreground.set(true);
+            }
+            "boundary" => fixture.clock.advance(Duration::from_secs(1)),
+            "readiness" => fixture.clock.advance(Duration::from_secs(30)),
+            "query" => fixture.factory.window_delay.set(Duration::from_millis(500)),
+            _ => {}
+        }
+        let result = fixture.surface.navigate();
+        if case == "on_time" {
+            assert!(result.is_pending());
+            fixture.clock.advance(Duration::from_secs(2));
+            assert!(fixture.surface.navigate().is_pending());
+            assert_eq!(
+                fixture
+                    .factory
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| **call == "navigate")
+                    .count(),
+                1
+            );
+        } else {
+            let expected = if case == "readiness" {
+                LifecycleCode::ReadinessTimeout
+            } else {
+                LifecycleCode::ForegroundUnavailable
+            };
+            assert!(
+                matches!(result, std::task::Poll::Ready(Err(error))
+                if error.error() == BridgeError::Lifecycle(expected)),
+                "{case}"
+            );
+            fixture.assert_no_ceremony_data();
+            assert!(!fixture.surface.idle());
+        }
+        fixture.factory.window_delay.set(Duration::ZERO);
+        fixture.finish()?;
+    }
+    Ok(())
+}

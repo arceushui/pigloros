@@ -102,9 +102,9 @@ impl Surface {
         self.native.subscribe_view(sink).map_err(unavailable)?;
         settings::apply(self.native.as_ref())?;
         self.native.fit_controller().map_err(unavailable)?;
-        self.native.show_window().map_err(unavailable)?;
         self.foreground_deadline =
             Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
+        self.native.show_window().map_err(unavailable)?;
         {
             #[cfg(test)]
             let _duration = crate::Native::readiness_span("focus");
@@ -124,13 +124,11 @@ impl Surface {
         }
         if !self.navigation_issued {
             let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
-            if !self.native.window().map_err(unavailable)?.foreground {
-                if self.clock.now() < deadline {
-                    return Ok(Poll::Pending);
-                }
-                return Err(SurfaceError::new(BridgeError::Lifecycle(
-                    LifecycleCode::ForegroundUnavailable,
-                )));
+            self.check_foreground_deadline(deadline)?;
+            let foreground = self.native.window().map_err(unavailable)?.foreground;
+            self.check_foreground_deadline(deadline)?;
+            if !foreground {
+                return Ok(Poll::Pending);
             }
             self.events.begin();
             {
@@ -144,6 +142,16 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         Ok(self.events.started().map_or(Poll::Pending, Poll::Ready))
+    }
+
+    fn check_foreground_deadline(&self, deadline: std::time::Instant) -> Result<()> {
+        self.before_deadline()?;
+        if self.clock.now() >= deadline {
+            return Err(SurfaceError::new(BridgeError::Lifecycle(
+                LifecycleCode::ForegroundUnavailable,
+            )));
+        }
+        Ok(())
     }
 
     pub(super) fn before_deadline(&self) -> Result<()> {
