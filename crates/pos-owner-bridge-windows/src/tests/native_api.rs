@@ -50,3 +50,15 @@ fn bounded_native_snapshots_preserve_paths_and_reject_invalid_display_text(
     assert_eq!(error.to_string(), "Text: InvalidOutput");
     Ok(())
 }
+
+#[test]
+fn modeled_retained_membership_requires_nonzero_pid_and_bounded_count() {
+    use crate::ExitMembershipKind::{Browser, Other};
+    assert!(crate::retained_exit_membership(&[], 0).is_err());
+    assert!(crate::retained_exit_membership(&[], 42).is_ok());
+    let mut entries = vec![(42, Browser)];
+    entries.extend((100..163).map(|pid| (pid, Other)));
+    assert!(crate::retained_exit_membership(&entries, 42).is_ok());
+    entries.push((163, Other));
+    assert!(crate::retained_exit_membership(&entries, 42).is_err());
+}

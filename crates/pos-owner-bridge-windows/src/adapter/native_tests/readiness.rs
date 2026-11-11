@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
 use pos_owner_bridge::ceremony::plan::{CeremonyPlan, StoredGet, Verified};
 use pos_owner_bridge::fake::signer::FIXTURE_COSE_KEY;
-use pos_owner_bridge::{BridgeError, CleanupStore, LifecycleCode, QuarantineKeeper, SystemClock};
+use pos_owner_bridge::{BridgeError, CleanupStore, LifecycleCode, SystemClock};
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, CoseEs256PublicKey, OwnerUserHandle, PrfInput, WebAuthnChallenge,
 };
@@ -20,7 +20,7 @@ use pos_owner_bridge_codec::{
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
 use super::trace::{worker_stage, Trace};
-use super::TestResult;
+use super::{retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
@@ -261,26 +261,16 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
-    let mut keeper = QuarantineKeeper::new();
-    let reply = keeper.finish(driver, result);
-    let mut quarantined = reply.driver.is_none();
-    surface.abandon_opening();
-    // Caller timeouts do not authorize destruction. Keep the exact environment,
-    // exit handler, record, driver and STA until actual retirement succeeds.
-    while quarantined || !surface.idle() {
-        if quarantined {
-            let poll = keeper.poll(|driver| {
-                trace.update("quarantine", surface, driver, loopback);
-                driver.poll_cleanup(&mut env(surface, loopback, store))
-            });
-            quarantined = poll.remaining;
-        } else {
-            let _retired_or_retained = surface.poll_failed_open();
-        }
-        if quarantined || !surface.idle() {
-            pump_retaining(surface);
-        }
-    }
+    retirement::retire(
+        surface,
+        loopback,
+        store,
+        driver,
+        result,
+        |surface, driver, loopback| {
+            trace.update("quarantine", surface, driver, loopback);
+        },
+    );
     surface.report_readiness_timing();
     let resource = crate::Native::readiness_resource_snapshot();
     let _logged = writeln!(std::io::stderr(),

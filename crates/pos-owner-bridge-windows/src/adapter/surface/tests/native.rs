@@ -180,6 +180,17 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn preload_fault_owners_retained(&self) -> bool {
+        self.controller
+            && self.factory.sink.borrow().is_some()
+            && self.factory.failure.get() != Some("preload-owner")
+    }
+
+    fn early_renderer_presence(&self) -> Result<crate::RendererPresence, ()> {
+        self.check("early_renderer_presence").map_err(|_| ())?;
+        Ok(crate::RendererPresence::Absent)
+    }
+
     fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
         if self.controller
             || self.factory.failure.get() == Some("exit_membership")
