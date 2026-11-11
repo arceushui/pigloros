@@ -279,12 +279,14 @@ trait AdmittedInput: Send + Sync {
         directory: &PreparedAttemptDirectory,
     ) -> Result<AdmittedAttempt, ExecuteError>;
 
-    /// Recheck `root` against current authority immediately before launch.
-    fn recheck(
+    /// The recheck of an activated root against current authority, run
+    /// immediately before launch.
+    fn checker(
         &self,
-        root: &Self::Root,
-        directory: &PreparedAttemptDirectory,
-    ) -> Result<CheckedRoot, ImageActivationError>;
+    ) -> impl Fn(&Self::Root, &PreparedAttemptDirectory) -> Result<CheckedRoot, ImageActivationError>
+           + Send
+           + Sync
+           + '_;
 }
 
 impl AdmittedInput for VerifiedStagedInput {
@@ -332,14 +334,24 @@ impl AdmittedInput for VerifiedStagedInput {
         AdmittedAttempt::from_entry(&self.entry(), directory)
     }
 
-    fn recheck(
+    fn checker(
         &self,
-        root: &VerifiedRootMount,
-        directory: &PreparedAttemptDirectory,
-    ) -> Result<CheckedRoot, ImageActivationError> {
-        root.recheck(directory, &self.entry())
+    ) -> impl Fn(
+        &VerifiedRootMount,
+        &PreparedAttemptDirectory,
+    ) -> Result<CheckedRoot, ImageActivationError>
+           + Send
+           + Sync
+           + '_ {
+        let entry = self.entry();
+        move |root: &VerifiedRootMount, directory: &PreparedAttemptDirectory| {
+            root.recheck(directory, &entry)
+        }
     }
 }
+
+/// The recheck an execution runs immediately before its unit starts.
+type Recheck<'a> = &'a (dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Sync);
 
 /// The result of one execution step.
 type Executed<S, C> = Result<AttemptExecution<S, C>, ExecuteFailure<C>>;
@@ -353,13 +365,12 @@ trait AttemptSteps<I: AdmittedInput>: Sync {
     /// The retained attempt cgroup.
     type Cgroup: Send;
 
-    /// Execute the attempt on its verified `root`.
+    /// Execute the admitted attempt; `recheck` yields its verified root.
     fn execute<'a>(
         &'a self,
         launch: Self::Launch,
-        input: &'a I,
-        directory: &'a PreparedAttemptDirectory,
-        root: &'a I::Root,
+        attempt: AdmittedAttempt,
+        recheck: Recheck<'a>,
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<Self::Started, Self::Cgroup>> + Send + 'a;
 
@@ -424,34 +435,25 @@ where
     fn execute<'a>(
         &'a self,
         launch: AttemptLaunch<F>,
-        input: &'a I,
-        directory: &'a PreparedAttemptDirectory,
-        root: &'a I::Root,
+        attempt: AdmittedAttempt,
+        recheck: Recheck<'a>,
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<SystemdVerifiedStart, crate::BoundAttemptCgroup>> + Send + 'a
     {
-        let prepared = input.attempt(directory).and_then(|attempt| {
-            (launch.barrier)(&attempt)
-                .map(|barrier| (attempt, barrier))
-                .map_err(|error| ExecuteError::Barrier(Box::new(error)))
-        });
-        let job = prepared.map(|(attempt, barrier)| {
-            let job = ExecuteJob {
-                attempt,
-                mode: launch.mode,
-                capture_store: Arc::clone(&self.capture_store),
-                cancel,
-            };
-            (job, barrier)
-        });
+        let barrier = (launch.barrier)(&attempt);
+        let job = ExecuteJob {
+            attempt,
+            mode: launch.mode,
+            capture_store: Arc::clone(&self.capture_store),
+            cancel,
+        };
         async move {
-            match job {
-                Ok((job, mut barrier)) => {
-                    let recheck = || input.recheck(root, directory);
+            match barrier {
+                Ok(mut barrier) => {
                     crate::execute(self.transport, &mut barrier, self.network, job, recheck).await
                 }
                 Err(error) => Err(ExecuteFailure {
-                    error,
+                    error: ExecuteError::Barrier(Box::new(error)),
                     unit: UnitState::NotStarted,
                     cgroup: None,
                 }),
@@ -1138,6 +1140,54 @@ impl<I> OwnedAttempt<'_, I> {
     }
 }
 
+/// Bind the admitted attempt to its directory, activate its root and execute
+/// it: how far it got, its retained cgroup and its root.
+async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
+    steps: &S,
+    launch: S::Launch,
+    input: &I,
+    directory: &PreparedAttemptDirectory,
+    cancel: CancelSignal,
+) -> (
+    AttemptProgress<S::Started>,
+    Option<S::Cgroup>,
+    Option<I::Root>,
+) {
+    let admitted = input.attempt(directory);
+    let checker = input.checker();
+    let attempt = match admitted {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            let unit = UnitState::NotStarted;
+            return (AttemptProgress::Failed { error, unit }, None, None);
+        }
+    };
+    let root = match input.activate(directory).await {
+        Ok(root) => root,
+        Err(error) => return (AttemptProgress::NotActivated(error), None, None),
+    };
+    let recheck = || checker(&root, directory);
+    let executed = steps.execute(launch, attempt, &recheck, cancel).await;
+    let (progress, cgroup) = match executed {
+        Ok(execution) => (
+            AttemptProgress::Executed {
+                started: execution.started,
+                ending: execution.ending,
+                network: execution.network,
+            },
+            Some(execution.cgroup),
+        ),
+        Err(failure) => (
+            AttemptProgress::Failed {
+                error: failure.error,
+                unit: failure.unit,
+            },
+            failure.cgroup,
+        ),
+    };
+    (progress, cgroup, Some(root))
+}
+
 type Progressed<S> = (
     AttemptProgress<S>,
     Result<CompletedAttemptCleanup, AttemptLifecycleError>,
@@ -1155,32 +1205,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     let (progress, cgroup, root) = if cancel.is_requested() {
         (AttemptProgress::CancelledBeforeActivation, None, None)
     } else {
-        match input.activate(&directory).await {
-            Err(error) => (AttemptProgress::NotActivated(error), None, None),
-            Ok(root) => {
-                let executed = steps
-                    .execute(launch, input, &directory, &root, cancel)
-                    .await;
-                let (progress, cgroup) = match executed {
-                    Ok(execution) => (
-                        AttemptProgress::Executed {
-                            started: execution.started,
-                            ending: execution.ending,
-                            network: execution.network,
-                        },
-                        Some(execution.cgroup),
-                    ),
-                    Err(failure) => (
-                        AttemptProgress::Failed {
-                            error: failure.error,
-                            unit: failure.unit,
-                        },
-                        failure.cgroup,
-                    ),
-                };
-                (progress, cgroup, Some(root))
-            }
-        }
+        activate_and_execute(steps, launch, input, &directory, cancel).await
     };
     let deadlines = budget.deadlines(Instant::now());
     let cleanup = steps
