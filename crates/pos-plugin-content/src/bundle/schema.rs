@@ -54,8 +54,9 @@ struct Index {
     references: Vec<Reference>,
     identifier_limit: usize,
     reference_limit: usize,
-    // Registry inputs borrow these same immutable Values. Membership only:
-    // addresses never affect traversal, ordering, serialization or a digest.
+    // Indexed documents retain these immutable Values at stable addresses.
+    // Membership only: addresses never affect traversal, ordering, serialization
+    // or a digest.
     // This rejects a JSON Pointer into instance data such as `examples` even
     // when its object happens to look like a schema elsewhere in the document.
     locations: BTreeSet<*const Value>,
