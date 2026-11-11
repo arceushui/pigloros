@@ -161,8 +161,10 @@ fn observe_case(
     let native_wiped = native_zeroing_observed(observations);
     if !refused || !wiped || !native_wiped {
         return Err(format!(
-            "quarantine mappings or secrets were not wiped: case={} refused={refused} wiped={wiped} native_wiped={native_wiped} observations={observations:?}",
-            fixture.number
+            "quarantine mappings or secrets were not wiped: case={} refused={refused} wiped={wiped} native_wiped={native_wiped} observation_count={} observations={:?}",
+            fixture.number,
+            observations.len(),
+            &observations[..observations.len().min(3)]
         ).into());
     }
     let state = fixture
@@ -360,24 +362,35 @@ mod tests {
         let calls = model.calls.borrow().clone();
         let mut keeper = QuarantineKeeper::new();
         let keeper_held = std::rc::Rc::new(std::cell::Cell::new(false));
-        for (refused, wiped, observations, expected) in [
+        let excess_observations = [observations[0]; 4];
+        for (refused, wiped, observations, expected, shown) in [
             (
                 false,
                 true,
                 observations.as_slice(),
                 "refused=false wiped=true native_wiped=true",
+                2,
             ),
             (
                 true,
                 false,
                 observations.as_slice(),
                 "refused=true wiped=false native_wiped=true",
+                2,
             ),
             (
                 true,
                 true,
                 &[][..],
                 "refused=true wiped=true native_wiped=false",
+                0,
+            ),
+            (
+                true,
+                true,
+                excess_observations.as_slice(),
+                "refused=true wiped=true native_wiped=false",
+                3,
             ),
         ] {
             let error = observe_case(
@@ -394,7 +407,9 @@ mod tests {
             let error = error.ok_or("modeled invalid wipe evidence was accepted")?;
             assert!(error.starts_with("quarantine mappings or secrets were not wiped: case=240 "));
             assert!(error.contains(expected));
+            assert!(error.contains(&format!("observation_count={}", observations.len())));
             assert!(error.contains("observations=["));
+            assert_eq!(error.matches("NativeZeroObservation {").count(), shown);
             assert!(fixture.surface.idle());
             assert!(fixture.trace.borrow().is_empty());
             assert_eq!(*model.calls.borrow(), calls);
