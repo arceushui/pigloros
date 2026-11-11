@@ -37,7 +37,7 @@ pub use recovery::{
 };
 #[cfg(test)]
 pub use tests::{
-    crash_io_now, in_lock_test_process, io_crashed, root_record_fixture, with_io_crash,
+    crash_io_now, in_lock_test_process, io_count, io_crashed, root_record_fixture, with_io_crash,
     with_io_fault,
 };
 
@@ -640,6 +640,11 @@ mod tests {
     /// there leaves, while the operation itself returns normally without
     /// unwinding. [`crash_io_now`] crashes at the next operation instead.
     /// Returns the number of operations started.
+    ///
+    /// A crash loses no completed write: the registry lives on the tmpfs
+    /// `/run`, where a write survives a daemon crash whether or not it was
+    /// fsynced, and a reboot empties the registry. Lost or torn fsynced data
+    /// is therefore not modelled; a torn temporary write is, by truncating it.
     pub fn with_io_crash<T>(crash_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
         let _restore = RestoreIoCrash(IO_CRASH.with(|state| state.replace(true)));
         with_io_fault(crash_at, operation)
@@ -652,6 +657,13 @@ mod tests {
             let (count, fail_at) = state.get();
             state.set((count, fail_at.or(Some(count))));
         });
+    }
+
+    /// The registry I/O operations started so far in the enclosing
+    /// [`with_io_fault`] or [`with_io_crash`].
+    #[must_use]
+    pub fn io_count() -> usize {
+        IO_FAULT.with(Cell::get).0
     }
 
     /// Whether the registry I/O of the enclosing [`with_io_crash`] crashed.
