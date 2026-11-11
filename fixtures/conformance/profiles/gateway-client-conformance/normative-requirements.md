@@ -3,9 +3,10 @@
 Profile `pigloros.w8.gateway-client-seam`, claim layer `GatewayClientConformance = 3`, subject
 adapter `public-gateway-protocol`, provider `pigloros.fixture.gateway-client-conformance`
 contract `2.0.0`, ABI 1.0 (Redmine #1295; owner decisions of 2026-11-07 on #1295). The normative
-surface is only the documented Gateway HTTP route table of ADR-014 and
-`apps/piglor-gateway/README.md`. There is no OpenAPI document, Golden Path transition, Scenario
-Room, or new authentication or action contract in this profile. No fixture relies on a live
+surface is the served routes of the Draft Gateway v1 contract `contracts/gateway/v1/openapi.json`
+and its RFC 9457 problem-type registry (#301, #1312); `scripts/check_gateway_contract.py`
+validates every expected response below against that description. There is no Golden Path
+transition, Scenario Room, or new authentication or action contract in this profile. No fixture relies on a live
 service or on the Gateway implementation as its oracle: every expected exchange is written by
 `scripts/generate_gateway_conformance_fixtures.py` from this text.
 
@@ -58,7 +59,9 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   The fixture World body is `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
   `x-piglor-actor-entity: 01JC0GATEWAYF1XTVREACT0R00`.
 
-A request `body` is sent as compact JSON with `content-type: application/json`.
+A request `body` is sent as compact JSON with `content-type: application/json`. Every request
+carries `idempotency-key: <sub-case id>`; routes without an idempotency key ignore it, and two
+identical actions of one sub-case are an exact retry.
 
 ## 4. Observations and normalization
 
@@ -67,10 +70,12 @@ The observation of a sent exchange is `{"status": <code>, "body": <body>}`. The 
 The value is normalized; the identities, cursors and messages the documentation does not fix
 are permitted nondeterministic operational fields:
 
-- a member `id` whose value is a ULID becomes `"<ulid>"`;
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
   becomes `"<cursor>"`;
-- a member `error` with a text value becomes `"<message>"`.
+- a member `detail` with a text value becomes `"<message>"`;
+- in a member `id` or `instance` with a text value, every `/`-separated segment that is a ULID
+  becomes `<ulid>`, so an `id` that is a ULID becomes `"<ulid>"` (a routed problem names its
+  route template and carries no ID; only the path of a request no route serves can carry one).
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
@@ -98,21 +103,23 @@ Event per `201` response of the signals or actions route. The other counters are
 - **positive:** `/health` answers `{"ok": true}`; a created Timeline polls an empty exhausted
   page; a committed Society Signal is polled back with its canonical payload; `/v1/ledger` is
   empty.
-- **denied** (`capability-denied`): an action without a host authorizer is `401` and an action
-  the fixture authority does not grant is `403`, each followed by an empty poll (denial without
-  state change); a route whose capability the attempt does not hold is refused; a read on the
-  `authorized` Gateway without the actor header is `401`.
-- **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are `400`; a
-  Timeline ID that is not a ULID is `400`; integer action `params` are `422`, and nothing is
-  committed.
-- **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is
-  `429`.
+- **denied** (`capability-denied`): an action without a host authorizer is the `401`
+  `unauthenticated` problem and an action the fixture authority does not grant is the `403`
+  `unauthorized` problem, each followed by an empty poll (denial without state change); a route
+  whose capability the attempt does not hold is refused; a read on the `authorized` Gateway
+  without the actor header is the `401` `unauthenticated` problem.
+- **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
+  `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
+  integer action `params` are the `422` `admission-rejected` problem, and nothing is committed.
+- **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is the
+  `429` `resource-limit-exceeded` problem.
 - **deletion-redaction:** public-listener redaction. A canary Society Signal is committed
   through the loopback router; on the same Gateway the spectator router answers the Timeline
-  events and signals routes with `404`, still answers `/health` and `/v1/ledger`, and no
+  events and signals routes with the `404` `not-found-or-unavailable` problem, still answers `/health` and `/v1/ledger`, and no
   spectator response contains the canary; the loopback poll still returns the Event. This is
   redaction from the public surface, not ADR-060 deletion (see `support/limitations.md`).
-- **downgrade** (`incompatible-contract`): the legacy `world.action` event type is `400` and
-  the legacy `world.action.submit` capability is `403`, with no fallback and nothing committed.
+- **downgrade** (`incompatible-contract`): the legacy `world.action` event type is the `400`
+  `unsupported-version` problem and the legacy `world.action.submit` capability is the `403`
+  `unauthorized` problem, with no fallback and nothing committed.
 - **independent-evaluation:** the digests of a health exchange and of a created Timeline with
   its empty page.
