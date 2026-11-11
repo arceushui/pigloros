@@ -403,13 +403,19 @@ mod cases {
                 .lifecycle
                 .reconcile(&reconcile_request(id, grant(id)))?;
             assert_eq!(reconciled.intent().attempt_id(), [id; 16]);
-            // A repeated reconcile reports the same attempt.
+            // A repeated reconcile reports the same attempt, for its grant only.
             assert_eq!(
                 runtime
                     .lifecycle
                     .reconcile(&reconcile_request(id, grant(id)))?,
                 reconciled
             );
+            assert!(matches!(
+                runtime
+                    .lifecycle
+                    .reconcile(&reconcile_request(id, grant(id + 1))),
+                Err(AttemptLifecycleError::GrantMismatch)
+            ));
             // The reconciled attempt is unknown to cancel, and is never relaunched.
             assert!(matches!(
                 runtime
@@ -610,6 +616,33 @@ mod cases {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn an_owner_dropped_before_its_run_started_leaves_admission_open() -> TestResult {
+        let runtime = Runtime::new()?;
+        drop(runtime.lifecycle.admit_input(FakeInput::new(1))?);
+        let fixture = manager(2).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(2))?;
+        drop(owned.run_with(&steps, (), budget()?));
+        // Nothing was committed, so nothing needs restart reconciliation.
+        assert!(!exists(&runtime.record(1)?));
+        assert!(runtime.admits()?);
+        // Each attempt still had its one owner, with nothing proved.
+        for id in [1, 2] {
+            assert!(matches!(
+                runtime.lifecycle.admit_input(FakeInput::new(id)),
+                Err(AttemptLifecycleError::AttemptKnown)
+            ));
+            assert!(matches!(
+                runtime
+                    .lifecycle
+                    .reconcile(&reconcile_request(id, grant(id))),
+                Err(AttemptLifecycleError::CleanupFailed)
+            ));
+        }
+        Ok(())
+    }
+
     /// Run one attempt that cannot be proved clean, and check what it leaves.
     async fn unproved(input: FakeInput, steps: FixtureSteps<'_>) -> TestResult<EndedAttempt<()>> {
         let runtime = Runtime::new()?;
@@ -622,6 +655,14 @@ mod cases {
             runtime
                 .lifecycle
                 .reconcile(&reconcile_request(id, grant(id))),
+            Err(AttemptLifecycleError::CleanupFailed)
+        ));
+        // An unproved attempt never looks cleanly terminal to a cancellation.
+        assert!(matches!(
+            runtime
+                .lifecycle
+                .cancel(&cancel_request(id, grant(id)))
+                .await,
             Err(AttemptLifecycleError::CleanupFailed)
         ));
         Ok(ended)
