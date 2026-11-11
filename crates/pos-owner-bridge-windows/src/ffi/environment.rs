@@ -112,3 +112,22 @@ const fn unavailable() -> NativeError {
         failure: Failure::CallFailed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::browser_exited;
+    use crate::{Failure, NativeError, Operation};
+
+    #[test]
+    fn modeled_missing_browser_exit_arguments_refuse_before_native_access() {
+        assert_eq!(
+            browser_exited(None).err(),
+            Some(NativeError {
+                operation: Operation::Environment,
+                failure: Failure::CallFailed,
+            })
+        );
+    }
+}

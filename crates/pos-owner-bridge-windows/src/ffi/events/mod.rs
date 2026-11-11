@@ -103,3 +103,165 @@ pub(super) const fn unavailable() -> NativeError {
         failure: Failure::CallFailed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use super::{action, observe, Subscriptions};
+    use crate::{EventKind, EventSink, Failure, NativeAction, NativeError, NativeEvent, Operation};
+    use windows::core::{Error, HRESULT};
+
+    #[derive(Default)]
+    struct Sink {
+        events: RefCell<Vec<NativeEvent>>,
+        failures: RefCell<Vec<(EventKind, NativeError)>>,
+    }
+
+    impl EventSink for Sink {
+        fn event(&self, event: NativeEvent) -> NativeAction {
+            self.events.borrow_mut().push(event);
+            NativeAction::Handled
+        }
+
+        fn failed(&self, kind: EventKind, error: NativeError) -> NativeAction {
+            self.failures.borrow_mut().push((kind, error));
+            NativeAction::BlockResource
+        }
+    }
+
+    #[test]
+    fn modeled_event_observations_keep_failure_classification_and_validate_actions() {
+        let sink = Sink::default();
+        let error = NativeError {
+            operation: Operation::Subscription,
+            failure: Failure::CallFailed,
+        };
+        assert_eq!(
+            observe(&sink, EventKind::NewWindow, Ok(NativeEvent::NewWindow)),
+            NativeAction::Handled
+        );
+        assert!(matches!(
+            sink.events.borrow().as_slice(),
+            [NativeEvent::NewWindow]
+        ));
+        assert_eq!(
+            observe(&sink, EventKind::Resource, Err(error)),
+            NativeAction::BlockResource
+        );
+        action(
+            &sink,
+            EventKind::NewWindow,
+            NativeAction::Handled,
+            NativeAction::Handled,
+        );
+        assert_eq!(*sink.failures.borrow(), [(EventKind::Resource, error)]);
+        action(
+            &sink,
+            EventKind::NewWindow,
+            NativeAction::Allow,
+            NativeAction::Handled,
+        );
+        assert_eq!(
+            *sink.failures.borrow(),
+            [
+                (EventKind::Resource, error),
+                (
+                    EventKind::NewWindow,
+                    NativeError {
+                        operation: Operation::Subscription,
+                        failure: Failure::InvalidAction,
+                    },
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn modeled_subscription_add_failure_never_installs_a_remover() {
+        let removed = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&removed);
+        let mut subscriptions = Subscriptions::default();
+        assert_eq!(
+            subscriptions.register(
+                |_| Err(Error::from_hresult(HRESULT(-1))),
+                move |_| {
+                    observed.set(true);
+                    Ok(())
+                },
+            ),
+            Err(NativeError {
+                operation: Operation::Subscription,
+                failure: Failure::CallFailed,
+            })
+        );
+        assert!(subscriptions.removers.is_empty());
+        assert_eq!(subscriptions.close(), Ok(()));
+        drop(subscriptions);
+        assert!(!removed.get());
+    }
+
+    #[test]
+    fn modeled_subscription_removal_retries_failures_and_close_retires_callbacks() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let first = Rc::clone(&calls);
+        let mut fail_first = true;
+        let mut subscriptions = Subscriptions::default();
+        assert_eq!(
+            subscriptions.register(
+                |_| Ok(()),
+                move |_| {
+                    first.borrow_mut().push("first");
+                    if std::mem::take(&mut fail_first) {
+                        Err(Error::from_hresult(HRESULT(-1)))
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Ok(())
+        );
+        let second = Rc::clone(&calls);
+        assert_eq!(
+            subscriptions.register(
+                |_| Ok(()),
+                move |_| {
+                    second.borrow_mut().push("second");
+                    Ok(())
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            subscriptions.close(),
+            Err(NativeError {
+                operation: Operation::Subscription,
+                failure: Failure::CallFailed,
+            })
+        );
+        assert_eq!(*calls.borrow(), ["second", "first"]);
+        assert_eq!(subscriptions.removers.len(), 1);
+        assert_eq!(subscriptions.close(), Ok(()));
+        assert!(subscriptions.removers.is_empty());
+        assert_eq!(*calls.borrow(), ["second", "first", "first"]);
+        let third = Rc::clone(&calls);
+        assert_eq!(
+            subscriptions.register(
+                |_| Ok(()),
+                move |_| {
+                    third.borrow_mut().push("third");
+                    Ok(())
+                },
+            ),
+            Ok(())
+        );
+        subscriptions.view_closed();
+        assert!(subscriptions.removers.is_empty());
+        assert_eq!(subscriptions.close(), Ok(()));
+        drop(subscriptions);
+        assert_eq!(*calls.borrow(), ["second", "first", "first"]);
+    }
+}

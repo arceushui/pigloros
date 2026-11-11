@@ -469,3 +469,28 @@ fn navigation_completed(
         success: success.as_bool(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::{content_loading, dom_loaded, navigation_completed};
+    use crate::{Failure, NativeError, Operation};
+
+    #[test]
+    fn modeled_missing_navigation_arguments_refuse_before_native_access() {
+        for result in [
+            content_loading(None),
+            dom_loaded(None, None),
+            navigation_completed(None),
+        ] {
+            assert_eq!(
+                result.err(),
+                Some(NativeError {
+                    operation: Operation::Subscription,
+                    failure: Failure::CallFailed,
+                })
+            );
+        }
+    }
+}
