@@ -209,6 +209,69 @@ fn references_fixture() -> TestResult<Fixture> {
     Ok(fixture)
 }
 
+fn set_external_document(value: &mut Value, document: &str) {
+    value["externalDocumentRefs"][0]["externalDocumentId"] = json!(document);
+    let element = format!("{document}:SPDXRef-external");
+    value["documentDescribes"][3] = json!(element);
+    value["packages"][0]["hasFiles"][3] = json!(element);
+    value["relationships"][0]["spdxElementId"] = json!(element);
+    value["packages"][0]["licenseDeclared"] = json!(format!(
+        "{document}:LicenseRef-external AND LicenseRef-local"
+    ));
+}
+
+#[test]
+fn spdx_external_identifiers_follow_the_declared_syntax() -> TestResult {
+    for document in ["bad", "DocumentRef-", "DocumentRef-bad@"] {
+        let mut fixture = references_fixture()?;
+        fixture.sbom(|value| set_external_document(value, document))?;
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::Malformed {
+                artifact: Artifact::Sbom
+            })
+        );
+    }
+    let mut fixture = references_fixture()?;
+    fixture.sbom(|value| {
+        value["relationships"][0]["spdxElementId"] = json!("DocumentRef-other:SPDXRef-bad@");
+    })?;
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Sbom
+        })
+    );
+
+    let mut fixture = references_fixture()?;
+    fixture.sbom(|value| set_external_document(value, "DocumentRef-a+b.1"))?;
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn schema_failure_reports_the_first_closure_member_across_phases() -> TestResult {
+    for (first, expected) in [
+        (
+            br#"{"$vocabulary":{"https://unknown.invalid/vocab":true}}"#.as_slice(),
+            Error::UnsupportedFormat {
+                artifact: Artifact::Schema { index: 0 },
+            },
+        ),
+        (
+            br#"{"$ref":"urn:missing"}"#.as_slice(),
+            Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 },
+            },
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![first.to_vec(), b"null".to_vec()];
+        assert_eq!(result(&fixture)?, Err(expected));
+    }
+    Ok(())
+}
+
 #[test]
 fn spdx_checks_direct_files_snippets_and_declared_external_metadata() -> TestResult {
     let fixture = references_fixture()?;
