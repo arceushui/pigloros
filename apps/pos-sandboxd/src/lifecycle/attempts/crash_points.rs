@@ -256,28 +256,31 @@ impl AttemptSteps<CrashInput> for CrashSteps<'_> {
                 unit: UnitState::NotStarted,
                 cgroup: None,
             });
-        let executed: Executed<(), BoundAttemptCgroup> = submitted.and_then(|()| {
-            *lock(&self.world.unit) = Some(input.attempt_id());
-            self.world.reach(Boundary::UnitSubmitted);
-            let taken = lock(&self.cgroup).take();
-            taken
-                .map(|cgroup| {
-                    ownership.bind_cgroup(cgroup.identity());
-                    self.world.reach(Boundary::ExecutionEnded);
-                    AttemptExecution {
-                        attempt_id: input.attempt_id(),
-                        started: (),
-                        cgroup,
-                        ending: AttemptEnding::CgroupEmpty,
-                        network: NetworkEvidence::None,
-                    }
-                })
-                .ok_or(ExecuteFailure {
-                    error: ExecuteError::HostTimeout,
-                    unit: UnitState::Unknown,
-                    cgroup: None,
-                })
-        });
+        let executed: Executed<(), BoundAttemptCgroup> = match submitted {
+            Err(failure) => Err(failure),
+            Ok(()) => {
+                *lock(&self.world.unit) = Some(input.attempt_id());
+                self.world.reach(Boundary::UnitSubmitted);
+                let taken = lock(&self.cgroup).take();
+                taken
+                    .map(|cgroup| {
+                        ownership.bind_cgroup(cgroup.identity());
+                        self.world.reach(Boundary::ExecutionEnded);
+                        AttemptExecution {
+                            attempt_id: input.attempt_id(),
+                            started: (),
+                            cgroup,
+                            ending: AttemptEnding::CgroupEmpty,
+                            network: NetworkEvidence::None,
+                        }
+                    })
+                    .ok_or(ExecuteFailure {
+                        error: ExecuteError::HostTimeout,
+                        unit: UnitState::Unknown,
+                        cgroup: None,
+                    })
+            }
+        };
         std::future::ready(executed)
     }
 
@@ -364,7 +367,7 @@ async fn lives(
         };
         let owned = lifecycle.admit_input(input)?;
         let budget = budget()?;
-        ended.push(owned.run_with(&steps, (), budget).await);
+        ended.push(Box::pin(owned.run_with(&steps, (), budget)).await);
     }
     Ok(ended)
 }

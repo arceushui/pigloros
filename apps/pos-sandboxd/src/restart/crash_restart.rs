@@ -264,12 +264,13 @@ pub async fn restart_after_crash(
     let network = Network {
         fails: uncertain == UncertainProof::Network,
     };
+    let deadlines = (cleanup()?, Instant::now() + Duration::from_secs(6));
     let reconciled = reconcile_with(
         &transport,
         recovery,
         &network,
         &crashed,
-        (cleanup()?, Instant::now() + Duration::from_secs(6)),
+        deadlines,
         (
             |_generations| std::future::ready(Ok(uncertain != UncertainProof::RecordedDevices)),
             || std::future::ready(Ok(uncertain != UncertainProof::ProviderLoops)),
