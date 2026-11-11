@@ -52,7 +52,7 @@ fn interaction_deadline(fixture_deadline: Instant, receipt: Instant) -> Instant 
 }
 
 #[test]
-fn interaction_cutpoint_requires_receipt_and_keeps_original_limits() {
+fn interaction_deadline_uses_receipt_and_conservative_challenge_origin() {
     let origin = Instant::now();
     let fixture_deadline = origin + Duration::from_secs(15);
     let receipt = origin + Duration::from_secs(10);
