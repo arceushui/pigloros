@@ -36,7 +36,10 @@ pub use recovery::{
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
 #[cfg(test)]
-pub use tests::{in_lock_test_process, root_record_fixture, with_io_crash, with_io_fault};
+pub use tests::{
+    crash_io_now, in_lock_test_process, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
+};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -589,24 +592,22 @@ mod tests {
 
     std::thread_local! {
         static IO_FAULT: Cell<(usize, Option<usize>)> = const { Cell::new((0, None)) };
-        // Whether the injected fault unwinds, as a crash, instead of failing.
+        // Whether every operation from the injected fault on fails, as after
+        // a crash, instead of that one alone.
         static IO_CRASH: Cell<bool> = const { Cell::new(false) };
     }
-
-    /// The unwinding payload of a crash injected by [`with_io_crash`].
-    struct InjectedCrash;
 
     pub(super) fn before_io() -> io::Result<()> {
         IO_FAULT.with(|state| {
             let (count, fail_at) = state.get();
             state.set((count + 1, fail_at));
-            if fail_at != Some(count) {
-                return Ok(());
+            let crashed = IO_CRASH.with(Cell::get);
+            match fail_at {
+                Some(at) if count == at || (crashed && count > at) => {
+                    Err(io::Error::other("injected registry I/O failure"))
+                }
+                _ => Ok(()),
             }
-            if IO_CRASH.with(Cell::get) {
-                std::panic::resume_unwind(Box::new(InjectedCrash));
-            }
-            Err(io::Error::other("injected registry I/O failure"))
         })
     }
 
@@ -632,26 +633,32 @@ mod tests {
         }
     }
 
-    /// Run `operation`, crashing it before registry I/O operation `crash_at`.
+    /// Run `operation`, crashing its registry I/O at operation `crash_at`.
     ///
-    /// The crash unwinds through every caller without performing that or any
-    /// later operation, so the disk keeps exactly what a process crash at that
-    /// point leaves. Unwinding runs only in-memory destructors. Returns `None`
-    /// when the crash happened, and the number of operations started, the
-    /// crashed one included.
-    ///
-    /// # Panics
-    /// Resumes any other panic of `operation`.
-    pub fn with_io_crash<T>(crash_at: usize, operation: impl FnOnce() -> T) -> (Option<T>, usize) {
+    /// That operation and every later one fail before they start, so the
+    /// registry and the attempt directories keep exactly what a process crash
+    /// there leaves, while the operation itself returns normally without
+    /// unwinding. [`crash_io_now`] crashes at the next operation instead.
+    /// Returns the number of operations started.
+    pub fn with_io_crash<T>(crash_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
         let _restore = RestoreIoCrash(IO_CRASH.with(|state| state.replace(true)));
-        let (result, count) = with_io_fault(Some(crash_at), || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+        with_io_fault(crash_at, operation)
+    }
+
+    /// Crash the registry I/O of the enclosing [`with_io_crash`] at its next
+    /// operation, unless it already crashed.
+    pub fn crash_io_now() {
+        IO_FAULT.with(|state| {
+            let (count, fail_at) = state.get();
+            state.set((count, fail_at.or(Some(count))));
         });
-        match result {
-            Ok(value) => (Some(value), count),
-            Err(payload) if payload.is::<InjectedCrash>() => (None, count),
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
+    }
+
+    /// Whether the registry I/O of the enclosing [`with_io_crash`] crashed.
+    #[must_use]
+    pub fn io_crashed() -> bool {
+        let (count, fail_at) = IO_FAULT.with(Cell::get);
+        IO_CRASH.with(Cell::get) && fail_at.is_some_and(|at| count > at)
     }
 
     // A concurrent test's fork can retain an O_CLOEXEC flock descriptor until

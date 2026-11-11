@@ -14,10 +14,11 @@
 //! execution, the stopped unit and the released root). A fresh run is then
 //! interrupted at each of them in turn:
 //!
-//! * a crash immediately before an I/O operation, or at a boundary, unwinds
-//!   the process without any further I/O, leaving what a real crash leaves:
-//!   the disk as it was, a started unit still loaded and an attached root
-//!   still mounted;
+//! * a crash immediately before an I/O operation, or at a boundary, fails
+//!   that and every later registry operation and freezes the fake unit and
+//!   root, leaving what a real crash leaves: the disk as it was, a started
+//!   unit still loaded and an attached root still mounted. Nothing unwinds,
+//!   so the run's in-memory owners are simply dropped afterwards;
 //! * a failed I/O operation is first handled by the live owner, which must
 //!   report cleanup only when it proved all of it and must close itself to
 //!   new intents; the process then crashes.
@@ -31,16 +32,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use pos_reference::sandbox_provider_protocol::{RequestAuthority, SandboxExecutionMode};
 
 use super::*;
 use crate::test_fixtures::{
-    authority, checked_root, fake_root_release, in_lock_test_process, recorded_identity,
-    release_fake_root, restart_after_crash, with_io_crash, with_io_fault, CrashSurvivors,
-    FakeRootRelease, TeardownFixture, TeardownReset, TeardownStop, TestResult, UncertainProof,
+    authority, checked_root, crash_io_now, fake_root_release, in_lock_test_process, io_crashed,
+    recorded_identity, release_fake_root, restart_after_crash, with_io_crash, with_io_fault,
+    CrashSurvivors, FakeRootRelease, TeardownFixture, TeardownReset, TeardownStop, TestResult,
+    UncertainProof,
 };
 use crate::{
     BoundAttemptCgroup, ReleasedAttemptRoot, RestartReconciliationError, TransientServiceUnitName,
@@ -80,14 +82,13 @@ const LIFECYCLE: [Boundary; 6] = [
     Boundary::RootReleased,
 ];
 
-/// The unwinding payload of a crash at a boundary.
-struct BoundaryCrash;
-
 /// The external resources a run holds, and the boundary it crashes at.
 #[derive(Debug, Default)]
 struct World {
     /// Crash at this boundary occurrence, counted over the whole run.
     crash_at: Option<usize>,
+    /// Whether the run crashed at a boundary.
+    crashed: AtomicBool,
     reached: Mutex<Vec<Boundary>>,
     /// The attempt whose unit is loaded.
     unit: Mutex<Option<[u8; 16]>>,
@@ -96,12 +97,28 @@ struct World {
 }
 
 impl World {
+    /// Whether the run crashed: nothing it does afterwards happens.
+    fn frozen(&self) -> bool {
+        self.crashed.load(Ordering::SeqCst) || io_crashed()
+    }
+
     /// Record `boundary`, and crash there if this occurrence is the one.
     fn reach(&self, boundary: Boundary) {
+        if self.frozen() {
+            return;
+        }
         lock(&self.reached).push(boundary);
         let occurrence = lock(&self.reached).len() - 1;
         if self.crash_at == Some(occurrence) {
-            resume_unwind(Box::new(BoundaryCrash));
+            self.crashed.store(true, Ordering::SeqCst);
+            crash_io_now();
+        }
+    }
+
+    /// Record which attempt's resource is live, unless the run crashed.
+    fn hold(&self, resource: &Mutex<Option<[u8; 16]>>, attempt: Option<[u8; 16]>) {
+        if !self.frozen() {
+            *lock(resource) = attempt;
         }
     }
 }
@@ -126,12 +143,12 @@ impl RootRelease for CrashRoot {
     ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_ {
         let Self { fake, world } = self;
         // Terminal cleanup releases the root only after it stopped the unit.
-        *lock(&world.unit) = None;
+        world.hold(&world.unit, None);
         world.reach(Boundary::UnitStopped);
         async move {
             let released = release_fake_root(fake, directory, deadline).await;
             if released.is_ok() {
-                *lock(&world.mounted) = None;
+                world.hold(&world.mounted, None);
                 world.reach(Boundary::RootReleased);
             }
             released
@@ -175,7 +192,8 @@ impl AdmittedInput for CrashInput {
                 fake_root_release(directory, true).map_err(|_| ImageActivationError::AttachFailure)
             })
             .map(|fake| {
-                *lock(&self.world.mounted) = Some(self.attempt_id());
+                self.world
+                    .hold(&self.world.mounted, Some(self.attempt_id()));
                 self.world.reach(Boundary::RootAttached);
                 CrashRoot {
                     fake,
@@ -256,7 +274,7 @@ impl AttemptSteps<CrashInput> for CrashSteps<'_> {
                 cgroup: None,
             });
         let started = submitted.map(|()| {
-            *lock(&self.world.unit) = Some(attempt_id);
+            self.world.hold(&self.world.unit, Some(attempt_id));
             self.world.reach(Boundary::UnitSubmitted);
             let taken = lock(&self.cgroup).take();
             taken.map(|cgroup| {
@@ -386,23 +404,14 @@ enum Interruption {
 
 /// What a run left behind.
 struct Run {
-    /// Each attempt's live outcome; `None` when the process crashed.
-    ended: Option<Vec<EndedAttempt<()>>>,
+    /// Each attempt's live outcome, as the process reported it.
+    ended: Vec<EndedAttempt<()>>,
     /// The registry I/O operations started.
     ios: usize,
     /// The boundaries reached.
     reached: Vec<Boundary>,
     /// The unit and root still live.
     survivors: CrashSurvivors,
-}
-
-/// The value of a run unless it crashed at a boundary.
-fn unless_crashed<T>(caught: std::thread::Result<T>) -> Option<T> {
-    match caught {
-        Ok(value) => Some(value),
-        Err(payload) if payload.is::<BoundaryCrash>() => None,
-        Err(payload) => resume_unwind(payload),
-    }
 }
 
 /// Run `count` lifecycles in `runtime`, interrupted by `interruption`, and
@@ -431,29 +440,21 @@ fn run(runtime: &Path, count: u8, interruption: Interruption) -> TestResult<Run>
     });
     let live = || tokio.block_on(Box::pin(lives(&lifecycle, count, &world)));
     let (ended, ios) = match interruption {
-        Interruption::None => {
-            let (ended, ios) = with_io_fault(None, live);
-            (Some(ended), ios)
-        }
-        Interruption::FailsAtIo(at) => {
-            let (ended, ios) = with_io_fault(Some(at), live);
-            (Some(ended), ios)
-        }
-        Interruption::CrashesAtIo(at) => with_io_crash(at, live),
-        Interruption::CrashesAtBoundary(_) => {
-            let (caught, ios) = with_io_fault(None, || catch_unwind(AssertUnwindSafe(live)));
-            (unless_crashed(caught), ios)
-        }
+        Interruption::None => with_io_fault(None, live),
+        Interruption::FailsAtIo(at) => with_io_fault(Some(at), live),
+        Interruption::CrashesAtIo(at) => with_io_crash(Some(at), live),
+        Interruption::CrashesAtBoundary(_) => with_io_crash(None, live),
     };
-    let ended = ended.transpose()?;
+    let ended = ended?;
     let survivors = CrashSurvivors {
         unit: (*lock(&world.unit))
             .map(TransientServiceUnitName::from_attempt_id)
             .transpose()?,
         mounted: *lock(&world.mounted),
     };
-    if let (Interruption::FailsAtIo(at), Some(ended)) = (interruption, &ended) {
-        assert_live_owner_fails_closed(&lifecycle, ended, &survivors, runtime, at)?;
+    assert_reported_cleanup_was_complete(&ended, &survivors, runtime, interruption);
+    if let Interruption::FailsAtIo(at) = interruption {
+        assert_live_owner_fails_closed(&lifecycle, &ended, at)?;
     }
     let reached = lock(&world.reached).clone();
     // The crash: every in-memory owner is gone.
@@ -467,39 +468,51 @@ fn run(runtime: &Path, count: u8, interruption: Interruption) -> TestResult<Run>
     })
 }
 
-/// After a failed operation, the live owner reported an attempt reconciled
-/// only when its cleanup left nothing, and it committed no new intent.
-fn assert_live_owner_fails_closed(
-    lifecycle: &AttemptLifecycle<CrashInput>,
+/// Every attempt the process reported cleaned left nothing behind: no record,
+/// no directory, no unit and no root. Proved cleanup is never partial.
+fn assert_reported_cleanup_was_complete(
     ended: &[EndedAttempt<()>],
     survivors: &CrashSurvivors,
     runtime: &Path,
+    interruption: Interruption,
+) {
+    for attempt in ended {
+        let id = attempt.attempt_id();
+        assert!(
+            !matches!(attempt.cleanup(), Ok(None)),
+            "{interruption:?}: attempt {id:?} was withdrawn"
+        );
+        if let Ok(Some(cleaned)) = attempt.cleanup() {
+            let key = cleaned.intent().unit_name().attempt_component();
+            assert!(
+                !runtime.join("registry").join(key).exists()
+                    && !runtime.join("attempts").join(key).exists()
+                    && survivors.mounted != Some(id)
+                    && survivors
+                        .unit
+                        .as_ref()
+                        .is_none_or(|unit| unit != cleaned.intent().unit_name()),
+                "{interruption:?}: attempt {id:?} reported clean over {survivors:?}"
+            );
+        }
+    }
+}
+
+/// After a failed operation, the live owner reports an attempt reconciled
+/// exactly when its cleanup was proved, and commits no new intent.
+fn assert_live_owner_fails_closed(
+    lifecycle: &AttemptLifecycle<CrashInput>,
+    ended: &[EndedAttempt<()>],
     at: usize,
 ) -> TestResult {
     for attempt in ended {
         let reported = lifecycle.reconcile(&reconcile_request(attempt.attempt_id()));
-        match attempt.cleanup() {
-            Ok(None) => {
-                return Err(format!("operation {at}: a started attempt was withdrawn").into())
-            }
-            Ok(Some(cleaned)) => {
-                assert!(reported.is_ok(), "operation {at}: {reported:?}");
-                assert_eq!(*survivors, CrashSurvivors::default(), "operation {at}");
-                let key = cleaned.intent().unit_name().attempt_component();
-                assert!(
-                    !runtime.join("registry").join(key).exists(),
-                    "operation {at}"
-                );
-                assert!(
-                    !runtime.join("attempts").join(key).exists(),
-                    "operation {at}"
-                );
-            }
-            Err(error) => assert!(
-                matches!(reported, Err(AttemptLifecycleError::CleanupFailed)),
-                "operation {at}: {error:?} reported as {reported:?}"
-            ),
-        }
+        assert_eq!(
+            reported.is_ok(),
+            matches!(attempt.cleanup(), Ok(Some(_))),
+            "operation {at}: {:?} reported as {reported:?}",
+            attempt.cleanup()
+        );
     }
     let refused = lifecycle
         .registry
@@ -695,7 +708,7 @@ fn assert_restart_reconciles(run: &Run, runtime: &Path, label: &str, withheld: b
 fn clean_run(count: u8) -> TestResult<Run> {
     let runtime = runtime()?;
     let clean = run(runtime.path(), count, Interruption::None)?;
-    let ended = clean.ended.as_ref().ok_or("the clean run crashed")?;
+    let ended = &clean.ended;
     assert_eq!(ended.len(), usize::from(count));
     for attempt in ended {
         assert!(
@@ -731,18 +744,13 @@ fn interrupt_each(
         let left = run(runtime.path(), count, interruption)?;
         let label = format!("{interruption:?}");
         match interruption {
-            Interruption::CrashesAtIo(at) => {
-                assert!(left.ended.is_none(), "{label}: no crash");
-                // The crash ran no further registry I/O.
-                assert_eq!(left.ios, at + 1, "{label}");
+            Interruption::CrashesAtIo(at) | Interruption::FailsAtIo(at) => {
+                assert!(left.ios > at, "{label}: not reached");
             }
             Interruption::CrashesAtBoundary(at) => {
-                assert!(left.ended.is_none(), "{label}: no crash");
                 assert_eq!(left.reached.len(), at + 1, "{label}");
             }
-            Interruption::FailsAtIo(_) | Interruption::None => {
-                assert!(left.ended.is_some(), "{label}: crashed");
-            }
+            Interruption::None => {}
         }
         let crashed = snapshot(runtime.path())?;
         let last = records(&crashed)
