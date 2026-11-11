@@ -129,7 +129,12 @@ impl ExecutionOwnership {
 
     /// Whether `identity` is the cgroup this owner's execution bound.
     fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
-        self.0.cgroup.get() == Some(&identity)
+        self.bound_cgroup() == Some(identity)
+    }
+
+    /// The cgroup this owner's execution bound, if it bound one.
+    fn bound_cgroup(&self) -> Option<(u64, u64)> {
+        self.0.cgroup.get().copied()
     }
 
     fn advance(&self, from: u8, to: u8) -> Result<(), ExecuteError> {
@@ -156,19 +161,19 @@ pub(crate) struct LauncherFacts {
 /// comparison with a fresh kernel readback. These are claims, not evidence.
 /// The held image's identity is PAI2's, not repeated here.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordedRoot {
+pub struct RecordedRoot {
     /// The attached root's mount ID.
-    pub(crate) mount_id: u64,
+    pub mount_id: u64,
     /// The root inode on the mapper device.
-    pub(crate) inode: u64,
+    pub inode: u64,
     /// The mapper's device and disk sequence.
-    pub(crate) mapper: ((u32, u32), u64),
+    pub mapper: ((u32, u32), u64),
     /// The mapper's UUID.
-    pub(crate) mapper_uuid: String,
+    pub mapper_uuid: String,
     /// The loop device's name.
-    pub(crate) loop_name: String,
+    pub loop_name: String,
     /// The loop device's device and disk sequence.
-    pub(crate) loop_device: ((u32, u32), u64),
+    pub loop_device: ((u32, u32), u64),
 }
 
 /// The held image `(device, inode)` the test fixtures record and read back.
@@ -224,8 +229,8 @@ pub use execute::{
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
     finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch, AttemptLifecycle,
-    AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt, OwnedAttempt,
-    ReconciledAttempt, SystemdAttemptSteps,
+    AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt, LiveAttemptIdentity,
+    LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{

@@ -38,6 +38,7 @@ mod cases {
     #[derive(Debug)]
     struct FakeInput {
         id: u8,
+        attempt: [u8; 16],
         sim1: [u8; 32],
         activation: Activation,
     }
@@ -46,9 +47,20 @@ mod cases {
         const fn new(id: u8) -> Self {
             Self {
                 id,
+                attempt: [id; 16],
                 sim1: SIM1,
                 activation: Activation::Released,
             }
+        }
+
+        /// The attempt numbered `number`, beyond the 255 single-byte ones.
+        const fn numbered(number: u16) -> Self {
+            let [high, low] = number.to_be_bytes();
+            let mut input = Self::new(0);
+            input.attempt = [1; 16];
+            input.attempt[0] = high;
+            input.attempt[1] = low;
+            input
         }
 
         const fn activating(mut self, activation: Activation) -> Self {
@@ -80,7 +92,7 @@ mod cases {
         type Root = FakeRoot;
 
         fn attempt_id(&self) -> [u8; 16] {
-            [self.id; 16]
+            self.attempt
         }
 
         fn sim1_digest(&self) -> [u8; 32] {
@@ -274,6 +286,7 @@ mod cases {
     /// A private runtime tree and its registry.
     struct Runtime {
         directory: tempfile::TempDir,
+        ledger: crate::StagingLedger,
         lifecycle: AttemptLifecycle<FakeInput>,
     }
 
@@ -291,9 +304,14 @@ mod cases {
             let parent = File::open(directory.path())?;
             let registry =
                 SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+            let ledger = crate::StagingLedger::new(crate::StagingLimits {
+                aggregate_bytes: 1024,
+            });
+            let reconciled = crate::ReconciledRestart::for_test();
             Ok(Self {
                 directory,
-                lifecycle: AttemptLifecycle::new(registry),
+                lifecycle: AttemptLifecycle::new(registry, ledger.clone(), &reconciled),
+                ledger,
             })
         }
 
@@ -315,13 +333,20 @@ mod cases {
                 .join(unit.attempt_component()))
         }
 
-        /// Whether a new intent can still be committed.
+        /// Whether a new grant can still be issued: the staging ledger's
+        /// gate before AGR1.
+        fn grants(&self) -> bool {
+            self.ledger.reserve_storage(0).is_ok()
+        }
+
+        /// Whether a new grant can still be issued and a new intent committed.
         fn admits(&self) -> TestResult<bool> {
-            Ok(self
+            let commits = self
                 .lifecycle
                 .registry
                 .commit_planned(&PlannedAttemptIntent::new([0xee; 16], SIM1)?)
-                .is_ok())
+                .is_ok();
+            Ok(self.grants() && commits)
         }
 
         async fn run(
@@ -330,7 +355,8 @@ mod cases {
             steps: &FixtureSteps<'_>,
         ) -> TestResult<EndedAttempt<()>> {
             let owned = self.lifecycle.admit_input(input)?;
-            Ok(owned.run_with(steps, (), budget()?).await)
+            let ended = owned.run_with(steps, (), budget()?).await;
+            Ok(ended)
         }
     }
 
@@ -495,8 +521,9 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
         // The cancellation is requested before the run prepares anything.
+        let request = cancel_request(1, grant(1));
         let (cancelled, ended) = tokio::join!(
-            runtime.lifecycle.cancel(&cancel_request(1, grant(1))),
+            runtime.lifecycle.cancel(&request),
             owned.run_with(&steps, (), budget()?)
         );
         assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
@@ -611,6 +638,7 @@ mod cases {
         // Its intent and directory are left for restart reconciliation.
         assert!(exists(&runtime.record(1)?));
         assert!(exists(&runtime.attempt_directory(1)?));
+        assert!(!runtime.grants());
         assert!(!runtime.admits()?);
         assert!(matches!(
             runtime.lifecycle.reconcile(&reconcile_request(1, grant(1))),
@@ -653,6 +681,8 @@ mod cases {
         let ended = runtime.run(input, &steps).await?;
         assert!(ended.cleanup.is_err(), "{:?}", ended.cleanup);
         assert!(exists(&runtime.record(id)?));
+        // Admission is closed before AGR1 as well as to new intents.
+        assert!(!runtime.grants());
         assert!(!runtime.admits()?);
         assert!(matches!(
             runtime
@@ -764,6 +794,7 @@ mod cases {
             ))
         ));
         assert!(!exists(&runtime.attempt_directory(1)?));
+        assert!(!runtime.grants());
         assert!(!runtime.admits()?);
         Ok(())
     }
@@ -781,6 +812,152 @@ mod cases {
         let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
         owned.run_with(&steps, (), budget).await.cleanup?;
         assert!(runtime.admits()?);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recycled_main_pid_never_redirects_termination() -> TestResult {
+        let runtime = Runtime::new()?;
+        // The unit's former MainPID was recycled: it now names this test
+        // process, in another cgroup. Termination addresses only the unit by
+        // name and the bound cgroup by descriptor, never a PID.
+        let recycled = tempfile::tempdir()?;
+        fs::write(
+            recycled.path().join("cgroup.procs"),
+            format!("{}\n", std::process::id()),
+        )?;
+        fs::write(recycled.path().join("cgroup.kill"), b"0")?;
+        // The stop leaves the bound cgroup populated, so escalation kills it.
+        let fixture =
+            TeardownFixture::new(1, TeardownStop::LeavesPopulated, TeardownReset::Unload).await?;
+        let bound = fixture.cgroup_directory().to_owned();
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
+        runtime.run(FakeInput::new(1), &steps).await?.cleanup?;
+        assert_eq!(fs::read(bound.join("cgroup.kill"))?, b"1");
+        assert_eq!(fs::read(recycled.path().join("cgroup.kill"))?, b"0");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_recovery_snapshot_lists_live_attempts_in_order_and_closes_admission() -> TestResult
+    {
+        let runtime = Runtime::new()?;
+        // Attempt 1 ended clean and was reconciled: it is not live.
+        let first = manager(1).await?;
+        let steps = FixtureSteps::over(&first.transport, first.bound);
+        runtime.run(FakeInput::new(1), &steps).await?.cleanup?;
+        runtime
+            .lifecycle
+            .reconcile(&reconcile_request(1, grant(1)))?;
+        // Attempt 3 was admitted and has not started.
+        drop(runtime.lifecycle.admit_input(FakeInput::new(3))?);
+        // Attempt 2 runs when the runtime is fenced.
+        let second = manager(2).await?;
+        let cgroup = second.bound.identity();
+        let steps = FixtureSteps::over(&second.transport, second.bound).behaving(Behaviour::Hangs);
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(2))?;
+        let budget = budget()?;
+        let fence = async {
+            steps.executing().await;
+            runtime.lifecycle.fence_and_snapshot()
+        };
+        let run = async {
+            let run = owned.run_with(&steps, (), budget);
+            tokio::time::timeout(Duration::from_secs(1), run).await.ok();
+        };
+        let (snapshot, ()) = tokio::join!(fence, run);
+        let snapshot = snapshot?;
+        let attempts = snapshot.attempts();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(LiveAttemptIdentity::attempt_id)
+                .collect::<Vec<_>>(),
+            vec![[2; 16], [3; 16]]
+        );
+        let running = &attempts[0];
+        assert_eq!(running.unit_name().attempt_component().len(), 32);
+        assert_eq!(running.sim1_digest(), SIM1);
+        assert_eq!(running.image(), Some(crate::FIXTURE_IMAGE));
+        assert!(running.directories().is_some());
+        assert_eq!(running.cgroup(), Some(cgroup));
+        assert!(running.root().is_none());
+        let idle = &attempts[1];
+        assert_eq!(idle.sim1_digest(), SIM1);
+        assert_eq!(
+            (idle.image(), idle.directories(), idle.cgroup()),
+            (None, None, None)
+        );
+        // Admission is closed for good, and the snapshot is taken once.
+        assert!(matches!(
+            runtime.lifecycle.admit_input(FakeInput::new(4)),
+            Err(AttemptLifecycleError::Fenced)
+        ));
+        assert!(matches!(
+            runtime.lifecycle.fence_and_snapshot(),
+            Err(AttemptLifecycleError::Fenced)
+        ));
+        assert!(!runtime.grants());
+        assert!(!runtime.admits()?);
+        Ok(())
+    }
+
+    #[test]
+    fn the_recovery_snapshot_carries_at_most_256_attempts() -> TestResult {
+        for (count, fits) in [(256, true), (257, false)] {
+            let runtime = Runtime::new()?;
+            for number in (1..=count).rev() {
+                drop(runtime.lifecycle.admit_input(FakeInput::numbered(number))?);
+            }
+            let snapshot = runtime.lifecycle.fence_and_snapshot();
+            assert_eq!(snapshot.is_ok(), fits, "{count}");
+            if let Ok(snapshot) = snapshot {
+                let ids = snapshot
+                    .attempts()
+                    .iter()
+                    .map(LiveAttemptIdentity::attempt_id)
+                    .collect::<Vec<_>>();
+                assert_eq!(ids.len(), 256);
+                assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+            } else {
+                assert!(matches!(
+                    snapshot,
+                    Err(AttemptLifecycleError::TooManyLiveAttempts)
+                ));
+            }
+            // Either way, admission stays closed.
+            assert!(matches!(
+                runtime.lifecycle.admit_input(FakeInput::new(1)),
+                Err(AttemptLifecycleError::Fenced)
+            ));
+            assert!(!runtime.grants());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unidentifiable_live_attempt_fails_the_snapshot_closed() -> TestResult {
+        let zero = Runtime::new()?;
+        let mut input = FakeInput::new(1);
+        input.attempt = [0; 16];
+        drop(zero.lifecycle.admit_input(input)?);
+        assert!(matches!(
+            zero.lifecycle.fence_and_snapshot(),
+            Err(AttemptLifecycleError::Registry(
+                SystemdAttemptRegistryError::InvalidIntent
+            ))
+        ));
+        assert!(!zero.grants());
+        let malformed = Runtime::new()?;
+        drop(malformed.lifecycle.admit_input(FakeInput::new(5))?);
+        let record = malformed.record(5)?;
+        fs::write(&record, b"junk")?;
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600))?;
+        assert!(matches!(
+            malformed.lifecycle.fence_and_snapshot(),
+            Err(AttemptLifecycleError::Registry(_))
+        ));
+        assert!(!malformed.grants());
         Ok(())
     }
 
@@ -873,7 +1050,8 @@ mod cases {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps = SystemdAttemptSteps::new(transport, &FailClosedLocalNetwork, store);
             let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-            Ok(owned.run_with(&steps, launch(barrier), budget()?).await)
+            let ended = owned.run_with(&steps, launch(barrier), budget()?).await;
+            Ok(ended)
         }
 
         #[tokio::test(start_paused = true)]
@@ -934,8 +1112,11 @@ mod cases {
                 crate::test_fixtures::staged_execution::verified_input(&installation, &ledger)
                     .map_err(|error| error.to_string())?;
             fixed_registry().map_err(|error| error.to_string())?;
-            let lifecycle: AttemptLifecycle =
-                AttemptLifecycle::new(SystemdAttemptRegistry::open()?);
+            let lifecycle: AttemptLifecycle = AttemptLifecycle::new(
+                SystemdAttemptRegistry::open()?,
+                ledger.clone(),
+                &crate::ReconciledRestart::for_test(),
+            );
             let request = input.entry().admission().snapshot().request().clone();
             let grant_digest = input.entry().grant_digest();
             let owned = lifecycle.admit(input)?;
@@ -964,6 +1145,19 @@ mod cases {
             };
             lifecycle.reconcile(&reconcile)?;
             assert_eq!(ledger.usage().attempts, 0);
+            // A quarantined lifecycle refuses the next exchange before AGR1.
+            lifecycle.quarantine();
+            let (mut provider, mut selector) = std::os::unix::net::UnixStream::pair()?;
+            installation.write_source(&mut selector)?;
+            let refused =
+                pos_reference::provider_admission::execution::PreparedProviderExecution::receive(
+                    &mut provider,
+                    &ledger,
+                );
+            assert!(matches!(
+                refused,
+                Err(pos_reference::provider_admission::execution::StagingError::CleanupFailed)
+            ));
             Ok(())
         }
     }

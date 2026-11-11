@@ -19,10 +19,19 @@
 //!   for that attempt are unknown.
 //!
 //! Every cancel and reconcile request must name the attempt's AGR1 digest.
-//! Any failure to prove cleanup, and any run dropped before it finished,
-//! quarantines the registry owner: no further intent can be committed, and
-//! only restart reconciliation can establish what remains. A quarantined
-//! attempt keeps its admitted input, and with it its staging reservation.
+//! Any failure to prove cleanup, and any run dropped after it started,
+//! quarantines the lifecycle: the registry owner commits no further intent
+//! and the staging ledger issues no further grant, before AGR1. Only restart
+//! reconciliation and a fresh ledger reopen admission. A quarantined attempt
+//! keeps its admitted input, and with it its staging reservation.
+//!
+//! The ownership table and its tombstones live in memory, for this runtime
+//! only (owner decision, 2026-11-11). A restarted provider forgets them; that
+//! is safe because the selector issues a fresh, nonzero `AttemptId` for every
+//! attempt and fences the previous runtime with SIR1 before a new one opens
+//! (ADR-069 §4.1), so a stale grant of a reconciled attempt cannot be replayed
+//! into the new runtime. Restart reconciliation removes every attempt the
+//! previous runtime left behind.
 //!
 //! The attempt steps are ports, so the composition is exercised without
 //! systemd, mountfsd or a kernel mount; production composes
@@ -32,6 +41,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -47,10 +57,14 @@ use crate::{
     AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError, CancelSignal, CheckedRoot,
     CommittedPlannedAttempt, CompletedAttemptCleanup, ExecuteError, ExecuteFailure, ExecuteJob,
     ExecutionOwnership, ImageActivationError, LaunchBarrier, LocalNetworkPort, ModePlan,
-    NetworkEvidence, PlannedAttemptIntent, PreparedAttemptDirectory, SystemdAttemptRegistry,
-    SystemdAttemptRegistryError, SystemdTransientUnitTransport, SystemdVerifiedStart, UnitState,
-    VerifiedRootMount, VerifiedStagedInput,
+    NetworkEvidence, PlannedAttemptIntent, PreparedAttemptDirectory, ReconciledRestart,
+    RecordedRoot, RecoveredAttemptIntent, StagingLedger, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError, SystemdTransientUnitTransport, SystemdVerifiedStart,
+    TransientServiceUnitName, UnitState, VerifiedRootMount, VerifiedStagedInput,
 };
+
+/// The most live attempts one snapshot carries (ADR-069 §4.1, RCC1).
+const MAX_LIVE_ATTEMPTS: usize = 256;
 
 /// One attempt's terminal cleanup budget, measured from the moment its
 /// execution returns, divided into strictly ordered phases.
@@ -96,6 +110,13 @@ pub enum AttemptLifecycleError {
     /// The attempt already has an owner in this runtime.
     #[error("the attempt already has an owner in this runtime")]
     AttemptKnown,
+    /// Admission was fenced for recovery; no attempt enters this runtime and
+    /// no second snapshot is taken.
+    #[error("the runtime was fenced for recovery")]
+    Fenced,
+    /// More live attempts than one snapshot may carry; admission stays closed.
+    #[error("more than 256 live attempts")]
+    TooManyLiveAttempts,
     /// No attempt with this identity is known, or it was reconciled.
     #[error("the attempt is unknown")]
     UnknownAttempt,
@@ -397,9 +418,10 @@ where
     }
 }
 
-/// What a running attempt shares with cancellation.
-#[derive(Debug, Default)]
+/// What an attempt's run shares with cancellation and the recovery snapshot.
+#[derive(Debug)]
 struct RunState {
+    sim1_digest: [u8; 32],
     cancel: AttemptCancel,
     // Set once the directory exists, so a cancellation can fence it.
     fence: Mutex<Option<ExecutionOwnership>>,
@@ -420,6 +442,100 @@ impl RunState {
     fn hold(&self, fence: ExecutionOwnership) {
         *lock(&self.fence) = Some(fence);
     }
+
+    /// The cgroup the attempt's execution bound, if it bound one.
+    fn bound_cgroup(&self) -> Option<(u64, u64)> {
+        lock(&self.fence)
+            .as_ref()
+            .and_then(ExecutionOwnership::bound_cgroup)
+    }
+}
+
+/// One live attempt of a [`LiveAttemptSnapshot`], as this runtime and its
+/// durable record know it. Every identity is a claim for the sealed recovery
+/// (#349) to correlate with fresh kernel evidence, never evidence itself.
+#[derive(Debug, Eq, PartialEq)]
+pub struct LiveAttemptIdentity {
+    attempt_id: [u8; 16],
+    unit_name: TransientServiceUnitName,
+    sim1_digest: [u8; 32],
+    recorded: Option<RecoveredAttemptIntent>,
+    cgroup: Option<(u64, u64)>,
+}
+
+impl LiveAttemptIdentity {
+    /// The `AttemptId`.
+    #[must_use]
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
+    /// The deterministic unit of the attempt.
+    #[must_use]
+    pub const fn unit_name(&self) -> &TransientServiceUnitName {
+        &self.unit_name
+    }
+
+    /// The admitted SIM1 digest.
+    #[must_use]
+    pub const fn sim1_digest(&self) -> [u8; 32] {
+        self.sim1_digest
+    }
+
+    /// The held image's `(device, inode)`, once the directory was recorded.
+    #[must_use]
+    pub fn image(&self) -> Option<(u64, u64)> {
+        self.recorded
+            .as_ref()
+            .and_then(RecoveredAttemptIntent::recorded_image)
+    }
+
+    /// The attempt and root directories' `(device, inode)`, once recorded.
+    #[must_use]
+    pub fn directories(&self) -> Option<[(u64, u64); 2]> {
+        self.recorded
+            .as_ref()
+            .and_then(RecoveredAttemptIntent::directory_identities)
+    }
+
+    /// The cgroup the execution bound to the unit, if it bound one.
+    #[must_use]
+    pub const fn cgroup(&self) -> Option<(u64, u64)> {
+        self.cgroup
+    }
+
+    /// The PAI3 root facts recorded before launch, if any.
+    #[must_use]
+    pub fn root(&self) -> Option<&RecordedRoot> {
+        self.recorded
+            .as_ref()
+            .and_then(RecoveredAttemptIntent::recorded_root)
+    }
+}
+
+/// The live attempts of a runtime fenced for recovery: the exact identity
+/// handoff to the sealed recovery (#349).
+///
+/// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
+/// runtime; it has no public constructor and cannot be cloned:
+///
+/// ```compile_fail,E0451
+/// let _forged = pos_sandboxd::LiveAttemptSnapshot { attempts: Vec::new() };
+/// ```
+///
+/// The attempts are every one admitted to this runtime and not reconciled,
+/// in strictly increasing `AttemptId` order, at most 256.
+#[derive(Debug, Eq, PartialEq)]
+pub struct LiveAttemptSnapshot {
+    attempts: Vec<LiveAttemptIdentity>,
+}
+
+impl LiveAttemptSnapshot {
+    /// The live attempts, in strictly increasing `AttemptId` order.
+    #[must_use]
+    pub fn attempts(&self) -> &[LiveAttemptIdentity] {
+        &self.attempts
+    }
 }
 
 #[derive(Debug)]
@@ -433,6 +549,7 @@ enum Slot<I> {
     /// Ended; `cleaned` is the removed intent when cleanup was proved.
     Ended {
         grant: [u8; 32],
+        state: Arc<RunState>,
         cleaned: Option<PlannedAttemptIntent>,
         _input: Option<I>,
     },
@@ -448,6 +565,9 @@ enum Slot<I> {
 #[derive(Debug)]
 pub struct AttemptLifecycle<I = VerifiedStagedInput> {
     registry: SystemdAttemptRegistry,
+    ledger: StagingLedger,
+    // Set once by the recovery snapshot; no attempt is admitted afterwards.
+    fenced: AtomicBool,
     attempts: Mutex<BTreeMap<[u8; 16], Slot<I>>>,
 }
 
@@ -456,14 +576,31 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl<I> AttemptLifecycle<I> {
-    /// The lifecycle over a registry owner whose restart reconciliation
-    /// completed.
+    /// The lifecycle over the registry owner and the staging ledger opened
+    /// after `_reconciled` proved the previous runtime's attempts absent.
+    ///
+    /// A quarantine closes both: the registry to new intents and the ledger
+    /// to new grants, before AGR1. Neither reopens; the next runtime's restart
+    /// reconciliation and a fresh ledger do.
     #[must_use]
-    pub const fn new(registry: SystemdAttemptRegistry) -> Self {
+    pub const fn new(
+        registry: SystemdAttemptRegistry,
+        ledger: StagingLedger,
+        _reconciled: &ReconciledRestart,
+    ) -> Self {
         Self {
             registry,
+            ledger,
+            fenced: AtomicBool::new(false),
             attempts: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Close admission until restart reconciliation: no new intent can be
+    /// committed and no new grant issued.
+    fn quarantine(&self) {
+        self.registry.quarantine();
+        self.ledger.close_for_reconciliation();
     }
 
     /// Cancel the attempt `request` names, and wait for its cleanup.
@@ -576,6 +713,63 @@ impl<I> AttemptLifecycle<I> {
         drop(released);
         Ok(ReconciledAttempt { intent })
     }
+
+    /// Fence this runtime for recovery and snapshot its live attempts: the
+    /// exact identity handoff to the sealed recovery (#349).
+    ///
+    /// Admission closes permanently first: no attempt is admitted afterwards,
+    /// the registry commits no new intent and the staging ledger issues no
+    /// new grant. Every attempt admitted and not reconciled is live, whether
+    /// it still runs or ended; an ended one is included conservatively,
+    /// since its signed terminal evidence is not known here.
+    ///
+    /// # Errors
+    /// [`AttemptLifecycleError::Fenced`] for every call after the first;
+    /// [`AttemptLifecycleError::TooManyLiveAttempts`] above 256 live
+    /// attempts; and a live attempt's unreadable or malformed record. Each
+    /// leaves admission closed.
+    pub fn fence_and_snapshot(&self) -> Result<LiveAttemptSnapshot, AttemptLifecycleError> {
+        let attempts = lock(&self.attempts);
+        if self.fenced.swap(true, Ordering::AcqRel) {
+            return Err(AttemptLifecycleError::Fenced);
+        }
+        self.quarantine();
+        let live: Vec<([u8; 16], Arc<RunState>)> = attempts
+            .iter()
+            .filter_map(|(attempt_id, slot)| match slot {
+                Slot::Running { state, .. } | Slot::Ended { state, .. } => {
+                    Some((*attempt_id, Arc::clone(state)))
+                }
+                Slot::Reconciled { .. } => None,
+            })
+            .collect();
+        drop(attempts);
+        if live.len() > MAX_LIVE_ATTEMPTS {
+            return Err(AttemptLifecycleError::TooManyLiveAttempts);
+        }
+        live.into_iter()
+            .map(|(attempt_id, state)| self.identity(attempt_id, &state))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|attempts| LiveAttemptSnapshot { attempts })
+    }
+
+    /// One live attempt's identities, its durable record read back.
+    fn identity(
+        &self,
+        attempt_id: [u8; 16],
+        state: &RunState,
+    ) -> Result<LiveAttemptIdentity, AttemptLifecycleError> {
+        let unit_name = TransientServiceUnitName::from_attempt_id(attempt_id)
+            .map_err(|_| SystemdAttemptRegistryError::InvalidIntent)?;
+        let recorded = self.registry.recorded(&unit_name)?;
+        Ok(LiveAttemptIdentity {
+            attempt_id,
+            unit_name,
+            sim1_digest: state.sim1_digest,
+            recorded,
+            cgroup: state.bound_cgroup(),
+        })
+    }
 }
 
 impl<I> AttemptLifecycle<I> {
@@ -586,10 +780,17 @@ impl<I> AttemptLifecycle<I> {
     {
         let attempt_id = input.attempt_id();
         let mut attempts = lock(&self.attempts);
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(AttemptLifecycleError::Fenced);
+        }
         if attempts.contains_key(&attempt_id) {
             return Err(AttemptLifecycleError::AttemptKnown);
         }
-        let state = Arc::new(RunState::default());
+        let state = Arc::new(RunState {
+            sim1_digest: input.sim1_digest(),
+            cancel: AttemptCancel::new(),
+            fence: Mutex::new(None),
+        });
         let (ended, waiting) = watch::channel(false);
         attempts.insert(
             attempt_id,
@@ -661,6 +862,7 @@ impl<I> Claim<'_, I> {
         self.finished = true;
         let ended = Slot::Ended {
             grant: self.grant,
+            state: Arc::clone(&self.state),
             cleaned,
             _input: input,
         };
@@ -674,7 +876,7 @@ impl<I> Drop for Claim<'_, I> {
         if !self.finished {
             if self.started {
                 // The run was abandoned: nothing about its resources is proved.
-                self.lifecycle.registry.quarantine();
+                self.lifecycle.quarantine();
             }
             self.end(None, None);
         }
@@ -726,15 +928,15 @@ impl<I> OwnedAttempt<'_, I> {
                 let cancel = claim.state.cancel.signal();
                 run_prepared(steps, launch, &input, directory, cancel, budget).await
             }
-            Err(error) => {
-                // A planned intent may already exist: only restart
-                // reconciliation can remove it.
-                claim.lifecycle.registry.quarantine();
-                (AttemptProgress::NotPrepared, Err(error.into()))
-            }
+            // A planned intent may already exist: only restart
+            // reconciliation can remove it.
+            Err(error) => (AttemptProgress::NotPrepared, Err(error.into())),
         };
         let (progress, cleanup) = ended;
         let cleaned = cleanup.as_ref().ok().map(|done| done.intent().clone());
+        if cleaned.is_none() {
+            claim.lifecycle.quarantine();
+        }
         let cancelled = claim.state.cancel.is_requested();
         claim.end(Some(input), cleaned);
         EndedAttempt {
