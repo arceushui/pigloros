@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pos_owner_bridge::{BridgeError, UnavailableCode};
 use pos_owner_bridge_windows::{create_private_directory, verify_private_directory};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -43,6 +44,15 @@ fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() ->
         .map_err(|error| format!("create private directory: {error}"))?;
     verify_private_directory(&path)
         .map_err(|error| format!("verify initial directory: {error}"))?;
+    assert_eq!(
+        create_private_directory(&path.join("child\0suffix")),
+        Err(BridgeError::Unavailable(
+            UnavailableCode::InterfaceUnavailable
+        ))
+    );
+    assert!(std::fs::read_dir(&path)?.next().is_none());
+    verify_private_directory(&path)
+        .map_err(|error| format!("verify directory after rejected path: {error}"))?;
     assert!(create_private_directory(&path).is_err());
     assert!(create_private_directory(std::path::Path::new("relative")).is_err());
     assert!(verify_private_directory(std::path::Path::new("relative")).is_err());

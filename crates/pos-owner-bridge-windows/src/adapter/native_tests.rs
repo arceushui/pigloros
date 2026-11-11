@@ -459,6 +459,14 @@ impl crate::Native {
         let sink: Rc<dyn EventSink> = events.clone();
         native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
         assert!(native.pending());
+        let closed = crate::NativeError {
+            operation: crate::Operation::Controller,
+            failure: crate::Failure::Closed,
+        };
+        assert_eq!(native.destroy_window(), Err(closed));
+        assert!(native.pending());
+        assert!(native.window()?.exists);
+        assert!(!native.has_controller()?);
         completion(&factory, "environment creation", || {
             native.environment_completion()
         })?;
@@ -478,6 +486,9 @@ impl crate::Native {
         completion(&factory, "controller creation", || {
             native.controller_completion()
         })?;
+        assert_eq!(native.destroy_window(), Err(closed));
+        assert!(native.has_controller()?);
+        assert!(native.window()?.exists);
         assert!(native.create_controller().is_err());
         let identity = runtime.browser_identity(native.browser_pid()?)?;
         events.expect_browser(identity.browser_pid);

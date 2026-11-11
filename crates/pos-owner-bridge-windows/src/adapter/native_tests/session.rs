@@ -235,7 +235,7 @@ mod tests {
             "require_shared_interfaces",
             session.require_shared_interfaces(),
         );
-        assert_closed("subscribe_view", session.subscribe_view(sink));
+        assert_closed("subscribe_view", session.subscribe_view(Rc::clone(&sink)));
         assert_closed(
             "set_bool",
             session.set_bool(crate::BoolProperty::Script, true),
@@ -255,6 +255,30 @@ mod tests {
         assert_eq!(session.source().err(), Some(closed));
         assert_eq!(session.load_state(), Err(closed));
         assert_eq!(session.compare_exchange(0, 1), Err(closed));
+        let invalid_environment = crate::NativeError {
+            operation: crate::Operation::Environment,
+            failure: crate::Failure::CallFailed,
+        };
+        for (runtime, folder) in [
+            ("", "folder"),
+            ("bad\0runtime", "folder"),
+            ("runtime", ""),
+            ("runtime", "bad\0folder"),
+        ] {
+            assert_eq!(
+                session.create_environment(
+                    std::path::Path::new(runtime),
+                    std::path::Path::new(folder),
+                    crate::adapter::settings::OPTIONS,
+                    Rc::clone(&sink),
+                ),
+                Err(invalid_environment)
+            );
+            assert!(!session.pending());
+            assert!(session.environment_completion().is_none());
+            assert!(session.environment_creation_completion().is_none());
+            assert_eq!(session.environment().err(), Some(closed));
+        }
         assert!(reply.as_bytes().iter().all(|byte| *byte == 0));
         assert!(session.environment_completion().is_none());
         assert!(session.controller_completion().is_none());
