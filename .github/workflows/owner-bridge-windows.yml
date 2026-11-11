@@ -12,6 +12,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.97.1
+          components: clippy
       - name: Verify candidate and run nonce lock witness
         shell: pwsh
         run: |
@@ -20,3 +21,5 @@ jobs:
           git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/nonce_ledger.rs
           cargo test -p pos-owner-bridge-windows --all-features --locked --lib tests::nonce_lock_native -- --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'nonce lock witness failed' }
+      - name: Clippy Windows native packages all targets
+        run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
