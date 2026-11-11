@@ -2120,7 +2120,7 @@ impl Fixture {
             browser,
             first,
             &SystemClock,
-            crate::Native::callback_order,
+            Box::new(crate::Native::callback_order),
         )
     }
 
@@ -2129,7 +2129,7 @@ impl Fixture {
         browser: pos_owner_bridge::ProcessIdentity,
         first: ProcessFaultMark,
         clock: &dyn pos_owner_bridge::MonotonicClock,
-        callback_order: impl FnOnce() -> Vec<crate::NativeCallbackMoment>,
+        callback_order: Box<dyn FnOnce() -> Vec<crate::NativeCallbackMoment> + '_>,
     ) -> TestResult {
         loop {
             if let Some(event) = self
