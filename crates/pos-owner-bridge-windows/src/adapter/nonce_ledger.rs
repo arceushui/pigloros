@@ -82,7 +82,7 @@ impl crate::Native {
                     writeln!(io::stdout(), "{MARKER}")?;
                     io::stdout().flush()?;
                     let mut line = String::new();
-                    io::stdin().read_line(&mut line)?;
+                    assert_eq!(io::stdin().read_line(&mut line)?, 0);
                 }
                 _ => return Err("unknown nonce lock probe".into()),
             }
@@ -98,6 +98,7 @@ impl crate::Native {
                     "--test-threads=1",
                 ])
                 .env(CASE, case)
+                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?;
@@ -120,7 +121,10 @@ impl crate::Native {
             }
             let output = child.wait_with_output()?;
             assert!(output.status.success(), "{output:?}");
-            assert!(String::from_utf8_lossy(&output.stdout).contains(MARKER));
+            let markers = String::from_utf8_lossy(&output.stdout)
+                .matches(MARKER)
+                .count();
+            assert_eq!(markers, if case == "hold" { 2 } else { 1 });
             Ok(())
         };
         crate::SubjectMutex::exercise_security_refusals().map_err(|()| unavailable())?;
@@ -152,6 +156,8 @@ impl crate::Native {
         probe("denied")?;
         let retained = crate::SubjectMutex::retain_second_handle().map_err(|()| unavailable())?;
         drop(guard);
+        probe("acquire")?;
+        probe("hold")?;
         probe("acquire")?;
         drop(retained);
 
