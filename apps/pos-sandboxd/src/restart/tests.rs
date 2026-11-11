@@ -984,6 +984,12 @@ mod cases {
                 _ => false,
             };
             assert!(refused, "{result:?}");
+            if let Err(error @ RestartReconciliationError::Egress(_)) = &result {
+                assert_eq!(
+                    error.to_string(),
+                    "the Local egress property was not observed"
+                );
+            }
             // The probe ran on the swept network; no later step ran and
             // every record is kept.
             assert_eq!(
