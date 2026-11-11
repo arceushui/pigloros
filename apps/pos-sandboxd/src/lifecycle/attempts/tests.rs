@@ -32,6 +32,8 @@ mod cases {
         Retained,
         /// Activation fails before any request.
         Refused,
+        /// A released fixture root whose PAI3 facts are committed first.
+        Recorded,
     }
 
     /// A fake admission of the attempt `[id; 16]`.
@@ -131,9 +133,18 @@ mod cases {
             &'a self,
             directory: &'a PreparedAttemptDirectory,
         ) -> impl Future<Output = Result<FakeRoot, ImageActivationError>> + Send + 'a {
+            if matches!(self.activation, Activation::Recorded) {
+                let recorded = crate::test_fixtures::recorded_identity(directory)
+                    .map_err(|error| SystemdAttemptRegistryError::Io(std::io::Error::other(error)))
+                    .and_then(|identity| directory.record_root(&identity, || Ok(())));
+                assert!(recorded.is_ok(), "{recorded:?}");
+            }
             let activated = match self.activation {
                 Activation::Refused => Err(ImageActivationError::EvidenceMismatch),
-                Activation::Released | Activation::Slow | Activation::Retained => {
+                Activation::Released
+                | Activation::Slow
+                | Activation::Retained
+                | Activation::Recorded => {
                     let absent = !matches!(self.activation, Activation::Retained);
                     fake_root_release(directory, absent)
                         .map(FakeRoot)
@@ -384,6 +395,15 @@ mod cases {
             self.ledger.reserve_storage(0).is_ok()
         }
 
+        /// Whether a new intent can still be committed.
+        fn commits(&self) -> TestResult<bool> {
+            Ok(self
+                .lifecycle
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([0xed; 16], SIM1)?)
+                .is_ok())
+        }
+
         /// Whether a new grant can still be issued and a new intent committed.
         fn admits(&self) -> TestResult<bool> {
             let commits = self
@@ -484,6 +504,10 @@ mod cases {
                 .lifecycle
                 .reconcile(&reconcile_request(id, grant(id)))?;
             assert_eq!(reconciled.attempt_id(), [id; 16]);
+            assert_eq!(
+                reconciled.intent().map(PlannedAttemptIntent::attempt_id),
+                Some([id; 16])
+            );
             // A repeated reconcile reports the same attempt, for its grant only.
             assert_eq!(
                 runtime
@@ -705,6 +729,8 @@ mod cases {
         assert!(exists(&runtime.attempt_directory(1)?));
         assert_eq!(runtime.reserved(), 0);
         assert!(!runtime.grants());
+        // The abandoned run closed the registry itself, not only the ledger.
+        assert!(!runtime.commits()?);
         assert!(!runtime.admits()?);
         assert!(matches!(
             runtime.lifecycle.reconcile(&reconcile_request(1, grant(1))),
@@ -1043,7 +1069,7 @@ mod cases {
         let steps =
             FixtureSteps::over(&second.transport, second.bound).behaving(Behaviour::Substitutes);
         assert!(runtime
-            .run(FakeInput::new(2), &steps)
+            .run(FakeInput::new(2).activating(Activation::Recorded), &steps)
             .await?
             .cleanup()
             .is_err());
@@ -1067,7 +1093,8 @@ mod cases {
         assert_eq!(unproved.image(), Some(crate::FIXTURE_IMAGE));
         assert!(unproved.directories().is_some());
         assert_eq!(unproved.cgroup(), Some((bound.0, bound.1 + 1)));
-        assert!(unproved.root().is_none());
+        // Its PAI3 root facts were committed before launch.
+        assert!(unproved.root().is_some_and(|root| root.mount_id() != 0));
         let dropped = &attempts[1];
         assert_eq!(dropped.sim1_digest(), SIM1);
         assert_eq!(
@@ -1226,6 +1253,21 @@ mod cases {
     }
 
     #[tokio::test]
+    async fn an_unreadable_record_fails_the_snapshot_closed() -> TestResult {
+        let runtime = Runtime::new()?;
+        started_and_dropped(&runtime, FakeInput::new(5))?;
+        // A record that cannot be opened is not a missing one.
+        std::os::unix::fs::symlink("elsewhere", runtime.record(5)?)?;
+        assert!(matches!(
+            runtime.lifecycle.fence_and_snapshot().await,
+            Err(AttemptLifecycleError::Registry(
+                SystemdAttemptRegistryError::Io(_)
+            ))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn an_attempt_without_a_unit_name_fails_the_snapshot_closed() -> TestResult {
         let runtime = Runtime::new()?;
         let mut input = FakeInput::new(1);
@@ -1244,12 +1286,12 @@ mod cases {
     #[test]
     fn recorded_root_facts_are_read_through_their_accessors() {
         let root = crate::RecordedRoot {
-            mount_id: 1,
-            inode: 2,
-            mapper: ((3, 4), 5),
+            mount_id: 11,
+            inode: 12,
+            mapper: ((13, 14), 15),
             mapper_uuid: "mapper".to_owned(),
-            loop_name: "loop6".to_owned(),
-            loop_device: ((7, 8), 9),
+            loop_name: "loop16".to_owned(),
+            loop_device: ((17, 18), 19),
         };
         assert_eq!(
             (
@@ -1258,9 +1300,9 @@ mod cases {
                 root.mapper(),
                 root.loop_device()
             ),
-            (1, 2, ((3, 4), 5), ((7, 8), 9))
+            (11, 12, ((13, 14), 15), ((17, 18), 19))
         );
-        assert_eq!((root.mapper_uuid(), root.loop_name()), ("mapper", "loop6"));
+        assert_eq!((root.mapper_uuid(), root.loop_name()), ("mapper", "loop16"));
     }
 
     #[test]
