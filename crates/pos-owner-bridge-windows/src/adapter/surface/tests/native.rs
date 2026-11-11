@@ -37,6 +37,8 @@ pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
     pub(in crate::adapter) failure: Cell<Option<&'static str>>,
     pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
+    pub(super) environment_arguments: Cell<&'static str>,
+    pub(super) environment_options: Cell<EnvironmentOptions>,
     pub(super) source: RefCell<String>,
     pub(super) state: Cell<u32>,
     pub(super) invalidate_request: Cell<bool>,
@@ -65,6 +67,8 @@ impl Factory {
             navigation_succeeds: Cell::new(false),
             failure: Cell::new(None),
             mismatched_setting: Cell::new(None),
+            environment_arguments: Cell::new(""),
+            environment_options: Cell::new(super::super::super::settings::OPTIONS),
             source: RefCell::new(crate::OWNER_URL.to_owned()),
             state: Cell::new(0),
             invalidate_request: Cell::new(false),
@@ -331,8 +335,8 @@ impl NativeOperations for Session {
             folder: NativePath::from_utf16(
                 &self.folder.as_os_str().encode_wide().collect::<Vec<_>>(),
             )?,
-            arguments: NativeText::fixture(""),
-            options: super::super::super::settings::OPTIONS,
+            arguments: NativeText::fixture(self.factory.environment_arguments.get()),
+            options: self.factory.environment_options.get(),
         })
     }
     fn create_controller(&mut self) -> NativeResult<()> {

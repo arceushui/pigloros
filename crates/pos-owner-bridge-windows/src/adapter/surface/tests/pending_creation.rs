@@ -294,3 +294,68 @@ fn immediate_precontroller_failure_blocks_admission_until_recordless_retirement(
     }
     Ok(())
 }
+
+#[test]
+fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> TestResult {
+    let required = super::super::super::settings::OPTIONS;
+    for (arguments, options) in [
+        ("--unexpected", required),
+        (
+            "",
+            crate::EnvironmentOptions {
+                extensions: true,
+                ..required
+            },
+        ),
+        (
+            "",
+            crate::EnvironmentOptions {
+                custom_crash_reporting: false,
+                ..required
+            },
+        ),
+        (
+            "",
+            crate::EnvironmentOptions {
+                exclusive_folder: false,
+                ..required
+            },
+        ),
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        let selected = spec(122);
+        let competing = spec(123);
+        fixture.factory.environment_arguments.set(arguments);
+        fixture.factory.environment_options.set(options);
+        assert_eq!(
+            fixture.open(&selected).map_err(|error| error.error()),
+            Err(pos_owner_bridge::BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::InterfaceUnavailable,
+            )),
+        );
+        assert_eq!(fixture.factory.environment_completions.get(), 1);
+        assert_eq!(count(&fixture, "create_controller"), 0);
+        assert!(!fixture.surface.idle());
+        competing_open_is_refused(&mut fixture, &competing);
+        fixture.assert_no_ceremony_data();
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        assert!(fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(fixture.surface.idle());
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        fixture.factory.environment_arguments.set("");
+        fixture.factory.environment_options.set(required);
+        assert_eq!(
+            fixture
+                .open(&competing)
+                .map_err(pos_owner_bridge::SurfaceError::error)?
+                .browser_pid,
+            42
+        );
+        fixture.finish()?;
+    }
+    Ok(())
+}
