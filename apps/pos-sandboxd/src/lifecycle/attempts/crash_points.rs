@@ -39,7 +39,8 @@
 //! Restart reconciliation then runs over what was left. With any one of its
 //! consulted proofs withheld it must fail closed, removing nothing while
 //! admission stays closed. With every proof given it must stop the surviving
-//! unit, detach the surviving root, clean the network, wait out a request
+//! unit, detach the surviving root, clean the network and then prove the
+//! egress property, wait out a request
 //! still pending on this boot before its loop sweep, and remove everything,
 //! the intent last; the same attempts can then be committed again. Restart
 //! itself is also crashed at each of its registry operations over three
@@ -938,7 +939,11 @@ mod cases {
 
     /// The proofs restart reconciliation consults for this crash state.
     fn consulted_proofs(snapshot: &Snapshot, survivors: &CrashSurvivors) -> Vec<UncertainProof> {
-        let mut proofs = vec![UncertainProof::Network, UncertainProof::ProviderLoops];
+        let mut proofs = vec![
+            UncertainProof::Network,
+            UncertainProof::Egress,
+            UncertainProof::ProviderLoops,
+        ];
         if survivors.unit.is_some() {
             proofs.push(UncertainProof::UnitStop);
         }
@@ -966,6 +971,7 @@ mod cases {
             UncertainProof::UnitStop => matches!(error, RestartReconciliationError::UnitStop(_)),
             UncertainProof::RootDetach => matches!(error, RestartReconciliationError::Root(_)),
             UncertainProof::Network => matches!(error, RestartReconciliationError::Network(_)),
+            UncertainProof::Egress => matches!(error, RestartReconciliationError::Egress(_)),
             UncertainProof::RecordedDevices => {
                 matches!(error, RestartReconciliationError::Devices(None))
             }
@@ -1038,6 +1044,11 @@ mod cases {
                 crashed,
                 "{label}: a refused restart removed state"
             );
+            // The egress property is probed only on a cleaned network.
+            assert!(
+                proof != UncertainProof::Network || !restarted.egress_proved,
+                "{label}: egress probed on an uncleaned network"
+            );
             assert_admission_closed(runtime, &crashed, &label)?;
         }
         assert_restart_succeeds(runtime, survivors, count, label, UncertainProof::None)
@@ -1103,6 +1114,7 @@ mod cases {
             "{label}: detached roots"
         );
         assert!(restarted.network_cleaned, "{label}: network");
+        assert!(restarted.egress_proved, "{label}: egress");
         let reconciled = restarted
             .result
             .map_err(|error| format!("{label}: restart with every proof failed: {error:?}"))?;
