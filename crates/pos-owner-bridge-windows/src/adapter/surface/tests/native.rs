@@ -35,6 +35,7 @@ pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
+    pub(super) fail_during_navigation: Cell<bool>,
     pub(in crate::adapter) failure: Cell<Option<&'static str>>,
     pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
     pub(super) environment_arguments: Cell<&'static str>,
@@ -67,6 +68,7 @@ impl Factory {
             sink: RefCell::new(None),
             foreground: Cell::new(true),
             navigation_succeeds: Cell::new(false),
+            fail_during_navigation: Cell::new(false),
             failure: Cell::new(None),
             mismatched_setting: Cell::new(None),
             environment_arguments: Cell::new(""),
@@ -403,6 +405,11 @@ impl NativeOperations for Session {
     }
     fn navigate_owner(&self) -> NativeResult<()> {
         self.call("navigate");
+        if self.factory.fail_during_navigation.get() {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::ProcessFailed);
+            }
+        }
         if self.factory.navigation_succeeds.get() {
             Ok(())
         } else {
