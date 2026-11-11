@@ -91,7 +91,7 @@ impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
         if self.failure.get() == Some("panic_pump") {
             self.failure.set(None);
-            panic!("modeled pump panic");
+            std::panic::resume_unwind(Box::new("modeled pump panic"));
         }
         if self.failure.get() == Some("pump") {
             return Err(NativeError {
