@@ -505,4 +505,4 @@ mod crash_restart;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
-pub use crash_restart::{restart_after_crash, CrashSurvivors, UncertainProof};
+pub use crash_restart::cases::{restart_after_crash, CrashSurvivors, UncertainProof};
