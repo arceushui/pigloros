@@ -2811,6 +2811,10 @@ fn diagnostic_pre_readiness_resource_and_listener_timing() -> TestResult {
     let mut failures = 0_u32;
     for sample in 1..=16 {
         for case in [49_u8, 100] {
+            let _logged = writeln!(
+                std::io::stderr(),
+                "DEBUG-535-T0 sample={sample} case={case} stage=begin"
+            );
             let result = if case == 49 {
                 run_case(
                     Path::new(&runtime),
