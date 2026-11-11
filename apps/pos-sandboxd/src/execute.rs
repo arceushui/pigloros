@@ -734,9 +734,7 @@ async fn until<T>(deadline: Instant, future: impl Future<Output = T>) -> Option<
 /// Await `future` unless cancellation is requested first; `None` then. A
 /// request already made wins over a ready `future`.
 async fn unless<T>(cancel: CancelSignal, future: impl Future<Output = T>) -> Option<T> {
-    let requested = std::pin::pin!(cancel.requested());
-    let future = std::pin::pin!(future);
-    match select(requested, future).await {
+    match select(std::pin::pin!(cancel.requested()), std::pin::pin!(future)).await {
         Either::Left(((), _)) => None,
         Either::Right((output, _)) => Some(output),
     }

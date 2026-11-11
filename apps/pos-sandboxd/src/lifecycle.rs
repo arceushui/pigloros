@@ -131,7 +131,7 @@ pub async fn finish_attempt(
 }
 
 /// The root step, behind a port so that it can be faked without a kernel.
-pub(crate) trait RootRelease: Send {
+trait RootRelease: Send {
     /// Detach the root and observe its original loop/dm generations absent.
     fn release(
         self,
@@ -170,7 +170,7 @@ type Evidence = (
     Option<ReleasedAttemptRoot>,
 );
 
-pub(crate) async fn finish_with<R: RootRelease>(
+async fn finish_with<R: RootRelease>(
     transport: &SystemdTransientUnitTransport,
     directory: PreparedAttemptDirectory,
     cgroup: Option<BoundAttemptCgroup>,
@@ -249,6 +249,12 @@ async fn release_root<R: RootRelease>(
         .map_err(AttemptCleanupError::Root);
     released
 }
+
+mod attempts;
+pub use attempts::{
+    AttemptLaunch, AttemptLifecycle, AttemptLifecycleError, AttemptProgress, CleanupBudget,
+    EndedAttempt, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
+};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

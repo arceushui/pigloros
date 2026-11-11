@@ -175,7 +175,7 @@ mod cases {
 
     impl<'f> FixtureSteps<'f> {
         /// Steps over a fixture's transport and its bound cgroup.
-        fn over(
+        const fn over(
             transport: &'f crate::SystemdTransientUnitTransport,
             cgroup: BoundAttemptCgroup,
         ) -> Self {
@@ -187,7 +187,7 @@ mod cases {
             }
         }
 
-        fn behaving(mut self, behaviour: Behaviour) -> Self {
+        const fn behaving(mut self, behaviour: Behaviour) -> Self {
             self.behaviour = behaviour;
             self
         }
@@ -259,15 +259,15 @@ mod cases {
             }
         }
 
-        fn finish<'a>(
-            &'a self,
+        fn finish(
+            &self,
             directory: PreparedAttemptDirectory,
             cgroup: Option<BoundAttemptCgroup>,
             root: Option<FakeRoot>,
             deadlines: AttemptCleanupDeadlines,
-        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
+        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
         {
-            crate::lifecycle::finish_with(self.transport, directory, cgroup, root, deadlines)
+            finish_with(self.transport, directory, cgroup, root, deadlines)
         }
     }
 
@@ -346,7 +346,7 @@ mod cases {
         )?)
     }
 
-    fn authority_of(id: u8) -> RequestAuthority {
+    const fn authority_of(id: u8) -> RequestAuthority {
         RequestAuthority {
             request_id: [id; 16],
             apt1_digest: [1; 32],
@@ -355,7 +355,7 @@ mod cases {
         }
     }
 
-    fn cancel_request(id: u8, grant_digest: [u8; 32]) -> SandboxCancelRequest {
+    const fn cancel_request(id: u8, grant_digest: [u8; 32]) -> SandboxCancelRequest {
         SandboxCancelRequest {
             request: authority_of(id),
             attempt_id: [id; 16],
@@ -364,7 +364,7 @@ mod cases {
         }
     }
 
-    fn reconcile_request(id: u8, grant_digest: [u8; 32]) -> SandboxReconcileRequest {
+    const fn reconcile_request(id: u8, grant_digest: [u8; 32]) -> SandboxReconcileRequest {
         SandboxReconcileRequest {
             request: authority_of(id),
             attempt_id: [id; 16],
@@ -556,13 +556,16 @@ mod cases {
         let run = owned.run_with(&steps, (), budget()?);
         let fenced = async {
             loop {
-                if let Some(Slot::Running { state, .. }) =
-                    lock(&runtime.lifecycle.attempts).get(&[1; 16])
-                {
-                    if lock(&state.fence).is_some() {
-                        state.cancel();
-                        return;
-                    }
+                let running = lock(&runtime.lifecycle.attempts)
+                    .get(&[1; 16])
+                    .and_then(|slot| match slot {
+                        Slot::Running { state, .. } => Some(Arc::clone(state)),
+                        Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+                    });
+                let held = running.filter(|state| lock(&state.fence).is_some());
+                if let Some(state) = held {
+                    state.cancel();
+                    return;
                 }
                 tokio::task::yield_now().await;
             }
@@ -855,7 +858,7 @@ mod cases {
 
         type BarrierFactory = fn(&AdmittedAttempt) -> Result<OpenBarrier, Refused>;
 
-        fn launch(barrier: BarrierFactory) -> AttemptLaunch<BarrierFactory> {
+        const fn launch(barrier: BarrierFactory) -> AttemptLaunch<BarrierFactory> {
             AttemptLaunch {
                 mode: ModePlan::AirGapped,
                 barrier,
@@ -915,7 +918,7 @@ mod cases {
         async fn an_authenticated_attempt_whose_root_cannot_activate_is_cleaned_and_reconciled(
         ) -> TestResult {
             if !require_isolated_root(
-        "attempt_lifecycle::tests::cases::production::an_authenticated_attempt_whose_root_cannot_activate_is_cleaned_and_reconciled",
+        "lifecycle::attempts::tests::cases::production::an_authenticated_attempt_whose_root_cannot_activate_is_cleaned_and_reconciled",
     )
     .map_err(|error| error.to_string())?
     {
