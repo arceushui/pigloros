@@ -38,6 +38,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
-          Write-Output 'DEBUG-535-T0 diagnostic-only; all samples are retained and do not qualify G3/G4'
+          Write-Output 'DEBUG-535-T0 diagnostic-only; up to 16 samples per case, stop on first failure, not G3/G4 qualification'
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- diagnostic_pre_readiness_resource_and_listener_timing --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'At least one timing sample failed' }
