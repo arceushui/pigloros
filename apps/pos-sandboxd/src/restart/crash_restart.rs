@@ -53,6 +53,8 @@ pub(super) mod cases {
         RecordedDevices,
         /// A loop device is still backed by a provider image.
         ProviderLoops,
+        /// The provider loop sweep never returns.
+        SweepHangs,
     }
 
     /// When the restart runs, relative to the last `MountImage` request that
@@ -64,6 +66,9 @@ pub(super) mod cases {
         /// On the marker's boot, one second after its request was sent, so
         /// the request could still attach a loop device for 69 seconds.
         SameBootSoon,
+        /// As `SameBootSoon`, with an overall deadline of one second, far
+        /// shorter than that wait.
+        SameBootSoonShortDeadline,
     }
 
     /// What a crash left beyond the registry and the attempt directories.
@@ -337,11 +342,15 @@ pub(super) mod cases {
         let transport = SystemdTransientUnitTransport::from_connection(client).await?;
         assert_eq!(subscriptions.load(Ordering::SeqCst), 1);
         let request = recorded_request(runtime);
-        let now: BootInstant = match (clock, request) {
-            (RestartClock::SameBootSoon, Some((boot, sent))) => {
-                (boot, sent + Duration::from_secs(1))
-            }
-            _ => ([0xee; 16], Duration::from_secs(1_000)),
+        let same_boot = clock != RestartClock::OtherBoot;
+        let now: BootInstant = match request.filter(|_| same_boot) {
+            Some((boot, sent)) => (boot, sent + Duration::from_secs(1)),
+            None => ([0xee; 16], Duration::from_secs(1_000)),
+        };
+        let overall = if clock == RestartClock::SameBootSoonShortDeadline {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(6)
         };
         let before = tree(runtime)?;
         let start = Instant::now();
@@ -358,7 +367,7 @@ pub(super) mod cases {
         };
         let parent = File::open(runtime)?;
         let owner = parent.metadata()?.uid();
-        let deadlines = (cleanup()?, Instant::now() + Duration::from_secs(6));
+        let deadlines = (cleanup()?, Instant::now() + overall);
         let opened = SystemdAttemptRecovery::from_runtime_directory(&parent, owner);
         let result = match opened {
             Err(error) => Err(RestartReconciliationError::from(error)),
@@ -377,7 +386,12 @@ pub(super) mod cases {
                             let unchanged = tree(runtime).is_ok_and(|current| current == before);
                             *swept.lock().unwrap_or_else(PoisonError::into_inner) =
                                 Some((start.elapsed(), unchanged));
-                            std::future::ready(Ok(uncertain != UncertainProof::ProviderLoops))
+                            let outcome = Ok(uncertain != UncertainProof::ProviderLoops);
+                            if uncertain == UncertainProof::SweepHangs {
+                                Either::Left(std::future::pending())
+                            } else {
+                                Either::Right(std::future::ready(outcome))
+                            }
                         },
                         move || Ok(now),
                     ),
@@ -399,7 +413,7 @@ pub(super) mod cases {
             still_loaded,
             detached,
             network_cleaned: network.removed.load(Ordering::SeqCst) == 1,
-            request_pending: clock == RestartClock::SameBootSoon && request.is_some(),
+            request_pending: same_boot && request.is_some(),
             swept,
         })
     }
