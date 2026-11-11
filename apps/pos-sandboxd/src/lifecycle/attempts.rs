@@ -212,13 +212,11 @@ impl<S> EndedAttempt<S> {
 
     /// The completed cleanup, or why it was not proved. An error leaves the
     /// lifecycle quarantined and the intent for restart reconciliation.
-    #[must_use]
     pub const fn cleanup(&self) -> &AttemptCleanup {
         &self.cleanup
     }
 
     /// The progress and cleanup by value, for the terminal records.
-    #[must_use]
     pub fn into_parts(self) -> (AttemptProgress<S>, AttemptCleanup) {
         (self.progress, self.cleanup)
     }
@@ -771,6 +769,7 @@ impl<I> AttemptLifecycle<I> {
                 intent: None,
             };
         }
+        drop(attempts);
         Ok(signalled)
     }
 
@@ -848,18 +847,16 @@ impl<I> AttemptLifecycle<I> {
             // A dropped run ends the wait too.
             ended.wait_for(|ended| *ended).await.ok();
         }
-        let live: Vec<([u8; 16], Arc<RunState>)> = lock(&self.attempts)
+        // Admission is closed and every run ended: the slots no longer
+        // change, so the records are read back under the attempts lock.
+        let attempts = lock(&self.attempts)
             .iter()
             .filter_map(|(attempt_id, slot)| match slot {
                 Slot::Running { state, .. } | Slot::Ended { state, .. } => {
-                    Some((*attempt_id, Arc::clone(state)))
+                    Some(self.identity(*attempt_id, state))
                 }
                 Slot::Reconciled { .. } => None,
             })
-            .collect();
-        let attempts = live
-            .into_iter()
-            .map(|(attempt_id, state)| self.identity(attempt_id, &state))
             .collect::<Result<Vec<_>, _>>()?;
         if self.snapshot_taken.swap(true, Ordering::AcqRel) {
             return Err(AttemptLifecycleError::Fenced);
@@ -898,6 +895,7 @@ impl<I> AttemptLifecycle<I> {
                 };
             }
         }
+        drop(attempts);
         running
     }
 
