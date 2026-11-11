@@ -2085,6 +2085,7 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert!(!*port.reached.borrow());", "assert!(*port.reached.borrow());"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(port.write_record(&[]), Err(pos_owner_bridge::CleanupError));", ""),
         (f"{SHIM}/src/adapter/native_tests.rs", "error.to_string().chars().take(512).collect()", "error.to_string()"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "fault.drive.failed case={} error={summary:?}", "fault.drive.failed case={} error={summary}"),
         (f"{SHIM}/src/ffi/process_fault/candidate_tests.rs", 'assert_eq!(calls, ["identity", "snapshot", "identity"]);', 'assert!(calls.is_empty());'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),

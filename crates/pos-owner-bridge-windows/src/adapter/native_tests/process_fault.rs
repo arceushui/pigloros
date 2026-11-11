@@ -542,7 +542,7 @@ impl Fixture {
         };
         let summary = super::diagnostic_error(failure.as_ref());
         super::diagnostic(format_args!(
-            "fault.drive.failed case={} error={summary}",
+            "fault.drive.failed case={} error={summary:?}",
             self.number
         ));
         let result = readiness::cancel_driver(
