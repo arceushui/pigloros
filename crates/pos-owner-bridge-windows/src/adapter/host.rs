@@ -18,8 +18,7 @@ use pos_owner_bridge::{
 
 use super::surface::Surface;
 use super::{loopback::SharedLoopback, store::WindowsCleanupStore};
-use crate::VerifiedRuntime;
-use crate::{NativePulse, StaPump};
+use crate::{NativePulse, VerifiedRuntime};
 
 const UNAVAILABLE: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 
@@ -220,7 +219,7 @@ impl Worker {
         }
     }
 
-    fn pump(&mut self) {
+    fn pump(&self) {
         match self.surface.pump() {
             Ok(NativePulse::Timer | NativePulse::Dispatched) => {}
             Ok(NativePulse::Quit) => self.surface.controller_lost(),

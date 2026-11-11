@@ -181,7 +181,9 @@ fn modeled_request_watchdog_closes_the_endpoint_and_joins_the_caller() -> TestRe
 fn modeled_request_panic_is_joined_and_reported() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let mut fixture = Fixture::new(Ok(NativePulse::Timer))?;
-    let outcome = fixture.exchange::<()>(|_| panic!("modeled owner caller panic"));
+    let outcome = fixture.exchange::<()>(|_| {
+        std::panic::resume_unwind(Box::new("modeled owner caller panic"));
+    });
     assert_eq!(
         outcome.err().map(|error| error.to_string()),
         Some("owner caller panicked".to_owned())
@@ -228,7 +230,9 @@ fn failed_startup_constructs_on_the_worker_and_releases_owners_before_return() -
                 let factory = FailingFactory(captured_drop);
                 match point {
                     FailurePoint::Factory => Err(failed()),
-                    FailurePoint::Panic => panic!("modeled native factory panic"),
+                    FailurePoint::Panic => {
+                        std::panic::resume_unwind(Box::new("modeled native factory panic"));
+                    }
                     FailurePoint::Session => Ok(factory),
                 }
             },
