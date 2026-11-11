@@ -1,0 +1,43 @@
+{
+  "name": "draft-simulated-action-exact-retry",
+  "operation_id": "submitSimulatedAction",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {
+      "Idempotency-Key": "client-1-6",
+      "content-type": "application/json"
+    },
+    "body": {
+      "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "event_type": "world.action.v1",
+      "capability": "world.action.v1.submit",
+      "payload": {
+        "actor_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+        "body_entity_id": "01JC0GATEWAYF1XTVREB0DY000",
+        "action_kind": "impulse",
+        "params": [
+          0.5,
+          0.25
+        ],
+        "action_scope": 0,
+        "catalogue_version": 1,
+        "tick": 3
+      },
+      "observed_seq": 2
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+      "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+      "event_id": "01JC0GATEWAYW9EVENT0000001",
+      "seq": 3,
+      "event_schema_id": "world.action.v1",
+      "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.4"
+    }
+  }
+}

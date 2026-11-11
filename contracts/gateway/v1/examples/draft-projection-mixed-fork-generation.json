@@ -1,0 +1,27 @@
+{
+  "name": "draft-projection-mixed-fork-generation",
+  "operation_id": "getProjection",
+  "request": {
+    "path": {
+      "timeline_id": "01JC0GATEWAYW9F0RK00000001"
+    },
+    "headers": {},
+    "query": {
+      "cursor": "p1.generation-0"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:mixed-fork-generation",
+      "title": "Mixed Fork generation",
+      "status": 409,
+      "detail": "the cursor belongs to a quarantined generation",
+      "instance": "/v1/timelines/{timeline_id}/projection",
+      "code": "mixed-fork-generation",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
