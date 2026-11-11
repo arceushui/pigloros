@@ -23,7 +23,10 @@ use pos_reference::{
 use crate::{ActiveAttempt, AdmittedAttempt};
 
 // Shared test helpers remain reachable through this public, test-only module.
-pub use crate::attempt_registry::{in_lock_test_process, root_record_fixture, with_io_fault};
+pub use crate::attempt_registry::{
+    in_lock_test_process, root_record_fixture, with_io_crash, with_io_fault,
+};
+pub use crate::restart::{restart_after_crash, CrashSurvivors, UncertainProof};
 pub use crate::root_attachment::{
     attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,
     FakeRecoveredRoots, FakeRootRelease,
