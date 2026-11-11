@@ -46,6 +46,10 @@ jobs:
           $modelResult = $LASTEXITCODE
           cargo test -p pos-owner-bridge-windows --all-features --locked --lib adapter::native_tests::process_fault::model_tests::pending_opening_tests -- --include-ignored --nocapture --test-threads=1
           $pendingResult = $LASTEXITCODE
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib adapter::native_tests::readiness::tests -- --include-ignored --nocapture --test-threads=1
+          $readinessResult = $LASTEXITCODE
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib adapter::native_tests::process_fault::quarantined::tests -- --include-ignored --nocapture --test-threads=1
+          $quarantineResult = $LASTEXITCODE
           cargo test -p pos-owner-bridge-windows --all-features --locked --lib tests::native_api -- --include-ignored --nocapture --test-threads=1
           $apiResult = $LASTEXITCODE
           cargo test -p pos-owner-bridge-windows --all-features --locked --lib modeled_callback_witnesses_bound_repeated_observations_and_reset -- --include-ignored --nocapture --test-threads=1
@@ -60,5 +64,5 @@ jobs:
             Write-Output "DIAGNOSTIC_FRESH_SAMPLE sample=$sample exit_code=$sampleResult"
             if ($sampleResult -ne 0) { $nativeFailed = $true }
           }
-          Write-Output "DIAGNOSTIC_ONLY model_exit=$modelResult pending_exit=$pendingResult api_exit=$apiResult witness_exit=$witnessResult ffi_exit=$ffiResult native_failed=$nativeFailed"
-          if ($modelResult -ne 0 -or $pendingResult -ne 0 -or $apiResult -ne 0 -or $witnessResult -ne 0 -or $ffiResult -ne 0 -or $nativeFailed) { throw 'One or more diagnostic cases failed' }
+          Write-Output "DIAGNOSTIC_ONLY model_exit=$modelResult pending_exit=$pendingResult readiness_exit=$readinessResult quarantine_exit=$quarantineResult api_exit=$apiResult witness_exit=$witnessResult ffi_exit=$ffiResult native_failed=$nativeFailed"
+          if ($modelResult -ne 0 -or $pendingResult -ne 0 -or $readinessResult -ne 0 -or $quarantineResult -ne 0 -or $apiResult -ne 0 -or $witnessResult -ne 0 -or $ffiResult -ne 0 -or $nativeFailed) { throw 'One or more diagnostic cases failed' }
