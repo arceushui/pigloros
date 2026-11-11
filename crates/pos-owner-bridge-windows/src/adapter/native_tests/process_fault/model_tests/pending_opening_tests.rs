@@ -210,19 +210,42 @@ fn modeled_pending_observer_bounds_missing_exit_and_missing_completion() -> Test
 }
 
 #[test]
-fn modeled_pending_observer_entry_requires_the_real_callback_ledger() -> TestResult {
+fn modeled_pending_observer_requires_the_real_empty_callback_ledger() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     assert!(crate::Native::callback_order().is_empty());
     let root = FixtureRoot::new()?;
-    let (mut fixture, model, _clock) = pending(&root)?;
+    let (mut fixture, model, clock) = pending(&root)?;
     exit(&model)?;
     model.failure.set(Some("pending-callback-after"));
-    let result = fixture.observe_pending_opening(BROWSER, FIRST);
+    let result = fixture.observe_pending_opening_with_observations(
+        BROWSER,
+        FIRST,
+        &clock,
+        crate::Native::callback_order,
+    );
     assert_eq!(
         result.err().map(|error| error.to_string()).as_deref(),
         Some("controller completion was not invoked after the matching exit")
     );
     assert!(!fixture.evidence_complete);
+    retire(root, fixture, &model)
+}
+
+#[test]
+fn modeled_pending_native_entry_refuses_expired_evidence() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model, _clock) = pending(&root)?;
+    exit(&model)?;
+    model.failure.set(Some("pending-callback-after"));
+    fixture.deadline = Instant::now();
+    let result = fixture.observe_pending_opening(BROWSER, FIRST);
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some("pending-opening browser exit timed out")
+    );
+    assert!(!fixture.evidence_complete);
+    assert_eq!(fixture.trace.borrow().len(), 3);
     retire(root, fixture, &model)
 }
 
