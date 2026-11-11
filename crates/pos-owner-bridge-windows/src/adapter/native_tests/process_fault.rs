@@ -1151,9 +1151,7 @@ impl Fixture {
                 && matches!(&step, Step::Pending)
                 && has_synthetic_success_prf(driver)
             {
-                let deadline = self
-                    .deadline
-                    .min(step_started + pos_owner_bridge::ceremony::timing::RELEASE_WINDOW);
+                let deadline = step_started + pos_owner_bridge::ceremony::timing::RELEASE_WINDOW;
                 self.at_success_releasing(driver, target, inject, deadline)?;
             }
             match step {
@@ -1192,7 +1190,7 @@ impl Fixture {
                     .inject_releasing_fault(target, seal)
                     .map_err(|()| "successful release fault refused")?,
             );
-            self.observe_fault(target)?;
+            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
         } else {
             self.evidence_complete = true;
         }
