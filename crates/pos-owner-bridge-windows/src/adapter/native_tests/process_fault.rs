@@ -46,26 +46,25 @@ type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
 
 // The fixture deadline was set before the test driver's T0. Its origin gives
 // a conservative challenge limit; these Get test plans have no enrollment budget.
-fn interaction_deadline(fixture_deadline: Instant, receipt: Option<Instant>) -> Option<Instant> {
+fn interaction_deadline(fixture_deadline: Instant, receipt: Instant) -> Instant {
     use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION, READINESS};
-    receipt.map(|at| (at + INTERACTION).min(fixture_deadline + (CHALLENGE_TTL - READINESS)))
+    (receipt + INTERACTION).min(fixture_deadline + CHALLENGE_TTL.saturating_sub(READINESS))
 }
 
 #[test]
 fn interaction_cutpoint_requires_receipt_and_keeps_original_limits() {
     let origin = Instant::now();
     let fixture_deadline = origin + Duration::from_secs(15);
-    assert!(interaction_deadline(fixture_deadline, None).is_none());
     let receipt = origin + Duration::from_secs(10);
-    let interaction = interaction_deadline(fixture_deadline, Some(receipt));
-    assert_eq!(interaction, Some(origin + Duration::from_secs(130)));
-    assert!(interaction.is_some_and(|end| origin + Duration::from_secs(129) < end));
-    assert!(interaction.is_some_and(|end| origin + Duration::from_secs(130) >= end));
+    let interaction = interaction_deadline(fixture_deadline, receipt);
+    assert_eq!(interaction, origin + Duration::from_secs(130));
+    assert!(origin + Duration::from_secs(129) < interaction);
+    assert!(origin + Duration::from_secs(130) >= interaction);
     let late_receipt = origin + Duration::from_secs(40);
-    let challenge = interaction_deadline(fixture_deadline, Some(late_receipt));
-    assert_eq!(challenge, Some(origin + Duration::from_secs(150)));
-    assert!(challenge.is_some_and(|end| origin + Duration::from_secs(149) < end));
-    assert!(challenge.is_some_and(|end| origin + Duration::from_secs(150) >= end));
+    let challenge = interaction_deadline(fixture_deadline, late_receipt);
+    assert_eq!(challenge, origin + Duration::from_secs(150));
+    assert!(origin + Duration::from_secs(149) < challenge);
+    assert!(origin + Duration::from_secs(150) >= challenge);
 }
 
 fn validate_process_failures(
@@ -626,11 +625,10 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if self.reached.is_none()
-                && matches!(&step, Step::Pending)
-                && driver.first_receipt_at().is_some()
+            if let (None, Step::Pending, Some(receipt)) =
+                (self.reached, &step, driver.first_receipt_at())
             {
-                self.at_fault_point(driver, target, inject)?;
+                self.at_fault_point(driver, target, inject, receipt)?;
             }
             match step {
                 Step::Finished(result) => return Ok(result),
@@ -645,9 +643,9 @@ impl Fixture {
         driver: &CeremonyDriver,
         target: ProcessFaultTarget,
         inject: bool,
+        receipt: Instant,
     ) -> TestResult {
-        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
-            .ok_or("posted receipt deadline missing")?;
+        let deadline = interaction_deadline(self.deadline, receipt);
         let state = self
             .surface
             .posted_fault_state(driver.posts())
@@ -2411,9 +2409,8 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if self.reached.is_none()
-                && matches!(&step, Step::Pending)
-                && driver.first_receipt_at().is_some()
+            if let (None, Step::Pending, Some(receipt)) =
+                (self.reached, &step, driver.first_receipt_at())
             {
                 let state = self
                     .surface
@@ -2426,7 +2423,7 @@ impl Fixture {
                     if step_started.saturating_duration_since(first)
                         >= pos_owner_bridge::ceremony::timing::FAST_POLL
                     {
-                        self.at_posted_writing(driver, target, inject)?;
+                        self.at_posted_writing(driver, target, inject, receipt)?;
                     }
                 } else if writing_seen.is_some() {
                     return Err("writing phase advanced before its fault point".into());
@@ -2445,9 +2442,9 @@ impl Fixture {
         driver: &CeremonyDriver,
         target: ProcessFaultTarget,
         inject: bool,
+        receipt: Instant,
     ) -> TestResult {
-        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
-            .ok_or("writing driver deadline missing")?;
+        let deadline = interaction_deadline(self.deadline, receipt);
         let state = self
             .surface
             .posted_writing_fault_state(driver.posts())
@@ -2536,13 +2533,13 @@ impl Fixture {
         loop {
             // Inspect after pumping and before the next driver step: that step
             // may otherwise consume READY immediately in the same call.
-            if self.reached.is_none() && driver.first_receipt_at().is_some() {
+            if let (None, Some(receipt)) = (self.reached, driver.first_receipt_at()) {
                 let state = self
                     .surface
                     .reply_load_state()
                     .map_err(|_| "ready reply read failed")?;
                 if state == ControlState::Ready as u32 {
-                    self.at_posted_ready(driver, target, inject)?;
+                    self.at_posted_ready(driver, target, inject, receipt)?;
                 }
             }
             let step = driver.step(&mut readiness::env(
@@ -2563,9 +2560,9 @@ impl Fixture {
         driver: &CeremonyDriver,
         target: ProcessFaultTarget,
         inject: bool,
+        receipt: Instant,
     ) -> TestResult {
-        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
-            .ok_or("ready driver deadline missing")?;
+        let deadline = interaction_deadline(self.deadline, receipt);
         let state = self
             .surface
             .posted_ready_fault_state(driver.posts())
@@ -2952,20 +2949,21 @@ impl Fixture {
         inject: bool,
     ) -> DriveResult {
         loop {
-            if self.reached.is_none()
-                && driver.first_receipt_at().is_some()
-                && self
-                    .surface
+            let receipt = driver.first_receipt_at().filter(|_| self.reached.is_none());
+            let ready = if receipt.is_some() {
+                self.surface
                     .reply_load_state()
                     .map_err(|_| "consuming reply read failed")?
                     == ControlState::Ready as u32
-            {
+            } else {
+                false
+            };
+            if let (Some(receipt), true) = (receipt, ready) {
                 let state = self
                     .surface
                     .posted_ready_fault_state(driver.posts())
                     .map_err(|()| "pre-consuming state unavailable")?;
-                let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
-                    .ok_or("consuming deadline missing")?;
+                let deadline = interaction_deadline(self.deadline, receipt);
                 if Instant::now() >= deadline {
                     return Err("consuming fault point expired".into());
                 }
