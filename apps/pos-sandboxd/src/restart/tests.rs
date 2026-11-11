@@ -181,9 +181,25 @@ mod cases {
     #[error("injected network cleanup failure")]
     struct NetworkFailure;
 
+    /// The network steps in the order they ran, each with the number of
+    /// registry entries it saw: admission is still closed while all remain.
+    type Steps = Arc<Mutex<Vec<(&'static str, usize)>>>;
+
+    /// Record `step` in `log`, if there is one, with the registry it saw.
+    fn log_step(log: Option<&(Steps, std::path::PathBuf)>, step: &'static str) {
+        if let Some((steps, runtime)) = log {
+            let records = count(&runtime.join("registry")).unwrap_or(usize::MAX);
+            steps
+                .lock()
+                .map(|mut steps| steps.push((step, records)))
+                .ok();
+        }
+    }
+
     struct Network {
         cleanup: Cleanup,
         calls: AtomicUsize,
+        log: Option<(Steps, std::path::PathBuf)>,
     }
 
     impl Network {
@@ -191,6 +207,7 @@ mod cases {
             Self {
                 cleanup,
                 calls: AtomicUsize::new(0),
+                log: None,
             }
         }
     }
@@ -200,12 +217,79 @@ mod cases {
 
         async fn remove_orphans(&self) -> Result<(), NetworkFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            log_step(self.log.as_ref(), "network");
             match self.cleanup {
                 Cleanup::Removes => Ok(()),
                 Cleanup::Fails => Err(NetworkFailure),
                 Cleanup::Hangs => std::future::pending().await,
             }
         }
+    }
+
+    /// What the fake egress probe observes.
+    #[derive(Clone, Copy)]
+    enum Property {
+        Present,
+        /// Forwarded traffic does not pass the host.
+        Absent,
+        /// Forwarded traffic passes but is not masqueraded.
+        Ineffective,
+        Hangs,
+    }
+
+    struct Egress {
+        property: Property,
+        calls: AtomicUsize,
+        log: Option<(Steps, std::path::PathBuf)>,
+    }
+
+    impl Egress {
+        const fn new(property: Property) -> Self {
+            Self {
+                property,
+                calls: AtomicUsize::new(0),
+                log: None,
+            }
+        }
+    }
+
+    impl EgressPropertyProbe for Egress {
+        type Error = crate::EgressProbeError;
+
+        async fn probe_egress(&self) -> Result<(), crate::EgressProbeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            log_step(self.log.as_ref(), "egress");
+            match self.property {
+                Property::Present => Ok(()),
+                Property::Absent => Err(crate::EgressProbeError::Blocked(
+                    io::ErrorKind::TimedOut.into(),
+                )),
+                Property::Ineffective => Err(crate::EgressProbeError::NotMasqueraded),
+                Property::Hangs => std::future::pending().await,
+            }
+        }
+    }
+
+    /// An egress probe that observes the property.
+    const fn present() -> Egress {
+        Egress::new(Property::Present)
+    }
+
+    /// An orphan sweep that removes and an egress probe that observes
+    /// `property`, both logging into the returned steps what they saw of
+    /// `runtime`'s registry.
+    fn logged(runtime: &Path, property: Property) -> (Network, Egress, Steps) {
+        let steps = Steps::default();
+        let log = Some((Arc::clone(&steps), runtime.to_path_buf()));
+        let network = Network {
+            log: log.clone(),
+            ..Network::new(Cleanup::Removes)
+        };
+        let egress = Egress {
+            log,
+            ..Egress::new(property)
+        };
+        (network, egress, steps)
     }
 
     struct Host {
@@ -529,14 +613,16 @@ mod cases {
     }
         let runtime = seed(true)?;
         let host = host(Listing::Empty, Vec::new()).await?;
-        let network = Network::new(Cleanup::Removes);
+        let (network, egress, steps) = logged(runtime.path(), Property::Present);
+        let recovered = recovery(runtime.path())?;
+        let records = count(&runtime.path().join("registry"))?;
         let probed = Mutex::new(Vec::new());
         let sweeps = AtomicUsize::new(0);
         let survivors = FakeSurvivors::succeeding(&host);
         let reconciled = reconcile_with(
             &host.transport,
-            recovery(runtime.path())?,
-            &network,
+            recovered,
+            (&network, &egress),
             &survivors,
             deadlines()?,
             (
@@ -562,7 +648,12 @@ mod cases {
         assert_eq!(count(&runtime.path().join("registry"))?, 1);
         assert!(runtime.path().join("registry/activation").is_file());
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
-        assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        // The orphan sweep, then the egress probe, each ran once while every
+        // record was kept, so admission was still closed.
+        assert_eq!(
+            *steps.lock().map_err(|_| "steps")?,
+            vec![("network", records), ("egress", records)]
+        );
         assert_eq!(sweeps.load(Ordering::SeqCst), 1);
         // No unit was listed; the recorded tree's and the PAI3 attempt's
         // roots were checked for a mount, and attempt 3 has no root left.
@@ -602,7 +693,7 @@ mod cases {
         let result = reconcile_restart(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             cleanup()?,
             deadline(),
         )
@@ -635,21 +726,24 @@ mod cases {
         let runtime = seed(false)?;
         let host = host_with_failed(Listing::Surviving, vec![unit(2)?], &[unit(2)?]).await?;
         let network = Network::new(Cleanup::Removes);
+        let egress = present();
         let result = reconcile_restart(
             &host.transport,
             recovery(runtime.path())?,
-            &network,
+            (&network, &egress),
             cleanup()?,
             deadline(),
         )
         .await;
         // The host reset the unit and observed it unloaded, and found the
         // recorded roots unmounted on the real kernel; the network was then
-        // cleaned. The real host's loop sweep then fails closed on a test host
-        // without a provider installation.
+        // cleaned and the egress property observed. The real host's loop
+        // sweep then fails closed on a test host without a provider
+        // installation.
         assert_eq!(*host.resets.lock().map_err(|_| "resets")?, vec![unit(2)?]);
         assert!(host.loaded.lock().map_err(|_| "loaded")?.is_empty());
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
         assert_no_installation();
         assert!(
             matches!(
@@ -692,7 +786,7 @@ mod cases {
         let reconciled = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &network,
+            (&network, &present()),
             &survivors,
             deadlines()?,
             (
@@ -758,7 +852,7 @@ mod cases {
             let result = reconcile_restart(
                 &host.transport,
                 recovery(runtime.path())?,
-                &network,
+                (&network, &present()),
                 cleanup()?,
                 deadline(),
             )
@@ -805,10 +899,11 @@ mod cases {
                 Cleanup::Removes,
             ][case];
             let network = Network::new(cleanup);
+            let egress = present();
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &network,
+                (&network, &egress),
                 &FakeSurvivors::succeeding(&host),
                 deadlines()?,
                 (
@@ -841,9 +936,93 @@ mod cases {
                     )
             );
             assert!(refused, "case {case}: {result:?}");
+            // The egress property is probed only on a network swept clean.
+            assert_eq!(
+                egress.calls.load(Ordering::SeqCst),
+                usize::from(case >= 2),
+                "case {case}"
+            );
             assert_untouched(runtime.path(), 5)?;
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_absent_ineffective_or_late_egress_property_keeps_admission_closed() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::an_absent_ineffective_or_late_egress_property_keeps_admission_closed",
+        )? {
+            return Ok(());
+        }
+        for property in [Property::Absent, Property::Ineffective, Property::Hangs] {
+            let runtime = seed(true)?;
+            let host = host(Listing::Empty, Vec::new()).await?;
+            let (network, egress, steps) = logged(runtime.path(), property);
+            let recovered = recovery(runtime.path())?;
+            let records = count(&runtime.path().join("registry"))?;
+            let devices = AtomicUsize::new(0);
+            let result = reconcile_with(
+                &host.transport,
+                recovered,
+                (&network, &egress),
+                &FakeSurvivors::succeeding(&host),
+                deadlines()?,
+                (
+                    |_| {
+                        devices.fetch_add(1, Ordering::SeqCst);
+                        std::future::ready(Ok(true))
+                    },
+                    swept(),
+                    this_boot(),
+                ),
+            )
+            .await;
+            let refused = match (property, &result) {
+                (Property::Absent, Err(RestartReconciliationError::Egress(error))) => matches!(
+                    error.downcast_ref::<crate::EgressProbeError>(),
+                    Some(crate::EgressProbeError::Blocked(_))
+                ),
+                (Property::Ineffective, Err(RestartReconciliationError::Egress(error))) => {
+                    matches!(
+                        error.downcast_ref::<crate::EgressProbeError>(),
+                        Some(crate::EgressProbeError::NotMasqueraded)
+                    )
+                }
+                (Property::Hangs, Err(RestartReconciliationError::DeadlineElapsed)) => true,
+                _ => false,
+            };
+            assert!(refused, "{result:?}");
+            if let Err(error @ RestartReconciliationError::Egress(_)) = &result {
+                assert_eq!(
+                    error.to_string(),
+                    "the Local egress property was not observed"
+                );
+            }
+            // The probe ran on the swept network; no later step ran and
+            // every record is kept.
+            assert_eq!(
+                *steps.lock().map_err(|_| "steps")?,
+                vec![("network", records), ("egress", records)]
+            );
+            assert_eq!(devices.load(Ordering::SeqCst), 0);
+            assert_untouched(runtime.path(), 5)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_egress_probe_starts_once_the_deadline_has_passed() {
+        let egress = present();
+        let late = prove_egress(&egress, Instant::now()).await;
+        assert!(
+            matches!(late, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{late:?}"
+        );
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 0);
+        // With time left, the probe runs.
+        let timely = prove_egress(&egress, Instant::now() + Duration::from_millis(1)).await;
+        assert!(timely.is_ok(), "{timely:?}");
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -858,7 +1037,7 @@ mod cases {
         let result = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             &FakeSurvivors::succeeding(&host),
             deadlines()?,
             (
@@ -894,7 +1073,7 @@ mod cases {
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &network,
+                (&network, &present()),
                 &survivors,
                 deadlines()?,
                 (|_| std::future::ready(Ok(true)), swept(), this_boot()),
@@ -925,7 +1104,7 @@ mod cases {
         let reconciled = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             &survivors,
             deadlines()?,
             (|_| std::future::ready(Ok(true)), swept(), this_boot()),
@@ -973,7 +1152,7 @@ mod cases {
             let result = reconcile_with(
                 &host.transport,
                 recovered,
-                &network,
+                (&network, &present()),
                 &survivors,
                 (
                     cleanup_from(started, Duration::from_secs(5))?,
@@ -1025,7 +1204,7 @@ mod cases {
         let result = reconcile_with(
             &host.transport,
             recovered,
-            &network,
+            (&network, &present()),
             &survivors,
             (
                 cleanup_from(started, Duration::from_secs(1))?,
@@ -1066,7 +1245,7 @@ mod cases {
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &Network::new(Cleanup::Removes),
+                (&Network::new(Cleanup::Removes), &present()),
                 &survivors,
                 deadlines()?,
                 (|_| std::future::ready(Ok(true)), swept(), this_boot()),
@@ -1101,7 +1280,7 @@ mod cases {
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &network,
+                (&network, &present()),
                 &survivors,
                 deadlines()?,
                 (
@@ -1160,7 +1339,7 @@ mod cases {
         let result = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             &survivors,
             deadlines()?,
             (|_| std::future::ready(Ok(true)), swept(), this_boot()),
@@ -1195,7 +1374,7 @@ mod cases {
             let result = reconcile_with(
                 &host.transport,
                 recovery(runtime.path())?,
-                &Network::new(Cleanup::Removes),
+                (&Network::new(Cleanup::Removes), &present()),
                 &FakeSurvivors::succeeding(&host),
                 deadlines()?,
                 (
@@ -1238,7 +1417,7 @@ mod cases {
         let result = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             &FakeSurvivors::succeeding(&host),
             deadlines()?,
             (
@@ -1275,7 +1454,7 @@ mod cases {
         let result = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
-            &Network::new(Cleanup::Removes),
+            (&Network::new(Cleanup::Removes), &present()),
             &FakeSurvivors::succeeding(&host),
             deadlines()?,
             (|_| std::future::ready(Ok(true)), swept(), this_boot()),

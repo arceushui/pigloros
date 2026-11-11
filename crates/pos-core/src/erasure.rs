@@ -2072,7 +2072,7 @@ pub enum ErasureArtifactClassV1 {
 }
 
 impl ErasureArtifactClassV1 {
-    const fn code(self) -> u64 {
+    pub(crate) const fn code(self) -> u64 {
         match self {
             Self::TimelineReplay => 0,
             Self::ReproManifest => 1,
@@ -2083,7 +2083,7 @@ impl ErasureArtifactClassV1 {
             Self::ConformanceReport => 6,
         }
     }
-    const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+    pub(crate) const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
         match code {
             0 => Ok(Self::TimelineReplay),
             1 => Ok(Self::ReproManifest),
