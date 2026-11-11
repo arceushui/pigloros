@@ -24,7 +24,8 @@ use crate::{ActiveAttempt, AdmittedAttempt};
 
 // Shared test helpers remain reachable through this public, test-only module.
 pub use crate::attempt_registry::{
-    in_lock_test_process, root_record_fixture, with_io_crash, with_io_fault,
+    crash_io_now, in_lock_test_process, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
 };
 pub use crate::restart::{restart_after_crash, CrashSurvivors, UncertainProof};
 pub use crate::root_attachment::{
