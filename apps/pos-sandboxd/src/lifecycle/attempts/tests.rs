@@ -36,6 +36,21 @@ mod cases {
         Recorded,
     }
 
+    /// Runs its check when the admission holding it is dropped.
+    struct DropProbe(Box<dyn Fn() + Send + Sync>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+
+    impl std::fmt::Debug for DropProbe {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("DropProbe")
+        }
+    }
+
     /// A fake admission of the attempt `[id; 16]`.
     #[derive(Debug)]
     struct FakeInput {
@@ -43,6 +58,8 @@ mod cases {
         attempt: [u8; 16],
         sim1: [u8; 32],
         activation: Activation,
+        // Dropped before the reservation below.
+        probe: Option<DropProbe>,
         // A staging reservation the admission holds until it is released.
         charge: Option<crate::StagingCharge>,
         // A run whose cancellation is requested while its directory is
@@ -59,6 +76,7 @@ mod cases {
                 attempt: [id; 16],
                 sim1: SIM1,
                 activation: Activation::Released,
+                probe: None,
                 charge: None,
                 cancel_while_preparing: None,
                 foreign: false,
@@ -704,7 +722,16 @@ mod cases {
         let fixture = manager(1).await?;
         let steps =
             FixtureSteps::over(&fixture.transport, fixture.bound).behaving(Behaviour::Hangs);
-        let owned = runtime.lifecycle.admit_input(runtime.charged(1)?)?;
+        let mut input = runtime.charged(1)?;
+        // When the abandoned run releases the admission, admission must
+        // already be closed, so no grant can use the freed reservation.
+        let ledger = runtime.ledger.clone();
+        let closed_first = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&closed_first);
+        input.probe = Some(DropProbe(Box::new(move || {
+            observed.store(ledger.reserve_storage(0).is_err(), Ordering::SeqCst);
+        })));
+        let owned = runtime.lifecycle.admit_input(input)?;
         assert_eq!(runtime.reserved(), 1);
         let cancel = async {
             steps.executing().await;
@@ -728,6 +755,7 @@ mod cases {
         assert!(exists(&runtime.record(1)?));
         assert!(exists(&runtime.attempt_directory(1)?));
         assert_eq!(runtime.reserved(), 0);
+        assert!(closed_first.load(Ordering::SeqCst));
         assert!(!runtime.grants());
         // The abandoned run closed the registry itself, not only the ledger.
         assert!(!runtime.commits()?);
@@ -786,8 +814,10 @@ mod cases {
         let fixture = manager(1).await?;
         let calls = fixture.calls();
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-        // The owner has not run it: the cancellation needs no wait.
+        let owned = runtime.lifecycle.admit_input(runtime.charged(1)?)?;
+        assert_eq!(runtime.reserved(), 1);
+        // The owner has not run it: the cancellation needs no wait, and the
+        // withdrawn admission is released at once.
         assert_eq!(
             runtime
                 .lifecycle
@@ -795,6 +825,7 @@ mod cases {
                 .await?,
             SandboxCancellationResult::CancelledAndCleaned
         );
+        assert_eq!(runtime.reserved(), 0);
         let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
         assert!(ended.cancelled());
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
@@ -1046,8 +1077,10 @@ mod cases {
     /// the attempt ended without proved cleanup and nothing was committed.
     fn started_and_dropped(runtime: &Runtime, input: FakeInput) -> TestResult {
         let mut owned = runtime.lifecycle.admit_input(input)?;
-        assert!(owned.claim.begin());
+        let taken = owned.claim.begin();
+        assert!(taken.is_some());
         drop(owned);
+        drop(taken);
         Ok(())
     }
 
@@ -1245,6 +1278,8 @@ mod cases {
         fs::remove_file(&record)?;
         let snapshot = runtime.lifecycle.fence_and_snapshot().await?;
         assert_eq!(snapshot.attempts()[0].attempt_id(), [5; 16]);
+        // Once handed out, the snapshot is final, whatever the records say.
+        std::os::unix::fs::symlink("elsewhere", &record)?;
         assert!(matches!(
             runtime.lifecycle.fence_and_snapshot().await,
             Err(AttemptLifecycleError::Fenced)
