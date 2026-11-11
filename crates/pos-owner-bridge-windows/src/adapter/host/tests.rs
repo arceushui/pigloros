@@ -131,10 +131,14 @@ impl Fixture {
             self.worker.step();
             self.worker.cleanup();
             self.worker.pump();
-            assert!(
-                Instant::now() < deadline,
-                "modeled owner request did not return"
-            );
+            if Instant::now() >= deadline {
+                let (replacement_owner, replacement_endpoint) = channel();
+                let abandoned = std::mem::replace(&mut self.worker.endpoint, replacement_endpoint);
+                drop(abandoned);
+                drop(replacement_owner);
+                let _joined = caller.join();
+                return Err("modeled owner request did not return".into());
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
         let (owner, reply) = caller.join().map_err(|_| "owner caller panicked")?;
