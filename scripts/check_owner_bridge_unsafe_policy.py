@@ -1329,8 +1329,7 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
         for reference in re.finditer(r"(?<!\w)model_main_renderer_exit(?!\w)", source):
             allowed = (
                 relative == "src/ffi/events/control_fixture.rs"
-                and any(name == "model_main_renderer_exit" and start < reference.start() < stop
-                        for name, start, stop in _function_spans(source))
+                and re.search(r"\bfn\s+$", source[max(0, reference.start() - 16):reference.start()]) is not None
             ) or (
                 relative == "src/adapter/native_tests/process_fault/model_tests.rs"
                 and any(name == "modeled_early_renderer_observer_enforces_deadline" and start < reference.start() < stop
