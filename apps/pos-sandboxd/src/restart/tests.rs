@@ -576,10 +576,18 @@ mod cases {
         let mut names = (1..=5).map(unit).collect::<Result<Vec<_>, _>>()?;
         names.rotate_right(1);
         assert_eq!(*host.lookups.lock().map_err(|_| "lookups")?, names);
-        // Admission can reopen: a new owner commits beside the marker.
+        // Admission can reopen: a new owner commits beside the marker, and
+        // a fresh staging ledger grants again under the new lifecycle.
         let parent = File::open(runtime.path())?;
-        SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?
-            .commit_planned(&intent(9)?)?;
+        let registry =
+            SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+        registry.commit_planned(&intent(9)?)?;
+        let ledger = crate::StagingLedger::new(crate::StagingLimits {
+            aggregate_bytes: 1024,
+        });
+        let _lifecycle: crate::AttemptLifecycle =
+            crate::AttemptLifecycle::new(registry, ledger.clone(), &reconciled);
+        ledger.reserve_storage(0)?;
         Ok(())
     }
 
