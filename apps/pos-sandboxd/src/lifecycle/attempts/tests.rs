@@ -1221,6 +1221,34 @@ mod cases {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_recovery_fences_hand_out_one_snapshot() -> TestResult {
+        let runtime = Runtime::new()?;
+        let fixture = manager(1).await?;
+        let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
+            .behaving(Behaviour::RunsUntilCancelled);
+        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
+        let run = Box::pin(owned.run_with(&steps, (), budget()?));
+        let fences = async {
+            steps.executing().await;
+            tokio::join!(
+                runtime.lifecycle.fence_and_snapshot(),
+                runtime.lifecycle.fence_and_snapshot()
+            )
+        };
+        let (ended, (first, second)) = tokio::join!(run, fences);
+        cleaned(&ended)?;
+        let handed_out = [&first, &second]
+            .iter()
+            .filter(|snapshot| snapshot.is_ok())
+            .count();
+        assert_eq!(handed_out, 1);
+        assert!([first, second]
+            .into_iter()
+            .any(|snapshot| matches!(snapshot, Err(AttemptLifecycleError::Fenced))));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn the_live_attempts_are_capped_at_what_one_snapshot_carries() -> TestResult {
         let runtime = Runtime::new()?;
