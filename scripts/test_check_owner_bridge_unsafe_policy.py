@@ -2150,6 +2150,7 @@ def test_external_qualification_is_sealed() -> None:
         (navigation, "content_loading(None),", ""),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "Box::new(crate::Native::callback_order)", "Box::new(Vec::new)"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs", "assert_eq!(reads.get(), 1);", "assert_eq!(reads.get(), 0);"),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", "observation=scripted qualified=false", "observation=native qualified=true"),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                return Err("pending-opening browser exit timed out".into());', 'if clock.now() >= self.deadline + Duration::from_secs(1) {\n                return Err("pending-opening browser exit timed out".into());'),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                    return Err("late controller completion was not observed".into());', 'if false {\n                    return Err("late controller completion was not observed".into());'),
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs", "assert!(crate::Native::callback_order().is_empty());", "let _ignored = crate::Native::callback_order();"),

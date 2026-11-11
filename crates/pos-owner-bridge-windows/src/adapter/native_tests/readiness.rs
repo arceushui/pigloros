@@ -376,3 +376,101 @@ pub(super) fn pump_retaining(surface: &Surface) {
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use pos_owner_bridge::fake::clock::FakeClock;
+    use pos_owner_bridge::listener::FixtureProfile;
+    use pos_owner_bridge::{CleanupStore, SystemClock};
+    use pos_owner_bridge_codec::CeremonyId;
+
+    use super::{
+        run_ceremony, Foreground, SharedLoopback, Surface, TestResult, WindowsCleanupStore,
+    };
+    use crate::adapter::native_tests::FixtureRoot;
+    use crate::adapter::surface::tests::native::{Creation, Factory};
+    use crate::adapter::surface::tests::Runtime;
+    use crate::NativeFactory;
+
+    #[test]
+    fn modeled_readiness_failures_retire_before_reporting_and_release_foreground() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        for (creation, failure, expected) in [
+            (Creation::Ready, Some("pump"), "Sta: CallFailed"),
+            (
+                Creation::Ready,
+                Some("panic_pump"),
+                "native readiness case panicked",
+            ),
+            (
+                Creation::SynchronousFailure,
+                None,
+                "packaged Get readiness/cancellation failed",
+            ),
+        ] {
+            let number = 10_240;
+            let _logged = writeln!(std::io::stderr(), "NATIVE_READINESS_MODEL case={number} observation=scripted qualified=false expected={expected}");
+            let root = FixtureRoot::new()?;
+            let model = Factory::new(creation, FakeClock::start());
+            model.failure.set(failure);
+            let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
+            let mut store = WindowsCleanupStore::open(root.0.clone())?;
+            let mut loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
+            let mut surface = Surface::new(
+                Rc::clone(&factory),
+                Arc::new(Runtime(root.0.clone())),
+                root.0.clone(),
+                Box::new(loopback.clone()),
+                Box::new(store.clone()),
+                Box::new(SystemClock),
+            )
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+            let foreground = Foreground::default();
+            let error = run_ceremony(
+                &mut surface,
+                &mut loopback,
+                &mut store,
+                &foreground,
+                CeremonyId::from_bytes([240; 16]),
+                number,
+            )
+            .expect_err("incomplete modeled readiness was accepted");
+            assert!(error.to_string().starts_with(expected));
+            assert!(surface.idle());
+            assert!(store.records()?.is_empty());
+            assert_eq!(store.folders()?.len(), 1);
+            let calls = model.calls.borrow();
+            let unsubscribe = calls
+                .iter()
+                .position(|call| *call == "unsubscribe_exit")
+                .ok_or("exit handler was not retired")?;
+            let released = calls
+                .iter()
+                .position(|call| *call == "drop_environment")
+                .ok_or("environment was not retired")?;
+            let destroyed = calls
+                .iter()
+                .position(|call| *call == "destroy_window")
+                .ok_or("window was not retired")?;
+            assert!(unsubscribe < released && released < destroyed);
+            assert!(!calls.contains(&"navigate"));
+            assert!(!calls.contains(&"create_buffers"));
+            assert!(!calls.contains(&"post"));
+            let next = foreground.request(number + 1, Instant::now())?;
+            assert!(next.is_next(Instant::now())?);
+            drop(next);
+            drop(calls);
+            drop(surface);
+            drop(loopback);
+            drop(store);
+            drop(factory);
+            root.remove()?;
+        }
+        Ok(())
+    }
+}
