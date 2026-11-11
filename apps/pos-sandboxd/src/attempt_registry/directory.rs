@@ -78,10 +78,11 @@ impl CommittedPlannedAttempt {
     ///
     /// # Errors
     /// Rejects an admission of another SIM1, or an unreadable image
-    /// descriptor or one with a zero device or inode, before creating anything; the planned intent is left for
-    /// recovery. Also rejects changed intent, unsafe parents, existing
-    /// components and uncertain writes; each of these closes new commits and
-    /// leaves owned state for recovery.
+    /// descriptor or one with a zero device or inode, before creating
+    /// anything; the planned intent is left for recovery. Also rejects
+    /// changed intent, unsafe parents, existing components and uncertain
+    /// writes; each of these closes new commits and leaves owned state for
+    /// recovery.
     pub fn prepare_directory(
         self,
         admission: &HeldImageAdmission<'_>,

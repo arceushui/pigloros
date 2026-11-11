@@ -227,6 +227,9 @@ pub(crate) const OTHER_IMAGES: [(u64, u64); 2] = [
     (FIXTURE_IMAGE.0, FIXTURE_IMAGE.0),
     (FIXTURE_IMAGE.1, FIXTURE_IMAGE.1),
 ];
+// `OTHER_IMAGES` differs from the fixture only while its device and inode do.
+#[cfg(all(test, target_os = "linux"))]
+const _: () = assert!(FIXTURE_IMAGE.0 != FIXTURE_IMAGE.1);
 
 /// An attempt's `root` is opened only as a directory path, never through a
 /// symlink: the root readback and the restart root inventory share this.
