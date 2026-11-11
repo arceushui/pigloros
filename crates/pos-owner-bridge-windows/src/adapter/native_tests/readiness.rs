@@ -439,8 +439,11 @@ mod tests {
                 CeremonyId::from_bytes([240; 16]),
                 number,
             )
-            .expect_err("incomplete modeled readiness was accepted");
-            assert!(error.to_string().starts_with(expected));
+            .err()
+            .map(|error| error.to_string());
+            assert!(error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(expected)));
             assert!(surface.idle());
             assert!(store.records()?.is_empty());
             assert_eq!(store.folders()?.len(), 1);
