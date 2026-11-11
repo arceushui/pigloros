@@ -44,6 +44,18 @@ type CeremonyResult = Result<Verified, BridgeError>;
 type DriveResult = Result<CeremonyResult, Box<dyn std::error::Error>>;
 type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
 
+static DIAGNOSTIC_TRACE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn bind_diagnostic_t0(fixture: &Fixture, number: u8, started: Instant) {
+    let trace = DIAGNOSTIC_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _logged = writeln!(
+        std::io::stderr(),
+        "DEBUG-535-T0 bind case={number} trace={trace}"
+    );
+    fixture.loopback.set_diagnostic_origin(trace, started);
+    crate::Native::readiness_navigation_case(Some((trace, started)));
+}
+
 // The fixture deadline was set before the test driver's T0. Its origin gives
 // a conservative challenge limit; these Get test plans have no enrollment budget.
 fn interaction_deadline(fixture_deadline: Instant, receipt: Instant) -> Instant {
@@ -900,10 +912,7 @@ fn run_case(
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let _zero_witness = ZeroWitness::arm();
     let started = Instant::now();
-    fixture
-        .loopback
-        .set_diagnostic_origin(u64::from(number), started);
-    crate::Native::readiness_navigation_case(Some((u64::from(number), started)));
+    bind_diagnostic_t0(&fixture, number, started);
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive(&mut driver, target, inject)
@@ -2775,10 +2784,7 @@ fn run_posted_retry(
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::WithheldDelivery)?;
     let _zero_witness = ZeroWitness::arm();
     let started = Instant::now();
-    fixture
-        .loopback
-        .set_diagnostic_origin(u64::from(number), started);
-    crate::Native::readiness_navigation_case(Some((u64::from(number), started)));
+    bind_diagnostic_t0(&fixture, number, started);
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_retry(&mut driver, target, point, inject)
