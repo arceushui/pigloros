@@ -62,7 +62,7 @@ struct Index {
 }
 
 impl Index {
-    fn new(identifier_limit: usize, reference_limit: usize) -> Self {
+    const fn new(identifier_limit: usize, reference_limit: usize) -> Self {
         Self {
             identifiers: BTreeSet::new(),
             references: Vec::new(),
@@ -218,10 +218,10 @@ pub(super) fn validate(inputs: &[(u16, &str, &[u8])]) -> Result<(), (u16, Refusa
             continue;
         };
         target.set_fragment(None);
-        if !index.identifiers.contains(target.as_str()) {
-            if first_error.is_none_or(|(first, _)| reference.index < first) {
-                first_error = Some((reference.index, Refusal::ReferenceMismatch));
-            }
+        if !index.identifiers.contains(target.as_str())
+            && first_error.is_none_or(|(first, _)| reference.index < first)
+        {
+            first_error = Some((reference.index, Refusal::ReferenceMismatch));
         }
     }
     // Only borrowed declared resources enter this registry. Its retriever
