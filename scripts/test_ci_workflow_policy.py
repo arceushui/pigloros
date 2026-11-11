@@ -770,7 +770,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w.update(env={"FAKE_COVERAGE": "1"}),
             lambda w: w[True].update(pull_request_target={}),
             lambda w: w["jobs"].update(fabricate={"runs-on": "ubuntu-latest"}),
-            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 45.0}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 60.0}),
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
             lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
         ):

@@ -10,7 +10,7 @@ permissions:
 jobs:
   owner-bridge-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUSTC_BOOTSTRAP: '1'
     steps:
