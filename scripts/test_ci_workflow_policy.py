@@ -487,6 +487,54 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
+    def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
+        source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
+        prefix, separator, command = source.partition("\nsudo ")
+        self.assertEqual(prefix, "#!/usr/bin/env bash\nset -euo pipefail\n")
+        self.assertEqual(separator, "\nsudo ")
+        expressions = [
+            "s|mirror+file:/etc/apt/apt-mirrors.txt|https://mirrors.edge.kernel.org/ubuntu|g",
+            "s|mirror+file:/etc/apt/apt-security-mirrors.txt|https://mirrors.edge.kernel.org/ubuntu|g",
+        ]
+        arguments = shlex.split(command.replace("\\\n", ""))
+        self.assertEqual(arguments, [
+            "sed", "-i", "-e", expressions[0], "-e", expressions[1],
+            "/etc/apt/sources.list.d/ubuntu.sources",
+        ])
+        original = (
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "Suites: noble-security\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "URIs: https://packages.microsoft.com/ubuntu/24.04/prod\n"
+        )
+        completed = subprocess.run(
+            ["sed", "-e", expressions[0], "-e", expressions[1]],
+            input=original, text=True, capture_output=True, check=True,
+        )
+        expected = original.replace(
+            "mirror+file:/etc/apt/apt-mirrors.txt", "https://mirrors.edge.kernel.org/ubuntu",
+        ).replace(
+            "mirror+file:/etc/apt/apt-security-mirrors.txt", "https://mirrors.edge.kernel.org/ubuntu",
+        )
+        self.assertEqual(completed.stdout, expected)
+
+    def test_ubuntu_dependency_installers_prepare_the_mirror_before_apt(self) -> None:
+        installers = []
+        for path in (CI_WORKFLOW_PATH, CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml")):
+            for job in load_workflow(path)["jobs"].values():
+                for step in job.get("steps", []):
+                    run = step.get("run", "")
+                    if "sudo apt-get" in run:
+                        lines = [line.strip() for line in run.splitlines()]
+                        prepare = "bash scripts/prepare-ubuntu-package-mirror.sh"
+                        self.assertIn(prepare, lines)
+                        self.assertLess(run.index(prepare), run.index("sudo apt-get"))
+                        installers.append(step["name"])
+        self.assertEqual(len(installers), 6)
+
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
@@ -1413,6 +1461,7 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
                      'save-if': "${{ github.ref == 'refs/heads/main' }}"}},
            {'name': 'Install the musl and aarch64 cross toolchains',
             'run': 'set -euo pipefail\n'
+                   'bash scripts/prepare-ubuntu-package-mirror.sh\n'
                    'sudo apt-get update\n'
                    'sudo apt-get install --yes --no-install-recommends musl-tools '
                    'gcc-aarch64-linux-gnu libc6-dev-arm64-cross\n'},
