@@ -2591,7 +2591,7 @@ fn diagnostic_repeated_second_retry() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
-    for repetition in 1..=16 {
+    for repetition in 1..=64 {
         let root = FixtureRoot::new()?;
         writeln!(
             std::io::stderr(),
