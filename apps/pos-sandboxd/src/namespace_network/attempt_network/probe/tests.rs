@@ -131,7 +131,7 @@ fn invalid_probe_configurations_say_what_is_wrong() {
         ),
         (
             InvalidEgressProbe::SpecialPurpose,
-            "the egress probe's /30 is not ordinary unicast space",
+            "the egress probe's /30 lies in 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16 or 224.0.0.0/3",
         ),
         (
             InvalidEgressProbe::Port,
@@ -175,4 +175,43 @@ async fn a_probe_on_the_blocking_pool_reports_its_outcome_or_its_interruption() 
         matches!(panicked, Err(EgressProbeError::Interrupted)),
         "{panicked:?}"
     );
+}
+
+#[test]
+fn only_one_probe_is_marked_running_at_a_time() {
+    let running = Arc::default();
+    let first = Running::claim(&running);
+    assert!(first.is_some());
+    assert!(Running::claim(&running).is_none());
+    drop(first);
+    assert!(Running::claim(&running).is_some());
+}
+
+#[tokio::test]
+async fn a_probe_is_refused_while_an_earlier_one_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let namespaces = NetworkNamespaces::pinned_under(directory.path());
+    let range = crate::NetworkRange::new(
+        Ipv4Addr::new(10, 213, 0, 0),
+        24,
+        std::net::Ipv6Addr::new(0xfd00, 0x913, 0, 0, 0, 0, 0, 0),
+        120,
+    )?;
+    let network = NamespacedLocalNetwork::new(
+        crate::NetlinkNamespaceControl::new(namespaces.clone()),
+        HostEgress::new(),
+        namespaces,
+        range,
+    );
+    let probe = LocalEgressProbe::new(Arc::new(network), EgressProbe::new(PROBE, 7000)?);
+    let earlier = Running::claim(&probe.running);
+    let refused = crate::EgressPropertyProbe::probe_egress(&probe).await;
+    assert!(
+        matches!(refused, Err(EgressProbeError::InFlight)),
+        "{refused:?}"
+    );
+    assert!(earlier.is_some());
+    // Nothing was started: the pinning directory is still empty.
+    assert!(std::fs::read_dir(directory.path())?.next().is_none());
+    Ok(())
 }

@@ -514,6 +514,37 @@ async fn restart_reconciliation_probes_the_port_attempts_use() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_quarantined_port_fails_the_probe_first() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let unremovable = FakeEgress {
+        refuse_removal: true,
+        ..FakeEgress::default()
+    };
+    let (stuck, _) = network_with(
+        directory.path(),
+        pinning(directory.path()),
+        &unremovable,
+        24,
+    )?;
+    drop(stuck.establish([3; 16], &[ENDPOINT])?);
+    // Without privileges the probe's target cannot be created either; the
+    // quarantine, which outlasts that, is what the probe reports.
+    let probed = stuck.probe_egress_through(
+        || Ok(host_with(&[Ipv4Addr::new(10, 0, 0, 1)])),
+        probe_network()?,
+    );
+    assert!(
+        matches!(
+            &probed,
+            Err(EgressProbeError::Quarantined { slot: 0, reason })
+                if reason == &HostEgressError::Readback.to_string()
+        ),
+        "{probed:?}"
+    );
+    Ok(())
+}
+
 /// A host route session that answers with scripted datagrams, then fails.
 struct HostReplies(RefCell<VecDeque<Vec<u8>>>);
 
@@ -636,6 +667,17 @@ fn probe_errors_say_what_failed() {
         (
             EgressProbeError::Interrupted,
             "the egress probe did not run to completion",
+        ),
+        (
+            EgressProbeError::InFlight,
+            "an earlier egress probe is still running",
+        ),
+        (
+            EgressProbeError::Quarantined {
+                slot: 2,
+                reason: "busy".to_owned(),
+            },
+            "the attempt network port is quarantined at slot 2 (busy)",
         ),
     ] {
         assert_eq!(error.to_string(), message);
@@ -1089,6 +1131,70 @@ mod privileged {
             namespaces,
             range(24, 120)?,
         ))
+    }
+
+    /// The kernel adapter, whose every removal removes and then reports a
+    /// failure, as a removal that left something behind would.
+    #[derive(Debug)]
+    struct FailingRemoval(NetlinkNamespaceControl);
+
+    impl NamespaceControl for FailingRemoval {
+        type Error = NetlinkError;
+
+        fn install(&self, expected: &ExpectedNamespace) -> Result<(), NetlinkError> {
+            self.0.install(expected)
+        }
+
+        fn observe(
+            &self,
+            name: &NamespaceName,
+            host_link: &LinkName,
+        ) -> Result<ObservedNamespace, NetlinkError> {
+            self.0.observe(name, host_link)
+        }
+
+        fn remove(&self, name: &NamespaceName, host_link: &LinkName) -> Result<(), NetlinkError> {
+            self.0
+                .remove(name, host_link)
+                .and(Err(NetlinkError::Residual))
+        }
+    }
+
+    #[test]
+    fn a_probe_whose_attempt_network_is_not_removed_fails() -> TestResult {
+        if !isolated("a_probe_whose_attempt_network_is_not_removed_fails")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let network = NamespacedLocalNetwork::new(
+            FailingRemoval(NetlinkNamespaceControl::new(namespaces.clone())),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        );
+        let probed = network.probe_egress(probe_network()?);
+        assert!(
+            matches!(probed, Err(EgressProbeError::Quarantined { slot: 0, .. })),
+            "{probed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restart_reconciliation_probes_egress_end_to_end() -> TestResult {
+        if !isolated("restart_reconciliation_probes_egress_end_to_end")? {
+            return Ok(());
+        }
+        let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        // The first probe's claim ends with it, so a second probe runs too.
+        for _ in 0..2 {
+            let probed = runtime.block_on(crate::EgressPropertyProbe::probe_egress(&probe));
+            assert!(probed.is_ok(), "{probed:?}");
+            let left = NetworkNamespaces::system().attempt_names();
+            assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
+        }
+        Ok(())
     }
 
     #[test]

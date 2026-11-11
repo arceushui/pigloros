@@ -352,11 +352,17 @@ sweep has removed the previous runtime's namespaces, veth ends, host table
 and recorded forwarding, and before the device proofs and the registry
 removal that let admission reopen. Any probe error, or a probe still running
 at the reconciliation deadline, keeps admission closed and keeps every
-record. It takes the installation-configured `EgressProbe`: an IPv4 /30 and
-the target's port. `EgressProbe::new` refuses a network that is not a /30's
-network address, a /30 in `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`,
-`224.0.0.0/4` or `240.0.0.0/4`, and port zero. The probe also refuses a /30
-that overlaps the attempt range or any host address or route. The probe
+record. A probe whose own attempt network could not be removed leaves the
+port quarantined and fails too, as does any probe while the port is
+quarantined. Only one probe runs at a time: a probe that outlives the
+deadline keeps running on the blocking pool, and every further probe fails
+until it ends. It takes the installation-configured `EgressProbe`: an IPv4
+/30 and the target's port. `EgressProbe::new` refuses a network that is not
+a /30's network address, a /30 in `0.0.0.0/8`, `127.0.0.0/8`,
+`169.254.0.0/16`, `224.0.0.0/4` or `240.0.0.0/4`, and port zero. It accepts
+any other range, including other special-purpose space such as
+`192.0.0.0/24` and the documentation and benchmarking ranges. The probe also
+refuses a /30 that overlaps the attempt range or any host address or route. The probe
 establishes a real attempt network for a
 reserved probe attempt whose one endpoint is a target namespace behind the
 host on its own veth pair (`piglor-t0`), connects, and requires the

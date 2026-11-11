@@ -1002,6 +1002,21 @@ mod cases {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn no_egress_probe_starts_once_the_deadline_has_passed() {
+        let egress = present();
+        let late = prove_egress(&egress, Instant::now()).await;
+        assert!(
+            matches!(late, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{late:?}"
+        );
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 0);
+        // With time left, the probe runs.
+        let timely = prove_egress(&egress, Instant::now() + Duration::from_millis(1)).await;
+        assert!(timely.is_ok(), "{timely:?}");
+        assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn a_device_probe_past_the_deadline_keeps_admission_closed() -> TestResult {
         if !in_lock_test_process(

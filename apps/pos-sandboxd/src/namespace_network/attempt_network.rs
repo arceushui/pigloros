@@ -9,7 +9,7 @@
 //! Teardown is RAII. Dropping the connector removes the namespace and frees
 //! the slot. A removal that fails quarantines the slot and closes the port:
 //! every later establishment fails, naming the slot, until restart
-//! reconciliation removes the remaining state (ADR-069 section 6: an
+//! reconciliation removes the remaining state (ADR-069 §1: an
 //! ineffective property closes admission).
 
 use std::collections::BTreeMap;

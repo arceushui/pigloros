@@ -463,13 +463,17 @@ async fn remove_network<N: OrphanNetworkCleanup + Sync>(
     }
 }
 
-/// Prove the egress property by `deadline`. A probe still running then is
-/// no longer awaited and admission stays closed; whatever it leaves, the
-/// next restart's sweep removes.
+/// Prove the egress property by `deadline`. No probe starts once the
+/// deadline has passed. A probe still running at the deadline is no longer
+/// awaited and admission stays closed; whatever it leaves, the next
+/// restart's sweep removes.
 async fn prove_egress<E: EgressPropertyProbe + Sync>(
     egress: &E,
     deadline: Instant,
 ) -> Reconciled<()> {
+    if Instant::now() >= deadline {
+        return Err(RestartReconciliationError::DeadlineElapsed);
+    }
     let probed = timeout_at(deadline, egress.probe_egress()).await;
     match probed {
         Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),

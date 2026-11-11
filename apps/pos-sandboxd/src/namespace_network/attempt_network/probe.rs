@@ -23,6 +23,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,10 +55,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the port the target listens on.
 ///
 /// The host takes `network + 1` and the target `network + 2`. Only
-/// [`EgressProbe::new`] makes one, so every probe's /30 is aligned ordinary
-/// unicast space with a nonzero port. It must also lie outside the attempt
-/// range and every address and route the host has; the probe checks those
-/// against the live host and refuses it otherwise.
+/// [`EgressProbe::new`] makes one, so every probe's /30 is aligned, lies
+/// outside `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` and `224.0.0.0/3`,
+/// and has a nonzero port. Other special-purpose space, such as
+/// `192.0.0.0/24` or the documentation and benchmarking ranges, is accepted.
+/// The /30 must also lie outside the attempt range and every address and
+/// route the host has; the probe checks those against the live host and
+/// refuses it otherwise.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EgressProbe {
     network: Ipv4Addr,
@@ -74,8 +78,10 @@ pub enum InvalidEgressProbe {
     /// The /30 lies in `0.0.0.0/8`, loopback `127.0.0.0/8`, link-local
     /// `169.254.0.0/16`, multicast `224.0.0.0/4` or the reserved
     /// `240.0.0.0/4`, which includes the limited broadcast address: none of
-    /// them can address a veth link.
-    #[error("the egress probe's /30 is not ordinary unicast space")]
+    /// them can address a veth link. No other range is refused here.
+    #[error(
+        "the egress probe's /30 lies in 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16 or 224.0.0.0/3"
+    )]
     SpecialPurpose,
     /// The target's port is zero.
     #[error("the egress probe's target port is zero")]
@@ -87,7 +93,8 @@ impl EgressProbe {
     ///
     /// # Errors
     /// Refuses a `network` that is not a /30's network address, a /30 in
-    /// special-purpose space that cannot address a link, and port zero.
+    /// `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` or `224.0.0.0/3`, none of
+    /// which can address a link, and port zero.
     pub const fn new(network: Ipv4Addr, port: u16) -> Result<Self, InvalidEgressProbe> {
         let [first, second, ..] = network.octets();
         let special = first == 0 || first == 127 || first >= 224 || (first == 169 && second == 254);
@@ -196,6 +203,20 @@ pub enum EgressProbeError {
     /// shut down, so it never reported its outcome.
     #[error("the egress probe did not run to completion")]
     Interrupted,
+    /// An earlier probe of this port is still running, so no second one
+    /// starts beside it.
+    #[error("an earlier egress probe is still running")]
+    InFlight,
+    /// The Local network port is quarantined: an attempt network, the
+    /// probe's own or an earlier one, could not be removed, so no attempt
+    /// can be established until restart reconciliation removes it.
+    #[error("the attempt network port is quarantined at slot {slot} ({reason})")]
+    Quarantined {
+        /// The quarantined slot.
+        slot: u16,
+        /// Why its namespace could not be removed.
+        reason: String,
+    },
 }
 
 /// The probe's addresses, checked.
@@ -329,7 +350,19 @@ where
                     .ok_or(EgressProbeError::NotMasqueraded)
             });
         let removed = remove_target(&self.namespaces).map_err(EgressProbeError::Target);
-        probed.and(removed)
+        // The probe's connector is gone by now. If its teardown failed, the
+        // port is quarantined and no attempt could be established, so the
+        // property is not present even when the connection passed. That is
+        // reported first, since it outlasts every other failure.
+        self.unquarantined().and(probed).and(removed)
+    }
+
+    /// `Ok` unless a slot of the port is quarantined.
+    fn unquarantined(&self) -> Result<(), EgressProbeError> {
+        let quarantined = self.slots.holders().quarantined.clone();
+        quarantined.map_or(Ok(()), |(slot, reason)| {
+            Err(EgressProbeError::Quarantined { slot, reason })
+        })
     }
 }
 
@@ -345,20 +378,52 @@ async fn on_blocking_pool(
         .unwrap_or(Err(EgressProbeError::Interrupted))
 }
 
+/// Marks a probe of one [`LocalEgressProbe`] as running until it is
+/// dropped, which happens when the blocking probe ends, however it ends.
+#[derive(Debug)]
+struct Running(Arc<AtomicBool>);
+
+impl Running {
+    /// Mark a probe running, unless one is already.
+    fn claim(running: &Arc<AtomicBool>) -> Option<Self> {
+        running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(Arc::clone(running)))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Restart reconciliation's egress probe (#1200): the installation's
 /// configured [`EgressProbe`] through the Local network port that attempts
 /// use, so the probe exercises exactly their path.
+///
+/// At most one probe runs at a time. A probe that outlives the
+/// reconciliation deadline keeps running on the blocking pool, since a
+/// blocking task cannot be cancelled; until it ends, every further probe
+/// fails at once with [`EgressProbeError::InFlight`] instead of starting a
+/// second probe on the same names, so an in-process retry stays closed.
 #[derive(Debug)]
 pub struct LocalEgressProbe<C, E = HostEgress> {
     network: Arc<NamespacedLocalNetwork<C, E>>,
     probe: EgressProbe,
+    running: Arc<AtomicBool>,
 }
 
 impl<C, E> LocalEgressProbe<C, E> {
     /// Probe `network`, the port admitted attempts will use, with `probe`.
     #[must_use]
-    pub const fn new(network: Arc<NamespacedLocalNetwork<C, E>>, probe: EgressProbe) -> Self {
-        Self { network, probe }
+    pub fn new(network: Arc<NamespacedLocalNetwork<C, E>>, probe: EgressProbe) -> Self {
+        Self {
+            network,
+            probe,
+            running: Arc::default(),
+        }
     }
 }
 
@@ -372,9 +437,23 @@ where
     type Error = EgressProbeError;
 
     fn probe_egress(&self) -> impl Future<Output = Result<(), EgressProbeError>> + Send {
+        let claimed = Running::claim(&self.running);
         let network = Arc::clone(&self.network);
         let probe = self.probe;
-        on_blocking_pool(move || network.probe_egress(probe))
+        async move {
+            match claimed {
+                // The claim moves into the blocking probe and ends with it.
+                Some(running) => {
+                    on_blocking_pool(move || {
+                        let probed = network.probe_egress(probe);
+                        drop(running);
+                        probed
+                    })
+                    .await
+                }
+                None => Err(EgressProbeError::InFlight),
+            }
+        }
     }
 }
 
