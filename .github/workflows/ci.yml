@@ -12,7 +12,6 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
-      SQLITE_IMAGE_REPORT: ${{ runner.temp }}/sqlite-image-inventory/report.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
@@ -25,10 +24,12 @@ jobs:
       - name: Record build and feature inputs
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$SQLITE_IMAGE_REPORT")"
+          inventory_directory="$RUNNER_TEMP/sqlite-image-inventory"
+          mkdir -p "$inventory_directory"
+          printf 'SQLITE_IMAGE_REPORT=%s/report.json\n' "$inventory_directory" >> "$GITHUB_ENV"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          rustc -Vv > "$(dirname "$SQLITE_IMAGE_REPORT")/rustc.txt"
-          cargo tree -p pos-store --all-features --locked -e features > "$(dirname "$SQLITE_IMAGE_REPORT")/features.txt"
+          rustc -Vv > "$inventory_directory/rustc.txt"
+          cargo tree -p pos-store --all-features --locked -e features > "$inventory_directory/features.txt"
       - name: Check the inventory test
         run: cargo clippy -p pos-store --all-features --test sqlite_native_image_inventory --locked -- -D warnings -W clippy::pedantic
       - name: Run the read-only inventory
