@@ -71,7 +71,7 @@ mod cases {
         authority, checked_root, crash_io_now, fake_root_release, in_lock_test_process, io_count,
         io_crashed, recorded_identity, release_fake_root, restart_after_crash, with_io_crash,
         with_io_fault, CrashSurvivors, FakeRootRelease, RestartClock, Restarted, TeardownFixture,
-        TeardownReset, TeardownStop, TestResult, UncertainProof,
+        TeardownReset, TeardownStop, TestResult, UncertainProof, SHORT_DEADLINE, SINCE_REQUEST,
     };
     use crate::{
         BoundAttemptCgroup, ReleasedAttemptRoot, RestartReconciliationError,
@@ -84,10 +84,10 @@ mod cases {
     /// registry, which creates its activation marker.
     const OPEN_IO_OPERATIONS: usize = 18;
 
-    /// How long a `MountImage` request sent one second before a same-boot
+    /// How long a `MountImage` request sent `SINCE_REQUEST` before a same-boot
     /// restart can still attach a loop device.
     const PENDING_REQUEST: Duration =
-        crate::MountfsdImageActivator::REQUEST_BOUND.saturating_sub(Duration::from_secs(1));
+        crate::MountfsdImageActivator::REQUEST_BOUND.saturating_sub(SINCE_REQUEST);
 
     /// A crash boundary between two lifecycle steps that are not registry I/O.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1663,10 +1663,7 @@ mod cases {
             hung.result
         );
         // The wait extended the one-second deadline exactly once.
-        assert_eq!(
-            hung.finished_after,
-            Duration::from_secs(1) + PENDING_REQUEST
-        );
+        assert_eq!(hung.finished_after, SHORT_DEADLINE + PENDING_REQUEST);
         assert_eq!(snapshot(runtime.path())?, crashed);
         assert_admission_closed(runtime.path(), &crashed, "a hung sweep")?;
         // The overall deadline is far shorter than the wait, which extends

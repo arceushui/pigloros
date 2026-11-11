@@ -28,7 +28,8 @@ pub use crate::attempt_registry::{
     with_io_fault,
 };
 pub use crate::restart::{
-    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof,
+    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof, SHORT_DEADLINE,
+    SINCE_REQUEST,
 };
 pub use crate::root_attachment::{
     attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,

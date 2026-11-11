@@ -506,5 +506,6 @@ mod crash_restart;
 mod tests;
 #[cfg(test)]
 pub use crash_restart::cases::{
-    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof,
+    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof, SHORT_DEADLINE,
+    SINCE_REQUEST,
 };
