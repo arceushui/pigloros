@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   diagnostic:
-    name: diagnostic instrumented empty-reply fault observations
+    name: diagnostic matrix apartment lifetime
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -34,7 +34,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: DIAGNOSTIC instrumented empty-reply fault pairs
+      - name: DIAGNOSTIC original fault matrix apartment comparison
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -42,12 +42,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
-          Write-Output 'DEBUG-535-413 DIAGNOSTIC_ONLY instrumented native G4 empty-reply observations'
+          Write-Output 'DEBUG-535-413 DIAGNOSTIC_ONLY original G4 matrix apartment comparison'
           Write-Output $checkout
           $failed = $false
           foreach ($sample in 1..2) {
-            Write-Output "DEBUG-535-413 sample=$sample stage=begin"
-            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::diagnostic_repeated_empty_reply_pair --exact --include-ignored --nocapture --test-threads=1
+            $mode = if ($sample -eq 1) { 'fresh' } else { 'held' }
+            $env:OWNER_BRIDGE_DIAGNOSTIC_APARTMENT = $mode
+            Write-Output "DEBUG-535-413 sample=$sample apartment=$mode stage=begin"
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_verified_owned_process_faults_retire --exact --include-ignored --nocapture --test-threads=1
             $result = $LASTEXITCODE
             Write-Output "DEBUG-535-413 sample=$sample exit=$result"
             if ($result -ne 0) { $failed = $true }

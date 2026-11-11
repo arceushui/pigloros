@@ -330,6 +330,13 @@ impl crate::Native {
 
 fn run() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
+    let _apartment = if std::env::var_os("OWNER_BRIDGE_DIAGNOSTIC_APARTMENT").as_deref()
+        == Some(std::ffi::OsStr::new("held"))
+    {
+        Some(crate::Native::retain_fault_apartment()?)
+    } else {
+        None
+    };
     let root = FixtureRoot::new()?;
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
