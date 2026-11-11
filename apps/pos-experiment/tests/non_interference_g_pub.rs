@@ -80,8 +80,9 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Fork,
 ];
 const EXECUTED_ROWS: [&str; 2] = [G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_EVAL_FIXTURE_ID_V1];
-/// The closed body of the Gateway's page-bound error.
-const PAGE_LIMIT_ERROR: &[u8] = b"{\"error\":\"event poll limit must be between 1 and 100\"}";
+/// The Gateway v1 problem body of the over-limit page request: sorted keys and the matched
+/// route template as `instance`, so it carries no run-local identity.
+const PAGE_LIMIT_ERROR: &[u8] = b"{\"code\":\"invalid-request\",\"detail\":\"event poll limit must be between 1 and 100\",\"instance\":\"/v1/timelines/{timeline_id}/events\",\"retryable\":false,\"schema_id\":\"urn:pigloros:gateway:v1:schema:problem\",\"status\":400,\"title\":\"Invalid request\",\"type\":\"urn:pigloros:gateway:v1:problem:invalid-request\"}";
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")

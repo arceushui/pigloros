@@ -77,7 +77,14 @@ ATTEMPT_OUTCOME = "admitted"
 PLUGIN_ID = (1 << 80) | 0x4750_5550
 PLUGIN_NAME = "ni-g-pub"
 DRIVER_NAME = "ni-g-pub.driver"
-PAGE_LIMIT_ERROR = b'{"error":"event poll limit must be between 1 and 100"}'
+# The Gateway v1 problem body of the over-limit page request (#1312): sorted keys, and the
+# matched route template as `instance`, so it carries no run-local identity.
+PAGE_LIMIT_ERROR = (
+    b'{"code":"invalid-request","detail":"event poll limit must be between 1 and 100",'
+    b'"instance":"/v1/timelines/{timeline_id}/events","retryable":false,'
+    b'"schema_id":"urn:pigloros:gateway:v1:schema:problem","status":400,'
+    b'"title":"Invalid request","type":"urn:pigloros:gateway:v1:problem:invalid-request"}'
+)
 
 
 # --- The subject ---

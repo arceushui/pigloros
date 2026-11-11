@@ -2,16 +2,22 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
+    problem::{
+        method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
+        ProblemCodeV1, ProblemV1,
+    },
     ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
     GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, RawQuery, State},
+    extract::{DefaultBodyLimit, FromRequestParts, RawQuery, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
+        request::Parts,
         HeaderMap, HeaderValue, StatusCode,
     },
+    middleware,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -93,7 +99,7 @@ mod coverage_tests {
     }
 }
 
-/// Build the Gateway foundation router (ADR-014 route table; WS deferred to follow-up).
+/// Build the Gateway v1 loopback router (the route table of `contracts/gateway/v1/openapi.json`).
 pub fn router(state: AppState) -> Router {
     build_router(state, MAX_HTTP_BODY_BYTES)
 }
@@ -101,9 +107,15 @@ pub fn router(state: AppState) -> Router {
 /// Build the loopback router with the explicit local `OwnTracks` route enabled.
 fn router_with_owntracks(state: AppState) -> Router {
     let gateway = state.gateway.clone();
-    build_router(state, MAX_HTTP_BODY_BYTES).route(
-        "/v1/bridges/owntracks",
-        post(move |headers, body| crate::owntracks_http::post_owntracks(gateway, headers, body)),
+    finish(
+        loopback_routes().route(
+            "/v1/bridges/owntracks",
+            post(move |headers, body| {
+                crate::owntracks_http::post_owntracks(gateway, headers, body)
+            }),
+        ),
+        state,
+        MAX_HTTP_BODY_BYTES,
     )
 }
 
@@ -124,19 +136,30 @@ pub fn router_for_addr(addr: SocketAddr, state: AppState) -> Router {
 /// Prediction Ledger surfaces from ADR-017 and ADR-020. Timeline and Ledger
 /// mutation routes remain available only on a loopback-bound Gateway.
 pub fn spectator_router(state: AppState) -> Router {
-    spectator_routes()
-        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
-        .with_state(state)
+    finish(spectator_routes(), state, MAX_HTTP_BODY_BYTES)
 }
 
 fn build_router(state: AppState, max_body_bytes: usize) -> Router {
+    finish(loopback_routes(), state, max_body_bytes)
+}
+
+fn loopback_routes() -> Router<AppState> {
     spectator_routes()
         .route("/v1/ledger/predictions", post(post_ledger_prediction))
         .route("/v1/timelines", post(create_timeline))
-        .route("/v1/timelines/{id}/events", get(list_events))
-        .route("/v1/timelines/{id}/actions", post(post_action))
-        .route("/v1/timelines/{id}/signals", post(post_signal))
+        .route("/v1/timelines/{timeline_id}/events", get(list_events))
+        .route("/v1/timelines/{timeline_id}/actions", post(post_action))
+        .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
+}
+
+/// Every router answers unknown paths, unserved methods and every failure with a problem body
+/// whose `instance` is the matched route template.
+fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> Router {
+    routes
+        .fallback(not_routed)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(middleware::from_fn(problem_instance))
         .with_state(state)
 }
 
@@ -162,7 +185,7 @@ async fn ledger_page(State(state): State<AppState>) -> impl IntoResponse {
     response
 }
 
-async fn health(State(state): State<AppState>) -> impl IntoResponse {
+async fn health(State(state): State<AppState>) -> Response {
     let ready = matches!(
         (
             state.gateway.is_ready(),
@@ -171,15 +194,15 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         (true, Ok(ErasureHostStatusV1::Ready))
     );
     if ready {
-        (StatusCode::OK, Json(json!({ "ok": true })))
+        (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
     } else {
-        (
+        ProblemV1::new(
+            ProblemCodeV1::TemporarilyUnavailable,
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "ok": false,
-                "error": "store executor or erasure host not ready"
-            })),
+            "store executor or erasure host not ready",
         )
+        .retryable()
+        .into_response()
     }
 }
 
@@ -193,7 +216,7 @@ async fn get_ledger(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn create_timeline(
     State(state): State<AppState>,
-    Json(body): Json<CreateTimelineRequest>,
+    ContractJson(body): ContractJson<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let tl = state.gateway.create_timeline(&body.name).await?;
     Ok((
@@ -208,7 +231,7 @@ async fn create_timeline(
 
 async fn list_events(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ContractPath(id): ContractPath<String>,
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, GatewayError> {
@@ -468,47 +491,77 @@ fn serialized_len(value: &serde_json::Value) -> usize {
     crate::serialized_json_len(value)
 }
 
+/// The header that carries the caller-generated idempotency key of a mutation.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// The longest idempotency key the contract admits.
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+
+/// The `Idempotency-Key` of a mutation: 1 to 128 visible ASCII characters.
+fn idempotency_key(headers: &HeaderMap) -> Result<&str, ProblemV1> {
+    headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|key| {
+            !key.is_empty()
+                && key.len() <= MAX_IDEMPOTENCY_KEY_BYTES
+                && key.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .ok_or_else(|| {
+            ProblemV1::new(
+                ProblemCodeV1::InvalidRequest,
+                StatusCode::BAD_REQUEST,
+                "an Idempotency-Key header of 1 to 128 visible ASCII characters is required",
+            )
+        })
+}
+
+/// The validated `Idempotency-Key` of a mutation, rejected as an `invalid-request` problem.
+struct IdempotencyKey(String);
+
+impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
+    type Rejection = ProblemV1;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        idempotency_key(&parts.headers).map(|key| Self(key.to_owned()))
+    }
+}
+
 async fn post_action(
     State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<ActionRequest>,
-) -> Result<impl IntoResponse, GatewayError> {
-    if let Some(ingress_id) = body.ingress_id.as_deref() {
-        let result = state
-            .gateway
-            .submit_identified_json_action(
-                &id,
-                &body.entity_id,
-                &body.event_type,
-                &body.payload,
-                &body.capability,
-                ingress_id,
-            )
-            .await?;
-        let status = if result.duplicate() {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        };
-        return EventView::try_from(result.event()).map(|view| (status, Json(view)));
-    }
-    let action = state
+    ContractPath(id): ContractPath<String>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<ActionRequest>,
+) -> Result<Response, ProblemV1> {
+    let result = match state
         .gateway
-        .submit_json_action(
+        .submit_identified_json_action(
             &id,
             &body.entity_id,
             &body.event_type,
             &body.payload,
             &body.capability,
+            &key,
         )
-        .await?;
-    EventView::try_from(action.event()).map(|view| (StatusCode::CREATED, Json(view)))
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return Err(ProblemV1::from(error)),
+    };
+    let status = if result.duplicate() {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    EventView::try_from(result.event())
+        .map(|view| (status, Json(view)).into_response())
+        .map_err(ProblemV1::from)
 }
 
 async fn post_signal(
     State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<SignalRequest>,
+    ContractPath(id): ContractPath<String>,
+    ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let entity_id = body.entity_id.clone();
     let event = state
@@ -520,7 +573,7 @@ async fn post_signal(
 
 async fn post_ledger_prediction(
     State(state): State<AppState>,
-    Json(body): Json<NewPrediction>,
+    ContractJson(body): ContractJson<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let ledger = match &state.ledger_write {
         LedgerWriteMode::Disabled => return Err(GatewayError::LedgerWriteDisabled),
@@ -535,88 +588,187 @@ async fn post_ledger_prediction(
     ))
 }
 
-const fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
+impl IntoResponse for GatewayError {
+    fn into_response(self) -> Response {
+        ProblemV1::from(self).into_response()
+    }
+}
+
+/// The problem family, status and retry hint of every Gateway failure (#1312).
+impl From<GatewayError> for ProblemV1 {
+    fn from(error: GatewayError) -> Self {
+        let Some((code, status, retryable)) = gateway_problem(&error) else {
+            return Self::internal(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+        let problem = Self::new(code, status, public_detail(&error));
+        if retryable {
+            problem.retryable()
+        } else {
+            problem
+        }
+    }
+}
+
+/// The `detail` of a Gateway failure. A missing Timeline may be a Fork ancestor the caller never
+/// named, so its id never leaves the Gateway and every not-found reads alike.
+fn public_detail(error: &GatewayError) -> String {
     match error {
-        CoreError::TimelineNotFound(_) => Some(StatusCode::NOT_FOUND),
-        CoreError::ErasureContainmentUnavailable => Some(StatusCode::SERVICE_UNAVAILABLE),
+        GatewayError::Store(CoreError::TimelineNotFound(_)) => {
+            GatewayError::ResourceUnavailable.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A public problem family, its HTTP status and whether an identical retry may succeed.
+type ProblemShape = (ProblemCodeV1, StatusCode, bool);
+
+/// The public shape of a Gateway failure; `None` is an internal fault whose description never
+/// leaves the Gateway.
+const fn gateway_problem(error: &GatewayError) -> Option<ProblemShape> {
+    match error {
+        GatewayError::Store(error) => store_problem(error),
+        GatewayError::ActionRegistry(_) => None,
+        GatewayError::Ledger(error) => ledger_problem(error),
+        GatewayError::ActionRejected(rejected) => Some(action_rejected_problem(rejected)),
+        other => Some(request_problem(other)),
+    }
+}
+
+/// The store failures a client may see; every other store failure is internal.
+const fn store_problem(error: &CoreError) -> Option<ProblemShape> {
+    match error {
+        CoreError::ErasureAccessFrozen => {
+            Some((ProblemCodeV1::Deleted, StatusCode::FORBIDDEN, false))
+        }
+        CoreError::TimelineNotFound(_) => Some((
+            ProblemCodeV1::NotFoundOrUnavailable,
+            StatusCode::NOT_FOUND,
+            false,
+        )),
+        CoreError::ErasureContainmentUnavailable => Some(UNAVAILABLE),
         _ => None,
     }
 }
 
-impl IntoResponse for GatewayError {
-    fn into_response(self) -> Response {
-        let status = self.status_code();
-        let body = Json(json!({ "error": self.to_string() }));
-        (status, body).into_response()
-    }
-}
-
-impl GatewayError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            Self::InvalidId(_)
-            | Self::InvalidPageLimit { .. }
-            | Self::InvalidEventsQuery(_)
-            | Self::InvalidAuthorizationRequest
-            | Self::ConsentCodec(_)
-            | Self::ConsentGrantSequenceMismatch
-            | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
-            Self::ActionRejected(ar) => action_rejected_status(ar),
-            Self::Consent(_)
-            | Self::LedgerWriteDisabled
-            | Self::AuthorizationDenied
-            | Self::Store(CoreError::ErasureAccessFrozen) => StatusCode::FORBIDDEN,
-            Self::TimelineLimitReached { .. }
-            | Self::EventLimitReached { .. }
-            | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
-            Self::EventPayloadTooLarge { .. }
-            | Self::EventMetadataTooLarge { .. }
-            | Self::ForkDepthTooLarge { .. }
-            | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
-            // 507: the Timeline's recorded dependency set is full for good, so
-            // the failure is permanent for that Timeline and a retry cannot help.
-            Self::DependencySetExhausted => StatusCode::INSUFFICIENT_STORAGE,
-            Self::CompatibilityReadTruncated { .. }
-            | Self::IngressConflict
-            | Self::ActionObservationStale
-            | Self::StaleEventCursor => StatusCode::CONFLICT,
-            Self::ResourceUnavailable => StatusCode::NOT_FOUND,
-            Self::Store(error) => {
-                gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-            Self::ActionRegistry(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
-                StatusCode::UNAUTHORIZED
-            }
-            Self::StoreExecutorClosed
-            | Self::StoreExecutorDeadlineExceeded
-            | Self::StoreExecutorUnhealthy
-            | Self::LedgerUnavailable
-            | Self::OwnTracksOwnerKeyUnavailable
-            | Self::ActionAdmissionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Ledger(le) => ledger_status(le),
-        }
-    }
-}
-
-/// Extracted from `status_code` to keep its complexity from regressing.
-const fn action_rejected_status(rejected: &ActionRejected) -> StatusCode {
-    match rejected {
-        ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
-        ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
-        ActionRejected::InvalidActorEntityId | ActionRejected::DomainValidationFailed(_) => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-    }
-}
-
-/// Extracted from `status_code` to keep its complexity from regressing.
-const fn ledger_status(error: &pos_plugin_ledger::LedgerError) -> StatusCode {
+/// An invalid prediction is the caller's; every other ledger failure is internal.
+const fn ledger_problem(error: &pos_plugin_ledger::LedgerError) -> Option<ProblemShape> {
     match error {
-        pos_plugin_ledger::LedgerError::InvalidPrediction(_) => StatusCode::UNPROCESSABLE_ENTITY,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        pos_plugin_ledger::LedgerError::InvalidPrediction(_) => Some((
+            ProblemCodeV1::InvalidRequest,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            false,
+        )),
+        _ => None,
+    }
+}
+
+/// A host dependency that cannot serve the request now; a retry may succeed.
+const UNAVAILABLE: ProblemShape = (
+    ProblemCodeV1::TemporarilyUnavailable,
+    StatusCode::SERVICE_UNAVAILABLE,
+    true,
+);
+
+/// The request, authority, bound and availability failures of the Gateway.
+const fn request_problem(error: &GatewayError) -> ProblemShape {
+    use ProblemCodeV1 as Code;
+    match error {
+        GatewayError::ConsentGrantSequenceMismatch
+        | GatewayError::ConsentRevocationFenceMismatch => {
+            (Code::ConsentInvalid, StatusCode::BAD_REQUEST, false)
+        }
+        GatewayError::Consent(_) => (Code::ConsentInvalid, StatusCode::FORBIDDEN, false),
+        GatewayError::LedgerWriteDisabled | GatewayError::AuthorizationDenied => {
+            (Code::Unauthorized, StatusCode::FORBIDDEN, false)
+        }
+        GatewayError::ActionAuthorizationUnavailable | GatewayError::AuthorizationUnavailable => {
+            (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
+        }
+        GatewayError::IngressConflict => (Code::IdempotencyConflict, StatusCode::CONFLICT, false),
+        GatewayError::ActionObservationStale | GatewayError::StaleEventCursor => {
+            (Code::AppendConflict, StatusCode::CONFLICT, false)
+        }
+        GatewayError::ResourceUnavailable => {
+            (Code::NotFoundOrUnavailable, StatusCode::NOT_FOUND, false)
+        }
+        GatewayError::StoreExecutorClosed
+        | GatewayError::StoreExecutorDeadlineExceeded
+        | GatewayError::StoreExecutorUnhealthy
+        | GatewayError::LedgerUnavailable
+        | GatewayError::OwnTracksOwnerKeyUnavailable
+        | GatewayError::ActionAdmissionUnavailable => UNAVAILABLE,
+        GatewayError::EventReadTimeExceeded { .. } => (
+            Code::TemporarilyUnavailable,
+            StatusCode::GATEWAY_TIMEOUT,
+            true,
+        ),
+        other => bound_problem(other),
+    }
+}
+
+/// The resource-bound and malformed-request failures of the Gateway.
+const fn bound_problem(error: &GatewayError) -> ProblemShape {
+    use ProblemCodeV1 as Code;
+    match error {
+        GatewayError::TimelineLimitReached { .. } | GatewayError::EventLimitReached { .. } => (
+            Code::ResourceLimitExceeded,
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+        ),
+        GatewayError::StoreExecutorSaturated => (
+            Code::ResourceLimitExceeded,
+            StatusCode::TOO_MANY_REQUESTS,
+            true,
+        ),
+        GatewayError::EventPayloadTooLarge { .. }
+        | GatewayError::EventMetadataTooLarge { .. }
+        | GatewayError::ForkDepthTooLarge { .. }
+        | GatewayError::EventResponseTooLarge { .. } => (
+            Code::ResourceLimitExceeded,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            false,
+        ),
+        // 507: the Timeline's recorded dependency set is full for good, so
+        // the failure is permanent for that Timeline and a retry cannot help.
+        GatewayError::DependencySetExhausted => (
+            Code::ResourceLimitExceeded,
+            StatusCode::INSUFFICIENT_STORAGE,
+            false,
+        ),
+        GatewayError::CompatibilityReadTruncated { .. } => {
+            (Code::ResourceLimitExceeded, StatusCode::CONFLICT, false)
+        }
+        _ => (Code::InvalidRequest, StatusCode::BAD_REQUEST, false),
+    }
+}
+
+/// Extracted from the `GatewayError` mapping to keep its complexity from regressing.
+const fn action_rejected_problem(rejected: &ActionRejected) -> ProblemShape {
+    match rejected {
+        ActionRejected::UnknownEventType => (
+            ProblemCodeV1::UnsupportedVersion,
+            StatusCode::BAD_REQUEST,
+            false,
+        ),
+        ActionRejected::CapabilityNotGranted => {
+            (ProblemCodeV1::Unauthorized, StatusCode::FORBIDDEN, false)
+        }
+        ActionRejected::InvalidActorEntityId => (
+            ProblemCodeV1::InvalidRequest,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            false,
+        ),
+        ActionRejected::DomainValidationFailed(_) => (
+            ProblemCodeV1::AdmissionRejected,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            false,
+        ),
+        ActionRejected::PayloadTooLarge { .. } => (
+            ProblemCodeV1::ResourceLimitExceeded,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            false,
+        ),
     }
 }
 
@@ -976,13 +1128,25 @@ mod tests {
         assert!(error.to_string().contains("TOML"));
     }
 
+    /// A fresh idempotency key for every request a test sends.
+    fn next_idempotency_key() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        format!(
+            "test-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
     async fn json_request(
         app: Router,
         method: &str,
         uri: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
-        let builder = Request::builder().method(method).uri(uri);
+        let mut builder = Request::builder().method(method).uri(uri);
+        if method == "POST" {
+            builder = builder.header(IDEMPOTENCY_KEY_HEADER, next_idempotency_key());
+        }
         let req = if let Some(b) = body {
             builder
                 .header("content-type", "application/json")
@@ -1159,7 +1323,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json["ok"], false);
+        assert_eq!(json["code"], "temporarily-unavailable");
+        assert_eq!(json["retryable"], true);
     }
 
     #[tokio::test]
@@ -1185,7 +1350,8 @@ mod tests {
         .await;
         drop(gateway);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json["ok"], false);
+        assert_eq!(json["code"], "temporarily-unavailable");
+        assert_eq!(json["retryable"], true);
     }
 
     #[tokio::test]
@@ -1294,6 +1460,56 @@ osf_link = \"https://osf.io/example\"\n";
         assert!(listed["next_from_seq"].is_null());
     }
 
+    /// Send one request with explicit headers; answer the status, the content type and the
+    /// parsed body (`Null` when it is not JSON).
+    async fn raw_request(
+        app: Router,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<Body>,
+    ) -> (StatusCode, String, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = app
+            .oneshot(builder.body(body.unwrap_or_else(Body::empty)).test_ok())
+            .await
+            .test_ok();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .test_ok();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, content_type, json)
+    }
+
+    async fn keyed_action(
+        app: Router,
+        timeline: &str,
+        key: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, String, serde_json::Value) {
+        raw_request(
+            app,
+            "POST",
+            &format!("/v1/timelines/{timeline}/actions"),
+            &[
+                ("content-type", "application/json"),
+                (IDEMPOTENCY_KEY_HEADER, key),
+            ],
+            Some(Body::from(body.to_string())),
+        )
+        .await
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn identified_http_action_retries_are_idempotent_and_conflicts_are_visible() {
@@ -1312,40 +1528,247 @@ osf_link = \"https://osf.io/example\"\n";
         let request = json!({
             "entity_id": entity,
             "capability": "world.action.v1.submit",
-            "ingress_id": "device-1-42",
             "payload": world_action_payload(&entity, &body, 1)
         });
-        let (status, first) = json_request(
-            app.clone(),
-            "POST",
-            &format!("/v1/timelines/{id}/actions"),
-            Some(request.clone()),
-        )
-        .await;
+        let (status, _, first) = keyed_action(app.clone(), id, "device-1-42", &request).await;
         assert_eq!(status, StatusCode::CREATED);
-        let (status, retry) = json_request(
-            app.clone(),
-            "POST",
-            &format!("/v1/timelines/{id}/actions"),
-            Some(request),
-        )
-        .await;
+        let (status, _, retry) = keyed_action(app.clone(), id, "device-1-42", &request).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(retry["id"], first["id"]);
-        let (status, error) = json_request(
-            app,
+        let changed = json!({
+            "entity_id": entity,
+            "capability": "world.action.v1.submit",
+            "payload": world_action_payload(&entity, &body, 2)
+        });
+        let (status, content_type, problem) = keyed_action(app, id, "device-1-42", &changed).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(content_type, crate::problem::PROBLEM_MEDIA_TYPE);
+        assert_eq!(problem["code"], "idempotency-conflict");
+        assert_eq!(problem["instance"], "/v1/timelines/{timeline_id}/actions");
+        assert!(problem["detail"].as_str().test_ok().contains("conflicts"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn an_action_without_a_valid_idempotency_key_is_an_invalid_request() {
+        let app = action_test_app();
+        let (_, created) = json_request(
+            app.clone(),
             "POST",
-            &format!("/v1/timelines/{id}/actions"),
-            Some(json!({
-                "entity_id": entity,
-                "capability": "world.action.v1.submit",
-                "ingress_id": "device-1-42",
-                "payload": world_action_payload(&entity, &body, 2)
-            })),
+            "/v1/timelines",
+            Some(json!({"name": "unkeyed"})),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(error["error"].as_str().test_ok().contains("conflicts"));
+        let id = created["id"].as_str().test_ok();
+        let entity = test_action_actor().to_string();
+        let body = test_world_body().to_string();
+        let request = json!({
+            "entity_id": entity,
+            "capability": "world.action.v1.submit",
+            "payload": world_action_payload(&entity, &body, 1)
+        });
+        let uri = format!("/v1/timelines/{id}/actions");
+        let long = "k".repeat(129);
+        for headers in [
+            vec![("content-type", "application/json")],
+            vec![
+                ("content-type", "application/json"),
+                (IDEMPOTENCY_KEY_HEADER, ""),
+            ],
+            vec![
+                ("content-type", "application/json"),
+                (IDEMPOTENCY_KEY_HEADER, "has space"),
+            ],
+            vec![
+                ("content-type", "application/json"),
+                (IDEMPOTENCY_KEY_HEADER, long.as_str()),
+            ],
+        ] {
+            let (status, content_type, problem) = raw_request(
+                app.clone(),
+                "POST",
+                &uri,
+                &headers,
+                Some(Body::from(request.to_string())),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(content_type, crate::problem::PROBLEM_MEDIA_TYPE);
+            assert_eq!(problem["code"], "invalid-request");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn rejections_unknown_routes_and_methods_answer_problems() {
+        let app = test_app();
+        let (status, content_type, problem) = raw_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            &[("content-type", "application/json")],
+            Some(Body::from("{not json")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(content_type, crate::problem::PROBLEM_MEDIA_TYPE);
+        assert_eq!(problem["code"], "invalid-request");
+        assert_eq!(problem["instance"], "/v1/timelines");
+        assert_eq!(problem["schema_id"], crate::problem::PROBLEM_SCHEMA_ID);
+        let (status, _, problem) = raw_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            &[],
+            Some(Body::from("{\"name\":\"x\"}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(problem["code"], "invalid-request");
+        let (status, _, problem) =
+            raw_request(app.clone(), "GET", "/v1/timelines/%FF/events", &[], None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["code"], "invalid-request");
+        let (status, _, problem) =
+            raw_request(app.clone(), "GET", "/v1/no-such-route", &[], None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(problem["code"], "not-found-or-unavailable");
+        assert_eq!(problem["instance"], "/v1/no-such-route");
+        let (status, _, problem) = raw_request(app, "DELETE", "/v1/timelines", &[], None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(problem["code"], "invalid-request");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn an_oversized_body_is_a_resource_limit_problem() {
+        let app = test_app_with_body_limit(16);
+        let (status, _, problem) = raw_request(
+            app,
+            "POST",
+            "/v1/timelines",
+            &[("content-type", "application/json")],
+            Some(Body::from(format!("{{\"name\":\"{}\"}}", "n".repeat(64)))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(problem["code"], "resource-limit-exceeded");
+    }
+
+    /// Gateway failures with their expected problem family and retry hint.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 19] {
+        [
+            (
+                GatewayError::DependencySetExhausted,
+                "resource-limit-exceeded",
+                false,
+            ),
+            (
+                GatewayError::CompatibilityReadTruncated { maximum: 1 },
+                "resource-limit-exceeded",
+                false,
+            ),
+            (
+                GatewayError::EventReadTimeExceeded { maximum_micros: 1 },
+                "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::EventPayloadTooLarge { maximum: 1 },
+                "resource-limit-exceeded",
+                false,
+            ),
+            (
+                GatewayError::ConsentRevocationFenceMismatch,
+                "consent-invalid",
+                false,
+            ),
+            (GatewayError::LedgerWriteDisabled, "unauthorized", false),
+            (
+                GatewayError::InvalidId("x".into()),
+                "invalid-request",
+                false,
+            ),
+            (GatewayError::IngressConflict, "idempotency-conflict", false),
+            (GatewayError::StaleEventCursor, "append-conflict", false),
+            (
+                GatewayError::ResourceUnavailable,
+                "not-found-or-unavailable",
+                false,
+            ),
+            (
+                GatewayError::StoreExecutorSaturated,
+                "resource-limit-exceeded",
+                true,
+            ),
+            (
+                GatewayError::StoreExecutorClosed,
+                "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::AuthorizationUnavailable,
+                "unauthenticated",
+                false,
+            ),
+            (GatewayError::AuthorizationDenied, "unauthorized", false),
+            (
+                GatewayError::ConsentGrantSequenceMismatch,
+                "consent-invalid",
+                false,
+            ),
+            (
+                GatewayError::Store(CoreError::ErasureAccessFrozen),
+                "deleted",
+                false,
+            ),
+            (
+                GatewayError::Store(CoreError::Storage("secret host path".into())),
+                "internal-safe-failure",
+                false,
+            ),
+            (
+                GatewayError::ActionRejected(ActionRejected::UnknownEventType),
+                "unsupported-version",
+                false,
+            ),
+            (
+                GatewayError::ActionRejected(ActionRejected::DomainValidationFailed("bad".into())),
+                "admission-rejected",
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn gateway_failures_map_to_their_problem_families() {
+        let cases = problem_cases();
+        let registry: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/gateway/v1/problem-types.json"
+        ))
+        .test_ok();
+        for (error, code, retryable) in cases {
+            let body = ProblemV1::from(error).body("/x");
+            assert_eq!(body["code"], code);
+            assert_eq!(body["retryable"], retryable);
+            assert!(!body["detail"].as_str().test_ok().contains("secret"));
+            let entry = registry["problem_types"]
+                .as_array()
+                .test_ok()
+                .iter()
+                .find(|entry| entry["code"] == code)
+                .test_ok();
+            assert!(
+                entry["statuses"]
+                    .as_array()
+                    .test_ok()
+                    .contains(&body["status"]),
+                "{code} {}",
+                body["status"]
+            );
+        }
     }
 
     #[tokio::test]
@@ -1657,7 +2080,7 @@ osf_link = \"https://osf.io/example\"\n";
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
             assert!(
-                body["error"]
+                body["detail"]
                     .as_str()
                     .is_some_and(|message| message.contains("query")),
                 "{query}: {body}"
@@ -1733,7 +2156,7 @@ osf_link = \"https://osf.io/example\"\n";
         let (status, body) =
             json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(body["error"]
+        assert!(body["detail"]
             .as_str()
             .is_some_and(|message| message.contains("payload")));
     }
@@ -1748,7 +2171,7 @@ osf_link = \"https://osf.io/example\"\n";
         let (status, body) =
             json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(body["error"]
+        assert!(body["detail"]
             .as_str()
             .is_some_and(|message| message.contains("response")));
     }
@@ -1794,7 +2217,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(err["error"]
+        assert!(err["detail"]
             .as_str()
             .test_ok()
             .contains("unknown event type"));
@@ -1877,7 +2300,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(missing["error"], "authorization unavailable");
+        assert_eq!(missing["detail"], "authorization unavailable");
 
         let request = Request::builder()
             .method("GET")
@@ -2091,6 +2514,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::Store(CoreError::TimelineNotFound(TimelineId::new())).into_response();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let ancestor = TimelineId::new();
+        let missing = ProblemV1::from(GatewayError::Store(CoreError::TimelineNotFound(ancestor)));
+        let body = missing.body("/v1/timelines/{timeline_id}/events");
+        assert_eq!(body["detail"], "resource not found");
+        assert!(!body.to_string().contains(&ancestor.to_string()));
         let r = GatewayError::StoreExecutorClosed.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::LedgerWriteDisabled.into_response();
@@ -2186,7 +2614,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(json["error"]
+        assert!(json["detail"]
             .as_str()
             .test_ok()
             .contains("ledger store not available"));
@@ -2306,7 +2734,7 @@ osf_link = \"https://osf.io/example\"\n";
             json_request(app, "POST", "/v1/ledger/predictions", Some(unknown_body)).await;
 
         assert!(
-            err_resp["error"].as_str().is_some(),
+            err_resp["detail"].as_str().is_some(),
             "domain validation should produce an error field, got: {err_resp:?}"
         );
         drop(std::fs::remove_dir_all(dir));
@@ -2338,7 +2766,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(err["error"].as_str().test_ok().contains("capability"));
+        assert!(err["detail"].as_str().test_ok().contains("capability"));
 
         let other_actor = EntityId::new().to_string();
         let (status, err) = json_request(
@@ -2355,7 +2783,7 @@ osf_link = \"https://osf.io/example\"\n";
         // Another acting Entity is outside this Principal's authority; the
         // error is identical, so it does not enumerate which check failed.
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(err["error"], "authorization denied");
+        assert_eq!(err["detail"], "authorization denied");
     }
 
     #[test]
