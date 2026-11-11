@@ -1,39 +1,58 @@
 //! Restart after a crash at every durable transition of an attempt (#1200).
 //!
 //! Attempts run through the lifecycle composition over the real registry,
-//! the real terminal cleanup, and fake systemd and kernel ports: the planned
-//! intent, the attempt and root directories and their PAI2 extension, the
-//! activation request marker, the attached root and its PAI3 extension, the
-//! unit start, the unit stop, the root release, the removal of both
-//! directories, and the intent deleted last.
+//! the real terminal cleanup, and fake systemd and kernel ports. Four courses
+//! are enumerated:
+//!
+//! * the attempt executes: its planned intent, the attempt and root
+//!   directories and their PAI2 extension, the `MountImage` request recorded
+//!   in the registry's activation marker, the attached root and its PAI3
+//!   extension, the unit start and stop, the root release, the removal of both
+//!   directories, and the intent deleted last;
+//! * its activation is refused before any request, so the directories and
+//!   the intent are removed without a root;
+//! * its request is sent but fails, so the live owner cannot prove cleanup
+//!   and leaves the tree for restart;
+//! * its launch is refused after the root was attached, so no unit ever
+//!   starts and the root is released before the directories are removed.
+//!
+//! Cancellation and withdrawn attempts are left to the lifecycle tests: a
+//! withdrawn attempt does no registry I/O, and a cancellation before
+//! activation leaves the same frontiers as a refused activation.
 //!
 //! The transitions are not listed by hand. A clean run counts every registry
 //! I/O operation (each write, fsync, rename, mkdir, readback, rmdir and
 //! unlink) and records every boundary between steps that are not registry
-//! I/O (the mount request, the attached root, the unit start, the ended
+//! I/O (the request sent, the attached root, the unit start, the ended
 //! execution, the stopped unit and the released root). A fresh run is then
 //! interrupted at each of them in turn:
 //!
 //! * a crash immediately before an I/O operation, or at a boundary, fails
 //!   that and every later registry operation and freezes the fake unit and
 //!   root, leaving what a real crash leaves: the disk as it was, a started
-//!   unit still loaded and an attached root still mounted. Nothing unwinds,
-//!   so the run's in-memory owners are simply dropped afterwards;
+//!   unit still loaded and an attached root still mounted;
 //! * a failed I/O operation is first handled by the live owner, which must
 //!   report cleanup only when it proved all of it and must close itself to
 //!   new intents; the process then crashes.
 //!
 //! Restart reconciliation then runs over what was left. With any one of its
-//! applicable proofs withheld it must fail closed, removing nothing while
-//! admission stays closed. With every proof given it must remove everything,
-//! the intent last, after which admission reopens. The counts are pinned, so
-//! an unreviewed new transition fails here.
+//! consulted proofs withheld it must fail closed, removing nothing while
+//! admission stays closed. With every proof given it must stop the surviving
+//! unit, detach the surviving root, clean the network, wait out a request
+//! still pending on this boot before its loop sweep, and remove everything,
+//! the intent last; the same attempts can then be committed again. Restart
+//! itself is also crashed at each of its registry operations, and the owner
+//! open that creates the activation marker at each of its own; a second
+//! restart must converge. The counts are pinned, so an unreviewed new
+//! transition fails here.
 
+// The declaration in `attempts.rs` already turns coverage off; this
+// `cfg(test)` also keeps the CRAP gate, which reads each file alone, from
+// scoring the suite's helpers as production code.
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod cases {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::fs::{self, File};
+    use std::fs::{self, File, OpenOptions};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
@@ -42,10 +61,10 @@ mod cases {
 
     use super::super::*;
     use crate::test_fixtures::{
-        authority, checked_root, crash_io_now, fake_root_release, in_lock_test_process, io_crashed,
-        recorded_identity, release_fake_root, restart_after_crash, with_io_crash, with_io_fault,
-        CrashSurvivors, FakeRootRelease, TeardownFixture, TeardownReset, TeardownStop, TestResult,
-        UncertainProof,
+        authority, checked_root, crash_io_now, fake_root_release, in_lock_test_process, io_count,
+        io_crashed, recorded_identity, release_fake_root, restart_after_crash, with_io_crash,
+        with_io_fault, CrashSurvivors, FakeRootRelease, RestartClock, Restarted, TeardownFixture,
+        TeardownReset, TeardownStop, TestResult, UncertainProof,
     };
     use crate::{
         BoundAttemptCgroup, ReleasedAttemptRoot, RestartReconciliationError,
@@ -54,14 +73,23 @@ mod cases {
 
     const SIM1: [u8; 32] = [9; 32];
 
-    /// The registry I/O operations of one clean lifecycle.
-    const IO_OPERATIONS: usize = 173;
+    /// The registry I/O operations of one restart over the attempt that
+    /// crashed when its execution ended.
+    const RESTART_IO_OPERATIONS: usize = 60;
+
+    /// The registry I/O operations of opening a registry owner over an empty
+    /// registry, which creates its activation marker.
+    const OPEN_IO_OPERATIONS: usize = 20;
+
+    /// How long a `MountImage` request sent one second before a same-boot
+    /// restart can still attach a loop device: 60 s plus 10 s, less 1 s.
+    const PENDING_REQUEST: Duration = Duration::from_secs(69);
 
     /// A crash boundary between two lifecycle steps that are not registry I/O.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Boundary {
-        /// The `MountImage` request was sent after its durable marker: loop/dm
-        /// devices may exist, nothing is mounted.
+        /// The `MountImage` request was sent after the activation marker
+        /// recorded it: loop/dm devices may exist, nothing is mounted.
         RequestSent,
         /// The root is attached and verified, before its PAI3 record.
         RootAttached,
@@ -69,37 +97,95 @@ mod cases {
         UnitSubmitted,
         /// The execution ended; the unit is still loaded.
         ExecutionEnded,
-        /// Terminal cleanup stopped and unloaded the unit; the root is mounted.
+        /// Terminal cleanup passed its unit step; the root is mounted.
         UnitStopped,
         /// The root was detached and its devices observed absent.
         RootReleased,
     }
 
-    /// The boundaries of one clean lifecycle, in order.
-    const LIFECYCLE: [Boundary; 6] = [
-        Boundary::RequestSent,
-        Boundary::RootAttached,
-        Boundary::UnitSubmitted,
-        Boundary::ExecutionEnded,
-        Boundary::UnitStopped,
-        Boundary::RootReleased,
-    ];
+    /// One course of an attempt's lifecycle.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Course {
+        /// The attempt executes and is cleaned up.
+        Executes,
+        /// Activation is refused before any `MountImage` request.
+        ActivationRefused,
+        /// The `MountImage` request is sent but fails.
+        RequestFails,
+        /// The launch is refused after the root was attached.
+        LaunchRefused,
+    }
+
+    impl Course {
+        /// The registry I/O operations of one lifecycle on this course.
+        const fn io_operations(self) -> usize {
+            match self {
+                Self::Executes => 173,
+                Self::ActivationRefused => 110,
+                Self::RequestFails => 90,
+                Self::LaunchRefused => 150,
+            }
+        }
+
+        /// The boundaries of one lifecycle on this course, in order.
+        const fn boundaries(self) -> &'static [Boundary] {
+            match self {
+                Self::Executes => &[
+                    Boundary::RequestSent,
+                    Boundary::RootAttached,
+                    Boundary::UnitSubmitted,
+                    Boundary::ExecutionEnded,
+                    Boundary::UnitStopped,
+                    Boundary::RootReleased,
+                ],
+                Self::ActivationRefused => &[],
+                Self::RequestFails => &[Boundary::RequestSent],
+                Self::LaunchRefused => &[
+                    Boundary::RequestSent,
+                    Boundary::RootAttached,
+                    Boundary::UnitStopped,
+                    Boundary::RootReleased,
+                ],
+            }
+        }
+
+        /// Whether the live owner proves the cleanup of this course: a sent
+        /// request with no released root leaves its tree for restart.
+        const fn proves_cleanup(self) -> bool {
+            !matches!(self, Self::RequestFails)
+        }
+    }
 
     /// The external resources a run holds, and the boundary it crashes at.
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct World {
+        course: Course,
         /// Crash at this boundary occurrence, counted over the whole run.
         crash_at: Option<usize>,
         /// Whether the run crashed at a boundary.
         crashed: AtomicBool,
         reached: Mutex<Vec<Boundary>>,
-        /// The attempt whose unit is loaded.
+        /// The attempt whose unit start was requested, crashed or not.
+        submitted: Mutex<Option<[u8; 16]>>,
+        /// The attempt whose unit is loaded, as of the crash.
         unit: Mutex<Option<[u8; 16]>>,
-        /// The attempt whose root is mounted.
+        /// The attempt whose root is mounted, as of the crash.
         mounted: Mutex<Option<[u8; 16]>>,
     }
 
     impl World {
+        const fn new(course: Course, crash_at: Option<usize>) -> Self {
+            Self {
+                course,
+                crash_at,
+                crashed: AtomicBool::new(false),
+                reached: Mutex::new(Vec::new()),
+                submitted: Mutex::new(None),
+                unit: Mutex::new(None),
+                mounted: Mutex::new(None),
+            }
+        }
+
         /// Whether the run crashed: nothing it does afterwards happens.
         fn frozen(&self) -> bool {
             self.crashed.load(Ordering::SeqCst) || io_crashed()
@@ -126,16 +212,18 @@ mod cases {
         }
     }
 
-    /// The admission of the attempt `[id; 16]`.
+    /// The admission of the attempt `[id; 16]`, over its fake manager.
     struct CrashInput {
         id: u8,
         world: Arc<World>,
+        transport: Arc<SystemdTransientUnitTransport>,
     }
 
     /// The attached fixture root of one attempt.
     struct CrashRoot {
         fake: FakeRootRelease,
         world: Arc<World>,
+        transport: Arc<SystemdTransientUnitTransport>,
     }
 
     impl RootRelease for CrashRoot {
@@ -145,11 +233,29 @@ mod cases {
             deadline: Instant,
         ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_
         {
-            let Self { fake, world } = self;
-            // Terminal cleanup releases the root only after it stopped the unit.
-            world.hold(&world.unit, None);
-            world.reach(Boundary::UnitStopped);
+            let Self {
+                fake,
+                world,
+                transport,
+            } = self;
             async move {
+                // Terminal cleanup releases the root only after it stopped
+                // the unit: a started unit is unloaded from its manager now.
+                let id = directory.intent().attempt_id();
+                if *lock(&world.submitted) == Some(id) {
+                    let absent = transport
+                        .wait_for_attempt_unit_absence(
+                            directory.intent().unit_name().clone(),
+                            Instant::now() + Duration::from_millis(50),
+                        )
+                        .await;
+                    assert!(
+                        absent.is_ok(),
+                        "attempt {id:?} released with its unit loaded"
+                    );
+                }
+                world.hold(&world.unit, None);
+                world.reach(Boundary::UnitStopped);
                 let released = release_fake_root(fake, directory, deadline).await;
                 if released.is_ok() {
                     world.hold(&world.mounted, None);
@@ -157,6 +263,41 @@ mod cases {
                 }
                 released
             }
+        }
+    }
+
+    impl CrashInput {
+        /// Send the recorded request and attach the fixture root.
+        fn attach(
+            &self,
+            directory: &PreparedAttemptDirectory,
+        ) -> Result<CrashRoot, ImageActivationError> {
+            // As in production, the request is recorded durably before it
+            // is sent, and nothing is sent when that record fails.
+            directory
+                .record_activation_request()
+                .map_err(|_| ImageActivationError::AttachFailure)
+                .and_then(|()| {
+                    self.world.reach(Boundary::RequestSent);
+                    if self.world.course == Course::RequestFails {
+                        // The request reached mountfsd, which may have left
+                        // loop/dm devices, and then failed.
+                        directory.begin_activation();
+                        return Err(ImageActivationError::AttachFailure);
+                    }
+                    fake_root_release(directory, true)
+                        .map_err(|_| ImageActivationError::AttachFailure)
+                })
+                .map(|fake| {
+                    self.world
+                        .hold(&self.world.mounted, Some(self.attempt_id()));
+                    self.world.reach(Boundary::RootAttached);
+                    CrashRoot {
+                        fake,
+                        world: Arc::clone(&self.world),
+                        transport: Arc::clone(&self.transport),
+                    }
+                })
         }
     }
 
@@ -186,25 +327,13 @@ mod cases {
             &'a self,
             directory: &'a PreparedAttemptDirectory,
         ) -> impl Future<Output = Result<CrashRoot, ImageActivationError>> + Send + 'a {
-            // As in production, the request is recorded durably before it is
-            // sent, and nothing is sent when that record fails.
-            let activated = directory
-                .record_activation_request()
-                .map_err(|_| ImageActivationError::AttachFailure)
-                .and_then(|()| {
-                    self.world.reach(Boundary::RequestSent);
-                    fake_root_release(directory, true)
-                        .map_err(|_| ImageActivationError::AttachFailure)
-                })
-                .map(|fake| {
-                    self.world
-                        .hold(&self.world.mounted, Some(self.attempt_id()));
-                    self.world.reach(Boundary::RootAttached);
-                    CrashRoot {
-                        fake,
-                        world: Arc::clone(&self.world),
-                    }
-                });
+            // A refused activation, such as a held image that no longer
+            // matches, sends no request.
+            let activated = if self.world.course == Course::ActivationRefused {
+                Err(ImageActivationError::AttachFailure)
+            } else {
+                self.attach(directory)
+            };
             std::future::ready(activated)
         }
 
@@ -251,13 +380,13 @@ mod cases {
 
     /// The fake execution over one fake systemd manager, and the real terminal
     /// cleanup through that manager's transport.
-    struct CrashSteps<'f> {
-        transport: &'f SystemdTransientUnitTransport,
+    struct CrashSteps {
+        transport: Arc<SystemdTransientUnitTransport>,
         cgroup: Mutex<Option<BoundAttemptCgroup>>,
         world: Arc<World>,
     }
 
-    impl AttemptSteps<CrashInput> for CrashSteps<'_> {
+    impl AttemptSteps<CrashInput> for CrashSteps {
         type Launch = ();
         type Started = ();
         type Cgroup = BoundAttemptCgroup;
@@ -271,17 +400,26 @@ mod cases {
         ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
             let ownership = attempt.execution_for_test();
             let attempt_id = attempt.attempt_id();
-            // As in production: claim, recheck the root, then request the start.
+            let refused = self.world.course == Course::LaunchRefused;
+            // As in production: claim, recheck the root, then request the
+            // start; a refused launch stops after the claim.
             let submitted = ownership
                 .claim()
-                .and_then(|()| recheck().map_err(ExecuteError::Recheck))
-                .and_then(|_checked| ownership.submit())
+                .and_then(|()| {
+                    if refused {
+                        Err(ExecuteError::ModeMismatch)
+                    } else {
+                        recheck().map(|_checked| ()).map_err(ExecuteError::Recheck)
+                    }
+                })
+                .and_then(|()| ownership.submit())
                 .map_err(|error| ExecuteFailure {
                     error,
                     unit: UnitState::NotStarted,
                     cgroup: None,
                 });
             let started = submitted.map(|()| {
+                *lock(&self.world.submitted) = Some(attempt_id);
                 self.world.hold(&self.world.unit, Some(attempt_id));
                 self.world.reach(Boundary::UnitSubmitted);
                 let taken = lock(&self.cgroup).take();
@@ -317,7 +455,7 @@ mod cases {
             deadlines: AttemptCleanupDeadlines,
         ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
         {
-            finish_with(self.transport, directory, cgroup, root, deadlines)
+            finish_with(&self.transport, directory, cgroup, root, deadlines)
         }
     }
 
@@ -346,6 +484,11 @@ mod cases {
         ))
     }
 
+    /// The planned intent of the attempt `[id; 16]`.
+    fn intent(id: u8) -> TestResult<PlannedAttemptIntent> {
+        Ok(PlannedAttemptIntent::new([id; 16], SIM1)?)
+    }
+
     /// Grace ends at 100 ms, the unit kill at 200 ms, shutdown at 300 ms, the
     /// unit is absent by 500 ms and the root released by 700 ms.
     fn budget() -> TestResult<CleanupBudget> {
@@ -372,28 +515,40 @@ mod cases {
         }
     }
 
-    /// Run attempts 1 to `count` one after another, each to its end.
+    /// A paused current-thread runtime: deadlines and waits pass at once.
+    fn paused() -> TestResult<tokio::runtime::Runtime> {
+        Ok(tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()?)
+    }
+
+    /// Run attempts 1 to `count` one after another, each to its end; with
+    /// each outcome, the registry operations started by then.
     async fn lives(
         lifecycle: &AttemptLifecycle<CrashInput>,
         count: u8,
         world: &Arc<World>,
-    ) -> TestResult<Vec<EndedAttempt<()>>> {
+    ) -> TestResult<Vec<(EndedAttempt<()>, usize)>> {
         let mut ended = Vec::new();
         for id in 1..=count {
             let fixture =
                 TeardownFixture::new(id, TeardownStop::Empty, TeardownReset::Unload).await?;
+            let transport = Arc::new(fixture.transport);
             let steps = CrashSteps {
-                transport: &fixture.transport,
+                transport: Arc::clone(&transport),
                 cgroup: Mutex::new(Some(fixture.bound)),
                 world: Arc::clone(world),
             };
             let input = CrashInput {
                 id,
                 world: Arc::clone(world),
+                transport,
             };
             let owned = lifecycle.admit_input(input)?;
             let budget = budget()?;
-            ended.push(Box::pin(owned.run_with(&steps, (), budget)).await);
+            let attempt = Box::pin(owned.run_with(&steps, (), budget)).await;
+            ended.push((attempt, io_count()));
         }
         Ok(ended)
     }
@@ -401,7 +556,7 @@ mod cases {
     /// Where a run is interrupted.
     #[derive(Clone, Copy, Debug)]
     enum Interruption {
-        /// Nowhere: every attempt runs to its proved cleanup.
+        /// Nowhere: every attempt runs its course to its end.
         None,
         /// Registry I/O operation `n` fails; the live owner handles it.
         FailsAtIo(usize),
@@ -415,6 +570,8 @@ mod cases {
     struct Run {
         /// Each attempt's live outcome, as the process reported it.
         ended: Vec<EndedAttempt<()>>,
+        /// The registry I/O operations started after each attempt ended.
+        ios_after: Vec<usize>,
         /// The registry I/O operations started.
         ios: usize,
         /// The boundaries reached.
@@ -423,14 +580,17 @@ mod cases {
         survivors: CrashSurvivors,
     }
 
-    /// Run `count` lifecycles in `runtime`, interrupted by `interruption`, and
-    /// leave the process state as the crash does.
-    fn run(runtime: &Path, count: u8, interruption: Interruption) -> TestResult<Run> {
-        let tokio = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(true)
-            .build()?;
-        // Opening the owner writes its activation marker before the counted run.
+    /// Run `count` lifecycles on `course` in `runtime`, interrupted by
+    /// `interruption`, and leave the process state as the crash does.
+    fn run(
+        runtime: &Path,
+        course: Course,
+        count: u8,
+        interruption: Interruption,
+    ) -> TestResult<Run> {
+        let tokio = paused()?;
+        // The owner open, and the activation marker it creates, are crashed
+        // by their own test.
         let ledger = crate::StagingLedger::new(crate::StagingLimits {
             aggregate_bytes: 1024,
         });
@@ -443,18 +603,15 @@ mod cases {
             Interruption::CrashesAtBoundary(at) => Some(at),
             Interruption::None | Interruption::FailsAtIo(_) | Interruption::CrashesAtIo(_) => None,
         };
-        let world = Arc::new(World {
-            crash_at,
-            ..World::default()
-        });
+        let world = Arc::new(World::new(course, crash_at));
         let live = || tokio.block_on(Box::pin(lives(&lifecycle, count, &world)));
-        let (ended, ios) = match interruption {
+        let (lived, ios) = match interruption {
             Interruption::None => with_io_fault(None, live),
             Interruption::FailsAtIo(at) => with_io_fault(Some(at), live),
             Interruption::CrashesAtIo(at) => with_io_crash(Some(at), live),
             Interruption::CrashesAtBoundary(_) => with_io_crash(None, live),
         };
-        let ended = ended?;
+        let (ended, ios_after): (Vec<_>, Vec<_>) = lived?.into_iter().unzip();
         let survivors = CrashSurvivors {
             unit: (*lock(&world.unit))
                 .map(TransientServiceUnitName::from_attempt_id)
@@ -471,14 +628,16 @@ mod cases {
         drop(tokio);
         Ok(Run {
             ended,
+            ios_after,
             ios,
             reached,
             survivors,
         })
     }
 
-    /// Every attempt the process reported cleaned left nothing behind: no record,
-    /// no directory, no unit and no root. Proved cleanup is never partial.
+    /// Every attempt the process reported cleaned left nothing behind: no
+    /// record, no directory, no unit and no root. Proved cleanup is never
+    /// partial.
     fn assert_reported_cleanup_was_complete(
         ended: &[EndedAttempt<()>],
         survivors: &CrashSurvivors,
@@ -508,7 +667,8 @@ mod cases {
     }
 
     /// After a failed operation, the live owner reports an attempt reconciled
-    /// exactly when its cleanup was proved, and commits no new intent.
+    /// exactly when its cleanup was proved, and commits no intent, not even
+    /// the same attempt's again.
     fn assert_live_owner_fails_closed(
         lifecycle: &AttemptLifecycle<CrashInput>,
         ended: &[EndedAttempt<()>],
@@ -522,10 +682,18 @@ mod cases {
                 "operation {at}: {:?} reported as {reported:?}",
                 attempt.cleanup()
             );
+            let again = lifecycle
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new(attempt.attempt_id(), SIM1)?);
+            assert!(
+                matches!(
+                    again,
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                ),
+                "operation {at}: the failed owner commits its attempt again: {again:?}"
+            );
         }
-        let refused = lifecycle
-            .registry
-            .commit_planned(&PlannedAttemptIntent::new([0xee; 16], SIM1)?);
+        let refused = lifecycle.registry.commit_planned(&intent(0xee)?);
         assert!(
             matches!(
                 refused,
@@ -574,9 +742,9 @@ mod cases {
             .filter(|(name, _)| !name.starts_with('.') && *name != "activation")
     }
 
-    /// What one attempt's crash left, in words: an interrupted temporary write,
-    /// the committed stage, the attempt and root directories, a loaded unit and
-    /// a mounted root.
+    /// What the crash of the attempt `[id; 16]` left, in words: an interrupted
+    /// temporary write, the committed stage, the attempt and root directories,
+    /// a loaded unit and a mounted root.
     fn frontier(snapshot: &Snapshot, survivors: &CrashSurvivors, id: u8) -> TestResult<String> {
         let unit = TransientServiceUnitName::from_attempt_id([id; 16])?;
         let key = unit.attempt_component();
@@ -606,6 +774,19 @@ mod cases {
             .map(|(_, word)| *word)
             .collect::<Vec<_>>()
             .join(" "))
+    }
+
+    /// The attempt an interruption on `course` hit, counted from 1.
+    fn attempt_of(course: Course, interruption: Interruption) -> TestResult<u8> {
+        let index = match interruption {
+            Interruption::None => Some(0),
+            Interruption::FailsAtIo(at) | Interruption::CrashesAtIo(at) => {
+                at.checked_div(course.io_operations())
+            }
+            Interruption::CrashesAtBoundary(at) => at.checked_div(course.boundaries().len()),
+        };
+        let index = index.ok_or("an interruption of a course without that step")?;
+        Ok(u8::try_from(index + 1)?)
     }
 
     /// The proofs restart reconciliation consults for this crash state.
@@ -643,30 +824,35 @@ mod cases {
         }
     }
 
-    /// Restart over what `run` left: with each consulted proof withheld it
-    /// fails closed and removes nothing, if `withheld`; with every proof given
-    /// it removes every attempt, and admission reopens.
-    fn assert_restart_reconciles(
-        run: &Run,
+    /// One restart over `runtime` on a paused runtime.
+    fn restart(
         runtime: &Path,
+        survivors: &CrashSurvivors,
+        proof: UncertainProof,
+        clock: RestartClock,
+    ) -> TestResult<Restarted> {
+        paused()?.block_on(Box::pin(restart_after_crash(
+            runtime, survivors, proof, clock,
+        )))
+    }
+
+    /// Restart over a crash state: with each consulted proof withheld it
+    /// fails closed and removes nothing, if `withheld`; then it reconciles.
+    fn assert_restart_reconciles(
+        runtime: &Path,
+        survivors: &CrashSurvivors,
+        count: u8,
         label: &str,
         withheld: bool,
     ) -> TestResult {
-        let tokio = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
         let crashed = snapshot(runtime)?;
         let proofs = if withheld {
-            consulted_proofs(&crashed, &run.survivors)
+            consulted_proofs(&crashed, survivors)
         } else {
             Vec::new()
         };
         for proof in proofs {
-            let refused = tokio.block_on(Box::pin(restart_after_crash(
-                runtime,
-                &run.survivors,
-                proof,
-            )))?;
+            let refused = restart(runtime, survivors, proof, RestartClock::OtherBoot)?.result;
             assert!(
                 refused
                     .as_ref()
@@ -680,7 +866,9 @@ mod cases {
                 "{label}, {proof:?} withheld: a refused restart removed state"
             );
             // Admission stays closed while anything but the marker remains.
-            if crashed.registry.len() > 1 {
+            if records(&crashed).next().is_some()
+                || crashed.registry.keys().any(|name| name.starts_with('.'))
+            {
                 assert!(
                     matches!(
                         registry(runtime)?,
@@ -690,64 +878,119 @@ mod cases {
                 );
             }
         }
-        let reconciled = tokio
-            .block_on(Box::pin(restart_after_crash(
-                runtime,
-                &run.survivors,
-                UncertainProof::None,
-            )))?
+        assert_restart_succeeds(runtime, survivors, count, label, UncertainProof::None)
+    }
+
+    /// Restart on the activation marker's boot, with `proof` withheld though
+    /// this crash state does not consult it: it stops the surviving unit,
+    /// detaches the surviving root, cleans the network, waits out a pending
+    /// request before its loop sweep, removes exactly the committed attempts,
+    /// and admission reopens for the same attempts.
+    fn assert_restart_succeeds(
+        runtime: &Path,
+        survivors: &CrashSurvivors,
+        count: u8,
+        label: &str,
+        proof: UncertainProof,
+    ) -> TestResult {
+        let crashed = snapshot(runtime)?;
+        let restarted = restart(runtime, survivors, proof, RestartClock::SameBootSoon)?;
+        let reconciled = restarted
+            .result
             .map_err(|error| format!("{label}: restart with every proof failed: {error:?}"))?;
         let removed = reconciled
             .attempts()
             .iter()
             .map(|intent| intent.unit_name().attempt_component().to_owned())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         let recorded = records(&crashed)
             .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         assert_eq!(removed, recorded, "{label}: reconciled attempts");
-        let clean = snapshot(runtime)?;
+        assert!(
+            restarted.still_loaded.is_empty(),
+            "{label}: {:?} still loaded",
+            restarted.still_loaded
+        );
         assert_eq!(
-            clean.registry.keys().collect::<Vec<_>>(),
-            ["activation"],
+            restarted.detached,
+            survivors.mounted.into_iter().collect::<Vec<_>>(),
+            "{label}: detached roots"
+        );
+        assert!(restarted.network_cleaned, "{label}: network");
+        let (swept_after, unchanged) = restarted.swept.ok_or("the loop sweep did not run")?;
+        assert!(unchanged, "{label}: removed before the loop sweep");
+        assert!(
+            !restarted.request_pending || swept_after >= PENDING_REQUEST,
+            "{label}: swept {swept_after:?} after a request pending on this boot"
+        );
+        let clean = snapshot(runtime)?;
+        // The activation marker is kept as it was, if there was one.
+        assert_eq!(
+            clean.registry,
+            crashed
+                .registry
+                .iter()
+                .filter(|(name, _)| *name == "activation")
+                .map(|(name, bytes)| (name.clone(), bytes.clone()))
+                .collect::<BTreeMap<_, _>>(),
             "{label}: registry after restart"
         );
         assert!(clean.attempts.is_empty(), "{label}: {:?}", clean.attempts);
-        // Admission reopens over the reconciled registry.
-        registry(runtime)??.commit_planned(&PlannedAttemptIntent::new([0xee; 16], SIM1)?)?;
+        // Admission reopens over the reconciled registry, for the same
+        // attempts too.
+        let reopened = registry(runtime)??;
+        for id in 1..=count {
+            reopened.commit_planned(&intent(id)?)?;
+        }
         Ok(())
     }
 
-    /// A clean run of `count` lifecycles, with its pinned transition counts.
-    fn clean_run(count: u8) -> TestResult<Run> {
+    /// A clean run of `count` lifecycles on `course`, with its pinned
+    /// transition counts.
+    fn clean_run(course: Course, count: u8) -> TestResult<Run> {
         let runtime = runtime()?;
-        let clean = run(runtime.path(), count, Interruption::None)?;
-        let ended = &clean.ended;
-        assert_eq!(ended.len(), usize::from(count));
-        for attempt in ended {
-            assert!(
+        let clean = run(runtime.path(), course, count, Interruption::None)?;
+        assert_eq!(clean.ended.len(), usize::from(count));
+        for attempt in &clean.ended {
+            assert_eq!(
                 matches!(attempt.cleanup(), Ok(Some(_))),
-                "{:?}",
+                course.proves_cleanup(),
+                "{course:?}: {:?}",
                 attempt.cleanup()
             );
         }
+        let each = course.io_operations();
         assert_eq!(
-            clean.ios,
-            IO_OPERATIONS * usize::from(count),
-            "registry I/O operations of {count} clean lifecycles: review and count the new transitions"
+            clean.ios_after,
+            (1..=usize::from(count))
+                .map(|attempt| attempt * each)
+                .collect::<Vec<_>>(),
+            "registry I/O operations of {count} lifecycles on {course:?}: review and count the new transitions"
         );
-        assert_eq!(clean.reached, LIFECYCLE.repeat(usize::from(count)));
+        assert_eq!(clean.ios, each * usize::from(count));
+        assert_eq!(
+            clean.reached,
+            course.boundaries().repeat(usize::from(count))
+        );
         assert_eq!(clean.survivors, CrashSurvivors::default());
-        let left = snapshot(runtime.path())?;
-        assert_eq!(left.registry.keys().collect::<Vec<_>>(), ["activation"]);
-        assert!(left.attempts.is_empty());
+        if course.proves_cleanup() {
+            let left = snapshot(runtime.path())?;
+            assert_eq!(left.registry.keys().collect::<Vec<_>>(), ["activation"]);
+            assert!(left.attempts.is_empty());
+        } else {
+            // What the live owner could not prove, restart does.
+            let label = format!("{course:?} clean run");
+            assert_restart_reconciles(runtime.path(), &clean.survivors, count, &label, true)?;
+        }
         Ok(clean)
     }
 
-    /// Crash or fail at every interruption `at` yields for `count` lifecycles,
-    /// checking restart over each; returns each crash's frontier of the last
-    /// attempt, consecutive repeats merged.
+    /// Crash or fail at every interruption on `course` for `count`
+    /// lifecycles, checking restart over each; returns the frontier each
+    /// left of the attempt it hit, consecutive repeats merged.
     fn interrupt_each(
+        course: Course,
         count: u8,
         interruptions: impl Iterator<Item = Interruption>,
         withheld: bool,
@@ -755,8 +998,8 @@ mod cases {
         let mut frontiers: Vec<String> = Vec::new();
         for interruption in interruptions {
             let runtime = runtime()?;
-            let left = run(runtime.path(), count, interruption)?;
-            let label = format!("{interruption:?}");
+            let left = run(runtime.path(), course, count, interruption)?;
+            let label = format!("{course:?} {interruption:?}");
             match interruption {
                 Interruption::CrashesAtIo(at) | Interruption::FailsAtIo(at) => {
                     assert!(left.ios > at, "{label}: not reached");
@@ -767,22 +1010,68 @@ mod cases {
                 Interruption::None => {}
             }
             let crashed = snapshot(runtime.path())?;
-            let last = records(&crashed)
-                .filter_map(|(name, _)| u8::from_str_radix(name.get(..2)?, 16).ok())
-                .max()
-                .unwrap_or(1);
-            let state = frontier(&crashed, &left.survivors, last)?;
+            let hit = attempt_of(course, interruption)?;
+            let state = frontier(&crashed, &left.survivors, hit)?;
             if frontiers.last() != Some(&state) {
                 frontiers.push(state.clone());
             }
             assert_restart_reconciles(
-                &left,
                 runtime.path(),
+                &left.survivors,
+                count,
                 &format!("{label} at {state}"),
                 withheld,
             )?;
         }
         Ok(frontiers)
+    }
+
+    /// Every crash before a registry operation, at a boundary, and every
+    /// failed operation, of one lifecycle on `course`; returns the frontiers
+    /// of the operation crashes and of the boundary crashes.
+    fn every_interruption(course: Course) -> TestResult<(Vec<String>, Vec<String>)> {
+        let clean = clean_run(course, 1)?;
+        let crashes = interrupt_each(
+            course,
+            1,
+            (0..clean.ios).map(Interruption::CrashesAtIo),
+            true,
+        )?;
+        let boundaries = interrupt_each(
+            course,
+            1,
+            (0..clean.reached.len()).map(Interruption::CrashesAtBoundary),
+            true,
+        )?;
+        interrupt_each(
+            course,
+            1,
+            (0..clean.ios).map(Interruption::FailsAtIo),
+            false,
+        )?;
+        Ok((crashes, boundaries))
+    }
+
+    /// The frontiers up to the PAI2 tree, which every course passes.
+    const PREPARED: [&str; 7] = [
+        // The planned intent: nothing, its interrupted write, then PAI1.
+        "none",
+        "tmp none",
+        "PAI1",
+        // mkdir of the attempt, then of its root, before PAI2.
+        "PAI1 attempt",
+        "PAI1 attempt root",
+        "tmp PAI1 attempt root",
+        "PAI2 attempt root",
+    ];
+
+    /// `PREPARED`, followed by `rest`.
+    fn after_prepared(rest: &[&str]) -> Vec<String> {
+        PREPARED
+            .iter()
+            .chain(rest)
+            .map(|frontier| (*frontier).to_owned())
+            .collect()
     }
 
     #[test]
@@ -792,21 +1081,18 @@ mod cases {
         )? {
             return Ok(());
         }
-        let clean = clean_run(1)?;
-        let frontiers = interrupt_each(1, (0..clean.ios).map(Interruption::CrashesAtIo), true)?;
+        let clean = clean_run(Course::Executes, 1)?;
+        let frontiers = interrupt_each(
+            Course::Executes,
+            1,
+            (0..clean.ios).map(Interruption::CrashesAtIo),
+            true,
+        )?;
         assert_eq!(
             frontiers,
-            [
-                // The planned intent: nothing, its interrupted write, then PAI1.
-                "none",
-                "tmp none",
-                "PAI1",
-                // mkdir of the attempt, then of its root, before PAI2.
-                "PAI1 attempt",
-                "PAI1 attempt root",
-                "tmp PAI1 attempt root",
-                "PAI2 attempt root",
-                // The activation marker's interrupted write.
+            after_prepared(&[
+                // The activation marker's interrupted write, recording the
+                // request before it is sent.
                 "tmp PAI2 attempt root",
                 "PAI2 attempt root",
                 // The attached root, its interrupted PAI3 write, then PAI3; the
@@ -820,7 +1106,7 @@ mod cases {
                 "PAI3 attempt",
                 "PAI3",
                 "none",
-            ]
+            ])
         );
         Ok(())
     }
@@ -832,8 +1118,9 @@ mod cases {
         )? {
             return Ok(());
         }
-        let clean = clean_run(1)?;
+        let clean = clean_run(Course::Executes, 1)?;
         let frontiers = interrupt_each(
+            Course::Executes,
             1,
             (0..clean.reached.len()).map(Interruption::CrashesAtBoundary),
             true,
@@ -841,7 +1128,8 @@ mod cases {
         assert_eq!(
             frontiers,
             [
-                // The request was sent: any loop device is the sweep's to find.
+                // The request was sent: any loop device is the sweep's to find,
+                // after a request still pending on this boot.
                 "PAI2 attempt root",
                 "PAI2 attempt root mounted",
                 // A started unit survives until the stop, the root until release.
@@ -860,30 +1148,304 @@ mod cases {
         )? {
             return Ok(());
         }
-        let clean = clean_run(1)?;
-        interrupt_each(1, (0..clean.ios).map(Interruption::FailsAtIo), false)?;
+        let clean = clean_run(Course::Executes, 1)?;
+        interrupt_each(
+            Course::Executes,
+            1,
+            (0..clean.ios).map(Interruption::FailsAtIo),
+            false,
+        )?;
         Ok(())
     }
 
     #[test]
-    fn eight_lifecycles_reconcile_after_a_crash_at_every_transition() -> TestResult {
+    fn a_refused_activation_removes_its_tree_without_a_root_at_every_crash() -> TestResult {
         if !in_lock_test_process(
-            "lifecycle::attempts::crash_points::cases::eight_lifecycles_reconcile_after_a_crash_at_every_transition",
+            "lifecycle::attempts::crash_points::cases::a_refused_activation_removes_its_tree_without_a_root_at_every_crash",
         )? {
             return Ok(());
         }
-        let clean = clean_run(8)?;
-        // Every registry operation of the first and the last attempt, and each
-        // operation of the six middle attempts once: its offset picks which of
-        // them crashes there. Every boundary of every attempt.
+        let (crashes, boundaries) = every_interruption(Course::ActivationRefused)?;
+        assert_eq!(
+            crashes,
+            // The root removed with the attempt present, both removed, and
+            // the intent deleted last; no request was ever recorded.
+            after_prepared(&["PAI2 attempt", "PAI2", "none"])
+        );
+        assert!(boundaries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_request_leaves_its_tree_to_restart_at_every_crash() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_failed_request_leaves_its_tree_to_restart_at_every_crash",
+        )? {
+            return Ok(());
+        }
+        let (crashes, boundaries) = every_interruption(Course::RequestFails)?;
+        assert_eq!(
+            crashes,
+            after_prepared(&["tmp PAI2 attempt root", "PAI2 attempt root"])
+        );
+        assert_eq!(boundaries, ["PAI2 attempt root"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_launch_releases_its_root_without_a_unit_at_every_crash() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_refused_launch_releases_its_root_without_a_unit_at_every_crash",
+        )? {
+            return Ok(());
+        }
+        let (crashes, boundaries) = every_interruption(Course::LaunchRefused)?;
+        assert_eq!(
+            crashes,
+            after_prepared(&[
+                "tmp PAI2 attempt root",
+                "PAI2 attempt root",
+                // No PAI3: the launch was refused before its recheck.
+                "PAI2 attempt root mounted",
+                "PAI2 attempt root",
+                "PAI2 attempt",
+                "PAI2",
+                "none",
+            ])
+        );
+        assert_eq!(
+            boundaries,
+            [
+                "PAI2 attempt root",
+                "PAI2 attempt root mounted",
+                "PAI2 attempt root",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eight_lifecycles_reconcile_after_a_crash_at_each_operation_offset_and_boundary() -> TestResult
+    {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::eight_lifecycles_reconcile_after_a_crash_at_each_operation_offset_and_boundary",
+        )? {
+            return Ok(());
+        }
+        // Each attempt's own operations are pinned by the clean run.
+        let clean = clean_run(Course::Executes, 8)?;
+        let each = Course::Executes.io_operations();
+        // Every registry operation of the first and the last attempt, and
+        // each operation offset once in the six middle attempts: the offset
+        // picks which of them crashes there. Every boundary of every attempt,
+        // with each consulted proof withheld.
         let io = (0..clean.ios)
             .filter(|at| {
-                let (attempt, offset) = (at / IO_OPERATIONS, at % IO_OPERATIONS);
+                let (attempt, offset) = (at / each, at % each);
                 attempt == 0 || attempt == 7 || attempt == 1 + offset % 6
             })
             .map(Interruption::CrashesAtIo);
+        interrupt_each(Course::Executes, 8, io, false)?;
         let boundaries = (0..clean.reached.len()).map(Interruption::CrashesAtBoundary);
-        interrupt_each(8, io.chain(boundaries), false)?;
+        interrupt_each(Course::Executes, 8, boundaries, true)?;
+        Ok(())
+    }
+
+    /// The state the single executing attempt leaves when it crashes as its
+    /// execution ended: PAI3, its tree, its unit and its mounted root.
+    fn crashed_running() -> TestResult<(tempfile::TempDir, CrashSurvivors)> {
+        let runtime = runtime()?;
+        let ended = Course::Executes
+            .boundaries()
+            .iter()
+            .position(|boundary| *boundary == Boundary::ExecutionEnded)
+            .ok_or("no ended execution")?;
+        let left = run(
+            runtime.path(),
+            Course::Executes,
+            1,
+            Interruption::CrashesAtBoundary(ended),
+        )?;
+        Ok((runtime, left.survivors))
+    }
+
+    #[test]
+    fn a_crash_inside_restart_reconciliation_converges_on_the_next_restart() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_crash_inside_restart_reconciliation_converges_on_the_next_restart",
+        )? {
+            return Ok(());
+        }
+        let operations = {
+            let (runtime, survivors) = crashed_running()?;
+            let (restarted, operations) = with_io_fault(None, || {
+                restart(
+                    runtime.path(),
+                    &survivors,
+                    UncertainProof::None,
+                    RestartClock::OtherBoot,
+                )
+            });
+            restarted?.result?;
+            operations
+        };
+        assert_eq!(
+            operations, RESTART_IO_OPERATIONS,
+            "registry I/O operations of one restart: review and count the new transitions"
+        );
+        for at in 0..operations {
+            let (runtime, survivors) = crashed_running()?;
+            let (restarted, started) = with_io_crash(Some(at), || {
+                restart(
+                    runtime.path(),
+                    &survivors,
+                    UncertainProof::None,
+                    RestartClock::OtherBoot,
+                )
+            });
+            let restarted = restarted?;
+            assert!(started > at, "restart operation {at} not reached");
+            assert!(
+                restarted.result.is_err(),
+                "restart operation {at}: a crashed restart reported success"
+            );
+            // What the crashed restart had already stopped or detached is
+            // gone; everything else survives for the next restart.
+            let survivors = CrashSurvivors {
+                unit: survivors.unit.filter(|unit| {
+                    restarted
+                        .still_loaded
+                        .iter()
+                        .any(|loaded| loaded == unit.as_str())
+                }),
+                mounted: survivors
+                    .mounted
+                    .filter(|attempt| !restarted.detached.contains(attempt)),
+            };
+            assert_restart_reconciles(
+                runtime.path(),
+                &survivors,
+                1,
+                &format!("restart crashed at operation {at}"),
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_crash_while_an_owner_opens_and_creates_its_marker_reconciles() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_crash_while_an_owner_opens_and_creates_its_marker_reconciles",
+        )? {
+            return Ok(());
+        }
+        let operations = {
+            let runtime = runtime()?;
+            let (opened, operations) = with_io_fault(None, || registry(runtime.path()));
+            opened??;
+            operations
+        };
+        assert_eq!(
+            operations, OPEN_IO_OPERATIONS,
+            "registry I/O operations of an owner open: review and count the new transitions"
+        );
+        for at in 0..operations {
+            let runtime = runtime()?;
+            let (opened, _) = with_io_crash(Some(at), || registry(runtime.path()));
+            assert!(opened?.is_err(), "owner open operation {at}");
+            assert_restart_reconciles(
+                runtime.path(),
+                &CrashSurvivors::default(),
+                1,
+                &format!("owner open crashed at operation {at}"),
+                true,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_torn_temporary_write_left_by_a_crash_is_removed() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_torn_temporary_write_left_by_a_crash_is_removed",
+        )? {
+            return Ok(());
+        }
+        let clean = clean_run(Course::Executes, 1)?;
+        let mut torn = 0;
+        for at in 0..clean.ios {
+            let runtime = runtime()?;
+            let left = run(
+                runtime.path(),
+                Course::Executes,
+                1,
+                Interruption::CrashesAtIo(at),
+            )?;
+            let crashed = snapshot(runtime.path())?;
+            let Some((name, bytes)) = crashed
+                .registry
+                .iter()
+                .find(|(name, bytes)| name.starts_with('.') && bytes.len() > 1)
+            else {
+                continue;
+            };
+            let length = u64::try_from(bytes.len() / 2)?;
+            OpenOptions::new()
+                .write(true)
+                .open(runtime.path().join("registry").join(name))?
+                .set_len(length)?;
+            torn += 1;
+            assert_restart_reconciles(
+                runtime.path(),
+                &left.survivors,
+                1,
+                &format!("torn {name} at operation {at}"),
+                false,
+            )?;
+        }
+        // The planned, PAI2, activation-marker and PAI3 writes, each between
+        // its write and its rename.
+        assert!(torn >= 4, "{torn} torn writes");
+        Ok(())
+    }
+
+    #[test]
+    fn a_withheld_proof_that_restart_does_not_consult_does_not_close_admission() -> TestResult {
+        if !in_lock_test_process(
+            "lifecycle::attempts::crash_points::cases::a_withheld_proof_that_restart_does_not_consult_does_not_close_admission",
+        )? {
+            return Ok(());
+        }
+        let boundaries = Course::Executes.boundaries();
+        for (crash, proof) in [
+            // No unit survives a released root.
+            (Boundary::RootReleased, UncertainProof::UnitStop),
+            // No PAI3 root's devices are recorded before the root attached.
+            (Boundary::RequestSent, UncertainProof::RecordedDevices),
+        ] {
+            let at = boundaries
+                .iter()
+                .position(|boundary| *boundary == crash)
+                .ok_or("no such boundary")?;
+            let runtime = runtime()?;
+            let left = run(
+                runtime.path(),
+                Course::Executes,
+                1,
+                Interruption::CrashesAtBoundary(at),
+            )?;
+            assert!(
+                !consulted_proofs(&snapshot(runtime.path())?, &left.survivors).contains(&proof)
+            );
+            assert_restart_succeeds(
+                runtime.path(),
+                &left.survivors,
+                1,
+                &format!("{crash:?} with {proof:?} withheld"),
+                proof,
+            )?;
+        }
         Ok(())
     }
 }
