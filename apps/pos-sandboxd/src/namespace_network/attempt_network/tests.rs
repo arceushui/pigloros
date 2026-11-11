@@ -474,44 +474,9 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
     Ok(())
 }
 
-#[test]
-fn the_probe_target_takes_the_second_address_of_an_aligned_slash_30() {
-    let probe = |network| EgressProbe {
-        network,
-        port: 7000,
-    };
-    assert_eq!(
-        probe(Ipv4Addr::new(198, 18, 0, 4)).addresses(),
-        Some((
-            Ipv4Addr::new(198, 18, 0, 5),
-            std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
-        ))
-    );
-    assert_eq!(
-        probe(Ipv4Addr::new(255, 255, 255, 252))
-            .addresses()
-            .map(|(host, _)| host),
-        Some(Ipv4Addr::new(255, 255, 255, 253))
-    );
-    for misaligned in [Ipv4Addr::new(198, 18, 0, 5), Ipv4Addr::BROADCAST] {
-        assert_eq!(probe(misaligned).addresses(), None);
-    }
-}
-
-#[test]
-fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probed = network.probe_egress(EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 5),
-        port: 7000,
-    });
-    assert!(
-        matches!(probed, Err(EgressProbeError::Network)),
-        "{probed:?}"
-    );
-    assert!(entries(&journal).installed.is_empty());
-    Ok(())
+/// The probe of the /30 at `198.18.0.4`, whose target listens on port 7000.
+fn probe_network() -> TestResult<EgressProbe> {
+    Ok(EgressProbe::new(Ipv4Addr::new(198, 18, 0, 4), 7000)?)
 }
 
 #[test]
@@ -519,15 +484,32 @@ fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes()
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
     for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
-        let probed = network.probe_egress(EgressProbe {
-            network: inside,
-            port: 7000,
-        });
+        let probed = network.probe_egress(EgressProbe::new(inside, 7000)?);
         assert!(
             matches!(probed, Err(EgressProbeError::Network)),
             "{probed:?}"
         );
     }
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_reconciliation_probes_the_port_attempts_use() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    // A /30 inside the attempt range is refused before the host is read, so
+    // the probe's outcome reaches reconciliation from the blocking pool
+    // without touching the kernel.
+    let probe = LocalEgressProbe::new(
+        Arc::new(network),
+        EgressProbe::new(Ipv4Addr::new(10, 213, 0, 4), 7000)?,
+    );
+    let probed = crate::EgressPropertyProbe::probe_egress(&probe).await;
+    assert!(
+        matches!(probed, Err(EgressProbeError::Network)),
+        "{probed:?}"
+    );
     assert!(entries(&journal).installed.is_empty());
     Ok(())
 }
@@ -583,10 +565,7 @@ fn host_with(addresses: &[Ipv4Addr]) -> NetlinkSession<HostReplies> {
 fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
+    let probe = probe_network()?;
     let used = Ipv4Addr::new(198, 18, 0, 5);
     let probed = network.probe_egress_through(|| Ok(host_with(&[used])), probe);
     assert!(
@@ -614,10 +593,7 @@ fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestRes
 fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
+    let probe = probe_network()?;
     // Unsharing a namespace needs `CAP_SYS_ADMIN`; the host has no address
     // in the probe's /30.
     let probed =
@@ -655,7 +631,11 @@ fn probe_errors_say_what_failed() {
         ),
         (
             EgressProbeError::Network,
-            "the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route",
+            "the egress probe's /30 overlaps the attempt range or a host address or route",
+        ),
+        (
+            EgressProbeError::Interrupted,
+            "the egress probe did not run to completion",
         ),
     ] {
         assert_eq!(error.to_string(), message);
@@ -1100,12 +1080,6 @@ mod privileged {
         Ok(())
     }
 
-    /// The probe's dedicated /30.
-    const PROBE: EgressProbe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
-
     /// A network over the real kernel, pinned in `/run/netns`.
     fn real_network() -> TestResult<NamespacedLocalNetwork<NetlinkNamespaceControl>> {
         let namespaces = NetworkNamespaces::system();
@@ -1122,7 +1096,7 @@ mod privileged {
         if !isolated("the_egress_probe_passes_and_leaves_nothing")? {
             return Ok(());
         }
-        let probed = real_network()?.probe_egress(PROBE);
+        let probed = real_network()?.probe_egress(probe_network()?);
         assert!(probed.is_ok(), "{probed:?}");
         let left = NetworkNamespaces::system().attempt_names();
         assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
@@ -1151,7 +1125,7 @@ mod privileged {
                     &[foreign],
                 ))
             });
-        let probed = real_network()?.probe_egress(PROBE);
+        let probed = real_network()?.probe_egress(probe_network()?);
         assert!(installed.is_ok(), "{installed:?}");
         assert!(
             matches!(probed, Err(EgressProbeError::Blocked(_))),

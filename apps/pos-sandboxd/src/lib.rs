@@ -238,16 +238,17 @@ pub use namespace_network::{
     AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EstablishError,
     EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
     FirewallRule, FirewallTableFamily, FirewallVerdict, ForwardingRecords, HostEgress,
-    HostEgressError, InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceConnector,
-    NamespaceControl, NamespaceName, NamespaceRoute, NamespacedLocalNetwork,
-    NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress,
-    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, OrphanSweepError,
-    ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
+    HostEgressError, InvalidEgressProbe, InvalidLinkName, IpPrefix, LinkKind, LinkName,
+    LocalEgressProbe, NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute,
+    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError,
+    NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
+    OrphanSweepError, ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE,
+    NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{
-    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
-    RootsReleased,
+    reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
+    RestartReconciliationError, RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

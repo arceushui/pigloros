@@ -332,7 +332,7 @@ where
 mod probe;
 
 pub(super) use probe::PROBE_HOST_LINK;
-pub use probe::{EgressProbe, EgressProbeError};
+pub use probe::{EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

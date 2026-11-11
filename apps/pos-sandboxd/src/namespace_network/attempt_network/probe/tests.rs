@@ -68,3 +68,111 @@ fn the_probes_veth_ends_are_valid_interface_names() {
         assert_eq!(LinkName::new(name), Ok(probe_link(name)));
     }
 }
+
+#[test]
+fn only_an_aligned_unicast_slash_30_with_a_port_is_a_probe() {
+    for accepted in [
+        PROBE,
+        Ipv4Addr::new(1, 0, 0, 0),
+        Ipv4Addr::new(10, 254, 0, 0),
+        Ipv4Addr::new(126, 255, 255, 252),
+        Ipv4Addr::new(128, 0, 0, 0),
+        Ipv4Addr::new(169, 0, 0, 4),
+        Ipv4Addr::new(169, 253, 0, 0),
+        Ipv4Addr::new(169, 255, 0, 0),
+        Ipv4Addr::new(223, 255, 255, 252),
+    ] {
+        let probe = EgressProbe::new(accepted, 1);
+        assert_eq!(
+            probe,
+            Ok(EgressProbe {
+                network: accepted,
+                port: 1
+            }),
+            "{accepted}"
+        );
+    }
+    for misaligned in [
+        Ipv4Addr::new(198, 18, 0, 5),
+        Ipv4Addr::new(198, 18, 0, 6),
+        Ipv4Addr::new(198, 18, 0, 7),
+        Ipv4Addr::new(127, 0, 0, 1),
+    ] {
+        assert_eq!(
+            EgressProbe::new(misaligned, 7000),
+            Err(InvalidEgressProbe::Misaligned),
+            "{misaligned}"
+        );
+    }
+    for special in [
+        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::new(0, 255, 255, 252),
+        Ipv4Addr::new(127, 0, 0, 0),
+        Ipv4Addr::new(169, 254, 0, 0),
+        Ipv4Addr::new(224, 0, 0, 0),
+        Ipv4Addr::new(240, 0, 0, 0),
+        Ipv4Addr::new(255, 255, 255, 252),
+    ] {
+        assert_eq!(
+            EgressProbe::new(special, 7000),
+            Err(InvalidEgressProbe::SpecialPurpose),
+            "{special}"
+        );
+    }
+    assert_eq!(EgressProbe::new(PROBE, 0), Err(InvalidEgressProbe::Port));
+}
+
+#[test]
+fn invalid_probe_configurations_say_what_is_wrong() {
+    for (error, message) in [
+        (
+            InvalidEgressProbe::Misaligned,
+            "the egress probe's network is not the network address of an IPv4 /30",
+        ),
+        (
+            InvalidEgressProbe::SpecialPurpose,
+            "the egress probe's /30 is not ordinary unicast space",
+        ),
+        (
+            InvalidEgressProbe::Port,
+            "the egress probe's target port is zero",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[test]
+fn the_host_and_the_target_take_the_first_two_host_addresses() -> Result<(), InvalidEgressProbe> {
+    assert_eq!(
+        EgressProbe::new(PROBE, 7000)?.addresses(),
+        (
+            Ipv4Addr::new(198, 18, 0, 5),
+            SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
+        )
+    );
+    assert_eq!(
+        EgressProbe::new(Ipv4Addr::new(223, 255, 255, 252), 1)?.addresses(),
+        (
+            Ipv4Addr::new(223, 255, 255, 253),
+            SocketAddrV4::new(Ipv4Addr::new(223, 255, 255, 254), 1)
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_probe_on_the_blocking_pool_reports_its_outcome_or_its_interruption() {
+    assert!(on_blocking_pool(|| Ok(())).await.is_ok());
+    let blocked = on_blocking_pool(|| Err(EgressProbeError::NotMasqueraded)).await;
+    assert!(
+        matches!(blocked, Err(EgressProbeError::NotMasqueraded)),
+        "{blocked:?}"
+    );
+    let panicked =
+        on_blocking_pool(|| std::panic::resume_unwind(Box::new("the probe panicked"))).await;
+    assert!(
+        matches!(panicked, Err(EgressProbeError::Interrupted)),
+        "{panicked:?}"
+    );
+}
