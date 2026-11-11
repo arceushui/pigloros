@@ -180,9 +180,13 @@ are ports, so the composition is exercised without systemd.
   planned endpoints against the admitted attempt and its launch policy, and
   the namespace's and the channel's attempt; the token carries the attempt it
   checked. The proxy serves on a blocking thread that the attempt watchdog
-  closes. The namespace, veth pair and nftables rules belong to a
-  separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
-  connection.
+  closes. `NamespacedLocalNetwork` (#911) establishes the attempt's network
+  namespace, veth pair and nftables firewall for exactly the admitted
+  endpoints, in the lowest free slot of the installation's reserved range, and
+  reads it all back before it returns; its connector opens each connection
+  from a thread inside the namespace, and dropping it removes the namespace
+  and frees the slot. `FailClosedLocalNetwork` establishes none and refuses
+  every connection.
 - Replay: every captured exchange is resolved from the durable capture store
   before launch; a missing or mismatched capture is unavailable and nothing
   starts.
@@ -256,7 +260,8 @@ readback-set digest itself (#443 owns the kernel observations and their
 digest, and the provider must supply an `ObservedReadback` before it can
 release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
-(#1199/#1200), adapter stdin and stdout transport, and the real Local namespace.
+(#1199/#1200), adapter stdin and stdout transport, and the host egress table
+and orphan sweep of the Local namespace (#911 slice 4).
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
 view and the authority heads the attempt was admitted with; that the recheck
 closure belongs to the same admitted entry is the caller's contract
@@ -296,3 +301,72 @@ process.
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the
 `ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.
+
+## Local attempt namespaces (#911)
+
+The Local network is built in-process over netlink (owner decisions of
+2026-11-09): `netlink-packet-route`, `netlink-packet-netfilter` and
+`netlink-packet-core` encode and decode, rustix carries the sockets, and no
+process is created. Each attempt namespace is created by a dedicated thread
+that unshares its network namespace and is pinned by a bind mount under
+`/run/netns/piglor-<attempt>`; the veth pair is `piglor-h<slot>` on the host
+and `piglor-n<slot>` inside. The namespace holds one `inet piglor_attempt`
+table whose chains drop everything except TCP to the admitted endpoints,
+return traffic and neighbour discovery with the host end.
+
+Kernel requirements: network namespaces (`CONFIG_NET_NS`), veth
+(`CONFIG_VETH`), nf_tables with the `inet` family, the `meta`, `payload`,
+`bitwise`, `cmp`, `immediate` and `ct` expressions (`CONFIG_NF_TABLES`,
+`CONFIG_NF_TABLES_INET`, `CONFIG_NFT_CT`) and conntrack, and IPv6. The
+provider needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` and a writable `/run/netns`.
+The kernel should not create fallback tunnel devices in new namespaces
+(`net.core.fb_tunnels_only_for_init_net=1` when the `sit`, `ipip`, `gre` or
+`ip6_tunnel` modules are loaded), because the read-back accepts only the
+loopback and the attempt's veth end.
+
+Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
+an IPv6 endpoint is admitted only when it is an address of the host itself,
+and the provider changes no IPv6 setting. The provider owns one host table,
+`inet piglor_sandbox`: its `forward` chain (filter, policy accept, so other
+host traffic is untouched) jumps from each attempt's `piglor-h<slot>` end to
+that attempt's own chain, which accepts TCP to exactly its endpoints, and
+then drops anything else from any `piglor-h*` end; its `postrouting` chain
+(nat) masquerades exactly that traffic. IPv4 forwarding is turned on only for
+the devices attempt traffic enters by: each attempt's veth end and the device
+each off-host endpoint's replies return on, and only where it is off: a
+device that already forwards is never written to. The provider records each
+egress device it turns forwarding on for under
+`/run/pigloros/sandbox/egress-forwarding` before turning it on, and turns it
+back off when the last attempt using it leaves. The table and the forwarding
+are read back after every change. Restart reconciliation first restores every
+recorded device, and only then deletes the table, whose rule drops unmatched
+sandbox traffic, with the other orphaned state; if a device cannot be
+restored, the table stays and the sweep fails. The provider never reads another table for
+policy and never changes one.
+
+`NamespacedLocalNetwork::probe_egress` proves that forwarded sandbox
+traffic passes the host. Nothing calls it yet: the provider's startup
+composition, outside #911, must run it before admission opens and keep
+admission closed on any error. It takes an installation-configured IPv4 /30
+that must be aligned and overlap neither the attempt range nor any host
+address or route; the probe refuses
+any other. The probe establishes a real attempt network for a
+reserved probe attempt whose one endpoint is a target namespace behind the
+host on its own veth pair (`piglor-t0`), connects, and requires the
+connection to arrive from the host's address, so forwarding and masquerade
+both work. Every failure is an error (ADR-069 section 6: an ineffective
+property must close admission). The probe removes everything it made, and the
+restart sweep removes `piglor-t0` and the probe's namespaces by name. Because its target sits behind a veth pair rather
+than the host's real uplink, a rule that drops only traffic leaving by one
+particular uplink is not detected; the requirement below still forbids it.
+
+Installation requirement: no other host firewall (Docker's, ufw's, an
+`iptables` FORWARD policy of DROP) may drop forwarded traffic from the
+`piglor-h*` ends to the authenticated endpoints or its replies. Host egress
+additionally needs nf_tables NAT (`CONFIG_NFT_NAT`, `CONFIG_NFT_MASQ`,
+`CONFIG_NF_NAT`).
+
+The privileged tests run in `scripts/run-isolated-with-net-admin-test.sh`,
+which adds exactly `NET_ADMIN` and `SYS_ADMIN` to an isolated container
+without network, and drops Docker's AppArmor profile only for the tests that
+pin namespaces.

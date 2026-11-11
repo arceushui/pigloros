@@ -31,7 +31,7 @@ fn bind(
     Ok(admitted
         .check_local(
             admission(attempt, authority, epochs, Vec::new()),
-            FailClosedLocalNetwork.establish(namespace)?,
+            FailClosedLocalNetwork.establish(namespace, &[])?,
             channel,
         )
         .map(CheckedLocal::bind))
@@ -94,7 +94,7 @@ fn refusal_with(
     Ok(admitted
         .check_local(
             admission,
-            FailClosedLocalNetwork.establish(ATTEMPT)?,
+            FailClosedLocalNetwork.establish(ATTEMPT, &[])?,
             channel,
         )
         .err())

@@ -30,6 +30,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
 ulid = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }

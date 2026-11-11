@@ -25,7 +25,12 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
+pub use pos_core::community_lifecycle::{
+    ArtifactRefV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+    TimelinePositionV1,
+};
 use pos_crypto::plugin_execution::is_valid_id_v1;
+use zeroize::Zeroize;
 
 use super::error::CommunityPluginHostErrorV1;
 
@@ -37,36 +42,14 @@ pub const MAX_STATE_BYTES_V1: usize = 1_048_576;
 /// in bytes (1 MiB; ADR-061 revision 6).
 pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
 
-/// `contract-v1.artifact-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ArtifactRefV1 {
-    /// Registered schema ID.
-    pub schema_id: u32,
-    /// Exact artifact length.
-    pub byte_length: u64,
-    /// BLAKE3-256 artifact digest.
-    pub digest: [u8; 32],
-}
-
-/// `contract-v1.timeline-position`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelinePositionV1 {
-    /// Timeline ID.
-    pub timeline_id: [u8; 16],
-    /// Timeline sequence number.
-    pub seq: u64,
-    /// Tick.
-    pub tick: u64,
-    /// Scheduler position inside the Tick.
-    pub scheduler_position: u32,
-}
-
 /// `contract-v1.plugin-invocation`, without its `kind`.
 ///
 /// The engine sets `kind` from the export it invokes, so an invocation can
 /// never name the other export. The host verifies every referenced artifact
 /// and digest before it builds one (ADR-061); the engine checks the bounds
 /// WIT cannot express before any guest code runs.
+/// Owners of private copies use [`Zeroize`] or a zeroizing guard before
+/// releasing them; this plain contract value does not erase itself on drop.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginInvocationV1 {
     /// Invocation ID.
@@ -97,6 +80,34 @@ pub struct PluginInvocationV1 {
     pub deterministic_random_domain: [u8; 32],
     /// Provenance root.
     pub provenance_root: [u8; 32],
+}
+
+impl Zeroize for PluginInvocationV1 {
+    fn zeroize(&mut self) {
+        self.invocation_id.zeroize();
+        self.timeline_position.timeline_id.zeroize();
+        self.timeline_position.seq.zeroize();
+        self.timeline_position.tick.zeroize();
+        self.timeline_position.scheduler_position.zeroize();
+        self.output_base_ordinal.zeroize();
+        for artifact in [
+            &mut self.principal_ref,
+            &mut self.authorization_decision,
+            &mut self.observation_snapshot,
+        ] {
+            artifact.schema_id.zeroize();
+            artifact.byte_length.zeroize();
+            artifact.digest.zeroize();
+        }
+        self.observation_bytes.zeroize();
+        self.prior_state_schema.zeroize();
+        self.prior_state_bytes.zeroize();
+        self.execution_profile_digest.zeroize();
+        self.trust_policy_snapshot_digest.zeroize();
+        self.deterministic_budget_id.zeroize();
+        self.deterministic_random_domain.zeroize();
+        self.provenance_root.zeroize();
+    }
 }
 
 impl PluginInvocationV1 {
@@ -131,6 +142,16 @@ pub struct EventDraftV1 {
     pub dependency_digests: Vec<[u8; 32]>,
 }
 
+impl Zeroize for EventDraftV1 {
+    fn zeroize(&mut self) {
+        self.event_schema_id.zeroize();
+        self.entity_id.zeroize();
+        self.event_type.zeroize();
+        self.canonical_payload.zeroize();
+        self.dependency_digests.zeroize();
+    }
+}
+
 /// `contract-v1.trace-annotation`, validated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceAnnotationV1 {
@@ -142,10 +163,20 @@ pub struct TraceAnnotationV1 {
     pub dependency_digests: Vec<[u8; 32]>,
 }
 
+impl Zeroize for TraceAnnotationV1 {
+    fn zeroize(&mut self) {
+        self.annotation_schema_id.zeroize();
+        self.canonical_bytes.zeroize();
+        self.dependency_digests.zeroize();
+    }
+}
+
 /// `contract-v1.plugin-output`, fully validated against its invocation.
 ///
 /// Nothing in it is committed by the engine: the supervisor approves and
 /// commits it as one value at the Tick Boundary.
+/// Dropping an owned output erases its retained payloads, State, annotations
+/// and identities. A consumer transferring a field must own that copy's cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginOutputV1 {
     /// The invocation's ID, echoed.
@@ -162,6 +193,26 @@ pub struct PluginOutputV1 {
     pub consumed_dependencies: Vec<[u8; 32]>,
     /// The output digest, equal to [`plugin_output_digest_v1`].
     pub output_digest: [u8; 32],
+}
+
+impl Zeroize for PluginOutputV1 {
+    fn zeroize(&mut self) {
+        self.invocation_id.zeroize();
+        self.event_drafts.zeroize();
+        self.next_state_schema.zeroize();
+        self.next_state_bytes.zeroize();
+        self.trace_annotations.zeroize();
+        self.consumed_dependencies.zeroize();
+        self.output_digest.zeroize();
+    }
+}
+
+impl Drop for PluginOutputV1 {
+    fn drop(&mut self) {
+        self.zeroize();
+        #[cfg(test)]
+        tests::observe_output_erasure(self);
+    }
 }
 
 /// `contract-v1.plugin-descriptor`, checked against the negotiated release.
@@ -199,50 +250,6 @@ pub struct PluginDescriptorV1 {
     pub release_digest: [u8; 32],
 }
 
-/// `contract-v1.field-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FieldRefV1 {
-    /// Schema ID.
-    pub schema_id: u32,
-    /// Field ordinal.
-    pub field_ordinal: u16,
-}
-
-/// `contract-v1.plugin-error-code`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PluginErrorCodeV1 {
-    /// `invalid-invocation`.
-    InvalidInvocation(FieldRefV1),
-    /// `unsupported-schema`.
-    UnsupportedSchema(u32),
-    /// `capability-required`, with an ADR-061 capability ID.
-    CapabilityRequired(String),
-    /// `dependency-missing`.
-    DependencyMissing([u8; 32]),
-    /// `deterministic-budget-exhausted`.
-    DeterministicBudgetExhausted,
-    /// `invalid-state`.
-    InvalidState(FieldRefV1),
-    /// `migration-rejected`.
-    MigrationRejected(FieldRefV1),
-    /// `guest-declared-failure`.
-    GuestDeclaredFailure(u16),
-}
-
-/// `contract-v1.plugin-error`: the guest's own typed failure, validated.
-///
-/// ADR-061 records the exact variant, ordinal, coordinate and digest as the
-/// outcome. No `EventDraft` or state accompanies it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GuestPluginErrorV1 {
-    /// The error code.
-    pub code: PluginErrorCodeV1,
-    /// Canonical coordinate, at most 128 bytes.
-    pub canonical_coordinate: Option<Vec<u8>>,
-    /// Related digest.
-    pub related_digest: Option<[u8; 32]>,
-}
-
 /// Deterministic values that `host-v1` exposes to one invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostInputs {
@@ -274,19 +281,6 @@ pub struct OperationalLogRecord {
 
 /// The guest's validated return: its value, or its own `plugin-error`.
 pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
-
-/// Deterministic resource use of one completed invocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MeteringV1 {
-    /// Fuel consumed while instantiating the Component.
-    pub startup_fuel: u64,
-    /// Fuel consumed by the call itself.
-    pub call_fuel: u64,
-    /// Linear memory reserved across all of the Component's memories, in bytes.
-    pub memory_bytes: u64,
-    /// `host-v1` calls made.
-    pub host_calls: u64,
-}
 
 /// One completed invocation: the guest's validated return and its metering.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -356,6 +350,21 @@ fn put_digests(hasher: &mut blake3::Hasher, digests: &[[u8; 32]]) {
 mod tests {
     use super::*;
 
+    thread_local! {
+        static OUTPUT_ERASURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    // Borrow only the still-live value after real drop cleanup. This records
+    // logical erasure, without inspecting freed storage or claiming a wipe proof.
+    pub(super) fn observe_output_erasure(output: &PluginOutputV1) {
+        OUTPUT_ERASURE.set(Some(
+            output.event_drafts.is_empty()
+                && output.next_state_bytes.is_empty()
+                && output.trace_annotations.is_empty()
+                && output.consumed_dependencies.is_empty(),
+        ));
+    }
+
     const ARTIFACT: ArtifactRefV1 = ArtifactRefV1 {
         schema_id: 1,
         byte_length: 0,
@@ -401,6 +410,60 @@ mod tests {
         assert_eq!(unnamed.validate(), error);
     }
 
+    #[test]
+    fn erasing_an_owned_invocation_invalidates_every_field_without_changing_its_source() {
+        let mut source = invocation();
+        source.observation_bytes = b"private observation".to_vec();
+        source.prior_state_bytes = b"private State".to_vec();
+        let artifact = ArtifactRefV1 {
+            schema_id: 23,
+            byte_length: 42,
+            digest: [0xa5; 32],
+        };
+        source.principal_ref = artifact;
+        source.authorization_decision = artifact;
+        source.observation_snapshot = artifact;
+        let mut owned = source.clone();
+        owned.zeroize();
+        let empty_artifact = ArtifactRefV1 {
+            schema_id: 0,
+            byte_length: 0,
+            digest: [0; 32],
+        };
+        assert_eq!(
+            owned,
+            PluginInvocationV1 {
+                invocation_id: [0; 16],
+                timeline_position: TimelinePositionV1 {
+                    timeline_id: [0; 16],
+                    seq: 0,
+                    tick: 0,
+                    scheduler_position: 0,
+                },
+                output_base_ordinal: 0,
+                principal_ref: empty_artifact,
+                authorization_decision: empty_artifact,
+                observation_snapshot: empty_artifact,
+                observation_bytes: Vec::new(),
+                prior_state_schema: [0; 32],
+                prior_state_bytes: Vec::new(),
+                execution_profile_digest: [0; 32],
+                trust_policy_snapshot_digest: [0; 32],
+                deterministic_budget_id: String::new(),
+                deterministic_random_domain: [0; 32],
+                provenance_root: [0; 32],
+            }
+        );
+        assert_eq!(
+            owned.validate(),
+            Err(CommunityPluginHostErrorV1::InvalidInvocation)
+        );
+        assert_eq!(source.observation_bytes, b"private observation");
+        assert_eq!(source.prior_state_bytes, b"private State");
+        assert_eq!(source.principal_ref, artifact);
+        assert_eq!(source.validate(), Ok(()));
+    }
+
     fn output() -> PluginOutputV1 {
         PluginOutputV1 {
             invocation_id: [1; 16],
@@ -421,6 +484,60 @@ mod tests {
             consumed_dependencies: vec![[11; 32]],
             output_digest: [0; 32],
         }
+    }
+
+    #[test]
+    fn output_erasure_clears_nested_payloads_annotations_and_state() {
+        let source = output();
+        let mut draft = source.event_drafts[0].clone();
+        draft.zeroize();
+        assert_eq!(
+            draft,
+            EventDraftV1 {
+                event_schema_id: 0,
+                entity_id: [0; 16],
+                event_type: String::new(),
+                canonical_payload: Vec::new(),
+                dependency_digests: Vec::new(),
+            }
+        );
+        let mut annotation = source.trace_annotations[0].clone();
+        annotation.dependency_digests = vec![[0x39; 32]];
+        annotation.zeroize();
+        assert_eq!(
+            annotation,
+            TraceAnnotationV1 {
+                annotation_schema_id: 0,
+                canonical_bytes: Vec::new(),
+                dependency_digests: Vec::new(),
+            }
+        );
+        let mut owned = source.clone();
+        owned.output_digest = [0x7b; 32];
+        owned.zeroize();
+        assert_eq!(
+            owned,
+            PluginOutputV1 {
+                invocation_id: [0; 16],
+                event_drafts: Vec::new(),
+                next_state_schema: [0; 32],
+                next_state_bytes: Vec::new(),
+                trace_annotations: Vec::new(),
+                consumed_dependencies: Vec::new(),
+                output_digest: [0; 32],
+            }
+        );
+        assert_eq!(source.event_drafts[0].canonical_payload, [3]);
+        assert_eq!(source.trace_annotations[0].canonical_bytes, [10]);
+        assert_eq!(source.next_state_bytes, [6, 7]);
+    }
+
+    #[test]
+    fn dropping_an_output_reaches_erasure_before_releasing_its_payloads() {
+        let owned = output();
+        OUTPUT_ERASURE.set(None);
+        drop(owned);
+        assert_eq!(OUTPUT_ERASURE.get(), Some(true));
     }
 
     const fn len(count: u64) -> [u8; 8] {

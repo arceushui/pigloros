@@ -117,8 +117,8 @@ fn reduce(mode: &[u8]) -> Produced {
 /// The probe's `name=value` report of its own process state.
 fn report() -> BTreeMap<String, String> {
     let report = ok(reduce(b"report"));
-    let state = ok(report.result).next_state_bytes;
-    String::from_utf8_lossy(&state)
+    let output = ok(report.result);
+    String::from_utf8_lossy(&output.next_state_bytes)
         .lines()
         .filter_map(|line| line.split_once('='))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -409,9 +409,13 @@ fn a_record_launches_with_the_token_of_its_mode() {
         let call = test_support::invocation_for(b"observation", &record);
         let authorization = test_support::authorization_for(&record, b"component");
         let report = ok(worker.drive(Some(authorization), &record, b"component", &call, INPUTS));
-        let recorded = ok(report.result).next_state_bytes;
+        let output = ok(report.result);
         let expected = format!("{} {token}", std::process::id());
-        assert_eq!(String::from_utf8_lossy(&recorded), expected, "{mode:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.next_state_bytes),
+            expected,
+            "{mode:?}"
+        );
     }
 }
 

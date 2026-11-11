@@ -2,6 +2,56 @@
 
 use super::*;
 
+#[test]
+fn private_staging_counts_exact_heads_and_keeps_the_original_allocation() {
+    for (value, expected_head) in [
+        (0, vec![0x00]),
+        (23, vec![0x17]),
+        (24, vec![0x18, 0x18]),
+        (255, vec![0x18, 0xff]),
+        (256, vec![0x19, 0x01, 0x00]),
+        (65_535, vec![0x19, 0xff, 0xff]),
+        (65_536, vec![0x1a, 0x00, 0x01, 0x00, 0x00]),
+        (
+            u64::MAX,
+            vec![0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+    ] {
+        for (size, text_head, byte_head) in [
+            (0, vec![0x60], vec![0x40]),
+            (23, vec![0x77], vec![0x57]),
+            (24, vec![0x78, 24], vec![0x58, 24]),
+            (255, vec![0x78, 255], vec![0x58, 255]),
+            (256, vec![0x79, 1, 0], vec![0x59, 1, 0]),
+            (65_535, vec![0x79, 255, 255], vec![0x59, 255, 255]),
+            (65_536, vec![0x7a, 0, 1, 0, 0], vec![0x5a, 0, 1, 0, 0]),
+        ] {
+            let text = "x".repeat(size);
+            let mut expected = vec![0x85];
+            expected.extend_from_slice(&expected_head);
+            expected.extend_from_slice(&text_head);
+            expected.extend_from_slice(text.as_bytes());
+            expected.extend_from_slice(&byte_head);
+            expected.extend_from_slice(text.as_bytes());
+            expected.extend_from_slice(&[0xf4, 0xf5]);
+            let actual = encode_zeroizing(|out| {
+                let allocation = out.output.as_deref().map(Vec::as_ptr);
+                out.array(5);
+                out.unsigned(value);
+                out.text(&text);
+                out.bytes(text.as_bytes());
+                out.boolean(false);
+                out.boolean(true);
+                assert_eq!(out.length, expected.len());
+                if let Some(allocation) = allocation {
+                    assert_eq!(out.output.as_deref().map(Vec::as_ptr), Some(allocation));
+                }
+            });
+            assert_eq!(&*actual, &expected);
+        }
+    }
+}
+
 fn encoded(write: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut out = Vec::new();
     write(&mut out);
@@ -94,10 +144,11 @@ fn array_heads_use_the_shortest_head() {
 #[test]
 fn the_wide_heads_of_every_major_type_are_encoded_by_one_routine() {
     let mut out = Vec::new();
-    head(&mut out, UNSIGNED, 1 << 32);
-    head(&mut out, BYTES, 1 << 32);
-    head(&mut out, TEXT, 1 << 32);
-    head(&mut out, ARRAY, 1 << 32);
+    let mut encoder = Encoder::writing(&mut out);
+    head(&mut encoder, UNSIGNED, 1 << 32);
+    head(&mut encoder, BYTES, 1 << 32);
+    head(&mut encoder, TEXT, 1 << 32);
+    head(&mut encoder, ARRAY, 1 << 32);
     let wide = [0, 0, 0, 1, 0, 0, 0, 0];
     let expected: Vec<u8> = [0x1b_u8, 0x5b, 0x7b, 0x9b]
         .iter()
