@@ -52,8 +52,13 @@ struct State {
 }
 
 impl State {
+    /// No file was leaked and no attempt's cleanup is awaiting reconciliation.
+    const fn is_open(&self) -> bool {
+        self.usage.leaked_files == 0 && !self.closed_for_reconciliation
+    }
+
     const fn ensure_open(&self) -> Result<(), StagingError> {
-        if self.usage.leaked_files == 0 && !self.closed_for_reconciliation {
+        if self.is_open() {
             Ok(())
         } else {
             Err(StagingError::CleanupFailed)

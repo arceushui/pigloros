@@ -444,17 +444,24 @@ impl LaunchBarrier for FakeBarrier {
             Ok(())
         };
         let hang = self.fault == BarrierFault::Hang;
-        let cancel = self.cancel_on_release.clone();
-        async move {
-            if hang {
-                std::future::pending::<()>().await;
-            }
-            if let Some(cancel) = cancel {
-                cancel.cancel();
-            }
-            outcome
-        }
+        released(hang, self.cancel_on_release.clone(), outcome)
     }
+}
+
+/// A release that never ends when `hang`, and otherwise requests `cancel`
+/// as it completes.
+async fn released(
+    hang: bool,
+    cancel: Option<Arc<AttemptCancel>>,
+    outcome: Result<(), Injected>,
+) -> Result<(), Injected> {
+    if hang {
+        std::future::pending::<()>().await;
+    }
+    if let Some(cancel) = cancel {
+        cancel.cancel();
+    }
+    outcome
 }
 
 struct LoopbackNetwork;
