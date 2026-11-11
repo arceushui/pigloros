@@ -153,13 +153,26 @@ impl Index {
     }
 }
 
-pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
+pub(super) fn validate(inputs: &[(u16, &str, &[u8])]) -> Result<(), (u16, Refusal)> {
     let mut index = Index::new(MAX_IDENTIFIERS, MAX_REFERENCES);
     let mut first_error: Option<(u16, Refusal)> = None;
     let mut identifiers_used = 0;
     let mut references_used = 0;
-    let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
-    for document in documents {
+    // The fixed capacity keeps document addresses stable for location checks.
+    let mut documents = Vec::with_capacity(inputs.len());
+    for &(ordinal, digest, bytes) in inputs {
+        let document = match Document::read(ordinal, digest, bytes) {
+            Ok(document) => document,
+            Err(error) => {
+                if matches!(error, Refusal::BoundsExceeded) {
+                    return Err(first_error.unwrap_or((ordinal, error)));
+                }
+                first_error.get_or_insert((ordinal, error));
+                continue;
+            }
+        };
+        documents.push(document);
+        let document = &documents[documents.len() - 1];
         let mut local = Index::new(
             MAX_IDENTIFIERS - identifiers_used,
             MAX_REFERENCES - references_used,
@@ -172,6 +185,7 @@ pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
                 return Err(first_error.unwrap_or((document.index, error)));
             }
             first_error.get_or_insert((document.index, error));
+            drop(documents.pop());
             continue;
         }
         if local
@@ -180,11 +194,15 @@ pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
             .any(|id| index.identifiers.contains(id))
         {
             first_error.get_or_insert((document.index, Refusal::ReferenceMismatch));
+            drop(documents.pop());
             continue;
         }
         index.identifiers.extend(local.identifiers);
         index.references.extend(local.references);
         index.locations.extend(local.locations);
+    }
+    let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
+    for document in &documents {
         registry = registry
             .add(document.base.as_str(), &document.value)
             .map_err(|_| (document.index, Refusal::ReferenceMismatch))?;

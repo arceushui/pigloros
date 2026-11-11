@@ -31,30 +31,14 @@ pub(super) fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
 
     let mut documents = Vec::new();
     let mut index = 0_u16;
-    let mut first_error = None;
     for (member, bytes) in bundle.members().iter().zip(bundle.member_bytes()) {
         if member.member().starts_with("schema/") {
-            match super::schema::Document::read(index, &member.digest()[7..], bytes) {
-                Ok(document) => documents.push(document),
-                Err(error) => {
-                    if matches!(error, Refusal::BoundsExceeded) {
-                        let (index, error) = first_error.unwrap_or((index, error));
-                        return Err(error.at(Artifact::Schema { index }));
-                    }
-                    first_error.get_or_insert((index, error));
-                }
-            }
+            documents.push((index, &member.digest()[7..], bytes));
             index += 1;
         }
     }
-    if let Err((index, error)) = super::schema::validate(&documents) {
-        if first_error.is_none_or(|(first, _)| index < first) {
-            first_error = Some((index, error));
-        }
-    }
-    if let Some((index, error)) = first_error {
-        return Err(error.at(Artifact::Schema { index }));
-    }
+    super::schema::validate(&documents)
+        .map_err(|(index, error)| error.at(Artifact::Schema { index }))?;
 
     let mut index = 0_u16;
     for (member, bytes) in bundle.members().iter().zip(bundle.member_bytes()) {
