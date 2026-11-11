@@ -96,7 +96,7 @@ fn only_an_aligned_unicast_slash_30_with_a_port_is_a_probe() {
         Ipv4Addr::new(198, 18, 0, 5),
         Ipv4Addr::new(198, 18, 0, 6),
         Ipv4Addr::new(198, 18, 0, 7),
-        Ipv4Addr::new(127, 0, 0, 1),
+        Ipv4Addr::LOCALHOST,
     ] {
         assert_eq!(
             EgressProbe::new(misaligned, 7000),
