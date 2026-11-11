@@ -98,11 +98,15 @@ fn modeled_pending_observer_requires_retained_final_status_before_callback_evide
             }) as Box<dyn ProcessFaultHandle>
         });
         let reads = Cell::new(0);
-        let result =
-            fixture.observe_pending_opening_with_observations(BROWSER, FIRST, &clock, || {
+        let result = fixture.observe_pending_opening_with_observations(
+            BROWSER,
+            FIRST,
+            &clock,
+            Box::new(|| {
                 reads.set(reads.get() + 1);
                 Vec::new()
-            });
+            }),
+        );
         assert_eq!(
             result.err().map(|error| error.to_string()).as_deref(),
             Some(expected)
@@ -146,8 +150,17 @@ fn modeled_pending_observer_requires_the_selected_browser_and_ordered_callback()
                 NativeCallbackMoment::BrowserExit(42),
                 NativeCallbackMoment::ControllerCompletion(true),
             ];
-        let result =
-            fixture.observe_pending_opening_with_observations(BROWSER, FIRST, &clock, || order);
+        let reads = Cell::new(0);
+        let result = fixture.observe_pending_opening_with_observations(
+            BROWSER,
+            FIRST,
+            &clock,
+            Box::new(|| {
+                reads.set(reads.get() + 1);
+                order
+            }),
+        );
+        assert_eq!(reads.get(), 1);
         assert_eq!(result.is_ok(), expected);
         assert_eq!(fixture.evidence_complete, expected);
         if expected {
@@ -176,7 +189,8 @@ fn modeled_pending_observer_rejects_an_exit_handle_for_a_different_browser() -> 
         creation_filetime: 2,
         ..BROWSER
     };
-    let result = fixture.observe_pending_opening_with_observations(other, FIRST, &clock, Vec::new);
+    let result =
+        fixture.observe_pending_opening_with_observations(other, FIRST, &clock, Box::new(Vec::new));
     assert_eq!(
         result.err().map(|error| error.to_string()).as_deref(),
         Some("pending-opening fault evidence is incomplete")
@@ -197,8 +211,12 @@ fn modeled_pending_observer_bounds_missing_exit_and_missing_completion() -> Test
         if exited {
             exit(&model)?;
         }
-        let result =
-            fixture.observe_pending_opening_with_observations(BROWSER, FIRST, &clock, Vec::new);
+        let result = fixture.observe_pending_opening_with_observations(
+            BROWSER,
+            FIRST,
+            &clock,
+            Box::new(Vec::new),
+        );
         assert_eq!(
             result.err().map(|error| error.to_string()).as_deref(),
             Some(expected)
@@ -221,7 +239,7 @@ fn modeled_pending_observer_requires_the_real_empty_callback_ledger() -> TestRes
         BROWSER,
         FIRST,
         &clock,
-        crate::Native::callback_order,
+        Box::new(crate::Native::callback_order),
     );
     assert_eq!(
         result.err().map(|error| error.to_string()).as_deref(),
@@ -268,16 +286,18 @@ fn modeled_pending_observer_rejects_evidence_read_after_its_original_deadline() 
             }));
         }
         let callback_clock = clock.0.clone();
-        let result =
-            fixture.observe_pending_opening_with_observations(BROWSER, FIRST, &clock, || {
-                if !slow_exit {
-                    callback_clock.advance(Duration::from_secs(6));
-                }
+        let result = fixture.observe_pending_opening_with_observations(
+            BROWSER,
+            FIRST,
+            &clock,
+            Box::new(|| {
+                callback_clock.advance(Duration::from_secs(6));
                 vec![
                     NativeCallbackMoment::BrowserExit(42),
                     NativeCallbackMoment::ControllerCompletion(true),
                 ]
-            });
+            }),
+        );
         assert_eq!(
             result.err().map(|error| error.to_string()).as_deref(),
             Some(expected)
@@ -287,6 +307,39 @@ fn modeled_pending_observer_rejects_evidence_read_after_its_original_deadline() 
             fixture.trace.borrow().last(),
             Some(ProcessFaultMark::ControllerCompletion(_))
         ));
+        retire(root, fixture, &model)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_pending_observer_preserves_pump_failures_before_exit_or_completion() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for exited in [false, true] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, clock) = pending(&root)?;
+        if exited {
+            exit(&model)?;
+        }
+        model.failure.set(Some("pump"));
+        let reads = Cell::new(0);
+        let result = fixture.observe_pending_opening_with_observations(
+            BROWSER,
+            FIRST,
+            &clock,
+            Box::new(|| {
+                reads.set(reads.get() + 1);
+                Vec::new()
+            }),
+        );
+        assert_eq!(
+            result.err().map(|error| error.to_string()).as_deref(),
+            Some("Sta: CallFailed")
+        );
+        assert_eq!(reads.get(), 0);
+        assert!(!fixture.evidence_complete);
+        assert!(fixture.surface.pending_opening_owners_retained());
+        assert_eq!(fixture.trace.borrow().len(), if exited { 5 } else { 3 });
         retire(root, fixture, &model)?;
     }
     Ok(())

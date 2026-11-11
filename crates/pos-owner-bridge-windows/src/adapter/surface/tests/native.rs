@@ -89,6 +89,12 @@ impl Factory {
 
 impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
+        if self.failure.get() == Some("pump") {
+            return Err(NativeError {
+                operation: Operation::Sta,
+                failure: Failure::CallFailed,
+            });
+        }
         if self.creation.get() == Creation::Pending
             && self.calls.borrow().contains(&"create_controller")
         {
