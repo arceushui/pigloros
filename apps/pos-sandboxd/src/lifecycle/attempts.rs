@@ -581,9 +581,10 @@ impl LiveAttemptIdentity {
 /// let _forged = pos_sandboxd::LiveAttemptSnapshot { attempts: Vec::new() };
 /// ```
 ///
-/// ```compile_fail,E0599
+/// ```compile_fail
 /// fn copy(snapshot: &pos_sandboxd::LiveAttemptSnapshot) -> pos_sandboxd::LiveAttemptSnapshot {
-///     pos_sandboxd::LiveAttemptSnapshot::clone(snapshot)
+///     // `LiveAttemptSnapshot` implements no `Clone`.
+///     <pos_sandboxd::LiveAttemptSnapshot as Clone>::clone(snapshot)
 /// }
 /// ```
 ///
