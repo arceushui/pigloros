@@ -28,7 +28,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: Diagnostic release deadline regression
+      - name: Diagnostic exit deadline regression
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -37,5 +37,5 @@ jobs:
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
           Write-Output 'DEBUG-535-PHASE diagnostic-only, not G3/G4 qualification'
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- native_release_cutpoint_uses_release_window_after_fixture_readiness_ceiling --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Release deadline regression failed' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- native_exit_cutpoint_uses_exit_window_after_fixture_readiness_ceiling --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Exit deadline regression failed' }
