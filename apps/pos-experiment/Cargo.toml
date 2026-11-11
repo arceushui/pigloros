@@ -27,6 +27,7 @@ test-support = [
   "dep:pos-time",
   "dep:tokio",
   "dep:tower",
+  "dep:zeroize",
 ]
 
 # The replay-conformance subject adapter; it is compiled only with `test-support`.
@@ -79,6 +80,7 @@ path = "src/bin/pos-ni-g-plug-subject.rs"
 required-features = ["test-support"]
 
 [dependencies]
+zeroize = { workspace = true, optional = true }
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }

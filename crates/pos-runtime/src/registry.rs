@@ -2727,7 +2727,7 @@ impl PluginRegistry {
             })
     }
 
-    fn ensure_no_pending_step(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn ensure_no_pending_step(&self) -> Result<(), RuntimeError> {
         if let Some(name) = &self.poisoned_driver {
             return Err(RuntimeError::DriverCommitPanicked { name: name.clone() });
         }

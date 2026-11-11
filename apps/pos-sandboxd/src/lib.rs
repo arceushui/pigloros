@@ -29,6 +29,8 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 mod local_network;
 #[cfg(target_os = "linux")]
+mod namespace_network;
+#[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod release_barrier;
@@ -282,9 +284,24 @@ pub use local_network::{
     ServedProxy,
 };
 #[cfg(target_os = "linux")]
+pub use namespace_network::netlink;
+#[cfg(target_os = "linux")]
+pub use namespace_network::{
+    decode_firewall_rule, encode_firewall_rule, establish_namespace, AttemptEgress,
+    AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EstablishError,
+    EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
+    FirewallRule, FirewallTableFamily, FirewallVerdict, ForwardingRecords, HostEgress,
+    HostEgressError, InvalidEgressProbe, InvalidLinkName, IpPrefix, LinkKind, LinkName,
+    LocalEgressProbe, NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute,
+    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError,
+    NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
+    OrphanSweepError, ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE,
+    NAMESPACE_TABLE,
+};
+#[cfg(target_os = "linux")]
 pub use restart::{
-    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
-    RootsReleased,
+    reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
+    RestartReconciliationError, RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

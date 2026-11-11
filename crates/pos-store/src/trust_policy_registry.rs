@@ -6,9 +6,8 @@
 
 use pos_conformance::{ExecutionProfileV1, TrustPolicyRootV1, TrustPolicySnapshotV1};
 use rusqlite::{params, Connection, ErrorCode, OpenFlags, TransactionBehavior};
-use std::fs::OpenOptions;
 use std::io::ErrorKind;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -431,26 +430,28 @@ fn raw_digest(bytes: &[u8]) -> [u8; 32] {
 
 /// Atomically create the private state file; an existing path is never reused.
 fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map(drop)
-        .map_err(|error| {
-            if error.kind() == ErrorKind::AlreadyExists {
-                TrustPolicyRegistryErrorV1::AlreadyProvisioned
-            } else {
-                TrustPolicyRegistryErrorV1::StorageUnavailable
-            }
-        })
+    use crate::sqlite::DatabasePathError;
+
+    crate::sqlite::create_private_database_file(path).map_err(|error| match error {
+        DatabasePathError::Operation(error) if error.kind() == ErrorKind::AlreadyExists => {
+            TrustPolicyRegistryErrorV1::AlreadyProvisioned
+        }
+        DatabasePathError::NamespaceRefused | DatabasePathError::Operation(_) => {
+            TrustPolicyRegistryErrorV1::StorageUnavailable
+        }
+    })
 }
 
 /// Open an existing state file. Callers establish that the path exists, so an
 /// unopenable or non-database file is corrupt state, not missing state.
 fn open_connection(path: &Path) -> Result<Connection, TrustPolicyRegistryErrorV1> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
+    use crate::sqlite::DatabasePathError;
+
+    let connection = crate::sqlite::open_database_path(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| match error {
+            DatabasePathError::NamespaceRefused => TrustPolicyRegistryErrorV1::StorageUnavailable,
+            DatabasePathError::Operation(_) => TrustPolicyRegistryErrorV1::CorruptState,
+        })?;
     connection
         .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
         .map_err(|error| {
@@ -731,6 +732,130 @@ mod tests {
                 Ok(proof.epoch())
             })?;
         assert_eq!(epoch, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_native_namespace_refuses_provision_and_reopen_without_modifying_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let anchor = release(&snapshot, &genesis);
+        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
+        let original = std::fs::read(&path)?;
+        std::fs::create_dir(
+            directory
+                .path()
+                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+        )?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::open_current(&path, anchor).err(),
+            Some(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        let new_path = directory.path().join("another.db");
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &new_path,
+                &release(&snapshot, &genesis),
+                &genesis
+            ),
+            Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        assert_eq!(std::fs::read(&path)?, original);
+        assert!(!new_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_literal_memory_name_cannot_be_provisioned() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD: &str = "PIGLOROS_NAMESPACE_TRUST_MEMORY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let directory = tempfile::tempdir()?;
+            std::fs::create_dir(
+                directory
+                    .path()
+                    .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+            )?;
+            // This process runs only this exact test, so its owned cwd cannot
+            // affect parallel tests or a caller-supplied directory.
+            std::env::set_current_dir(directory.path())?;
+            let snapshot = fixture_snapshot()?;
+            let genesis = signed(snapshot.clone())?;
+            let anchor = release(&snapshot, &genesis);
+            assert_eq!(
+                DeploymentTrustPolicyRegistryV1::provision_explicit(
+                    Path::new(":memory:"),
+                    &anchor,
+                    &genesis
+                ),
+                Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+            );
+            assert!(!Path::new(":memory:").exists());
+            assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+            return Ok(());
+        }
+        run_isolated_namespace_case(
+            "trust_policy_registry::tests::reserved_literal_memory_name_cannot_be_provisioned",
+            CHILD,
+        )
+    }
+
+    #[test]
+    fn implicit_native_uri_target_is_checked_before_literal_trust_file_creation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "PIGLOROS_NAMESPACE_TRUST_URI_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let root = tempfile::tempdir()?;
+            let private = root.path().join("private");
+            let ordinary = root.path().join("ordinary");
+            std::fs::create_dir(&private)?;
+            std::fs::create_dir(&ordinary)?;
+            let native = private.join("trust.db");
+            drop(crate::sqlite::SqliteStore::open(
+                native.to_str().ok_or("fixture path is not UTF-8")?,
+            )?);
+            let original = std::fs::read(&native)?;
+            std::fs::create_dir(
+                private.join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+            )?;
+            std::env::set_current_dir(&ordinary)?;
+            let uri = format!(
+                "file:{}",
+                native.to_str().ok_or("fixture path is not UTF-8")?
+            );
+            let literal = Path::new(&uri);
+            std::fs::create_dir_all(literal.parent().ok_or("literal fixture parent missing")?)?;
+            crate::protected_sqlite_namespace::refuse_reserved_path(literal)?;
+            let snapshot = fixture_snapshot()?;
+            let genesis = signed(snapshot.clone())?;
+            let anchor = release(&snapshot, &genesis);
+            assert_eq!(
+                DeploymentTrustPolicyRegistryV1::provision_explicit(literal, &anchor, &genesis),
+                Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+            );
+            assert!(!literal.exists());
+            assert_eq!(std::fs::read(&native)?, original);
+            return Ok(());
+        }
+        run_isolated_namespace_case("trust_policy_registry::tests::implicit_native_uri_target_is_checked_before_literal_trust_file_creation", CHILD)
+    }
+
+    fn run_isolated_namespace_case(
+        name: &str,
+        child_flag: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", name, "--nocapture", "--format=pretty"])
+            .env(child_flag, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated namespace refusal failed: {output:?}"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
         Ok(())
     }
 

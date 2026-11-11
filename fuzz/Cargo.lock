@@ -40,6 +40,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-gcm-siv"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ctutils",
+ "polyval",
+ "zeroize",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -50,6 +65,9 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -144,6 +162,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -572,9 +591,9 @@ dependencies = [
 
 [[package]]
 name = "hpke"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92041268e41ff204ac89aac70ea9ad4cdaf7b04625a1cc2fa785b100c77f3c9e"
+checksum = "8f512e325a1a71bf3273fb9b7fc9e5d96dac136fb4a95d0e6637001b12ea3e09"
 dependencies = [
  "aead",
  "chacha20poly1305",
@@ -958,13 +977,13 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
- "libc",
  "pos-core",
  "pos-crypto",
  "pos-plugin-ledger",
  "pos-runtime",
  "pos-store",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",
@@ -1055,10 +1074,12 @@ name = "pos-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "aes-gcm-siv",
  "base64",
  "blake3",
  "ciborium",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "hkdf",
  "hpke",
  "pos-core",
@@ -1167,6 +1188,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]

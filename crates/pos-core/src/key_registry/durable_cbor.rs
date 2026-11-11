@@ -269,6 +269,7 @@ impl Cursor<'_> {
                     b"ExportRecipientEncryption" => KeyRoleV1::ExportRecipientEncryption,
                     b"ConformanceEvaluatorSigning" => KeyRoleV1::ConformanceEvaluatorSigning,
                     b"ConformanceReportSigning" => KeyRoleV1::ConformanceReportSigning,
+                    b"CommunityArtifactEncryption" => KeyRoleV1::CommunityArtifactEncryption,
                     _ => return Err(Error::InvalidSnapshot),
                 };
                 context.materialize(1).map(|()| role)
