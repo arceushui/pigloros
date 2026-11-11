@@ -126,7 +126,8 @@ must keep guaranteeing what they guaranteed, a schema reached from both keeps it
 exactly) and validates the frozen examples, so a breaking change to a v1 schema fails CI. CI
 runs it with `--append-only origin/main`, which also fails when `compatibility/` lost or changed
 anything since the merge base with `main`: a pull request cannot loosen the baseline together
-with the contract. The
+with the contract. `servers` and `info.version` are not frozen: a client must not hard-code the
+server URL, and the description's revision label is not part of the wire contract. The
 golden examples `unsupported-version-api-major`, `not-found-unrouted-path`,
 `unknown-required-schema-event-type`, `unsupported-version-legacy-event-type`,
 `draft-scenario-room-unsupported-schema-version`, `draft-decision-preview-incompatible-profile`,
