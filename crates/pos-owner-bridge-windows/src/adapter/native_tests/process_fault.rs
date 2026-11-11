@@ -2585,6 +2585,22 @@ impl Fixture {
     }
 }
 
+// Temporary DEBUG-535-4297 observer. Its lifetime encloses the fixture so the
+// existing callback context survives ordinary retirement and all error paths.
+struct RetryDiagnostic(u64);
+
+impl Drop for RetryDiagnostic {
+    fn drop(&mut self) {
+        let resource = crate::Native::readiness_resource_snapshot();
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DEBUG-535-4297 origin=G4-retry context={} stage=observer-drop resource={resource:?}",
+            self.0,
+        );
+        crate::Native::readiness_navigation_case(None);
+    }
+}
+
 fn run_posted_retry(
     runtime: &Path,
     root: &Path,
@@ -2593,6 +2609,14 @@ fn run_posted_retry(
     point: crate::RetryPoint,
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
+    let observer_started = Instant::now();
+    let diagnostic_case = 20_000 + u64::from(number);
+    let _diagnostic = RetryDiagnostic(diagnostic_case);
+    crate::Native::readiness_navigation_case(Some((diagnostic_case, observer_started)));
+    let _logged = writeln!(
+        std::io::stderr(),
+        "DEBUG-535-4297 origin=G4-retry case={number} context={diagnostic_case} target={target:?} point={point:?} inject={inject} clock=observer-entry",
+    );
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::WithheldDelivery)?;
     let _zero_witness = ZeroWitness::arm();
@@ -2600,6 +2624,12 @@ fn run_posted_retry(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));
+    super::trace::Trace::new(diagnostic_case, observer_started).update(
+        "DEBUG-535-4297-G4-attempt-return",
+        &fixture.surface,
+        &driver,
+        &fixture.loopback,
+    );
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let state = fixture.reached;
     let native_zeroed = fixture.prior_native_wipe
