@@ -113,7 +113,8 @@ impl crate::Native {
             })();
             if let Err(error) = observed {
                 if let Err(cleanup) = retire_child(&mut child) {
-                    eprintln!("nonce lock probe cleanup failed: {cleanup}");
+                    let _diagnostic =
+                        writeln!(io::stderr(), "nonce lock probe cleanup failed: {cleanup}");
                 }
                 return Err(error);
             }
@@ -160,7 +161,7 @@ impl crate::Native {
 
 #[cfg(test)]
 fn exercise_abandonment(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, BufRead as _};
+    use std::io::{self, BufRead as _, Write as _};
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
@@ -209,10 +210,16 @@ fn exercise_abandonment(directory: &Path) -> Result<(), Box<dyn std::error::Erro
     });
     if observed.is_err() {
         if let Err(cleanup) = &retired {
-            eprintln!("abandoned lock probe cleanup failed: {cleanup}");
+            let _diagnostic = writeln!(
+                io::stderr(),
+                "abandoned lock probe cleanup failed: {cleanup}"
+            );
         }
         if let Err(cleanup) = &joined {
-            eprintln!("abandoned lock probe reader cleanup failed: {cleanup}");
+            let _diagnostic = writeln!(
+                io::stderr(),
+                "abandoned lock probe reader cleanup failed: {cleanup}"
+            );
         }
     }
     let retained = observed?;
@@ -235,5 +242,8 @@ fn retire_child(child: &mut std::process::Child) -> std::io::Result<()> {
     };
     drop(child.stdin.take());
     let waited = child.wait();
-    observed.map(|_| ()).and(killed).and(waited.map(|_| ()))
+    observed
+        .map(|_| ())
+        .and(killed)
+        .and_then(|()| waited.map(|_| ()))
 }
