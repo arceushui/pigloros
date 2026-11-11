@@ -316,6 +316,38 @@ fn invalid_schema_reference_precedes_later_json_node_exhaustion() -> TestResult 
 }
 
 #[test]
+fn known_local_reference_is_checked_before_later_json_node_exhaustion() -> TestResult {
+    let mut fixture = Fixture::new();
+    let mut later = br#"{"examples":["#.to_vec();
+    later.extend(
+        std::iter::repeat_n(b"0,".as_slice(), 262_143)
+            .flatten()
+            .copied(),
+    );
+    later.extend_from_slice(br#"0],"title":"17"}"#);
+    fixture.schemas = vec![br##"{"$ref":"#/missing"}"##.to_vec(), later.clone()];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+
+    fixture.schemas = vec![
+        br#"{"$ref":"urn:later"}"#.to_vec(),
+        later,
+        br#"{"$id":"urn:later","title":"15"}"#.to_vec(),
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::BoundsExceeded {
+            artifact: Artifact::Schema { index: 1 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn spdx_checks_direct_files_snippets_and_declared_external_metadata() -> TestResult {
     let fixture = references_fixture()?;
     assert_eq!(result(&fixture)?, Ok(()));
