@@ -483,6 +483,8 @@ mod native_tests {
     fn assert_path_admission() {
         let invalid = PathBuf::from(OsString::from_wide(&[b'x'.into(), 0, b'y'.into()]));
         assert!(crate::Native::create_private_ledger_file(&invalid).is_err());
+        assert!(crate::Native::replace_ledger(&invalid, Path::new("valid")).is_err());
+        assert!(crate::Native::replace_ledger(Path::new("valid"), &invalid).is_err());
         for path in [
             r"relative\path",
             r"C:relative",
@@ -620,44 +622,57 @@ mod native_tests {
 
     fn crash_stages(base: &Path) -> TestResult {
         for (name, stage) in STAGES {
-            let guard = WindowsSubjectEncryptorLock::acquire(base)?;
-            let ledger = guard.open_nonce_ledger()?;
-            ledger.replace_nonce_ledger_bytes(b"old")?;
-            drop(ledger);
-            drop(guard);
-            let marker = base.join(format!("probe-{name}"));
-            let mut child = Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "tests::windows_nonce_ledger_storage_native",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(PROBE, name)
-                .env(BASE, base)
-                .env(MARKER, &marker)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !marker.exists() {
-                if child.try_wait()?.is_some() {
-                    return Err("storage probe exited before its checkpoint".into());
+            // The interrupted run is the crash witness. The EOF control lets
+            // the same child code return normally after reporting its checkpoint.
+            for interrupted in [true, false] {
+                let guard = WindowsSubjectEncryptorLock::acquire(base)?;
+                let ledger = guard.open_nonce_ledger()?;
+                ledger.replace_nonce_ledger_bytes(b"old")?;
+                drop(ledger);
+                drop(guard);
+                let marker = base.join(format!("probe-{name}"));
+                let mut child = Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "tests::windows_nonce_ledger_storage_native",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(PROBE, name)
+                    .env(BASE, base)
+                    .env(MARKER, &marker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !marker.exists() {
+                    if child.try_wait()?.is_some() {
+                        return Err("storage probe exited before its checkpoint".into());
+                    }
+                    if Instant::now() >= deadline {
+                        child.kill()?;
+                        child.wait()?;
+                        return Err("storage probe exceeded its deadline".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                if Instant::now() >= deadline {
+                if interrupted {
                     child.kill()?;
-                    child.wait()?;
-                    return Err("storage probe exceeded its deadline".into());
+                } else {
+                    drop(child.stdin.take());
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                let status = child.wait()?;
+                if interrupted {
+                    assert!(!status.success());
+                } else {
+                    assert_eq!(status.code(), Some(101));
+                }
+                fs::remove_file(marker)?;
+                let guard = WindowsSubjectEncryptorLock::acquire(base)?;
+                let ledger = guard.open_nonce_ledger()?;
+                assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(stage));
             }
-            child.kill()?;
-            child.wait()?;
-            fs::remove_file(marker)?;
-            let guard = WindowsSubjectEncryptorLock::acquire(base)?;
-            let ledger = guard.open_nonce_ledger()?;
-            assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(stage));
         }
         Ok(())
     }
