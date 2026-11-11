@@ -16,8 +16,6 @@ const MAX_RECORD: usize = 1_048_576;
 // Six IDP1 coordinate fields: array, Tick, three u32 fields, bounded owner,
 // and a fixed hash. The text header needs at most two bytes for 128 bytes.
 const MAX_NODE_BYTES: usize = 1 + 9 + 3 * 5 + 2 + MAX_DEPENDENCY_OWNER_ID_BYTES_V1 + 34;
-const MAX_EVENT_BYTES: usize = 1 + 17 + 9 + 34;
-const _: () = assert!(1024 + MAX_COMMUNITY_CARRIED_EVENTS_V1 * MAX_EVENT_BYTES <= MAX_RECORD);
 
 /// Untrusted existing six-field IDP1 coordinate, borrowing the original owner.
 ///
@@ -240,13 +238,15 @@ impl<'a> CommunityMemberProgressV1<'a> {
         &self.0
     }
 
-    /// Encode the complete record in one pre-sized zeroizing allocation.
+    /// Encode the record in zeroizing storage, requesting its exact byte length.
+    ///
+    /// Compute the complete size before allocation to avoid payload-bearing
+    /// growth. The owner still accounts for the actual returned capacity,
+    /// including any allocator overprovisioning.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
-        let mut out = Zeroizing::new(Vec::with_capacity(
-            1024 + input.carried_events.len() * MAX_EVENT_BYTES,
-        ));
+        let mut out = Zeroizing::new(Vec::with_capacity(encoded_bytes(input)));
         record_prefix(&mut out, 9, *b"CMS1");
         encode_hash(&mut out, input.member_binding_digest);
         encode_hash(&mut out, input.state_revision_digest);
@@ -340,6 +340,44 @@ const fn uint_bytes(value: u64) -> usize {
     }
 }
 
+fn encoded_bytes(input: &CommunityMemberProgressInputV1<'_>) -> usize {
+    let rows = match input.carried_events.0 {
+        CarriedRows::Typed(events) => events
+            .iter()
+            .map(|event| 1 + 17 + uint_bytes(event.seq.as_u64()) + 34)
+            .sum(),
+        CarriedRows::Canonical { bytes, .. } => bytes.len(),
+    };
+    7 + 2 * 34
+        + input.last_step_simulation_time.map_or(1, uint_bytes)
+        + uint_bytes(input.forwarded_cursor.as_u64())
+        + uint_bytes(input.carried_events.len() as u64)
+        + rows
+        + reference_bytes(input.step_chain)
+        + reference_bytes(input.history_input)
+}
+
+fn reference_bytes(reference: CommunityProgressReferenceV1<'_>) -> usize {
+    match reference {
+        CommunityProgressReferenceV1::None => 2,
+        CommunityProgressReferenceV1::Pending(_) => 2 + 34,
+        CommunityProgressReferenceV1::Factual(node) => {
+            let length = node_bytes(node);
+            2 + uint_bytes(length as u64) + length
+        }
+    }
+}
+
+fn node_bytes(node: CommunityFactualNodeReferenceV1<'_>) -> usize {
+    1 + uint_bytes(node.tick)
+        + uint_bytes(u64::from(node.scheduler_position))
+        + uint_bytes(node.owner_id.len() as u64)
+        + node.owner_id.len()
+        + uint_bytes(u64::from(node.output_ordinal))
+        + uint_bytes(u64::from(node.schema_id))
+        + 34
+}
+
 fn encode_reference(out: &mut Vec<u8>, reference: CommunityProgressReferenceV1<'_>) {
     match reference {
         CommunityProgressReferenceV1::None => out.extend_from_slice(&[0x81, 0]),
@@ -348,14 +386,7 @@ fn encode_reference(out: &mut Vec<u8>, reference: CommunityProgressReferenceV1<'
             encode_hash(out, hash);
         }
         CommunityProgressReferenceV1::Factual(node) => {
-            let length = 1
-                + uint_bytes(node.tick)
-                + uint_bytes(u64::from(node.scheduler_position))
-                + uint_bytes(node.owner_id.len() as u64)
-                + node.owner_id.len()
-                + uint_bytes(u64::from(node.output_ordinal))
-                + uint_bytes(u64::from(node.schema_id))
-                + 34;
+            let length = node_bytes(node);
             out.extend_from_slice(&[0x82, 2]);
             encode_head(out, 2, length as u64);
             // Write directly behind the bstr head: no temporary node/owner copy.

@@ -96,16 +96,24 @@ fn expected() -> Value {
     ])
 }
 
+fn assert_exact_encoding(record: &Progress<'_>, expected: &[u8]) {
+    let encoded = record.to_canonical_cbor();
+    assert_eq!(encoded.as_slice(), expected);
+    // Verify the workspace's actual allocator profile has no unused capacity;
+    // the portable owner must still account for an allocator that returns more.
+    assert_eq!(encoded.capacity(), expected.len());
+}
+
 #[test]
 fn exact_nine_field_record_and_borrowed_rows_have_an_independent_oracle() -> TestResult {
     let rows = [event(3, 4, 5), event(6, 7, 8)];
     let record = Progress::new(input(&rows))?;
     let wire = encode(&expected())?;
     assert_eq!(&wire[..7], &[0x89, 0x44, b'C', b'M', b'S', b'1', 1]);
-    assert_eq!(record.to_canonical_cbor().as_slice(), wire);
+    assert_exact_encoding(&record, &wire);
     let decoded = Progress::from_canonical_cbor(&wire)?;
     assert!(decoded.as_input() == record.as_input());
-    assert_eq!(decoded.to_canonical_cbor().as_slice(), wire);
+    assert_exact_encoding(&decoded, &wire);
     assert!(record
         .as_input()
         .carried_events
@@ -161,8 +169,10 @@ fn all_reference_forms_and_absent_zero_or_maximum_step_time_remain_distinct() ->
                 fields(&mut value)?[7] = reference_value(step_chain)?;
                 fields(&mut value)?[8] = reference_value(history_input)?;
                 let wire = encode(&value)?;
-                assert_eq!(record.to_canonical_cbor().as_slice(), wire);
-                assert!(Progress::from_canonical_cbor(&wire)?.as_input() == &data);
+                assert_exact_encoding(&record, &wire);
+                let decoded = Progress::from_canonical_cbor(&wire)?;
+                assert!(decoded.as_input() == &data);
+                assert_exact_encoding(&decoded, &wire);
             }
         }
     }
@@ -263,9 +273,10 @@ fn every_integer_width_and_utf8_owner_byte_bound_fits_nested_framing() -> TestRe
         fields(&mut value)?[7] = reference_value(data.step_chain)?;
         fields(&mut value)?[8] = reference_value(data.history_input)?;
         let wire = encode(&value)?;
-        assert_eq!(record.to_canonical_cbor().as_slice(), wire);
+        assert_exact_encoding(&record, &wire);
         let decoded = Progress::from_canonical_cbor(&wire)?;
         assert!(decoded.as_input() == &data);
+        assert_exact_encoding(&decoded, &wire);
         assert!(decoded.as_input().carried_events.is_empty());
         assert_eq!(
             decoded.as_input().carried_events.iter().size_hint(),
@@ -301,6 +312,7 @@ fn maximum_carried_set_and_maximum_coordinates_fit_the_enclosing_record() -> Tes
     let wire = record.to_canonical_cbor();
     // Literal preferred field/header widths: 96 fixed bytes, 3836*61, two193-byte refs.
     assert_eq!(wire.len(), 234_478);
+    assert_eq!(wire.capacity(), wire.len());
     assert!(wire.len() < 1_048_576);
     assert!(Progress::from_canonical_cbor(&wire)?.as_input() == &data);
     let too_many = vec![event(3, 1, 5); 3837];
@@ -495,6 +507,51 @@ fn decoder_validates_nested_coordinate_and_reference_governance() -> TestResult 
         Progress::from_canonical_cbor(&encode(&value)?).err(),
         Some(Error::InvalidEncoding)
     );
+    Ok(())
+}
+
+#[test]
+fn factual_reference_byte_limit_refuses_before_parsing_either_nested_payload() -> TestResult {
+    for slot in [7, 8] {
+        let mut value = expected();
+        // One over the existing IDP1 maximum, with intentionally malformed
+        // content: the encoded-byte bound must win over nested parsing.
+        fields(&mut value)?[slot] = Value::Array(vec![uint(2), bytes(&[0; 190])]);
+        assert_eq!(
+            Progress::from_canonical_cbor(&encode(&value)?).err(),
+            Some(Error::BoundsExceeded)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn event_sequence_widths_use_one_exact_allocation_for_typed_and_decoded_rows() -> TestResult {
+    for sequence in [
+        1,
+        23,
+        24,
+        255,
+        256,
+        65535,
+        65536,
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        u64::MAX,
+    ] {
+        let rows = [event(3, sequence, 5)];
+        let record = Progress::new(input(&rows))?;
+        let mut value = expected();
+        fields(&mut value)?[6] = Value::Array(vec![Value::Array(vec![
+            bytes(&[3; 16]),
+            uint(sequence),
+            bytes(&[5; 32]),
+        ])]);
+        let wire = encode(&value)?;
+        assert_exact_encoding(&record, &wire);
+        let decoded = Progress::from_canonical_cbor(&wire)?;
+        assert_exact_encoding(&decoded, &wire);
+    }
     Ok(())
 }
 
