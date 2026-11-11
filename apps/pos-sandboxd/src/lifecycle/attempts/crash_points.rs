@@ -256,30 +256,30 @@ impl AttemptSteps<CrashInput> for CrashSteps<'_> {
                 unit: UnitState::NotStarted,
                 cgroup: None,
             });
-        let executed: Executed<(), BoundAttemptCgroup> = match submitted {
+        let started = submitted.map(|()| {
+            *lock(&self.world.unit) = Some(input.attempt_id());
+            self.world.reach(Boundary::UnitSubmitted);
+            let taken = lock(&self.cgroup).take();
+            taken.map(|cgroup| {
+                ownership.bind_cgroup(cgroup.identity());
+                self.world.reach(Boundary::ExecutionEnded);
+                AttemptExecution {
+                    attempt_id: input.attempt_id(),
+                    started: (),
+                    cgroup,
+                    ending: AttemptEnding::CgroupEmpty,
+                    network: NetworkEvidence::None,
+                }
+            })
+        });
+        let executed: Executed<(), BoundAttemptCgroup> = match started {
+            Ok(Some(execution)) => Ok(execution),
+            Ok(None) => Err(ExecuteFailure {
+                error: ExecuteError::HostTimeout,
+                unit: UnitState::Unknown,
+                cgroup: None,
+            }),
             Err(failure) => Err(failure),
-            Ok(()) => {
-                *lock(&self.world.unit) = Some(input.attempt_id());
-                self.world.reach(Boundary::UnitSubmitted);
-                let taken = lock(&self.cgroup).take();
-                taken
-                    .map(|cgroup| {
-                        ownership.bind_cgroup(cgroup.identity());
-                        self.world.reach(Boundary::ExecutionEnded);
-                        AttemptExecution {
-                            attempt_id: input.attempt_id(),
-                            started: (),
-                            cgroup,
-                            ending: AttemptEnding::CgroupEmpty,
-                            network: NetworkEvidence::None,
-                        }
-                    })
-                    .ok_or(ExecuteFailure {
-                        error: ExecuteError::HostTimeout,
-                        unit: UnitState::Unknown,
-                        cgroup: None,
-                    })
-            }
         };
         std::future::ready(executed)
     }
