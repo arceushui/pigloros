@@ -98,7 +98,7 @@ impl Drop for Session<'_> {
             let _controller = self.controller_completion();
             if report {
                 super::diagnostic(format_args!(
-                    "raw.retire.ownership iteration={iteration} pid={:?} had_controller={} exited={:?}",
+                    "raw.retire.cached iteration={iteration} pid={:?} had_controller={} exited={:?}",
                     self.browser_pid.get(), self.had_controller.get(), self.events.exited()
                 ));
             }

@@ -162,7 +162,32 @@ fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestRe
 }
 
 fn diagnostic(arguments: std::fmt::Arguments<'_>) {
-    let _logged_or_unavailable = writeln!(std::io::stderr(), "[DEBUG-535-E8] {arguments}");
+    let thread = std::thread::current();
+    let _logged_or_unavailable = writeln!(
+        std::io::stderr(),
+        "[DEBUG-535-E8] process={} thread={:?} test={:?} {arguments}",
+        std::process::id(),
+        thread.id(),
+        thread.name()
+    );
+}
+
+fn diagnostic_error(error: &dyn std::error::Error) -> String {
+    error.to_string().chars().take(512).collect()
+}
+
+#[test]
+fn diagnostic_error_summary_bounds_ascii_and_multibyte_output() {
+    for (text, expected) in [
+        (String::new(), String::new()),
+        ("a".repeat(513), "a".repeat(512)),
+        ("🦀".repeat(513), "🦀".repeat(512)),
+    ] {
+        let error = std::io::Error::other(text);
+        let summary = diagnostic_error(&error);
+        assert_eq!(summary, expected);
+        assert!(summary.len() <= 2_048);
+    }
 }
 
 fn pump_until(
