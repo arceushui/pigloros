@@ -46,11 +46,14 @@ struct State {
     usage: StagingUsage,
     queue_ceilings: BTreeMap<u64, u64>,
     attempt_ceilings: BTreeMap<u64, u64>,
+    // An attempt's cleanup was not proved: admission waits for restart
+    // reconciliation and a fresh ledger.
+    closed_for_reconciliation: bool,
 }
 
 impl State {
     const fn ensure_open(&self) -> Result<(), StagingError> {
-        if self.usage.leaked_files == 0 {
+        if self.usage.leaked_files == 0 && !self.closed_for_reconciliation {
             Ok(())
         } else {
             Err(StagingError::CleanupFailed)
@@ -114,6 +117,16 @@ impl StagingLedger {
             .revocation_epoch
             .max(floor.revocation_epoch);
         state.usage.floor.policy_epoch = state.usage.floor.policy_epoch.max(floor.policy_epoch);
+    }
+
+    /// Close all admission of this live ledger because an attempt's cleanup
+    /// was not proved (ADR-087 §3): every later grant, reservation and
+    /// dispatch recheck refuses with [`StagingError::CleanupFailed`].
+    ///
+    /// The ledger never reopens. Restart reconciliation must prove the
+    /// previous runtime's attempts clean before a fresh ledger is installed.
+    pub fn close_for_reconciliation(&self) {
+        self.shared.state().closed_for_reconciliation = true;
     }
 
     /// Charge private storage only; this value grants no admission or input proof.
@@ -613,6 +626,45 @@ mod tests {
         ));
         drop((slot, input));
         assert_eq!(ledger.usage().attempts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_ledger_closed_for_reconciliation_refuses_every_admission_path() -> TestResult {
+        let ledger = new_ledger(100);
+        let (slot, input) = ledger.prepare_with(authority(1, 1), policy(5, 2, 2))?;
+        ledger.close_for_reconciliation();
+        assert!(matches!(
+            ledger.control(2),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(0, 2, 2)),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            slot.recheck(authority(1, 1)),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(input.recheck(), Err(StagingError::CleanupFailed)));
+        // Dropping every reservation or raising the floor does not reopen it,
+        // and no file was leaked.
+        drop((slot, input));
+        ledger.raise_floor(ControlFloor {
+            revocation_epoch: 2,
+            policy_epoch: 2,
+        });
+        assert_eq!(ledger.usage().leaked_files, 0);
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        // A fresh ledger, installed after restart reconciliation, is open.
+        new_ledger(100).reserve_storage(0)?;
         Ok(())
     }
 

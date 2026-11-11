@@ -122,6 +122,15 @@ pub struct ReconciledRestart {
 }
 
 impl ReconciledRestart {
+    /// A reconciliation of a previous runtime that left no attempts, for
+    /// lifecycle tests that start over an empty registry.
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self {
+            attempts: Vec::new(),
+        }
+    }
+
     /// The committed attempts whose units, roots and directories were absent
     /// and whose intents were deleted.
     #[must_use]

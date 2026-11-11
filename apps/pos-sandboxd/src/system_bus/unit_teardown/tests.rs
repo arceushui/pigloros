@@ -294,6 +294,12 @@ pub(super) mod cases {
     }
 
     impl Fixture {
+        /// The bound attempt cgroup's directory.
+        #[must_use]
+        pub fn cgroup_directory(&self) -> &std::path::Path {
+            &self.directory
+        }
+
         /// A counter of this fixture's manager calls.
         #[must_use]
         pub fn calls(&self) -> ManagerCalls {
