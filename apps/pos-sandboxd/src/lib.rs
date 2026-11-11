@@ -176,12 +176,13 @@ pub(crate) struct RecordedRoot {
 /// The held image `(device, inode)` the test fixtures record and read back.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) const FIXTURE_IMAGE: (u64, u64) = (5, 6);
-/// Other images than the fixture's: another inode on its device, and the
-/// same inode on another device.
+/// Other images than the fixture's, built without arithmetic from its
+/// distinct device and inode: another inode on its device, and its inode on
+/// another device.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) const OTHER_IMAGES: [(u64, u64); 2] = [
-    (FIXTURE_IMAGE.0, FIXTURE_IMAGE.1 + 1),
-    (FIXTURE_IMAGE.0 - 1, FIXTURE_IMAGE.1),
+    (FIXTURE_IMAGE.0, FIXTURE_IMAGE.0),
+    (FIXTURE_IMAGE.1, FIXTURE_IMAGE.1),
 ];
 
 /// An attempt's `root` is opened only as a directory path, never through a
