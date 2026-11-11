@@ -1,6 +1,5 @@
 #![cfg(all(target_os = "linux", feature = "sqlite"))]
 
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
 
@@ -29,11 +28,6 @@ fn captures_current_sqlite_image() -> Result<(), Box<dyn Error>> {
         |row| row.get(0),
     )?;
     let process_maps = fs::read_to_string("/proc/self/maps")?;
-    let mapped_files: BTreeSet<_> = process_maps
-        .lines()
-        .filter_map(|line| line.split_whitespace().next_back())
-        .filter(|path| path.starts_with('/'))
-        .collect();
     let report = json!({
         "version": 1,
         "purpose": "ordinary SQLite test-process image inventory",
@@ -48,7 +42,7 @@ fn captures_current_sqlite_image() -> Result<(), Box<dyn Error>> {
         "runtime_version_number": rusqlite::version_number(),
         "compile_options": compile_options,
         "sqlite_filestat_function_count": filestat_functions,
-        "mapped_files": mapped_files,
+        "process_maps": process_maps,
     });
     fs::write(
         std::env::var_os("SQLITE_IMAGE_REPORT").ok_or("missing inventory output path")?,
