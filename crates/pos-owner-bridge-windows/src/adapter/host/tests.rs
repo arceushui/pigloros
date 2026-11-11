@@ -120,12 +120,19 @@ impl Fixture {
         &mut self,
         request: impl FnOnce(&mut ChannelHost) -> T + Send + 'static,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        self.exchange_before(request, Instant::now() + Duration::from_secs(10))
+    }
+
+    fn exchange_before<T: Send + 'static>(
+        &mut self,
+        request: impl FnOnce(&mut ChannelHost) -> T + Send + 'static,
+        deadline: Instant,
+    ) -> Result<T, Box<dyn std::error::Error>> {
         let mut owner = self.owner.take().ok_or("missing owner channel")?;
         let caller = std::thread::spawn(move || {
             let reply = request(&mut owner);
             (owner, reply)
         });
-        let deadline = Instant::now() + Duration::from_secs(10);
         while !caller.is_finished() {
             self.worker.receive();
             self.worker.step();
@@ -153,6 +160,36 @@ impl Fixture {
         drop(self.model);
         self.root.remove()
     }
+}
+
+#[test]
+fn modeled_request_watchdog_closes_the_endpoint_and_joins_the_caller() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let mut fixture = Fixture::new(Ok(NativePulse::Timer))?;
+    let outcome = fixture.exchange_before(CeremonyHost::poll_quarantine, Instant::now());
+    assert_eq!(
+        outcome.err().map(|error| error.to_string()),
+        Some("modeled owner request did not return".to_owned())
+    );
+    assert!(fixture.owner.is_none());
+    assert!(fixture.worker.surface.idle());
+    assert!(fixture.model.calls.borrow().is_empty());
+    fixture.finish()
+}
+
+#[test]
+fn modeled_request_panic_is_joined_and_reported() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let mut fixture = Fixture::new(Ok(NativePulse::Timer))?;
+    let outcome = fixture.exchange::<()>(|_| panic!("modeled owner caller panic"));
+    assert_eq!(
+        outcome.err().map(|error| error.to_string()),
+        Some("owner caller panicked".to_owned())
+    );
+    assert!(fixture.owner.is_none());
+    assert!(fixture.worker.surface.idle());
+    assert!(fixture.model.calls.borrow().is_empty());
+    fixture.finish()
 }
 
 #[derive(Clone, Copy)]
