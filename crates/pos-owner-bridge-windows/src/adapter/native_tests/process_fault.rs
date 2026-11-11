@@ -1486,9 +1486,7 @@ impl Fixture {
             // The transition to AwaitingExit occurs inside this driver step;
             // its start is a conservative lower bound for the real deadline.
             let step_started = Instant::now();
-            let deadline = self
-                .deadline
-                .min(step_started + pos_owner_bridge::ceremony::timing::EXIT_WINDOW);
+            let deadline = step_started + pos_owner_bridge::ceremony::timing::EXIT_WINDOW;
             if self.exit_reached.is_none() && has_synthetic_success_prf(driver) {
                 self.surface
                     .arm_exit_capture(
