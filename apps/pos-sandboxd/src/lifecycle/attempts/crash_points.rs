@@ -1534,7 +1534,7 @@ mod cases {
         const fn restart_io_operations(self) -> usize {
             match self {
                 Self::Running => 132,
-                Self::RequestSent => 55,
+                Self::RequestSent => 132,
                 Self::TwoPrepared => 100,
             }
         }
