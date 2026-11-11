@@ -49,10 +49,11 @@ struct Reference {
     target: String,
 }
 
-#[derive(Default)]
 struct Index {
     identifiers: BTreeSet<String>,
     references: Vec<Reference>,
+    identifier_limit: usize,
+    reference_limit: usize,
     // Registry inputs borrow these same immutable Values. Membership only:
     // addresses never affect traversal, ordering, serialization or a digest.
     // This rejects a JSON Pointer into instance data such as `examples` even
@@ -61,8 +62,18 @@ struct Index {
 }
 
 impl Index {
+    fn new(identifier_limit: usize, reference_limit: usize) -> Self {
+        Self {
+            identifiers: BTreeSet::new(),
+            references: Vec::new(),
+            locations: BTreeSet::new(),
+            identifier_limit,
+            reference_limit,
+        }
+    }
+
     fn identifier(&mut self, identifier: String) -> Result<(), Refusal> {
-        if self.identifiers.len() == MAX_IDENTIFIERS {
+        if self.identifiers.len() == self.identifier_limit {
             return Err(Refusal::BoundsExceeded);
         }
         if !self.identifiers.insert(identifier) {
@@ -123,7 +134,7 @@ impl Index {
         }
         for keyword in ["$ref", "$dynamicRef"] {
             if let Some(target) = value.get(keyword).and_then(Value::as_str) {
-                if self.references.len() == MAX_REFERENCES {
+                if self.references.len() == self.reference_limit {
                     return Err(Refusal::BoundsExceeded);
                 }
                 self.references.push(Reference {
@@ -143,12 +154,37 @@ impl Index {
 }
 
 pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
-    let mut index = Index::default();
+    let mut index = Index::new(MAX_IDENTIFIERS, MAX_REFERENCES);
+    let mut first_error: Option<(u16, Refusal)> = None;
+    let mut identifiers_used = 0;
+    let mut references_used = 0;
     let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
     for document in documents {
-        index
-            .visit(&document.value, document.base.clone(), document.index, true)
-            .map_err(|error| (document.index, error))?;
+        let mut local = Index::new(
+            MAX_IDENTIFIERS - identifiers_used,
+            MAX_REFERENCES - references_used,
+        );
+        let result = local.visit(&document.value, document.base.clone(), document.index, true);
+        identifiers_used += local.identifiers.len();
+        references_used += local.references.len();
+        if let Err(error) = result {
+            if matches!(error, Refusal::BoundsExceeded) {
+                return Err(first_error.unwrap_or((document.index, error)));
+            }
+            first_error.get_or_insert((document.index, error));
+            continue;
+        }
+        if local
+            .identifiers
+            .iter()
+            .any(|id| index.identifiers.contains(id))
+        {
+            first_error.get_or_insert((document.index, Refusal::ReferenceMismatch));
+            continue;
+        }
+        index.identifiers.extend(local.identifiers);
+        index.references.extend(local.references);
+        index.locations.extend(local.locations);
         registry = registry
             .add(document.base.as_str(), &document.value)
             .map_err(|_| (document.index, Refusal::ReferenceMismatch))?;
@@ -156,11 +192,18 @@ pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
     // Resolve target resource URIs in artifact order before the registry's
     // aggregate preparation, so a missing external resource names its owner.
     for reference in &index.references {
-        let mut target = uri::resolve_against(&reference.base.borrow(), &reference.target)
-            .map_err(|_| (reference.index, Refusal::ReferenceMismatch))?;
+        let Ok(mut target) = uri::resolve_against(&reference.base.borrow(), &reference.target)
+        else {
+            if first_error.is_none_or(|(first, _)| reference.index < first) {
+                first_error = Some((reference.index, Refusal::ReferenceMismatch));
+            }
+            continue;
+        };
         target.set_fragment(None);
         if !index.identifiers.contains(target.as_str()) {
-            return Err((reference.index, Refusal::ReferenceMismatch));
+            if first_error.is_none_or(|(first, _)| reference.index < first) {
+                first_error = Some((reference.index, Refusal::ReferenceMismatch));
+            }
         }
     }
     // Only borrowed declared resources enter this registry. Its retriever
@@ -169,18 +212,17 @@ pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
         .prepare()
         .map_err(|_| (0, Refusal::ReferenceMismatch))?;
     for reference in index.references {
-        let resolved = registry
-            .resolver(reference.base)
-            .lookup(&reference.target)
-            .map_err(|_| (reference.index, Refusal::ReferenceMismatch))?;
-        if !index
-            .locations
-            .contains(&std::ptr::from_ref(resolved.contents()))
+        let resolved = registry.resolver(reference.base).lookup(&reference.target);
+        if resolved.as_ref().map_or(true, |resolved| {
+            !index
+                .locations
+                .contains(&std::ptr::from_ref(resolved.contents()))
+        }) && first_error.is_none_or(|(first, _)| reference.index < first)
         {
-            return Err((reference.index, Refusal::ReferenceMismatch));
+            first_error = Some((reference.index, Refusal::ReferenceMismatch));
         }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

@@ -63,7 +63,13 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
         }
     }
     let external: BTreeSet<_> = items(value, "externalDocumentRefs")
-        .map(|document| nonempty(document.get("externalDocumentId")))
+        .map(|document| {
+            let id = nonempty(document.get("externalDocumentId"))?;
+            if !identifier(id, "DocumentRef-", true) {
+                return Err(Refusal::Malformed);
+            }
+            Ok(id)
+        })
         .collect::<Result<_, _>>()?;
     if external.len() != items(value, "externalDocumentRefs").count() {
         return Err(Refusal::ReferenceMismatch);
@@ -153,16 +159,24 @@ fn reference(
     let valid = local.contains_key(target)
         || matches!(target, "NONE" | "NOASSERTION")
         || target.split_once(':').is_some_and(|(document, element)| {
-            external.contains(document)
-                && element
-                    .strip_prefix("SPDXRef-")
-                    .is_some_and(|id| !id.is_empty())
+            external.contains(document) && identifier(element, "SPDXRef-", false)
         });
     if valid {
         Ok(())
     } else {
         Err(Refusal::ReferenceMismatch)
     }
+}
+
+fn identifier(value: &str, prefix: &str, plus: bool) -> bool {
+    value.strip_prefix(prefix).is_some_and(|id| {
+        !id.is_empty()
+            && id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-')
+                    || (plus && byte == b'+')
+            })
+    })
 }
 
 fn licences(value: &Value, external: &BTreeSet<&str>) -> Result<(), Refusal> {
@@ -189,7 +203,7 @@ fn licences(value: &Value, external: &BTreeSet<&str>) -> Result<(), Refusal> {
                         .map_or_else(|| vec![metadata], |array| array.iter().collect());
                     for text in texts {
                         for token in nonempty(Some(text))?
-                            .split(|c: char| !(c.is_ascii_alphanumeric() || "-.:".contains(c)))
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || "-.:+".contains(c)))
                         {
                             if token.starts_with("LicenseRef-") && !extracted.contains(token) {
                                 return Err(Refusal::ReferenceMismatch);
