@@ -85,12 +85,9 @@ mod cases {
     const OPEN_IO_OPERATIONS: usize = 18;
 
     /// How long a `MountImage` request sent one second before a same-boot
-    /// restart can still attach a loop device: the activator deadline plus
-    /// the 10 s `SERVER_MARGIN` of `attempt_registry::activation`, less the
-    /// second since it was sent.
-    const PENDING_REQUEST: Duration = crate::MountfsdImageActivator::DEADLINE
-        .saturating_add(Duration::from_secs(10))
-        .saturating_sub(Duration::from_secs(1));
+    /// restart can still attach a loop device.
+    const PENDING_REQUEST: Duration =
+        crate::MountfsdImageActivator::REQUEST_BOUND.saturating_sub(Duration::from_secs(1));
 
     /// A crash boundary between two lifecycle steps that are not registry I/O.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +190,10 @@ mod cases {
         loaded: Mutex<Option<[u8; 16]>>,
         /// The attempt whose root is attached and not released.
         attached: Mutex<Option<[u8; 16]>>,
+        // `submitted`, `loaded` and `attached` each hold one attempt, the
+        // last to set it. That is sound only because attempts run one after
+        // another and a crash stops every later one, so at most one attempt
+        // leaves a survivor; they must become per-attempt if that changes.
     }
 
     impl World {
@@ -1660,6 +1661,11 @@ mod cases {
             ),
             "{:?}",
             hung.result
+        );
+        // The wait extended the one-second deadline exactly once.
+        assert_eq!(
+            hung.finished_after,
+            Duration::from_secs(1) + PENDING_REQUEST
         );
         assert_eq!(snapshot(runtime.path())?, crashed);
         assert_admission_closed(runtime.path(), &crashed, "a hung sweep")?;
