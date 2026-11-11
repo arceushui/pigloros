@@ -327,3 +327,88 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NativeEvent;
+
+    #[test]
+    fn modeled_quarantine_driver_done_refuses_without_native_work() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = super::super::FixtureRoot::new()?;
+        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now())?;
+        let result = readiness::cancel_driver(
+            &mut driver,
+            &mut fixture.surface,
+            &mut fixture.loopback,
+            &mut fixture.store,
+        );
+        assert!(fixture.finished_driver_is_done(&mut driver));
+        let calls = model.calls.borrow().clone();
+        let mut refused = false;
+        assert_eq!(
+            drive_to_quarantine(&mut fixture, &mut driver, &mut refused),
+            Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable
+            ))
+        );
+        assert!(!refused);
+        assert_eq!(*model.calls.borrow(), calls);
+        assert!(fixture.surface.idle());
+        fixture.retire(driver, result, None)?;
+        root.remove()
+    }
+
+    #[test]
+    fn modeled_quarantine_finish_delegates_until_the_matching_exit() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = super::super::FixtureRoot::new()?;
+        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let selected = super::super::fixed_competing_spec(240);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(matches!(
+            fixture.surface.open(&selected),
+            Poll::Ready(Ok(_))
+        ));
+        let mut refused = false;
+        {
+            let mut port = RefuseClose {
+                surface: &mut fixture.surface,
+                refused: &mut refused,
+            };
+            assert!(port.close_controller().is_err());
+            assert!(port.finish().is_err());
+        }
+        assert!(refused);
+        assert!(!fixture.surface.idle());
+        fixture
+            .surface
+            .close_controller()
+            .map_err(SurfaceError::error)?;
+        let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 43 });
+        {
+            let mut port = RefuseClose {
+                surface: &mut fixture.surface,
+                refused: &mut refused,
+            };
+            assert!(port.finish().is_err());
+            let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+            port.finish().map_err(SurfaceError::error)?;
+        }
+        assert!(fixture.surface.idle());
+        drop(sink);
+        let driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now())?;
+        fixture.retire(
+            driver,
+            Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable,
+            )),
+            None,
+        )?;
+        root.remove()
+    }
+}

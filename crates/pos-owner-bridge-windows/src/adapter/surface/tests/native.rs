@@ -89,6 +89,10 @@ impl Factory {
 
 impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
+        if self.failure.get() == Some("panic_pump") {
+            self.failure.set(None);
+            panic!("modeled pump panic");
+        }
         if self.failure.get() == Some("pump") {
             return Err(NativeError {
                 operation: Operation::Sta,
