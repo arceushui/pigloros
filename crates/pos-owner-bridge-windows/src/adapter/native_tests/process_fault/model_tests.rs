@@ -663,101 +663,110 @@ fn modeled_consuming_and_pre_record_observers_enforce_their_deadline() -> TestRe
         (false, Duration::ZERO, true),
     ] {
         for consuming in [true, false] {
-            let root = FixtureRoot::new()?;
-            let (mut fixture, model) = fixture(&root)?;
-            let selected = fixed_competing_spec(MODEL_CASE);
-            assert!(fixture.surface.open(&selected).is_pending());
-            assert!(fixture.surface.open(&selected).is_pending());
-            assert!(matches!(
-                fixture.surface.open(&selected),
-                Poll::Ready(Ok(_))
-            ));
-            let sink = model.sink.borrow().clone().ok_or("missing sink")?;
-            sink.event(NativeEvent::BrowserExited { pid: 42 });
-            let clock = TickingClock(FakeClock::start());
-            let deadline = clock.0.now()
-                + if boundary {
-                    Duration::ZERO
-                } else {
-                    Duration::from_secs(5)
-                };
-            let handle = Handle {
-                code: Ok(Some(0x535)),
-                clock: clock.0.clone(),
-                advance,
-            };
-            let browser = handle.identity();
-            let state = ProcessFaultState {
-                phase: ProcessFaultPhase::PostedConsuming,
-                topology: ProcessFaultTopology::SealedSingleViewFrameFree,
-                generation: 1,
-                reply_state: ControlState::Consuming as u32,
-                record_count: 1,
-                posts: 1,
-            };
-            let first = if consuming {
-                ProcessFaultMark::Reached(state)
-            } else {
-                ProcessFaultMark::BeforeRecord {
-                    generation: 1,
-                    record_count: 0,
-                }
-            };
-            fixture.trace.borrow_mut().extend([
-                first,
-                ProcessFaultMark::Selected(browser),
-                ProcessFaultMark::TerminationCall,
-            ]);
-            let result = if consuming {
-                let port = super::ConsumingPort {
-                    inner: RefCell::new(&mut fixture.surface),
-                    target: ProcessFaultTarget::Browser,
-                    inject: true,
-                    deadline,
-                    trace: Rc::clone(&fixture.trace),
-                    state,
-                    handle: RefCell::new(Some(Box::new(handle))),
-                    failure: RefCell::new(None),
-                    reached: RefCell::new(true),
-                };
-                port.observe_consuming_with_clock(state, &clock)
-            } else {
-                let shared = RefCell::new(&mut fixture.surface);
-                let store = super::BeforeRecordStore {
-                    inner: &mut fixture.store,
-                    surface: &shared,
-                    inject: true,
-                    target: ProcessFaultTarget::Browser,
-                    presence: None,
-                    deadline,
-                    trace: Rc::clone(&fixture.trace),
-                    handle: Some(Box::new(handle)),
-                    failure: None,
-                    reached: true,
-                    written: false,
-                    generation: 1,
-                    posts: 0,
-                    ceremony_id: CeremonyId::from_bytes([MODEL_CASE; 16]),
-                };
-                store.observe_before_record_with_clock(browser, first, &clock)
-            };
-            assert_eq!(result.is_ok(), accepted);
-            assert_eq!(fixture.trace.borrow().len(), if accepted { 5 } else { 3 });
-            fixture
-                .surface
-                .close_controller()
-                .map_err(pos_owner_bridge::SurfaceError::error)?;
-            fixture
-                .surface
-                .finish()
-                .map_err(pos_owner_bridge::SurfaceError::error)?;
-            drop(sink);
-            let driver =
-                readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-            fixture.retire(driver, Err(ERROR), None)?;
-            root.remove()?;
+            consuming_or_pre_record_deadline_case(boundary, advance, accepted, consuming)?;
         }
     }
+    Ok(())
+}
+
+fn consuming_or_pre_record_deadline_case(
+    boundary: bool,
+    advance: Duration,
+    accepted: bool,
+    consuming: bool,
+) -> TestResult {
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let selected = fixed_competing_spec(MODEL_CASE);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(matches!(
+        fixture.surface.open(&selected),
+        Poll::Ready(Ok(_))
+    ));
+    let sink = model.sink.borrow().clone().ok_or("missing sink")?;
+    sink.event(NativeEvent::BrowserExited { pid: 42 });
+    let clock = TickingClock(FakeClock::start());
+    let deadline = clock.0.now()
+        + if boundary {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(5)
+        };
+    let handle = Handle {
+        code: Ok(Some(0x535)),
+        clock: clock.0.clone(),
+        advance,
+    };
+    let browser = handle.identity();
+    let state = ProcessFaultState {
+        phase: ProcessFaultPhase::PostedConsuming,
+        topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+        generation: 1,
+        reply_state: ControlState::Consuming as u32,
+        record_count: 1,
+        posts: 1,
+    };
+    let first = if consuming {
+        ProcessFaultMark::Reached(state)
+    } else {
+        ProcessFaultMark::BeforeRecord {
+            generation: 1,
+            record_count: 0,
+        }
+    };
+    fixture.trace.borrow_mut().extend([
+        first,
+        ProcessFaultMark::Selected(browser),
+        ProcessFaultMark::TerminationCall,
+    ]);
+    let result = if consuming {
+        let port = super::ConsumingPort {
+            inner: RefCell::new(&mut fixture.surface),
+            target: ProcessFaultTarget::Browser,
+            inject: true,
+            deadline,
+            trace: Rc::clone(&fixture.trace),
+            state,
+            handle: RefCell::new(Some(Box::new(handle))),
+            failure: RefCell::new(None),
+            reached: RefCell::new(true),
+        };
+        port.observe_consuming_with_clock(state, &clock)
+    } else {
+        let shared = RefCell::new(&mut fixture.surface);
+        let store = super::BeforeRecordStore {
+            inner: &mut fixture.store,
+            surface: &shared,
+            inject: true,
+            target: ProcessFaultTarget::Browser,
+            presence: None,
+            deadline,
+            trace: Rc::clone(&fixture.trace),
+            handle: Some(Box::new(handle)),
+            failure: None,
+            reached: true,
+            written: false,
+            generation: 1,
+            posts: 0,
+            ceremony_id: CeremonyId::from_bytes([MODEL_CASE; 16]),
+        };
+        store.observe_before_record_with_clock(browser, first, &clock)
+    };
+    assert_eq!(result.is_ok(), accepted);
+    assert_eq!(fixture.trace.borrow().len(), if accepted { 5 } else { 3 });
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    drop(sink);
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+    fixture.retire(driver, Err(ERROR), None)?;
+    root.remove()?;
     Ok(())
 }
 
@@ -826,6 +835,21 @@ fn modeled_short_retry_deadline_precedes_readiness_deadline() -> TestResult {
     root.remove()
 }
 
+struct ModeledRendererObservation;
+
+impl ModeledRendererObservation {
+    fn new() -> Self {
+        crate::Native::reset_process_failure_observations();
+        Self
+    }
+}
+
+impl Drop for ModeledRendererObservation {
+    fn drop(&mut self) {
+        crate::Native::reset_process_failure_observations();
+    }
+}
+
 #[test]
 fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
@@ -834,7 +858,7 @@ fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
         (false, Duration::from_secs(6), false),
         (false, Duration::ZERO, true),
     ] {
-        crate::Native::reset_process_failure_observations();
+        let _observation = ModeledRendererObservation::new();
         let root = FixtureRoot::new()?;
         let (mut fixture, model) = fixture(&root)?;
         let selected = fixed_competing_spec(MODEL_CASE);

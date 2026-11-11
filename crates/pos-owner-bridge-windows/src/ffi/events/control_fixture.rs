@@ -144,6 +144,7 @@ pub(super) fn navigation(args: &ICoreWebView2NavigationStartingEventArgs) -> Res
 }
 
 impl crate::Native {
+    // Scripted classification for model tests only; it grants no native fault authority.
     pub(crate) fn model_main_renderer_exit() {
         PROCESS_FAILURES.with(|failures| {
             push_observation(failures, crate::NativeProcessFailure::MainRendererExited);

@@ -1926,6 +1926,7 @@ def test_private_fault_capability_construction() -> None:
         if not errors(changed):
             raise SystemExit(f"product capability was accepted: {marker}")
     for statement, expected in (
+        ("fn f() { crate::Native::model_main_renderer_exit(); }", "modeled renderer observation belongs only in its reviewed model"),
         ("type Alias = crate::RetainedExitHandle;", "retained-exit capability belongs only in reviewed paths"),
         ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
         ("fn f() { let _seal = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),

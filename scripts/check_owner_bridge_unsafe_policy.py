@@ -1326,6 +1326,18 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
             found.append(f"{SHIM}/src/lib.rs: {marker} requires its private cfg(test) declaration")
     for relative, (scanned, _) in scans.items():
         source = scanned.code
+        for reference in re.finditer(r"(?<!\w)model_main_renderer_exit(?!\w)", source):
+            allowed = (
+                relative == "src/ffi/events/control_fixture.rs"
+                and any(name == "model_main_renderer_exit" and start < reference.start() < stop
+                        for name, start, stop in _function_spans(source))
+            ) or (
+                relative == "src/adapter/native_tests/process_fault/model_tests.rs"
+                and any(name == "modeled_early_renderer_observer_enforces_deadline" and start < reference.start() < stop
+                        for name, start, stop in _function_spans(source))
+            )
+            if not allowed or re.search(r"(?<!\w)model_main_renderer_exit\s+as\s", source):
+                found.append(f"{SHIM}/{relative}: modeled renderer observation belongs only in its reviewed model")
         retained_paths = {
             "src/lib.rs", "src/ffi/process_fault.rs", "src/ffi/session.rs",
             "src/adapter/surface/exit_boundary.rs", "src/adapter/surface/tests/native.rs",
@@ -1571,7 +1583,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '9b19109f8a3b4972344b25e16c9d5045cda51860cc13859d8ebb69b9e8db5ab7',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '778161393684a2a28173db4b0a22da53c494ce8da9d73dfdfd1e96ba9f440bc5',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': 'fe6b353621e5cc6bdc339ef6d638cfd6d38f3613f4aa5f1c123c9606e53714dd',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '18d2656cc315199a9fe7da5dc9f6d8d012f52f0d690e476dc418b10a6cf0255f',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '7092d9da1b8dc450df5eb0abb81840ed9435105c3815f66a69715ae72591b2e5',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'a510a6cfa3b90c208ba32d8941a3a0deb0379b7c0d08b4230237dfe84442cf32',
@@ -1602,7 +1614,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',
-    'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '65f1439c72d3278daf6df13eca9c40defb246a0522fe9fbd54adbf62e80daf06',
+    'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': 'c94e9fe0f864aeb6a0b154222663e70992416eb878de2a04098441b50c4f48ba',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '058d6019a325b8e969b5c4c0b65258740bac1fbd92478e7db1386eff5fe1d257',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
     'crates/pos-owner-bridge/assets/qualification/external.html': '45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4',
