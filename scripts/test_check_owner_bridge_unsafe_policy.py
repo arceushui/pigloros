@@ -1711,6 +1711,33 @@ def test_owned_process_fault_authority() -> None:
             raise SystemExit(f"the shared identity policy accepted {old} -> {new}")
 
 
+def test_pending_model_callback_references_are_read_only() -> None:
+    relative = "src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs"
+    message = f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths"
+
+    def errors(body: str) -> list[str]:
+        scanned = CHECKER.scan(CFG + f"fn proposed() {{ {body} }}\n")
+        found: list[str] = []
+        CHECKER._check_fault_authority(
+            ROOT, {relative: (scanned, CHECKER._attributes(scanned.code))}, found
+        )
+        return found
+
+    reader = "let _ = crate::Native::callback_order(); let _: Option<crate::NativeCallbackMoment> = None;"
+    if message in errors(reader):
+        raise SystemExit("the reviewed pending model cannot read callback observations")
+    for body in (
+        "crate::Native::arm_callback_order();",
+        "crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(42));",
+        "crate::Native::disarm_callback_order();",
+        "let _ = &crate::CALLBACK_ORDER;",
+        "let _ = crate::Native::creation_order();",
+        "let _ = crate::NativeCreationMoment::EnvironmentReturned(true);",
+    ):
+        if message not in errors(body):
+            raise SystemExit(f"the pending model escaped its read-only callback scope: {body}")
+
+
 def test_fault_profile_bindings() -> None:
     directory = "crates/pos-owner-bridge"
     paths = (
@@ -2086,6 +2113,10 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(port.write_record(&[]), Err(pos_owner_bridge::CleanupError));", ""),
         (f"{SHIM}/src/adapter/native_tests.rs", "error.to_string().chars().take(512).collect()", "error.to_string()"),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "fault.drive.failed case={} error={summary:?}", "fault.drive.failed case={} error={summary}"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "crate::Native::callback_order,", "Vec::new,"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                return Err("pending-opening browser exit timed out".into());', 'if clock.now() >= self.deadline + Duration::from_secs(1) {\n                return Err("pending-opening browser exit timed out".into());'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                    return Err("late controller completion was not observed".into());', 'if false {\n                    return Err("late controller completion was not observed".into());'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs", "assert!(crate::Native::callback_order().is_empty());", "let _ignored = crate::Native::callback_order();"),
         (f"{SHIM}/src/ffi/process_fault/candidate_tests.rs", 'assert_eq!(calls, ["identity", "snapshot", "identity"]);', 'assert!(calls.is_empty());'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
@@ -2153,6 +2184,7 @@ def main() -> None:
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
     test_owned_process_fault_authority()
+    test_pending_model_callback_references_are_read_only()
     test_fault_profile_bindings()
     test_recordless_and_release_authority()
     test_typed_process_failure_evidence()

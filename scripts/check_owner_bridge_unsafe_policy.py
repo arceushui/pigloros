@@ -1234,6 +1234,10 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     for relative, (scanned, _) in scans.items():
         for reference in re.finditer(r"(?<!\w)(?:NativeCallbackMoment|CALLBACK_ORDER|record_callback|callback_order|arm_callback_order|disarm_callback_order|NativeCreationMoment|CreationCallback|CREATION_ORDER|creation_moment|creation_order|arm_creation_order|disarm_creation_order)(?!\w)", scanned.code):
             allowed = relative in ("src/ffi/creation.rs", "src/ffi/environment.rs", "src/adapter/native_tests/process_fault.rs")
+            allowed |= (
+                relative == "src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs"
+                and reference.group() in ("NativeCallbackMoment", "callback_order")
+            )
             allowed |= relative == "src/lib.rs" and callback_begin <= reference.start() < callback_end
             if not allowed:
                 found.append(f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths")
@@ -1311,7 +1315,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "77d1c4309113fd94a93bdb6a59d650406b420e57d3b5e4f17291cbf20eba46db":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "2f140d9dd5dada0b175cf8b3696fda1c15b12775afae7f4c558bd4edf29ded30":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1570,13 +1574,14 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'df5724509defa4333ea686071cdfcddab99d80042ba9d5cd3715872b2d95a586',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '8cb57b27bf03190c6442713156d5e8efb75fb16aa54b245f66a4f60d4628c306',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '87153a998f1d00b0d4aef890b89587325696fc55897dabaf2121b876ac36b548',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': 'b0ede6304f3b6ff6af9d74eab409efed9f7af311feec7b5ca0e722e0d0ab8ff4',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': 'b44d0e723cc09dff7b98a82b023545f536ed78aefc28900545186bdb44030998',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': 'c7472ba0dd092b8ea9fa1eb7909a587e721ab358b664ac6df3eaedbf387b4bd2',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': '58339ed1ed417eba7e46174a757573de06453e33224aca5461bd5f1700b9b1bf',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
     'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': 'f987aa8a99b0e5d55e476f1b8db2e4665942dd934997269b54639f7e63030236',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': 'fbb9e6f09ce188b12282cee52ffddb0377e22c274d708060ef60dd18982b0b6e',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '7d81d1a18601d66e9fc7e1c4d5d5791607460ca4c5286736813b68784b10a7c1',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_admission.rs': '581ac5786231abd52373ce5575d735a46c87a9f1347f531218e98d9009fb60d4',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '325e26461e331f804c810140858791205246c09c118995e537f1d129340acfe5',

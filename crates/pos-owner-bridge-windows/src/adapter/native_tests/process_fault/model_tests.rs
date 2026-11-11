@@ -32,6 +32,8 @@ use crate::{
 const ERROR: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 const MODEL_CASE: u8 = 240;
 
+mod pending_opening_tests;
+
 pub(super) fn fixture(
     root: &FixtureRoot,
 ) -> Result<(Fixture, Rc<Factory>), Box<dyn std::error::Error>> {

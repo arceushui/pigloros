@@ -45,7 +45,7 @@ pub(in crate::adapter) struct Factory {
     pub(super) window_exists: Cell<bool>,
     pub(super) close_requested: Cell<bool>,
     pub(super) exit_code: Cell<Option<u32>>,
-    pub(super) pending_browser: Cell<Option<pos_owner_bridge::ProcessIdentity>>,
+    pub(in crate::adapter) pending_browser: Cell<Option<pos_owner_bridge::ProcessIdentity>>,
     pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
 }

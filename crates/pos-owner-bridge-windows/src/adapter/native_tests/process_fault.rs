@@ -2126,6 +2126,21 @@ impl Fixture {
         browser: pos_owner_bridge::ProcessIdentity,
         first: ProcessFaultMark,
     ) -> TestResult {
+        self.observe_pending_opening_with_observations(
+            browser,
+            first,
+            &SystemClock,
+            crate::Native::callback_order,
+        )
+    }
+
+    fn observe_pending_opening_with_observations(
+        &mut self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        first: ProcessFaultMark,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+        callback_order: impl FnOnce() -> Vec<crate::NativeCallbackMoment>,
+    ) -> TestResult {
         loop {
             if let Some(event) = self
                 .surface
@@ -2140,6 +2155,9 @@ impl Fixture {
                     .exit_code()
                     .map_err(|()| "pending-opening exit query failed")?
                     .ok_or("pending-opening process exit pending")?;
+                if clock.now() >= self.deadline {
+                    return Err("pending-opening browser exit timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -2157,20 +2175,20 @@ impl Fixture {
                 }
                 break;
             }
-            if Instant::now() >= self.deadline {
+            if clock.now() >= self.deadline {
                 return Err("pending-opening browser exit timed out".into());
             }
             readiness::pump(&self.surface)?;
         }
         loop {
             if let Some(success) = self.surface.pending_opening_completion() {
-                if !controller_invoked_after_exit(
-                    &crate::Native::callback_order(),
-                    browser.browser_pid,
-                ) {
+                if !controller_invoked_after_exit(&callback_order(), browser.browser_pid) {
                     return Err(
                         "controller completion was not invoked after the matching exit".into(),
                     );
+                }
+                if clock.now() >= self.deadline {
+                    return Err("late controller completion was not observed".into());
                 }
                 self.trace
                     .borrow_mut()
@@ -2178,7 +2196,7 @@ impl Fixture {
                 self.evidence_complete = true;
                 return Ok(());
             }
-            if Instant::now() >= self.deadline {
+            if clock.now() >= self.deadline {
                 return Err("late controller completion was not observed".into());
             }
             readiness::pump(&self.surface)?;
