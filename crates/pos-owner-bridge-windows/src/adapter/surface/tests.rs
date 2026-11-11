@@ -145,7 +145,7 @@ impl Drop for Fixture {
     }
 }
 
-struct Runtime(PathBuf);
+pub(in crate::adapter) struct Runtime(pub(in crate::adapter) PathBuf);
 
 impl RuntimeAdmission for Runtime {
     fn root(&self) -> &Path {

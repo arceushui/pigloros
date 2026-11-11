@@ -1244,7 +1244,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     root_open = fixture_root_code.find("{", root_start) if root_start >= 0 else -1
     root_end = _matching_brace(fixture_root_code, root_open) if root_open >= 0 else -1
     root_body = fixture_root_code[root_start:root_end + 1] if root_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", root_body).encode()).hexdigest() != "e0d192838ffc3bbbeb4313c07e1e421b0de552068d917e7e57d4e1cd76d99e05":
+    if hashlib.sha256(re.sub(r"\s+", "", root_body).encode()).hexdigest() != "30b62a1903eada0a14b9721b26c2a52d7ae138e6e70db52025230aca0e5dab78":
         found.append(f"{SHIM}/src/adapter/native_tests.rs: fixture root differs from reviewed private temporary directory")
     root_format = list(re.finditer(r"(?<!\w)format!\s*\(", root_body))
     expected_root = re.compile(r'format!\s*\(\s*"piglor-native-\{\}-\{\}-\{\}"')
@@ -1522,7 +1522,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     complete_sources = {
         lib: "0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
-        prefix + "adapter/native_tests.rs": "e4e79524d4256efa5f4794b8d72f64be791512da0609576d9f46527b86bb4134",
+        prefix + "adapter/native_tests.rs": "e19e0e1f463568040863502bdc9ed5b4e54a80ea579a03df3fc4248bfdca1a70",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
     }
     for path, digest in complete_sources.items():
@@ -1544,7 +1544,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         (plan, "with_test_owner_window", "df7788308f2149191a92004d4d57598c85c4036d2dc60cb106d1bccba6367606"),
         (lib, "native_host_fixture_child", "00c2d4140ff13359ffdcb7c81f100b6452ff07538e1c6e9ad08c5a8daf011c75"),
         (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "59cbe1ca5074bdb5088a7c318424844127288858c7318f4341bb0b08db449ce7"),
-        (prefix + "adapter/native_tests.rs", "native_host_lifecycle", "2ebf81ffbcae9bf98e9fb57a6ba28efc59bb40adfa972b5d463ead557a6f15e4"),
+        (prefix + "adapter/native_tests.rs", "native_host_lifecycle", "ad257a26fd236b84eaf1fd2100af8c43bd16b723c40177dcc61414342779ba7a"),
     )
     for path, name, digest in specs:
         raw = sources.get(path, "")
@@ -1572,7 +1572,9 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '53fd4bd1f85d50bebff1e462ae504de86393504fb53d46e6f0e15f4157276f61',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': '58339ed1ed417eba7e46174a757573de06453e33224aca5461bd5f1700b9b1bf',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': 'd18f730018b9e5daf71997cd717d2366b61e148585b2fa9af75bdc8d23fd8bf3',
+    'crates/pos-owner-bridge-windows/src/adapter/host.rs': 'ede3adc77b628d6b9eaced9409072d8445902979a263f414426d8288e394319c',
+    'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': '300698634046a9e7aa89d71c7444e9326534f89cfbe2553d6f1d4c43d5d67ac3',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '416b14facb7fafc8031109c313a8139d6b81b4b48a6e6edc84543a0c504bb7c4',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_admission.rs': '581ac5786231abd52373ce5575d735a46c87a9f1347f531218e98d9009fb60d4',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '325e26461e331f804c810140858791205246c09c118995e537f1d129340acfe5',
@@ -1581,7 +1583,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '0669c03257c31be00fa41c224b3031eeaeccaab4936cbbb7eec4006ad5742fd8',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': '8a85e1162598d9df27d98143188e699701e0e4ba0ac3863f09cdc937baa3210a',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'cd03f37467a3ea75879ea5a999b3d317157ec30cccea673188a7c13dd158bf2e',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '184716e9896fe0fb73d246212df0c41d773c8f5a6848f9deee166579b07e33ba',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
@@ -1591,7 +1593,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'ace2de26aa2f33320ced974c0016fc1a5ac1aa9b5678b05c4f7b60285daf1774',
     'crates/pos-owner-bridge-windows/src/lib.rs': '0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '8e826240756a79be6a791869846edf305e5be147544a6c93ede9bbbe0fbb718b',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': 'e4e79524d4256efa5f4794b8d72f64be791512da0609576d9f46527b86bb4134',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': 'e19e0e1f463568040863502bdc9ed5b4e54a80ea579a03df3fc4248bfdca1a70',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '09e8b45996cff36d5dda6f2e1bd0ace799171a5b32a926f30b44be5d31a59624',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',

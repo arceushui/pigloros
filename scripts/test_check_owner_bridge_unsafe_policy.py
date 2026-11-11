@@ -2024,6 +2024,8 @@ def test_external_qualification_is_sealed() -> None:
     if resource not in CHECKER.EXTERNAL_FIXTURE_SOURCES:
         raise SystemExit("resource callback diagnostic source binding was removed")
     mutations = (
+        (f"{SHIM}/src/adapter/host.rs", "Self::start_with_profile(runtime, root, store, crate::require_windows_profile)", "Self::start_with_profile(runtime, root, store, || Ok(()))"),
+        (f"{SHIM}/src/adapter/host.rs", "Self::spawn_with_factory(runtime, root, loopback, store, crate::Native::owner_factory)", "Self::spawn_with_factory(runtime, root, loopback, store, || panic!())"),
         (f"{SHIM}/src/adapter/surface/tests/fault_admission.rs", "deadline: Instant::now() + Duration::from_secs(10)", "deadline: Instant::now() + Duration::from_secs(3_600)"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/obstruction/tests.rs", "Factory::new(Creation::Ready, FakeClock::start())", "crate::Native::owner_factory().unwrap()"),
         (resource, 'current.borrow_mut().register(retained_trace)', 'drop(retained_trace)'),

@@ -12,8 +12,8 @@ use std::time::Duration;
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
 use pos_owner_bridge::channel::{channel, ChannelHost, SurfaceEndpoint, SurfaceRequest};
 use pos_owner_bridge::{
-    BridgeError, CeremonyHost, CeremonyReply, CleanupStore, QuarantineCode, QuarantineKeeper,
-    QuarantinePoll, SystemClock, UnavailableCode,
+    BridgeError, CeremonyHost, CeremonyReply, CleanupStore, QuarantineKeeper, QuarantinePoll,
+    SystemClock, UnavailableCode,
 };
 
 use super::surface::Surface;
@@ -46,11 +46,31 @@ impl WindowsOwnerHost {
         root: PathBuf,
         store: impl CleanupStore + Send + 'static,
     ) -> Result<Self, BridgeError> {
-        crate::require_windows_profile()?;
+        Self::start_with_profile(runtime, root, store, crate::require_windows_profile)
+    }
+
+    fn start_with_profile(
+        runtime: VerifiedRuntime,
+        root: PathBuf,
+        store: impl CleanupStore + Send + 'static,
+        profile: fn() -> Result<(), BridgeError>,
+    ) -> Result<Self, BridgeError> {
+        profile()?;
         crate::refuse_overrides()?;
         crate::verify_private_directory(&root)?;
         let loopback = SharedLoopback::start()?;
         Self::spawn(runtime, root, loopback, WindowsCleanupStore::new(store))
+    }
+
+    #[cfg(test)]
+    // Hosted Server exercises override, root and listener admission with the
+    // same worker underneath the independently tested desktop-profile check.
+    pub(super) fn start_fixture(
+        runtime: VerifiedRuntime,
+        root: PathBuf,
+        store: impl CleanupStore + Send + 'static,
+    ) -> Result<Self, BridgeError> {
+        Self::start_with_profile(runtime, root, store, || Ok(()))
     }
 
     pub(super) fn spawn(
@@ -59,12 +79,22 @@ impl WindowsOwnerHost {
         loopback: SharedLoopback,
         store: WindowsCleanupStore,
     ) -> Result<Self, BridgeError> {
+        Self::spawn_with_factory(runtime, root, loopback, store, crate::Native::owner_factory)
+    }
+
+    fn spawn_with_factory<F: crate::NativeFactory + 'static>(
+        runtime: VerifiedRuntime,
+        root: PathBuf,
+        loopback: SharedLoopback,
+        store: WindowsCleanupStore,
+        make_factory: impl FnOnce() -> crate::NativeResult<F> + Send + 'static,
+    ) -> Result<Self, BridgeError> {
         let (owner, endpoint) = channel();
         let (ready, started) = sync_channel(1);
         let worker = thread::Builder::new()
             .name("piglor-owner-sta".to_owned())
             .spawn(move || {
-                let Ok(factory) = crate::Native::owner_factory() else {
+                let Ok(factory) = make_factory() else {
                     let _sent = ready.send(Err(UNAVAILABLE));
                     return;
                 };
@@ -111,6 +141,9 @@ impl WindowsOwnerHost {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 impl CeremonyHost for WindowsOwnerHost {
     fn run(&mut self, driver: CeremonyDriver) -> CeremonyReply {
@@ -183,15 +216,19 @@ impl Worker {
             {
                 return;
             }
-            match self.surface.pump() {
-                Ok(NativePulse::Timer | NativePulse::Dispatched) => {}
-                Ok(NativePulse::Quit) => self.surface.controller_lost(),
-                Err(_) => {
-                    self.surface.controller_lost();
-                    // Keep accepted owners on their STA after a pump failure,
-                    // while avoiding a tight retry loop. Only this host sleeps.
-                    thread::sleep(Duration::from_millis(10));
-                }
+            self.pump();
+        }
+    }
+
+    fn pump(&mut self) {
+        match self.surface.pump() {
+            Ok(NativePulse::Timer | NativePulse::Dispatched) => {}
+            Ok(NativePulse::Quit) => self.surface.controller_lost(),
+            Err(_) => {
+                self.surface.controller_lost();
+                // Keep accepted owners on their STA after a pump failure,
+                // while avoiding a tight retry loop. Only this host sleeps.
+                thread::sleep(Duration::from_millis(10));
             }
         }
     }
@@ -236,7 +273,7 @@ impl Worker {
         let result = match outcome {
             Step::Pending => return,
             Step::Finished(result) => result,
-            Step::Done => Err(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
+            Step::Done => Err(UNAVAILABLE),
         };
         if let Some(driver) = self.active.take() {
             self.surface.abandon_opening();
