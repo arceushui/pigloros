@@ -391,14 +391,14 @@ fn mismatched_environment_identity_refuses_controller_and_retires_recordless() -
         match case {
             Case::Version => fixture.factory.environment_version.set("153.0.4234.47"),
             Case::RelativeFolder => {
-                *fixture.factory.environment_folder.borrow_mut() = Some("relative".into())
+                *fixture.factory.environment_folder.borrow_mut() = Some("relative".into());
             }
             Case::OtherFolder => {
-                *fixture.factory.environment_folder.borrow_mut() = Some(fixture.root.clone())
+                *fixture.factory.environment_folder.borrow_mut() = Some(fixture.root.clone());
             }
             Case::MissingFolder => {
                 *fixture.factory.environment_folder.borrow_mut() =
-                    Some(fixture.root.join("missing"))
+                    Some(fixture.root.join("missing"));
             }
         }
         assert_eq!(
