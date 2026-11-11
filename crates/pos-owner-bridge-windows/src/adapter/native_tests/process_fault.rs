@@ -1675,6 +1675,47 @@ fn run_success_exit(
     reached.ok_or_else(|| "successful exit point was not reached".into())
 }
 
+#[test]
+fn native_exit_cutpoint_uses_exit_window_after_fixture_readiness_ceiling() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let root = FixtureRoot::new()?;
+    crate::Native::reset_process_failure_observations();
+    let number = 0xe1;
+    let mut fixture = Fixture::new(
+        Path::new(&runtime),
+        &root.0,
+        number,
+        FixtureProfile::SuccessfulGetReleaseDelay,
+    )?;
+    // Preserve the Surface's original readiness deadline; expire only the
+    // unrelated fixture-wide ceiling before the later exit cutpoint.
+    fixture.deadline = Instant::now();
+    let _zero_witness = ZeroWitness::arm();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_success_exit(&mut driver, false)
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let reached = fixture.exit_reached;
+    let complete = fixture.evidence_complete;
+    let verified = result.is_ok() && has_synthetic_success_prf(&driver) && driver.request_clear();
+    let observations = crate::Native::take_native_zero_observations();
+    let native_zeroed = native_zeroing_observed(&observations)
+        && observations
+            .get(1)
+            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    fixture.retire(driver, result, None)?;
+    root.remove()?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    assert!(verified && complete && native_zeroed);
+    assert!(reached.is_some());
+    Ok(())
+}
+
 fn restart_recordless_orphans(store: &mut WindowsCleanupStore) -> TestResult {
     use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
     use pos_owner_bridge::fake::honest::{HonestConfig, HonestPage};
