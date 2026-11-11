@@ -36,7 +36,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{BridgeError, LoopbackPort, ServedSnapshot, UnavailableCode};
 use bind::{bind_loopback, check_ipv6_absent, Ipv6Mode, LoopbackBinder};
@@ -227,6 +227,7 @@ type Work = Box<dyn FnOnce() + Send>;
 /// it was given is dropped, which closes the stream and frees the slot.
 fn dispatch(
     stream: TcpStream,
+    accepted_at: Instant,
     slot: SlotGuard,
     context: &Arc<ServeContext>,
     spawn: impl FnOnce(Work) -> io::Result<()>,
@@ -235,7 +236,7 @@ fn dispatch(
     let work: Work = Box::new(move || {
         let _slot = slot;
         if stream.set_nonblocking(false).is_ok() {
-            serve_connection(stream, &context);
+            serve_connection(stream, accepted_at, &context);
         }
     });
     // A failed spawn has already dropped the work, so there is nothing further to do.
@@ -300,13 +301,14 @@ fn accept_loop(
         let mut slot = slot;
         let accepted = listener.accept();
         if let Ok((stream, _)) = accepted {
+            let accepted_at = Instant::now();
             #[cfg(feature = "test-support")]
             {
                 slot.accepted = true;
                 shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
                 shared.observations.handling.fetch_add(1, Ordering::SeqCst);
             }
-            dispatch(stream, slot, context, spawn_thread);
+            dispatch(stream, accepted_at, slot, context, spawn_thread);
         } else {
             drop(slot);
             pause();

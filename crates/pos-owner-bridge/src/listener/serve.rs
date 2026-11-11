@@ -54,9 +54,6 @@ pub(super) enum SilentReason {
     Other,
 }
 
-/// The shortest read timeout a socket accepts; a passed deadline reads for this long and fails.
-pub(super) const MIN_TIMEOUT: Duration = Duration::from_millis(1);
-
 /// The remaining time until `deadline`, or `None` when it has passed.
 fn remaining(deadline: Instant) -> Option<Duration> {
     deadline
@@ -85,14 +82,19 @@ impl TimedRead for TcpStream {
 pub(super) fn read_request<S: TimedRead>(
     stream: &mut S,
     buffer: &mut [u8; REQUEST_BUFFER_BYTES],
+    accepted_at: Instant,
     timeouts: ListenerTimeouts,
     mut first_byte: impl FnMut(),
     #[cfg(feature = "test-support")] mut silent: impl FnMut(SilentReason),
 ) -> ReadOutcome {
-    let mut deadline = Instant::now() + timeouts.first_byte;
+    let mut deadline = accepted_at + timeouts.first_byte;
     let mut filled = 0;
     loop {
-        let left = remaining(deadline).unwrap_or(MIN_TIMEOUT);
+        let Some(left) = remaining(deadline) else {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Timeout);
+            return ReadOutcome::Silent;
+        };
         let (_, room) = buffer.split_at_mut(filled.min(REQUEST_BUFFER_BYTES));
         let outcome = stream
             .limit_next_read(left)
@@ -200,11 +202,16 @@ pub(super) fn respond<W: Write>(
 }
 
 /// Serve one accepted connection to completion, then close it.
-pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
+pub(super) fn serve_connection(
+    mut stream: TcpStream,
+    accepted_at: Instant,
+    context: &ServeContext,
+) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
     let outcome = read_request(
         &mut stream,
         &mut buffer,
+        accepted_at,
         context.timeouts,
         || {
             #[cfg(feature = "test-support")]

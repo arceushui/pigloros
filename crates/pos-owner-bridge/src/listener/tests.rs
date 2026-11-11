@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pos_owner_bridge_codec::LoopbackRequestDisposition;
 use sha2::{Digest, Sha256};
@@ -448,7 +448,14 @@ fn read_scripted(
 ) -> (ReadOutcome, Vec<Duration>) {
     let mut reader = Scripted::new(chunks);
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let outcome = read_request(&mut reader, &mut buffer, timeouts, || {}, |_| {});
+    let outcome = read_request(
+        &mut reader,
+        &mut buffer,
+        Instant::now(),
+        timeouts,
+        || {},
+        |_| {},
+    );
     (outcome, reader.limits)
 }
 
@@ -462,6 +469,7 @@ fn first_request_byte_is_observed_once_even_without_complete_headers() {
         let outcome = read_request(
             &mut reader,
             &mut buffer,
+            Instant::now(),
             ADR_TIMEOUTS,
             || received += 1,
             |_| {},
@@ -530,6 +538,7 @@ fn silent_read_diagnostics_preserve_the_silent_outcome() {
         let outcome = read_request(
             &mut reader,
             &mut buffer,
+            Instant::now(),
             ADR_TIMEOUTS,
             || {},
             |reason| observed.push(reason),
@@ -558,6 +567,63 @@ fn an_expired_first_byte_deadline_refuses_a_queued_request_without_reading() {
     let (outcome, limits) = read_scripted(vec![Ok(OWNER_REQUEST.to_vec())], timeouts);
     assert_eq!(outcome, ReadOutcome::Silent);
     assert!(limits.is_empty());
+}
+
+#[test]
+fn the_first_byte_deadline_begins_at_accept_before_a_worker_runs() -> TestResult {
+    let accepted_at = Instant::now()
+        .checked_sub(ADR_TIMEOUTS.first_byte)
+        .ok_or("monotonic clock cannot represent the accepted instant")?;
+    let mut reader = Scripted::new(vec![Ok(OWNER_REQUEST.to_vec())]);
+    let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    assert_eq!(
+        read_request(
+            &mut reader,
+            &mut buffer,
+            accepted_at,
+            ADR_TIMEOUTS,
+            || first_bytes += 1,
+            |reason| silent.push(reason),
+        ),
+        ReadOutcome::Silent
+    );
+    assert!(reader.limits.is_empty());
+    assert_eq!(reader.chunks.len(), 1);
+    assert_eq!(first_bytes, 0);
+    assert_eq!(silent, [SilentReason::Timeout]);
+    Ok(())
+}
+
+#[test]
+fn an_expired_header_deadline_refuses_the_remaining_queued_bytes() {
+    let timeouts = ListenerTimeouts {
+        header: Duration::ZERO,
+        ..ADR_TIMEOUTS
+    };
+    let mut reader = Scripted::new(vec![
+        Ok(OWNER_REQUEST[..4].to_vec()),
+        Ok(OWNER_REQUEST[4..].to_vec()),
+    ]);
+    let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    assert_eq!(
+        read_request(
+            &mut reader,
+            &mut buffer,
+            Instant::now(),
+            timeouts,
+            || first_bytes += 1,
+            |reason| silent.push(reason),
+        ),
+        ReadOutcome::Silent
+    );
+    assert_eq!(reader.limits.len(), 1);
+    assert_eq!(reader.chunks.len(), 1);
+    assert_eq!(first_bytes, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
 }
 
 #[test]
@@ -643,7 +709,7 @@ fn a_worker_that_cannot_be_spawned_gives_back_its_slot_and_closes_the_stream() -
     let (mut client, server) = connected()?;
     let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
     assert_eq!(held(&shared), 1);
-    dispatch(server, slot, &serve_context(), |_work| {
+    dispatch(server, Instant::now(), slot, &serve_context(), |_work| {
         Err(io::Error::other("no threads left"))
     });
     assert_eq!(held(&shared), 0);
@@ -658,11 +724,43 @@ fn a_worker_that_runs_gives_back_its_slot_when_it_finishes() -> TestResult {
     let (client, server) = connected()?;
     drop(client);
     let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
-    dispatch(server, slot, &serve_context(), |work| {
+    dispatch(server, Instant::now(), slot, &serve_context(), |work| {
         work();
         Ok(())
     });
     assert_eq!(held(&shared), 0);
+    Ok(())
+}
+
+#[test]
+fn a_delayed_worker_uses_the_original_accept_deadline() -> TestResult {
+    let shared = Arc::new(Shared::default());
+    let context = serve_context();
+    let (mut client, server) = connected()?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    client.write_all(OWNER_REQUEST)?;
+    let accepted_at = Instant::now()
+        .checked_sub(ADR_TIMEOUTS.first_byte)
+        .ok_or("monotonic clock cannot represent the accepted instant")?;
+    let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
+    dispatch(server, accepted_at, slot, &context, |work| {
+        work();
+        Ok(())
+    });
+    assert_eq!(held(&shared), 0);
+    assert_eq!(context.received.load(Ordering::SeqCst), 0);
+    assert_eq!(context.observations.complete.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        context.observations.silent_timeout.load(Ordering::SeqCst),
+        1
+    );
+    match client.read(&mut [0_u8; 1]) {
+        Ok(received) => assert_eq!(received, 0),
+        Err(error) => assert!(matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+        )),
+    }
     Ok(())
 }
 
