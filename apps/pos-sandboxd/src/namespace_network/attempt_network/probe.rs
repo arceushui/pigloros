@@ -219,7 +219,7 @@ pub enum EgressProbeError {
         /// The probe's own failure, which the quarantine outranks, if it
         /// failed too.
         #[source]
-        probe: Option<Box<EgressProbeError>>,
+        probe: Option<Box<Self>>,
     },
 }
 
