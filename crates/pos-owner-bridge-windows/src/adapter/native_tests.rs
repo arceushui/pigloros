@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -161,58 +160,22 @@ fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestRe
     Ok(())
 }
 
-fn diagnostic(arguments: std::fmt::Arguments<'_>) {
-    let thread = std::thread::current();
-    let _logged_or_unavailable = writeln!(
-        std::io::stderr(),
-        "[DEBUG-535-E8] process={} thread={:?} test={:?} {arguments}",
-        std::process::id(),
-        thread.id(),
-        thread.name()
-    );
-}
-
-fn diagnostic_error(error: &dyn std::error::Error) -> String {
-    error.to_string().chars().take(512).collect()
-}
-
-#[test]
-fn diagnostic_error_summary_bounds_ascii_and_multibyte_output() {
-    for (text, expected) in [
-        (String::new(), String::new()),
-        ("a".repeat(513), "a".repeat(512)),
-        ("🦀".repeat(513), "🦀".repeat(512)),
-    ] {
-        let error = std::io::Error::other(text);
-        let summary = diagnostic_error(&error);
-        assert_eq!(summary, expected);
-        assert!(summary.len() <= 2_048);
-    }
-}
-
 fn pump_until(
     factory: &dyn StaPump,
     stage: &str,
     mut observed: impl FnMut() -> bool,
 ) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(15);
-    diagnostic(format_args!("pump.enter stage={stage}"));
     while !observed() {
         if Instant::now() >= deadline {
-            diagnostic(format_args!("pump.expired stage={stage}"));
             return Err(
                 format!("native fixture deadline expired while waiting for {stage}").into(),
             );
         }
-        let pulse = factory.next().inspect_err(|error| {
-            diagnostic(format_args!("pump.failed stage={stage} error={error:?}"));
-        })?;
-        if pulse == NativePulse::Quit {
-            diagnostic(format_args!("pump.quit stage={stage}"));
+        if factory.next()? == NativePulse::Quit {
             return Err(format!("native fixture received quit while waiting for {stage}").into());
         }
     }
-    diagnostic(format_args!("pump.complete stage={stage}"));
     Ok(())
 }
 
@@ -524,9 +487,7 @@ impl crate::Native {
         super::settings::apply(native.as_ref()).map_err(pos_owner_bridge::SurfaceError::error)?;
         native.fit_controller()?;
         native.show_window()?;
-        diagnostic(format_args!("lifecycle.focus.enter"));
         native.focus_controller()?;
-        diagnostic(format_args!("lifecycle.focus.complete"));
         listener.begin_navigation();
         events.begin();
         native.navigate_owner()?;
@@ -536,11 +497,8 @@ impl crate::Native {
         assert!(!events.invalid());
         assert_eq!(listener.served().count, 1);
         assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
-        diagnostic(format_args!("lifecycle.unacknowledged_buffers.enter"));
         exercise_unacknowledged_buffers(&factory, native.as_mut())?;
-        diagnostic(format_args!("lifecycle.packaged_receipt.enter"));
         exercise_packaged_get_receipt(&factory, native.as_mut())?;
-        diagnostic(format_args!("lifecycle.controller_close.enter"));
         native.unsubscribe_view()?;
         native.unsubscribe_view()?;
         native.close_controller()?;

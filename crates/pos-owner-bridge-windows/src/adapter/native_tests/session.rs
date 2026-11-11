@@ -82,26 +82,10 @@ impl DerefMut for Session<'_> {
 
 impl Drop for Session<'_> {
     fn drop(&mut self) {
-        let mut iteration = 0_u32;
         loop {
-            let report = iteration == 0 || iteration.is_power_of_two();
-            if report {
-                super::diagnostic(format_args!(
-                    "raw.retire.close_buffers iteration={iteration}"
-                ));
-            }
             let _zeroed_or_retained = self.native.close_buffers();
-            if report {
-                super::diagnostic(format_args!("raw.retire.completions iteration={iteration}"));
-            }
             let _environment = self.native.environment_completion();
             let _controller = self.controller_completion();
-            if report {
-                super::diagnostic(format_args!(
-                    "raw.retire.cached iteration={iteration} pid={:?} had_controller={} exited={:?}",
-                    self.browser_pid.get(), self.had_controller.get(), self.events.exited()
-                ));
-            }
             if !self.native.pending() {
                 if let Ok(has_controller) = self.native.has_controller() {
                     self.had_controller
@@ -121,7 +105,6 @@ impl Drop for Session<'_> {
                             && self.native.drop_environment().is_ok()
                             && self.native.destroy_window().is_ok()
                         {
-                            super::diagnostic(format_args!("raw.retire.complete"));
                             break;
                         }
                     } else if self.browser_pid.get().is_some() {
@@ -130,16 +113,7 @@ impl Drop for Session<'_> {
                     }
                 }
             }
-            if report {
-                super::diagnostic(format_args!("raw.retire.pump.enter iteration={iteration}"));
-            }
             self.pump_retaining();
-            if report {
-                super::diagnostic(format_args!(
-                    "raw.retire.pump.complete iteration={iteration}"
-                ));
-            }
-            iteration = iteration.saturating_add(1);
         }
     }
 }

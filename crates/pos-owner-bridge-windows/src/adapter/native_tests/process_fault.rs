@@ -540,11 +540,6 @@ impl Fixture {
             Ok(Err(error)) => error,
             Err(_) => "process fault fixture panicked".into(),
         };
-        let summary = super::diagnostic_error(failure.as_ref());
-        super::diagnostic(format_args!(
-            "fault.drive.failed case={} error={summary:?}",
-            self.number
-        ));
         let result = readiness::cancel_driver(
             driver,
             &mut self.surface,
@@ -1634,11 +1629,6 @@ fn run_success_exit(
         && observations
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
-    let summary = failure.as_deref().map(super::diagnostic_error);
-    super::diagnostic(format_args!(
-        "exit_case.before_retire case={number} driver_error={:?} fixture_error={summary:?} reached={reached:?} verified={verified} complete={complete} native_zeroed={native_zeroed}",
-        result.as_ref().err()
-    ));
     fixture.retire(driver, result, None)?;
     let actual_fault =
         inject && reached.is_some_and(|state| matches!(state, ExitBoundary::ActiveStatus(_)));
@@ -4300,16 +4290,7 @@ impl Fixture {
         provenance: &mut Option<pos_owner_bridge::ProcessIdentity>,
         failure_stage: &mut Option<&'static str>,
     ) -> DriveResult {
-        // Temporary [DEBUG-535-E8] phase observer. Its elapsed time starts here.
-        // The driver and surface retain their existing original deadlines.
-        let mut progress = super::trace::Trace::new(u64::from(self.number), Instant::now());
         loop {
-            progress.update(
-                "DEBUG-535-E8-fresh-active",
-                &self.surface,
-                driver,
-                &self.loopback,
-            );
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -4324,15 +4305,7 @@ impl Fixture {
                 )?);
             }
             match step {
-                Step::Finished(result) => {
-                    progress.update(
-                        "DEBUG-535-E8-fresh-finished",
-                        &self.surface,
-                        driver,
-                        &self.loopback,
-                    );
-                    return Ok(result);
-                }
+                Step::Finished(result) => return Ok(result),
                 Step::Done => {
                     *failure_stage = Some("driver_done");
                     return Err("fresh success driver ended without result".into());

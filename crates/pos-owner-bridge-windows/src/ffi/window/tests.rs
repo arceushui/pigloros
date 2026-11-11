@@ -34,6 +34,19 @@ fn close_interception_signals_only_the_registered_owned_window() -> Result<(), N
     assert!(intercept(&system_close));
     assert!(second.snapshot()?.close_requested);
     first.destroy()?;
+    let retired = first.snapshot()?;
+    assert!(!retired.exists);
+    assert!(retired.close_requested);
+    assert_eq!(retired.dpi, 0);
+    assert_eq!(
+        retired.client,
+        crate::ClientBounds {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }
+    );
     assert!(!intercept(&close));
     assert!(!intercept(&MSG {
         message: WM_CLOSE,
