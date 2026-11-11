@@ -2802,6 +2802,50 @@ fn run_posted_retry(
     state.ok_or_else(|| "retry empty-reply state was not reached".into())
 }
 
+#[test]
+fn diagnostic_pre_readiness_resource_and_listener_timing() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let root = FixtureRoot::new()?;
+    let mut failures = 0_u32;
+    for sample in 1..=16 {
+        for case in [49_u8, 100] {
+            let result = if case == 49 {
+                run_case(
+                    Path::new(&runtime),
+                    &root.0,
+                    case,
+                    ProcessFaultTarget::Renderer,
+                    false,
+                )
+            } else {
+                run_posted_retry(
+                    Path::new(&runtime),
+                    &root.0,
+                    case,
+                    ProcessFaultTarget::Renderer,
+                    crate::RetryPoint::Seventh,
+                    false,
+                )
+            };
+            let _logged = writeln!(
+                std::io::stderr(),
+                "DEBUG-535-T0 sample={sample} case={case} result={result:?}"
+            );
+            if result.is_err() {
+                failures += 1;
+            }
+        }
+    }
+    root.remove()?;
+    if failures == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failures} diagnostic samples failed").into())
+    }
+}
+
 // The wrapper delegates the real Surface CAS. Its only intervention is after
 // the driver's successful READY -> CONSUMING exchange, before it returns.
 struct ConsumingPort<'a> {
