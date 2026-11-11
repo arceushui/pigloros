@@ -264,4 +264,43 @@ mod tests {
         drop(subscriptions);
         assert_eq!(*calls.borrow(), ["second", "first", "first"]);
     }
+
+    #[test]
+    fn modeled_subscriptions_retain_every_failed_remover_across_multiple_retries() {
+        let attempts = Rc::new(RefCell::new([0; 3]));
+        let mut subscriptions = Subscriptions::default();
+        for (index, failures) in [2, 1, 0].into_iter().enumerate() {
+            let observed = Rc::clone(&attempts);
+            assert_eq!(
+                subscriptions.register(
+                    |_| Ok(()),
+                    move |_| {
+                        let mut calls = observed.borrow_mut();
+                        calls[index] += 1;
+                        if calls[index] <= failures {
+                            Err(Error::from_hresult(HRESULT(-1)))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ),
+                Ok(())
+            );
+        }
+        let error = NativeError {
+            operation: Operation::Subscription,
+            failure: Failure::CallFailed,
+        };
+        assert_eq!(subscriptions.close(), Err(error));
+        assert_eq!(*attempts.borrow(), [1, 1, 1]);
+        assert_eq!(subscriptions.removers.len(), 2);
+        assert_eq!(subscriptions.close(), Err(error));
+        assert_eq!(*attempts.borrow(), [2, 2, 1]);
+        assert_eq!(subscriptions.removers.len(), 1);
+        assert_eq!(subscriptions.close(), Ok(()));
+        assert_eq!(*attempts.borrow(), [3, 2, 1]);
+        assert!(subscriptions.removers.is_empty());
+        drop(subscriptions);
+        assert_eq!(*attempts.borrow(), [3, 2, 1]);
+    }
 }
