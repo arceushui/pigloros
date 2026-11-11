@@ -76,9 +76,9 @@ pub enum InvalidEgressProbe {
     #[error("the egress probe's network is not the network address of an IPv4 /30")]
     Misaligned,
     /// The /30 lies in `0.0.0.0/8`, loopback `127.0.0.0/8`, link-local
-    /// `169.254.0.0/16`, multicast `224.0.0.0/4` or the reserved
-    /// `240.0.0.0/4`, which includes the limited broadcast address: none of
-    /// them can address a veth link. No other range is refused here.
+    /// `169.254.0.0/16` or `224.0.0.0/3`, which is multicast `224.0.0.0/4`
+    /// and the reserved `240.0.0.0/4` with the limited broadcast address:
+    /// none of them can address a veth link. No other range is refused here.
     #[error(
         "the egress probe's /30 lies in 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16 or 224.0.0.0/3"
     )]
@@ -322,6 +322,20 @@ where
         probe: EgressProbe,
     ) -> Result<(), EgressProbeError> {
         let _running = Running::claim(&self.probing).ok_or(EgressProbeError::InFlight)?;
+        // Whatever the probe's outcome, a quarantined port is reported
+        // first, since it outlasts every other failure, with that outcome's
+        // failure as its source: a passing connection cannot reopen
+        // admission over a port that can establish no attempt.
+        self.unquarantined(self.probe_once(host_session, probe))
+    }
+
+    /// One probe of [`Self::probe_egress_through`], while it holds the
+    /// network's claim.
+    fn probe_once<T: NetlinkTransport>(
+        &self,
+        host_session: impl FnOnce() -> Result<NetlinkSession<T>, NetlinkError>,
+        probe: EgressProbe,
+    ) -> Result<(), EgressProbeError> {
         // The range and the /30 are both aligned, so they overlap exactly
         // when the range holds the /30's network address.
         if self.range.contains(IpAddr::V4(probe.network)) {
@@ -355,12 +369,9 @@ where
                     .ok_or(EgressProbeError::NotMasqueraded)
             });
         let removed = remove_target(&self.namespaces).map_err(EgressProbeError::Target);
-        // The probe's connector is gone by now. If its teardown failed, the
-        // port is quarantined and no attempt could be established, so the
-        // property is not present even when the connection passed. That is
-        // reported first, since it outlasts every other failure, and carries
-        // the probe's own failure as its source.
-        self.unquarantined(probed.and(removed))
+        // The probe's connector is gone by now: if its teardown failed, the
+        // port is quarantined, which the caller reports.
+        probed.and(removed)
     }
 
     /// `outcome`, unless a slot of the port is quarantined: then the

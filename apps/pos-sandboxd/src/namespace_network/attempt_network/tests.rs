@@ -514,33 +514,56 @@ async fn restart_reconciliation_probes_the_port_attempts_use() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_quarantined_port_fails_the_probe_first() -> TestResult {
-    let directory = tempfile::tempdir()?;
+/// A network whose port is quarantined: its one attempt network's egress
+/// could not be removed.
+fn quarantined(
+    directory: &std::path::Path,
+) -> TestResult<NamespacedLocalNetwork<FakeControl, FakeEgress>> {
     let unremovable = FakeEgress {
         refuse_removal: true,
         ..FakeEgress::default()
     };
-    let (stuck, _) = network_with(
-        directory.path(),
-        pinning(directory.path()),
-        &unremovable,
-        24,
-    )?;
+    let (stuck, _) = network_with(directory, pinning(directory), &unremovable, 24)?;
     drop(stuck.establish([3; 16], &[ENDPOINT])?);
-    // Without privileges the probe's target cannot be created either; the
-    // quarantine, which outlasts that, is what the probe reports.
+    Ok(stuck)
+}
+
+#[test]
+fn a_quarantined_port_fails_the_probe_first() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let stuck = quarantined(directory.path())?;
+    // However far the probe gets on this host, the quarantine, which
+    // outlasts every other failure, is what it reports.
     let probed = stuck.probe_egress_through(
         || Ok(host_with(&[Ipv4Addr::new(10, 0, 0, 1)])),
         probe_network()?,
     );
-    // The probe's own failure is kept as the quarantine's source.
     assert!(
         matches!(
             &probed,
-            Err(EgressProbeError::Quarantined { slot: 0, reason, probe: Some(outcome) })
+            Err(EgressProbeError::Quarantined { slot: 0, reason, probe: Some(_) })
                 if reason == &HostEgressError::Readback.to_string()
-                    && matches!(**outcome, EgressProbeError::Target(_))
+        ),
+        "{probed:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_quarantine_keeps_the_probes_own_failure_as_its_source() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let stuck = quarantined(directory.path())?;
+    // The host cannot be read: the probe fails there on any host, with or
+    // without privileges, before anything is set up.
+    let probed = stuck.probe_egress_through(
+        || -> Result<NetlinkSession<HostReplies>, _> { Err(NetlinkError::Unexpected) },
+        probe_network()?,
+    );
+    assert!(
+        matches!(
+            &probed,
+            Err(EgressProbeError::Quarantined { slot: 0, probe: Some(outcome), .. })
+                if matches!(**outcome, EgressProbeError::Target(NetlinkError::Unexpected))
         ),
         "{probed:?}"
     );
