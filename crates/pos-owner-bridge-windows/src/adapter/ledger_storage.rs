@@ -485,6 +485,8 @@ mod native_tests {
     fn assert_path_admission() {
         let invalid = PathBuf::from(OsString::from_wide(&[b'x'.into(), 0, b'y'.into()]));
         assert!(crate::Native::create_private_ledger_file(&invalid).is_err());
+        assert!(crate::Native::replace_ledger(&invalid, Path::new("valid")).is_err());
+        assert!(crate::Native::replace_ledger(Path::new("valid"), &invalid).is_err());
         for path in [
             r"relative\path",
             r"C:relative",
