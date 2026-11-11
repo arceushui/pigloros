@@ -9,6 +9,27 @@ use pos_owner_bridge::{MonotonicClock, OwnerWebSurface, SurfaceSpec};
 use super::{spec, Creation, Fixture, TestResult};
 use crate::NativeEvent;
 
+#[test]
+fn modeled_mismatched_folder_refuses_before_window_creation_and_allows_fresh_open() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let correct = spec(40);
+    let mut wrong = spec(40);
+    wrong.folder_name = spec(41).folder_name;
+    assert!(matches!(fixture.surface.open(&wrong), Poll::Ready(Err(_))));
+    assert!(fixture.surface.idle());
+    assert!(!fixture.root.join(&wrong.folder_name).exists());
+    assert!(!fixture.root.join(&correct.folder_name).exists());
+    fixture.assert_no_ceremony_data();
+    for call in ["create_window", "create_environment"] {
+        assert!(!fixture.factory.calls.borrow().contains(&call));
+    }
+    let identity = fixture
+        .open(&correct)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    fixture.finish()
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
     Environment,

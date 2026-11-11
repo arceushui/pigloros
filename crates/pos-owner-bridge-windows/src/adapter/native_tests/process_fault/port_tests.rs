@@ -266,3 +266,103 @@ fn before_record_store_preserves_durable_results_after_a_failed_observation() ->
     drop(fixture);
     root.remove()
 }
+
+#[test]
+fn modeled_pre_record_observation_requires_matching_driver_and_record_identity() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let selected = fixed_competing_spec(MODEL_CASE);
+    let other = fixed_competing_spec(MODEL_CASE + 1);
+    let ceremony = selected.ceremony_id;
+    let folder = selected.folder_name.as_str();
+    let other_ceremony = other.ceremony_id;
+    let other_folder = other.folder_name.as_str();
+    let wrong_pid = ProcessIdentity {
+        browser_pid: 43,
+        ..identity()
+    };
+    let wrong_creation = ProcessIdentity {
+        creation_filetime: 2,
+        ..identity()
+    };
+    let wrong_image = ProcessIdentity {
+        image_path_sha256: ImagePathSha256::from_bytes([8; 32]),
+        ..identity()
+    };
+    let mismatch = Some("pre-record proposed identity or driver state mismatched");
+    let cases = [
+        (1, 0, ceremony, folder, identity(), None),
+        (2, 0, ceremony, folder, identity(), mismatch),
+        (1, 1, ceremony, folder, identity(), mismatch),
+        (1, 0, other_ceremony, other_folder, identity(), mismatch),
+        (1, 0, ceremony, other_folder, identity(), mismatch),
+        (1, 0, ceremony, folder, wrong_pid, mismatch),
+        (1, 0, ceremony, folder, wrong_creation, mismatch),
+        (1, 0, ceremony, folder, wrong_image, mismatch),
+    ];
+    for (generation, posts, record_ceremony, record_folder, record_identity, expected) in cases {
+        let record = cleanup_record_bytes(record_ceremony, record_folder, &record_identity)?;
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model) = fixture(&root)?;
+        model.preload_owners.set(true);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert_eq!(fixture.surface.open(&selected), Poll::Ready(Ok(identity())));
+        assert_eq!(fixture.surface.before_record_fault_state(), Ok(identity()));
+        assert!(fixture.surface.before_record_owners_retained());
+        {
+            let surface = RefCell::new(&mut fixture.surface);
+            let mut port = BeforeRecordStore {
+                inner: &mut fixture.store,
+                surface: &surface,
+                inject: false,
+                target: ProcessFaultTarget::Browser,
+                presence: None,
+                deadline: fixture.deadline,
+                trace: Rc::clone(&fixture.trace),
+                handle: None,
+                failure: None,
+                reached: false,
+                written: false,
+                generation,
+                posts,
+                ceremony_id: selected.ceremony_id,
+            };
+            let error = port.on_write(&record).err().map(|error| error.to_string());
+            assert_eq!(error.as_deref(), expected);
+            assert_eq!(port.reached, expected.is_none());
+            assert!(port.handle.is_none());
+            assert!(!port.written);
+            assert!(port.failure.is_none());
+            assert!(port.records()?.is_empty());
+            assert!(surface.borrow_mut().before_record_owners_retained());
+            if expected.is_none() {
+                assert_eq!(
+                    port.trace.borrow().as_slice(),
+                    &[crate::ProcessFaultMark::BeforeRecord {
+                        generation: 1,
+                        record_count: 0
+                    }]
+                );
+                let repeated = port.on_write(&record).err().map(|error| error.to_string());
+                assert_eq!(repeated.as_deref(), Some("record write observed twice"));
+                assert_eq!(port.trace.borrow().len(), 1);
+            } else {
+                assert!(port.trace.borrow().is_empty());
+            }
+        }
+        for call in ["navigate", "create_buffers", "post"] {
+            assert!(!model.calls.borrow().contains(&call));
+        }
+        fixture
+            .surface
+            .close_controller()
+            .map_err(SurfaceError::error)?;
+        let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        fixture.surface.finish().map_err(SurfaceError::error)?;
+        assert!(fixture.surface.idle());
+        drop(fixture);
+        root.remove()?;
+    }
+    Ok(())
+}
