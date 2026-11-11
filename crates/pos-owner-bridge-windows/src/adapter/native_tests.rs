@@ -627,6 +627,13 @@ fn exercise_unacknowledged_buffers(
     let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)
         .map_err(|error| error.to_string())?
         .encode();
+    assert!(native
+        .create_buffers(
+            CeremonyKind::Create,
+            &request[..request.len() - 1],
+            &reply_header
+        )
+        .is_err());
     native.create_buffers(CeremonyKind::Create, &request, &reply_header)?;
     assert!(native
         .create_buffers(CeremonyKind::Create, &request, &reply_header)

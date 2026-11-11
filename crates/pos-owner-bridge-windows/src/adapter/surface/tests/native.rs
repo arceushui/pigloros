@@ -45,6 +45,7 @@ pub(in crate::adapter) struct Factory {
     pub(super) window_exists: Cell<bool>,
     pub(super) close_requested: Cell<bool>,
     pub(super) exit_code: Cell<Option<u32>>,
+    pub(super) pending_browser: Cell<Option<pos_owner_bridge::ProcessIdentity>>,
     pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
 }
@@ -70,6 +71,7 @@ impl Factory {
             window_exists: Cell::new(true),
             close_requested: Cell::new(false),
             exit_code: Cell::new(None),
+            pending_browser: Cell::new(None),
             client: Cell::new(ClientBounds {
                 left: 0,
                 top: 0,
@@ -222,6 +224,7 @@ impl NativeOperations for Session {
 
     fn pending_opening_owners_retained(&self) -> bool {
         self.controller_pending
+            && self.factory.failure.get() != Some("pending-owner")
             && (self.factory.failure.get() != Some("pending-owner-after")
                 || !self.factory.calls.borrow().contains(&"pending_candidate"))
     }
@@ -230,7 +233,8 @@ impl NativeOperations for Session {
         &self,
     ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
         self.call("pending_candidate");
-        Ok(None)
+        self.check("pending_candidate").map_err(|_| ())?;
+        Ok(self.factory.pending_browser.get())
     }
 
     fn recordless_controller_completion(&self) -> Option<bool> {

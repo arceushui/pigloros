@@ -20,6 +20,7 @@ use crate::{NativeEvent, NativeFactory};
 use native::{Creation, Factory};
 
 mod exit_boundary_tests;
+mod fault_admission;
 pub(in crate::adapter) mod native;
 mod pending_creation;
 mod posting;

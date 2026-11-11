@@ -12,6 +12,9 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct ObstructionFactory<F> {
     inner: F,
     expected: PathBuf,

@@ -436,3 +436,6 @@ impl crate::Native {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

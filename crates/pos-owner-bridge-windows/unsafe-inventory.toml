@@ -1197,7 +1197,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/text.rs"
-line = 24
+line = 23
 function = "extract"
 operation = "raw.0.wrapping_add(index).read()"
 invariant = "the successful getter transfers a valid NUL-terminated COM allocation retained by _memory. Read only through its first NUL or the fixed extraction bound, whichever occurs first. No unbounded length scan, borrowed native string, or native allocation escapes."
