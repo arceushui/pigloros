@@ -173,3 +173,27 @@ fn redact_sids(text: &str, current_sid: &str) -> String {
     result.push_str(remaining);
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redact_sids;
+
+    #[test]
+    fn diagnostic_redaction_preserves_context_without_exposing_sids() {
+        let current = "S-1-5-21-123";
+        let cases = [
+            ("owner=S-1-5-21-123", "owner=<CURRENT>"),
+            ("owner=S-1-5-21-456", "owner=<OTHER>"),
+            (
+                "O:S-1-5-21-123 D:(A;;FA;;;S-1-5-21-456)",
+                "O:<CURRENT> D:(A;;FA;;;<OTHER>)",
+            ),
+            ("no identities here", "no identities here"),
+            ("[S-1-5-21-123], S-1-5-21-456!", "[<CURRENT>], <OTHER>!"),
+            ("end:S-1-5-21-456", "end:<OTHER>"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_sids(input, current), expected, "{input}");
+        }
+    }
+}
