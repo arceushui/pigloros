@@ -10,3 +10,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Run normal public bundle test target
         run: cargo test -p pos-plugin-content --test bundle_public --all-features --locked -- --include-ignored
+      - name: Check content package lint policy
+        run: cargo clippy -p pos-plugin-content --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
