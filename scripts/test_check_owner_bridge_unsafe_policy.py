@@ -2147,6 +2147,7 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "verdict.validate()?;", "let _ignored = verdict.validate();"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert!(!*port.reached.borrow());", "assert!(*port.reached.borrow());"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(error.as_deref(), expected);", "let _ignored = expected;"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "(1, 0, other_ceremony, folder, identity(), mismatch)", "(1, 0, other_ceremony, other_folder, identity(), mismatch)"),
         (f"{SHIM}/src/adapter/surface/tests/native.rs", "preload_owners: Cell::new(false),", "preload_owners: Cell::new(true),"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(port.write_record(&[]), Err(pos_owner_bridge::CleanupError));", ""),
         (f"{SHIM}/src/ffi/events/mod.rs", "assert_eq!(subscriptions.removers.len(), 1);", "assert!(subscriptions.removers.is_empty());"),

@@ -293,7 +293,7 @@ fn modeled_pre_record_observation_requires_matching_driver_and_record_identity()
         (1, 0, ceremony, folder, identity(), None),
         (2, 0, ceremony, folder, identity(), mismatch),
         (1, 1, ceremony, folder, identity(), mismatch),
-        (1, 0, other_ceremony, other_folder, identity(), mismatch),
+        (1, 0, other_ceremony, folder, identity(), mismatch),
         (1, 0, ceremony, other_folder, identity(), mismatch),
         (1, 0, ceremony, folder, wrong_pid, mismatch),
         (1, 0, ceremony, folder, wrong_creation, mismatch),
