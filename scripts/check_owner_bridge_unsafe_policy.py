@@ -1311,7 +1311,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "51d3ad523210cb033527f14c42bd8c509364f0fad390cf3e4ec565b3c9ab1582":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "ac41466f3ab5abe0e1fe415d4e94610e585d5f497507a09be626994452b4a8e7":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1570,7 +1570,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '63328d75b7034f3215cd86f5977c2e6451b9d70f0ac1897b0a42e3f7b70f31db',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '6f83a00451aa0b76216d567820a0f229cce716a9e1b908c929c69e7bf387eb0b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': 'b0ede6304f3b6ff6af9d74eab409efed9f7af311feec7b5ca0e722e0d0ab8ff4',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '797f1d0d6b9be71e408e87957b16c5e75ee3a2fdab35e8107ee730f8bd6bf8a8',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '7092d9da1b8dc450df5eb0abb81840ed9435105c3815f66a69715ae72591b2e5',

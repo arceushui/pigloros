@@ -148,7 +148,11 @@ const fn unavailable() -> NativeError {
 
 #[cfg(test)]
 impl crate::Native {
-    pub(crate) fn retain_fault_apartment() -> Result<impl Drop> {
-        Apartment::new()
+    pub(crate) fn retain_fault_apartment(enabled: bool) -> Result<Option<impl Drop>> {
+        if enabled {
+            Apartment::new().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 }
