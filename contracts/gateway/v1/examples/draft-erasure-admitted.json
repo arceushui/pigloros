@@ -1,0 +1,31 @@
+{
+  "name": "draft-erasure-admitted",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-21",
+      "content-type": "application/json"
+    },
+    "body": {
+      "scopes": [
+        "private-subject-data"
+      ],
+      "impact_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 202,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:admission-receipt",
+      "request_id": "01JC0GATEWAYW90REQVEST0001",
+      "operation_id": "01JC0GATEWAYW90QPERAT10N01",
+      "state": "admitted",
+      "operation_url": "/v1/me/erasures/01JC0GATEWAYW90ERASVRE0001",
+      "idempotency_key_digest": "0909090909090909090909090909090909090909090909090909090909090909",
+      "bound_inputs": {
+        "scope": "1919191919191919191919191919191919191919191919191919191919191919"
+      }
+    }
+  }
+}

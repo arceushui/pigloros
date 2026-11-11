@@ -5,6 +5,7 @@
 //! length above the limit is rejected before any body byte is read.
 
 use std::io::{self, Read, Write};
+use zeroize::Zeroizing;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_runtime::community_plugin_host::{
@@ -94,27 +95,33 @@ pub fn write_frame(
         .ok()
         .filter(|_| (1..=limit).contains(&bytes.len()))
         .ok_or(FrameFaultV1::OutOfBounds)?;
+    let prefix = Zeroizing::new(length.to_be_bytes());
     writer
-        .write_all(&length.to_be_bytes())
+        .write_all(&*prefix)
         .and_then(|()| writer.write_all(bytes))
         .and_then(|()| writer.flush())
         .map_err(|_| FrameFaultV1::Io)
 }
 
 /// Read one frame of 1 to `limit` bytes.
+/// Its single pre-sized body allocation is zeroizing on success and on partial
+/// read failure; callers keep that ownership while decoding or transferring it.
 ///
 /// # Errors
 /// Returns `Truncated` when the stream ends inside the prefix or body,
 /// `OutOfBounds` for a zero or over-limit length (no body byte is read), and
 /// `Io` when the stream fails.
-pub fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>, FrameFaultV1> {
-    let mut prefix = [0; 4];
-    read_exactly(reader, &mut prefix)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix))
+pub fn read_frame(
+    reader: &mut impl Read,
+    limit: usize,
+) -> Result<Zeroizing<Vec<u8>>, FrameFaultV1> {
+    let mut prefix = Zeroizing::new([0; 4]);
+    read_exactly(reader, &mut *prefix)?;
+    let length = usize::try_from(u32::from_be_bytes(*prefix))
         .ok()
         .filter(|length| (1..=limit).contains(length))
         .ok_or(FrameFaultV1::OutOfBounds)?;
-    let mut bytes = vec![0; length];
+    let mut bytes = Zeroizing::new(vec![0; length]);
     read_exactly(reader, &mut bytes).map(|()| bytes)
 }
 
@@ -184,12 +191,18 @@ mod tests {
         assert_eq!(write_frame(&mut out, b"abc", 3), Ok(()));
         assert_eq!(out, [0, 0, 0, 3, b'a', b'b', b'c']);
         let mut reader = out.as_slice();
-        assert_eq!(read_frame(&mut reader, 3), Ok(b"abc".to_vec()));
+        assert_eq!(
+            read_frame(&mut reader, 3),
+            Ok(Zeroizing::new(b"abc".to_vec()))
+        );
         assert_eq!(require_end(&mut reader), Ok(()));
         let mut large = Vec::new();
         assert_eq!(write_frame(&mut large, &[7; 300], 300), Ok(()));
         assert_eq!(large[..4], [0, 0, 1, 44]);
-        assert_eq!(read_frame(&mut large.as_slice(), 300), Ok(vec![7; 300]));
+        assert_eq!(
+            read_frame(&mut large.as_slice(), 300),
+            Ok(Zeroizing::new(vec![7; 300]))
+        );
     }
 
     #[test]

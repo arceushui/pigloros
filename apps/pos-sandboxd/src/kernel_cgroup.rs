@@ -403,6 +403,10 @@ impl crate::UnitCgroup for BoundAttemptCgroup {
     fn kill_all(&mut self) -> Result<(), AttemptCgroupError> {
         Self::kill_all(self)
     }
+
+    fn identity(&self) -> (u64, u64) {
+        (self.identity.device, self.identity.inode)
+    }
 }
 
 fn relative_cgroup_path(path: &str) -> Result<&str, AttemptCgroupError> {

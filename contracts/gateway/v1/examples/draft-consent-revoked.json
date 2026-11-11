@@ -1,0 +1,39 @@
+{
+  "name": "draft-consent-revoked",
+  "operation_id": "revokeConsent",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-19",
+      "content-type": "application/json"
+    },
+    "body": {
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+      "id": "01JC0GATEWAYW90C0NSENT0001",
+      "generation": 4,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "principal-authored"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001",
+      "state": "revoked",
+      "future_protected_work": "denied"
+    }
+  }
+}

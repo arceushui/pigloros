@@ -8,8 +8,8 @@
 
 #[cfg(target_os = "linux")]
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicU8, Ordering},
+    Arc, OnceLock,
 };
 
 #[cfg(target_os = "linux")]
@@ -25,13 +25,19 @@ mod kernel_cgroup;
 #[cfg(target_os = "linux")]
 pub mod launcher;
 #[cfg(target_os = "linux")]
+mod lifecycle;
+#[cfg(target_os = "linux")]
 mod local_network;
+#[cfg(target_os = "linux")]
+mod namespace_network;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
+#[cfg(target_os = "linux")]
+mod restart;
 #[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
@@ -45,13 +51,41 @@ mod system_bus;
 pub mod test_fixtures;
 mod transient_unit;
 
+/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
+#[cfg(target_os = "linux")]
+type BootInstant = ([u8; 16], std::time::Duration);
+
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
 
 /// One irreversible execution claim, shared by the exact prepared directory.
+///
+/// Its phase only moves forward: open, then claimed, then either submitted
+/// (a unit start was requested) or fenced (no unit start can ever be
+/// requested). The cgroup that the submitting execution bound is recorded
+/// once, so terminal cleanup accepts stop evidence only for that cgroup.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Default)]
-struct ExecutionOwnership(Arc<AtomicBool>);
+struct ExecutionOwnership(Arc<ExecutionState>);
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct ExecutionState {
+    phase: AtomicU8,
+    cgroup: OnceLock<(u64, u64)>,
+}
+
+// Phase tags, not an order: FENCED (2) and SUBMITTED (3) are both terminal and
+// neither follows the other. Compare phases only with compare-and-swap or
+// `==`/`!=`, never with `<`/`>`.
+#[cfg(target_os = "linux")]
+const EXECUTION_OPEN: u8 = 0;
+#[cfg(target_os = "linux")]
+const EXECUTION_CLAIMED: u8 = 1;
+#[cfg(target_os = "linux")]
+const EXECUTION_FENCED: u8 = 2;
+#[cfg(target_os = "linux")]
+const EXECUTION_SUBMITTED: u8 = 3;
 
 #[cfg(target_os = "linux")]
 impl PartialEq for ExecutionOwnership {
@@ -67,12 +101,43 @@ impl Eq for ExecutionOwnership {}
 impl ExecutionOwnership {
     /// Close this owner's start permission without releasing admission resources.
     fn close(&self) {
-        self.0.store(true, Ordering::Release);
+        self.advance(EXECUTION_OPEN, EXECUTION_FENCED).ok();
     }
 
     fn claim(&self) -> Result<(), ExecuteError> {
+        self.advance(EXECUTION_OPEN, EXECUTION_CLAIMED)
+    }
+
+    /// Record, immediately before the unit start is requested, that the
+    /// claimed execution may have created a unit. Refused once fenced.
+    fn submit(&self) -> Result<(), ExecuteError> {
+        self.advance(EXECUTION_CLAIMED, EXECUTION_SUBMITTED)
+    }
+
+    /// Record the exact cgroup the submitted execution bound to its unit.
+    fn bind_cgroup(&self, identity: (u64, u64)) {
+        self.0.cgroup.set(identity).ok();
+    }
+
+    /// Fence every future unit start; `false` when one was already requested.
+    fn fence_unsubmitted(&self) -> bool {
         self.0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .phase
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |phase| {
+                (phase != EXECUTION_SUBMITTED).then_some(EXECUTION_FENCED)
+            })
+            .is_ok()
+    }
+
+    /// Whether `identity` is the cgroup this owner's execution bound.
+    fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
+        self.0.cgroup.get() == Some(&identity)
+    }
+
+    fn advance(&self, from: u8, to: u8) -> Result<(), ExecuteError> {
+        self.0
+            .phase
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| ())
             .map_err(|_| ExecuteError::AttemptAlreadyClaimed)
     }
@@ -97,18 +162,39 @@ pub use execute::{
     UnitState,
 };
 #[cfg(target_os = "linux")]
+pub use lifecycle::{finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError};
+#[cfg(target_os = "linux")]
 pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
     ServedProxy,
 };
+#[cfg(target_os = "linux")]
+pub use namespace_network::netlink;
+#[cfg(target_os = "linux")]
+pub use namespace_network::{
+    decode_firewall_rule, encode_firewall_rule, establish_namespace, AttemptEgress,
+    AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EstablishError,
+    EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
+    FirewallRule, FirewallTableFamily, FirewallVerdict, ForwardingRecords, HostEgress,
+    HostEgressError, InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceConnector,
+    NamespaceControl, NamespaceName, NamespaceRoute, NamespacedLocalNetwork,
+    NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, OrphanSweepError,
+    ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
+};
+#[cfg(target_os = "linux")]
+pub use restart::{
+    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
+    RootsReleased,
+};
 
 #[cfg(target_os = "linux")]
 pub use attempt_registry::{
-    CommittedPlannedAttempt, PlannedAttemptIntent, PreparedAttemptDirectory,
-    RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
-    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    UnmountedDirectoryInventory,
+    AttemptUnitTermination, CommittedPlannedAttempt, CompletedAttemptCleanup, PlannedAttemptIntent,
+    PreparedAttemptDirectory, RecoveredAttemptIntent, RecoveredUnmountedDirectory,
+    RegistryRecoveryEntry, SystemdAttemptRecovery, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError, UnmountedDirectoryInventory,
 };
 
 #[cfg(target_os = "linux")]
@@ -117,7 +203,9 @@ pub use image_activator::{
     QuarantinedRootMount,
 };
 #[cfg(target_os = "linux")]
-pub use root_attachment::{activate_admitted_root, RootResourceIdentity, VerifiedRootMount};
+pub use root_attachment::{
+    activate_admitted_root, ReleasedAttemptRoot, RootResourceIdentity, VerifiedRootMount,
+};
 
 #[cfg(target_os = "linux")]
 pub use provider_barrier::{

@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     num::NonZeroU64,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -228,6 +229,83 @@ impl HostKernel {
             identity: identity.filter(|before| Some(*before) == block_identity(&device)),
         }
     }
+}
+
+impl HostKernel {
+    /// Whether no bound loop device is backed by a file in the `images`
+    /// directory.
+    ///
+    /// Every `loop<N>` whole device under `/sys/block` is read from sysfs; no
+    /// block device is opened. An unbound device has no `loop` directory and
+    /// is skipped. `None` when `images` cannot be resolved, the block class
+    /// cannot be listed or a bound device's backing file is unreadable or
+    /// empty. See `provider_backed` for how a backing file is matched.
+    pub(super) fn provider_loops_absent(&self, images: &Path) -> Option<bool> {
+        let directory = fs::canonicalize(images).ok().and_then(|canonical| {
+            fs::metadata(&canonical)
+                .ok()
+                .map(|metadata| (canonical, (metadata.dev(), metadata.ino())))
+        });
+        directory
+            .zip(self.loop_backings())
+            .map(|((canonical, identity), backings)| {
+                let prefixes = [images, canonical.as_path()];
+                backings
+                    .iter()
+                    .all(|printed| !provider_backed(printed, prefixes, identity))
+            })
+    }
+
+    /// The printed backing file of every bound `loop<N>` whole device.
+    fn loop_backings(&self) -> Option<Vec<String>> {
+        let block = self.sys.join("block");
+        fs::read_dir(&block)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.ok().map(|entry| entry.file_name()))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .and_then(|names| {
+                names
+                    .iter()
+                    // A name that is not UTF-8 is not `loop<N>`.
+                    .filter_map(|name| name.to_str())
+                    .filter(|name| name.strip_prefix("loop").is_some_and(all_digits))
+                    .map(|name| block.join(name).join("loop"))
+                    // Skip unbound devices; an unobservable `loop` entry is
+                    // kept as an error and refuses below.
+                    .filter_map(|bound| {
+                        fs::exists(&bound)
+                            .map(|is_bound| is_bound.then_some(bound))
+                            .transpose()
+                    })
+                    .map(|bound| {
+                        bound.ok().and_then(|bound| {
+                            read_text(&bound.join("backing_file")).filter(|path| !path.is_empty())
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+    }
+}
+
+/// Whether a loop's printed backing file is a provider image.
+///
+/// The kernel prints the backing file's path as seen from this namespace. It
+/// is a provider image when it lies beneath either the fixed or the canonical
+/// image directory, component by component, or when its parent directory is
+/// the image directory itself by device and inode, as through a bind mount.
+/// The ` (deleted)` the kernel appends to an unlinked file changes only the
+/// final component, so every rule still holds for a deleted image. Only
+/// `stat` is used; nothing is opened.
+fn provider_backed(printed: &str, prefixes: [&Path; 2], directory: (u64, u64)) -> bool {
+    let path = Path::new(printed);
+    prefixes.iter().any(|prefix| path.starts_with(prefix))
+        || path
+            .parent()
+            .and_then(|parent| fs::metadata(parent).ok())
+            .is_some_and(|parent| (parent.dev(), parent.ino()) == directory)
 }
 
 impl AttachmentKernel for HostKernel {

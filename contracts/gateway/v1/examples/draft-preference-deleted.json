@@ -1,0 +1,25 @@
+{
+  "name": "draft-preference-deleted",
+  "operation_id": "getPreferenceRevision",
+  "request": {
+    "path": {
+      "preference_id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 410,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:deleted",
+      "title": "Deleted",
+      "status": 410,
+      "detail": "the subject erased this revision",
+      "instance": "/v1/preferences/{preference_id}/revisions/{revision}",
+      "code": "deleted",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

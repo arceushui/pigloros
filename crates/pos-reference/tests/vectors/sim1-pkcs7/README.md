@@ -125,6 +125,51 @@ structure and algorithm parameter encodings as the original fixture.
 | `rsa-3072-signer.der` | 1043 | `c26a10e3900bf34a4eb029142ccd512e37c2c4e1ca19961dafabbaaca7421985` |
 | `rsa-3072-proof.der` | 1571 | `5e12e3ed24e5b735710d1ebcaaae51b3337d101ba1ef9daca0eb8f6e7ad9894e` |
 
+## Signed minimum-leading-byte RSA-2048 fixture
+
+`rsa-2048-0x80-*` is an independently signed positive fixture for the lower
+edge of the RSA-2048 profile: its modulus has 256 unsigned bytes beginning
+with `0x80`, the smallest leading byte of a 2048-bit modulus. The public test
+checks that geometry, exponent 65537 and dates, then requires acceptance. Like
+the other vectors here, it is test-only and never a trust anchor, and its
+private key was destroyed after signing. Random RSA-2048 key generation bounds each prime independently at or above
+`sqrt(2) * 2^1023`, so this leading byte occurs in only about 1 in several
+thousand random keys (roughly 2e-4); the primes were chosen directly instead
+of searching.
+
+The certificate is self-issued, serial 1, `CN=SIM1 RSA-2048 0x80 fixture`,
+with validity from 2026-01-01 00:00:00 UTC through 2036-01-01 00:00:00 UTC.
+The CMS structure and algorithm encodings match the `rsa-2047-*` fixture.
+
+OpenSSL 3.6.1 (library 3.6.1) produced it offline in a disposable private
+directory containing the same `root-hash.txt`. Key generation and the OpenSSL
+version (3.6.1 rather than 3.0.13) differ from the RSA-2047/3072 procedure
+above:
+
+1. Choose 1024-bit primes `p` and `q` from a cryptographically secure random
+   offset above `isqrt(0x80 << 2040)`, with `p - 1` and `q - 1` not divisible
+   by 65537, until `n = p * q` is 2048 bits and `n >> 2040 == 0x80`. Confirm
+   both with `openssl prime -checks 64`.
+2. Write the two-prime RSAPrivateKey (version 0, `n`, `e = 65537`, `d`, `p`,
+   `q`, `d mod (p - 1)`, `d mod (q - 1)`, `q^-1 mod p`) as an
+   `openssl asn1parse -genconf` configuration, then run
+   `openssl asn1parse -genconf key.cnf -out key.der -noout`,
+   `openssl pkey -inform DER -in key.der -out key.pem` and
+   `openssl pkey -in key.pem -check -noout`.
+3. Run the RSA-2047/3072 procedure above with `-key key.pem` in place of
+   `-newkey "rsa:$BITS" -nodes -keyout key.pem`, subject
+   `/CN=SIM1 RSA-2048 0x80 fixture` and output names `rsa-2048-0x80-*`.
+
+`openssl smime -verify -binary -noverify` against the exact content and
+`openssl verify -check_ss_sig -partial_chain` on the certificate both
+succeeded. The private key was destroyed after generation; regeneration
+creates different bytes.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `rsa-2048-0x80-signer.der` | 797 | `9154270eee2948b2577c67fa7d43dc663d8333c332371bc9a8934f9710b53069` |
+| `rsa-2048-0x80-proof.der` | 1202 | `98928fdee91b8910d3ce2a122de9245883d35b728ffbd167d87121b42dae66a8` |
+
 Hosted workspace tests execute `sim1_pkcs7_interoperability`. The runtime
 OpenSSL dependency ban remains in force: OpenSSL is only the offline fixture
 producer, never a production verifier or subprocess fallback.

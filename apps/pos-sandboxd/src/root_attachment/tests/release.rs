@@ -55,7 +55,7 @@ mod cases {
         }
         assert_eq!(
             fs::read_dir(tree.runtime.path().join("registry"))?.count(),
-            8
+            9
         );
         tree.registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;
@@ -322,6 +322,78 @@ mod cases {
             Err(ImageActivationError::EvidenceMismatch)
         );
         tree.prepared.verify_directory()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn only_the_single_released_root_of_its_tree_lets_intent_go_last() -> TestResult {
+        let tree = prepared_tree()?;
+        tree.prepared.begin_activation();
+        let (kernel, root) = attached_root(&tree.prepared)?;
+        recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+            Ok(())
+        })?;
+        let key = component(&tree.prepared);
+        let record = tree.runtime.path().join("registry").join(&key);
+        assert_eq!(fs::read(&record)?.len(), 393);
+        let released = release_owned(root, &kernel, &tree.prepared).await?;
+        let completed = tree
+            .prepared
+            .finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, Some(released))?;
+        assert_eq!(completed.intent().unit_name().attempt_component(), key);
+        assert!(!record.exists());
+        assert!(!tree.runtime.path().join("attempts").join(&key).exists());
+        tree.registry
+            .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;
+
+        // Foreign evidence, a missing root, an ambiguous repeat activation and
+        // a released root on a tree whose activation never reached mountfsd.
+        // The repeat is a mountfsd request that failed followed by a
+        // successful retry: the count never decreases, so the one released
+        // root cannot cover the failed request's possible resources.
+        for case in 0..4 {
+            let tree = prepared_tree()?;
+            let other = tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
+                .prepare_directory()?;
+            let (kernel, root) = attached_root(&other)?;
+            let foreign = release_owned(root, &kernel, &other).await?;
+            let (kernel, root) = attached_root(&tree.prepared)?;
+            let own = release_owned(root, &kernel, &tree.prepared).await?;
+            let (activations, evidence) = match case {
+                0 => (1, Some(foreign)),
+                1 => (1, None),
+                2 => (2, Some(own)),
+                _ => (0, Some(own)),
+            };
+            (0..activations).for_each(|_| tree.prepared.begin_activation());
+            let key = component(&tree.prepared);
+            let record = tree.runtime.path().join("registry").join(&key);
+            let bytes = fs::read(&record)?;
+            let result = tree
+                .prepared
+                .finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, evidence);
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
+                ),
+                "case {case}: {result:?}"
+            );
+            assert_eq!(fs::read(&record)?, bytes);
+            assert!(tree
+                .runtime
+                .path()
+                .join("attempts")
+                .join(&key)
+                .join("root")
+                .exists());
+            assert!(tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([11; 16], [9; 32])?)
+                .is_err());
+        }
         Ok(())
     }
 }

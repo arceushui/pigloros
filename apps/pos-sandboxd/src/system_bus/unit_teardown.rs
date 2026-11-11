@@ -16,8 +16,9 @@ use crate::{
 ///
 /// The lifecycle controller must exclusively own the attempt throughout teardown.
 /// These observations do not fence a later start or establish namespace, mount,
-/// device, directory or durable-intent absence. They do not authorize unmount,
-/// intent deletion, cleanup success or admission reopening.
+/// device, directory or durable-intent absence. Alone they authorize no unmount,
+/// cleanup success or admission reopening; they are the unit step consumed by
+/// [`crate::PreparedAttemptDirectory::finish_terminal_cleanup`].
 #[derive(Debug, Eq, PartialEq)]
 pub struct SystemdAttemptUnitTeardownObservation {
     unit_absence: SystemdAttemptUnitAbsenceObservation,
@@ -150,3 +151,8 @@ async fn remove_with_proxy(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+#[cfg(test)]
+pub use tests::cases::{
+    Fixture as TeardownFixture, ManagerCalls as TeardownManagerCalls, Reset as TeardownReset,
+    Stop as TeardownStop,
+};

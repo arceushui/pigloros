@@ -95,6 +95,8 @@ pub mod owner_store_admission;
 pub mod owner_store_interlock;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
+#[cfg(target_os = "linux")]
+pub mod protected_sqlite_namespace;
 pub mod stitch;
 mod timeline_range;
 pub mod trusted_clock;

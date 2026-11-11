@@ -20,9 +20,9 @@
 //! Any failure after the unit was started terminates it. The result carries
 //! the evidence the later signed records need: the ordered NXT1 transcript
 //! digests for SPR1 and the proxy termination for the SAU1 terminal
-//! classification (#443 signs and classifies). Unmounting the root, removing
-//! the attempt directory and releasing the reservation stay with the attempt
-//! lifecycle (#442).
+//! classification (#443 signs and classifies). Stopping the unit, unmounting
+//! the root, removing the attempt directory and deleting its intent follow in
+//! [`crate::finish_attempt`], through the cgroup this call returns.
 //!
 //! The unit host, the launcher barrier and the Local network are ports, so the
 //! composition is exercised without systemd, a launcher or a namespace.
@@ -125,6 +125,12 @@ pub trait UnitCgroup {
     /// # Errors
     /// Fails if the kill cannot be issued.
     fn kill_all(&mut self) -> Result<(), Self::Error>;
+
+    /// The device and inode of the cgroup directory bound to the unit.
+    ///
+    /// The prepared directory records it, so its terminal cleanup accepts
+    /// stop evidence only for the cgroup this execution bound.
+    fn identity(&self) -> (u64, u64);
 }
 
 /// The launcher barrier of ADR-069 section 6, behind one port.
@@ -214,7 +220,8 @@ pub struct ExecuteJob {
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
-    /// This prepared directory's execution ownership was already consumed.
+    /// This prepared directory's execution ownership was already consumed,
+    /// or terminal cleanup fenced it before the unit start was requested.
     #[error("the attempt already has an execution owner")]
     AttemptAlreadyClaimed,
     /// The authenticated limits cannot be enforced exactly on systemd.
@@ -282,15 +289,24 @@ pub enum UnitState {
     Unknown,
 }
 
-/// A failed execution and the state of its unit.
+/// A failed execution, the state of its unit and its retained cgroup.
+///
+/// Like any error, it is `Send`, `Sync` or `'static` only when the cgroup
+/// handle `C` is; the production `BoundAttemptCgroup` is all three.
 #[derive(Debug, thiserror::Error)]
 #[error("execution failed with the unit {unit:?}")]
-pub struct ExecuteFailure {
+pub struct ExecuteFailure<C> {
     /// Why the execution failed.
     #[source]
     pub error: ExecuteError,
     /// What is known of the unit.
     pub unit: UnitState,
+    /// The attempt cgroup bound before the failure, if binding completed.
+    ///
+    /// The lifecycle controller needs it to prove process emptiness before
+    /// terminal cleanup. `None` means no cgroup was bound by this call, so
+    /// only restart reconciliation can establish the unit's absence.
+    pub cgroup: Option<C>,
 }
 
 /// How a released attempt ended.
@@ -434,14 +450,15 @@ struct Prepared<C> {
 ///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any
-/// failure after the unit was submitted kills it.
+/// failure after the unit was submitted kills it. A failure after the cgroup
+/// was bound returns that cgroup, so the controller can prove it empty.
 pub async fn execute<H, B, N>(
     host: &H,
     barrier: &mut B,
     network: &N,
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
+) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -453,6 +470,7 @@ where
             .map_err(|error| ExecuteFailure {
                 error,
                 unit: UnitState::NotStarted,
+                cgroup: None,
             }),
     )
     .and_then(|()| async move {
@@ -490,7 +508,7 @@ async fn drive<H, B, N>(
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
     guard: &mut SubmissionGuard<H::Killer>,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
+) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -499,6 +517,7 @@ where
     let prepared = prepare(barrier, network, job, recheck).map_err(|error| ExecuteFailure {
         error,
         unit: UnitState::NotStarted,
+        cgroup: None,
     })?;
     let Prepared {
         attempt,
@@ -513,8 +532,7 @@ where
         call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
     let deadline = bounds.deadline;
-    guard.arm(host.killer(), unit.clone(), bounds.call);
-    let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
+    let (started, mut cgroup) = submit_claimed(host, &attempt, request, bounds, guard).await?;
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = bind_planned(planned);
@@ -529,7 +547,7 @@ where
         let aborted = abort(
             host,
             &unit,
-            Some(&mut cgroup),
+            Some(cgroup),
             error,
             Submission::Confirmed,
             bounds,
@@ -543,7 +561,7 @@ where
             let aborted = abort(
                 host,
                 &unit,
-                Some(&mut cgroup),
+                Some(cgroup),
                 error,
                 Submission::Confirmed,
                 bounds,
@@ -561,6 +579,35 @@ where
     })
 }
 
+/// Record the submission of the claimed attempt, then submit its unit and
+/// record the cgroup it bound. Terminal cleanup may have fenced the attempt
+/// since it was claimed; then nothing is submitted.
+async fn submit_claimed<H>(
+    host: &H,
+    attempt: &AdmittedAttempt,
+    request: TransientUnitRequest,
+    bounds: Bounds,
+    guard: &mut SubmissionGuard<H::Killer>,
+) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
+where
+    H: UnitHost + Sync,
+{
+    if let Err(error) = attempt.submit_execution() {
+        return Err(ExecuteFailure {
+            error,
+            unit: UnitState::NotStarted,
+            cgroup: None,
+        });
+    }
+    let unit = attempt.unit_name();
+    guard.arm(host.killer(), unit.clone(), bounds.call);
+    let submitted = submit(host, unit, request, bounds).await;
+    submitted.map(|(started, cgroup)| {
+        attempt.bind_execution_cgroup(cgroup.identity());
+        (started, cgroup)
+    })
+}
+
 /// Submit the unit and bind its cgroup, both before the attempt deadline. A
 /// failure of either kills the unit.
 async fn submit<H>(
@@ -568,7 +615,7 @@ async fn submit<H>(
     unit: &TransientServiceUnitName,
     request: TransientUnitRequest,
     bounds: Bounds,
-) -> Result<(H::Started, H::Cgroup), ExecuteFailure>
+) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
 {
@@ -643,6 +690,32 @@ impl<K: UnitKiller> Drop for SubmissionGuard<K> {
     }
 }
 
+/// The distinct endpoints `admission` plans exchanges with, in order, each
+/// in canonical form.
+///
+/// LPS1 decoding admits only four- and sixteen-byte addresses, so every
+/// admitted capability names one.
+fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<std::net::SocketAddr> {
+    admission
+        .exchanges()
+        .filter_map(|(_, capability)| {
+            <[u8; 4]>::try_from(capability.address.as_slice())
+                .map(std::net::IpAddr::from)
+                .or_else(|_| {
+                    <[u8; 16]>::try_from(capability.address.as_slice()).map(std::net::IpAddr::from)
+                })
+                .ok()
+                // An IPv4-mapped IPv6 address is the IPv4 endpoint it maps,
+                // as the namespace plan reads it.
+                .map(|address| {
+                    std::net::SocketAddr::new(address.to_canonical(), capability.destination_port)
+                })
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn prepare<B, N>(
     barrier: &mut B,
     network: &N,
@@ -667,7 +740,7 @@ where
             let (adapter_end, channel) = HostServiceChannel::pair(attempt.attempt_id())
                 .map_err(ExecuteError::HostService)?;
             let established = network
-                .establish(attempt.attempt_id())
+                .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
                 .map_err(|error| ExecuteError::Network(Box::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;
@@ -859,19 +932,19 @@ where
     }
 }
 
-/// Terminate the unit after `error`.
+/// Terminate the unit after `error`, retaining any bound cgroup.
 async fn abort<H>(
     host: &H,
     unit: &TransientServiceUnitName,
-    cgroup: Option<&mut H::Cgroup>,
+    mut cgroup: Option<H::Cgroup>,
     error: ExecuteError,
     submission: Submission,
     bounds: Bounds,
-) -> ExecuteFailure
+) -> ExecuteFailure<H::Cgroup>
 where
     H: UnitHost + Sync,
 {
-    let killed = kill_everything(host, unit, cgroup, bounds.call).await;
+    let killed = kill_everything(host, unit, cgroup.as_mut(), bounds.call).await;
     ExecuteFailure {
         error,
         unit: match (killed, submission) {
@@ -879,6 +952,7 @@ where
             (false, Submission::Confirmed) => UnitState::KillFailed,
             (false, Submission::Unconfirmed) => UnitState::Unknown,
         },
+        cgroup,
     }
 }
 

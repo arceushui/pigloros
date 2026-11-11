@@ -1,0 +1,19 @@
+{
+  "name": "pagination-cursor-page",
+  "operation_id": "listEvents",
+  "request": {
+    "query": {
+      "cursor": "v1.abababababababababababababababababababababababababababababababab.01JC0GATEWAYEXAMPTMESH0000.2",
+      "limit": 1
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "events": [],
+      "next_from_seq": null,
+      "next_cursor": null
+    }
+  }
+}

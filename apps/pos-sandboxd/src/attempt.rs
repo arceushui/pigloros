@@ -169,6 +169,17 @@ impl AdmittedAttempt {
         self.execution.claim()
     }
 
+    /// Record that the claimed execution is about to request its unit start;
+    /// refused once terminal cleanup fenced the attempt.
+    pub(crate) fn submit_execution(&self) -> Result<(), ExecuteError> {
+        self.execution.submit()
+    }
+
+    /// Record the cgroup the submitted execution bound to its unit.
+    pub(crate) fn bind_execution_cgroup(&self, identity: (u64, u64)) {
+        self.execution.bind_cgroup(identity);
+    }
+
     /// Exact ELM1 projection from this attempt's independently derived policy.
     ///
     /// # Errors
@@ -325,6 +336,12 @@ impl AdmittedAttempt {
                     })
                 })
             })
+    }
+
+    /// The shared execution ownership, for fencing and inspection in tests.
+    #[cfg(all(test, unix))]
+    pub(crate) fn execution_for_test(&self) -> ExecutionOwnership {
+        self.execution.clone()
     }
 
     #[cfg(all(test, unix))]

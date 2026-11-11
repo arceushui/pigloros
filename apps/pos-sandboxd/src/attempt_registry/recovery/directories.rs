@@ -1,6 +1,6 @@
 //! Correlation of registry claims with held, unmounted attempt directories.
 
-use super::super::{open_directory, require_empty};
+use super::super::{open_directory, remove_empty, require_empty};
 use super::{
     registry_io, validate_directory, Dir, File, MetadataExt, PlannedAttemptIntent,
     RecoveredAttemptIntent, RegistryResult, ResolveFlags, SystemdAttemptRecovery,
@@ -21,7 +21,7 @@ struct DirectoryObservation {
 /// grants no deletion, activation, or admission-reopening authority.
 #[derive(Debug)]
 pub struct RecoveredUnmountedDirectory {
-    _attempt: File,
+    attempt: File,
     _root: Option<File>,
     observation: DirectoryObservation,
 }
@@ -121,6 +121,21 @@ impl UnmountedDirectoryInventory<'_> {
     }
 }
 
+impl UnmountedDirectoryInventory<'_> {
+    /// Remove each held root, then its attempt directory, synchronizing the
+    /// held parent after every removal. The caller proved the attempts clean.
+    pub(super) fn remove_directories(&self) -> RegistryResult<()> {
+        self.directories.iter().try_for_each(|directory| {
+            let component = directory.intent().unit_name().attempt_component();
+            directory
+                .observation
+                .root
+                .map_or(Ok(()), |_| remove_empty(&directory.attempt, "root"))
+                .and_then(|()| remove_empty(&self.parent, component))
+        })
+    }
+}
+
 fn open_attempts(recovery: &SystemdAttemptRecovery) -> RegistryResult<File> {
     let directory = &recovery.directory;
     validate_directory(&directory.runtime, directory.owner, true)?;
@@ -178,7 +193,7 @@ fn read_directory(
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
     Ok(RecoveredUnmountedDirectory {
-        _attempt: attempt,
+        attempt,
         _root: root,
         observation: observed,
     })
@@ -310,7 +325,7 @@ mod tests {
         }
         inventory.verify_unchanged()?;
         drop(inventory);
-        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 9);
         assert_eq!(fs::read_dir(runtime.join("attempts"))?.count(), 7);
         assert!(SystemdAttemptRegistry::open().is_err());
         Ok(())
@@ -353,7 +368,7 @@ mod tests {
                 _ => fs::write(attempts.join("not-a-directory"), b"unexpected")?,
             }
             assert!(recovery.inventory_unmounted_directories().is_err());
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         }
         Ok(())
     }
@@ -385,7 +400,7 @@ mod tests {
         assert_ne!(identity(&File::open(&root)?)?, identity(&held_root)?);
         assert!(partial.verify_unchanged().is_err());
         assert!(recovery.inventory_unmounted_directories().is_err());
-        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         Ok(())
     }
 
@@ -455,7 +470,7 @@ mod tests {
                 with_io_fault(Some(fail_at), || recovery.inventory_unmounted_directories());
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
             assert_eq!(fs::read_dir(directory.path().join("attempts"))?.count(), 7);
         }
         Ok(())
