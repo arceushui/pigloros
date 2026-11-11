@@ -165,6 +165,8 @@ FUNCTION = re.compile(r"(?<!\w)fn\s+(\w+)")
 FUNCTION_MODIFIERS = re.compile(r"(?:(?:pub(?:\s*\([^)]*\))?|async|const)\s+)*\Z")
 RAW_PREFIXES = ("r", "br", "cr")
 STRING_PREFIXES = ("b", "c")
+WORD_RUN = re.compile(r"\w+")
+CODE_SYMBOLS = re.compile(r"""[^\w/"']+""")
 MISSING = object()
 
 
@@ -265,10 +267,6 @@ def _raw_string_end(text: str, quote: int, hashes: int) -> int:
     return len(text) if end < 0 else end + len(closing)
 
 
-def _is_word(character: str) -> bool:
-    return character.isalnum() or character == "_"
-
-
 def scan(text: str) -> Scan:
     """Tokenize Rust source, masking comments, literals and raw identifiers.
 
@@ -311,10 +309,8 @@ def scan(text: str) -> Scan:
             emit(end, "blank")
         elif text.startswith("/*", index):
             emit(_block_comment_end(text, index), "blank")
-        elif _is_word(character):
-            end = index + 1
-            while end < length and _is_word(text[end]):
-                end += 1
+        elif word_match := WORD_RUN.match(text, index):
+            end = word_match.end()
             word = text[index:end]
             after = text[end : end + 1]
             if word in RAW_PREFIXES and after in ('"', "#"):
@@ -324,12 +320,10 @@ def scan(text: str) -> Scan:
                 if quote < length and text[quote] == '"':
                     emit(_raw_string_end(text, quote, quote - end), "blank")
                     continue
-                if word == "r" and quote == end + 1 and quote < length and _is_word(text[quote]):
-                    identifier_end = quote
-                    while identifier_end < length and _is_word(text[identifier_end]):
-                        identifier_end += 1
-                    emit(identifier_end, "ident")
-                    continue
+                if word == "r" and quote == end + 1:
+                    if identifier := WORD_RUN.match(text, quote):
+                        emit(identifier.end(), "ident")
+                        continue
             if word in STRING_PREFIXES and after == '"':
                 emit(_quoted_end(text, end), "blank")
             elif word == "b" and after == "'" and _char_end(text, end) is not None:
@@ -344,6 +338,8 @@ def scan(text: str) -> Scan:
                 emit(index + 1, "keep")
             else:
                 emit(char_end, "blank")
+        elif symbols := CODE_SYMBOLS.match(text, index):
+            emit(symbols.end(), "keep")
         else:
             emit(index + 1, "keep")
     code = "".join(pieces)

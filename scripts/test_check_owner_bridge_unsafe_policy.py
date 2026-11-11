@@ -282,6 +282,40 @@ def test_masker() -> None:
         raise SystemExit(f"masker mishandled a multi-line string: {code!r}")
 
 
+def test_masker_unicode_word_boundaries() -> None:
+    for word in ("é", "变量", "²", "Ⅻ", "_", "𐐀"):
+        prefix = f"{word}unsafe "
+        raw_identifier = f"r#{word}unsafe"
+        source = prefix + raw_identifier + f' {word}r"unsafe" \t;::\n  // SAFETY: kept\n'
+        expected = (
+            prefix
+            + "_" * len(raw_identifier)
+            + f" {word}r"
+            + " " * len('"unsafe"')
+            + " \t;::\n"
+            + " " * len("  // SAFETY: kept")
+            + "\n"
+        )
+        scanned = CHECKER.scan(source)
+        assert scanned.code == expected
+        assert scanned.code_lines == tuple(expected.split("\n"))
+        assert scanned.comments == {1: "SAFETY: kept"}
+        assert scanned.raw_identifiers == (len(prefix),)
+        assert scanned.source == source
+    source = "r#e\u0301unsafe r#éunsafe \u200cunsafe"
+    expected = "___\u0301unsafe " + "_" * len("r#éunsafe") + " \u200cunsafe"
+    assert CHECKER.scan(source).code == expected
+
+
+def test_masker_run_classes_cover_the_same_unicode_characters() -> None:
+    for codepoint in range(sys.maxunicode + 1):
+        character = chr(codepoint)
+        word = character.isalnum() or character == "_"
+        symbols = not word and character not in "/\"'"
+        assert (CHECKER.WORD_RUN.fullmatch(character) is not None) == word
+        assert (CHECKER.CODE_SYMBOLS.fullmatch(character) is not None) == symbols
+
+
 def test_accepted() -> None:
     require_accepted("clean tree")
     require_accepted(
@@ -2172,6 +2206,8 @@ def test_external_qualification_is_sealed() -> None:
 
 def main() -> None:
     test_masker()
+    test_masker_unicode_word_boundaries()
+    test_masker_run_classes_cover_the_same_unicode_characters()
     test_accepted()
     test_unsafe_evasions()
     test_ffi_surface()
