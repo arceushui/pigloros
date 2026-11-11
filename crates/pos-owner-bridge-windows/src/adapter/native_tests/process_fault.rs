@@ -44,6 +44,30 @@ type CeremonyResult = Result<Verified, BridgeError>;
 type DriveResult = Result<CeremonyResult, Box<dyn std::error::Error>>;
 type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
 
+// The fixture deadline was set before the test driver's T0. Its origin gives
+// a conservative challenge limit; these Get test plans have no enrollment budget.
+fn interaction_deadline(fixture_deadline: Instant, receipt: Option<Instant>) -> Option<Instant> {
+    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION, READINESS};
+    receipt.map(|at| (at + INTERACTION).min(fixture_deadline + (CHALLENGE_TTL - READINESS)))
+}
+
+#[test]
+fn interaction_cutpoint_requires_receipt_and_keeps_original_limits() {
+    let origin = Instant::now();
+    let fixture_deadline = origin + Duration::from_secs(15);
+    assert!(interaction_deadline(fixture_deadline, None).is_none());
+    let receipt = origin + Duration::from_secs(10);
+    let interaction = interaction_deadline(fixture_deadline, Some(receipt));
+    assert_eq!(interaction, Some(origin + Duration::from_secs(130)));
+    assert!(interaction.is_some_and(|end| origin + Duration::from_secs(129) < end));
+    assert!(interaction.is_some_and(|end| origin + Duration::from_secs(130) >= end));
+    let late_receipt = origin + Duration::from_secs(40);
+    let challenge = interaction_deadline(fixture_deadline, Some(late_receipt));
+    assert_eq!(challenge, Some(origin + Duration::from_secs(150)));
+    assert!(challenge.is_some_and(|end| origin + Duration::from_secs(149) < end));
+    assert!(challenge.is_some_and(|end| origin + Duration::from_secs(150) >= end));
+}
+
 fn validate_process_failures(
     observed: &[crate::NativeProcessFailure],
     expected: Option<ProcessFaultTarget>,
@@ -622,12 +646,17 @@ impl Fixture {
         target: ProcessFaultTarget,
         inject: bool,
     ) -> TestResult {
+        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
+            .ok_or("posted receipt deadline missing")?;
         let state = self
             .surface
             .posted_fault_state(driver.posts())
             .map_err(|()| "unverified pre-fault state")?;
         if ControlState::try_from(state.reply_state).ok() != Some(ControlState::Received) {
             return Err("the page was not in RECEIVED".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("posted receipt fault point expired".into());
         }
         self.reached = Some(state);
         self.trace
@@ -636,14 +665,14 @@ impl Fixture {
         if inject {
             let seal = crate::FaultSeal {
                 trace: Rc::clone(&self.trace),
-                deadline: self.deadline,
+                deadline,
             };
             self.handle = Some(
                 self.surface
                     .inject_posted_fault(target, seal)
                     .map_err(|()| "owned process fault refused")?,
             );
-            self.observe_fault(target)?;
+            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
         } else {
             if self.trace.borrow().as_slice() != [ProcessFaultMark::Reached(state)] {
                 return Err("control trace changed".into());
@@ -2417,11 +2446,8 @@ impl Fixture {
         target: ProcessFaultTarget,
         inject: bool,
     ) -> TestResult {
-        let deadline = self.deadline.min(
-            driver
-                .next_wake()
-                .ok_or("writing driver deadline missing")?,
-        );
+        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
+            .ok_or("writing driver deadline missing")?;
         let state = self
             .surface
             .posted_writing_fault_state(driver.posts())
@@ -2443,7 +2469,7 @@ impl Fixture {
                     .inject_posted_writing_fault(target, seal)
                     .map_err(|()| "owned writing fault refused")?,
             );
-            self.observe_fault(target)?;
+            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
         } else {
             self.evidence_complete = true;
         }
@@ -2538,9 +2564,8 @@ impl Fixture {
         target: ProcessFaultTarget,
         inject: bool,
     ) -> TestResult {
-        let deadline = self
-            .deadline
-            .min(driver.next_wake().ok_or("ready driver deadline missing")?);
+        let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
+            .ok_or("ready driver deadline missing")?;
         let state = self
             .surface
             .posted_ready_fault_state(driver.posts())
@@ -2562,7 +2587,7 @@ impl Fixture {
                     .inject_posted_ready_fault(target, seal)
                     .map_err(|()| "owned ready fault refused")?,
             );
-            self.observe_fault(target)?;
+            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
         } else {
             self.evidence_complete = true;
         }
@@ -2939,9 +2964,8 @@ impl Fixture {
                     .surface
                     .posted_ready_fault_state(driver.posts())
                     .map_err(|()| "pre-consuming state unavailable")?;
-                let deadline = self
-                    .deadline
-                    .min(driver.next_wake().ok_or("consuming deadline missing")?);
+                let deadline = interaction_deadline(self.deadline, driver.first_receipt_at())
+                    .ok_or("consuming deadline missing")?;
                 if Instant::now() >= deadline {
                     return Err("consuming fault point expired".into());
                 }
