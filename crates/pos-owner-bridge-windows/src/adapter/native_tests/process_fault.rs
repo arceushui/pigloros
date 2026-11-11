@@ -329,6 +329,9 @@ impl crate::Native {
 
 fn run() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
+    // The owner host retains its creator STA across ceremonies. Each case
+    // still creates and retires its own factory, environment and folder.
+    let _apartment = crate::Native::fault_fixture_apartment()?;
     let root = FixtureRoot::new()?;
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;

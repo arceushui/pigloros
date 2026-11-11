@@ -145,3 +145,10 @@ const fn unavailable() -> NativeError {
         failure: Failure::CallFailed,
     }
 }
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn fault_fixture_apartment() -> Result<impl Drop> {
+        Apartment::new()
+    }
+}
