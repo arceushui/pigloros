@@ -31,6 +31,7 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod cancellation;
 mod ownership;
 
 const HOST_SERVICE: &str = "piglor-host-service-v1";
@@ -581,6 +582,7 @@ struct Scenario {
     host: FakeHost,
     barrier: FakeBarrier,
     store: Arc<NetworkCaptureStore>,
+    cancel: AttemptCancel,
     _root: Option<tempfile::TempDir>,
 }
 
@@ -601,6 +603,7 @@ impl Scenario {
             barrier: FakeBarrier::new(&log),
             log,
             store: Arc::clone(store),
+            cancel: AttemptCancel::new(),
             _root: root,
         }
     }
@@ -622,6 +625,7 @@ impl Scenario {
                 .with_limits(crate::test_fixtures::execution_limits(watchdog_ms)),
             mode: plan,
             capture_store: Arc::clone(&self.store),
+            cancel: self.cancel.signal(),
         })
     }
 
