@@ -28,8 +28,8 @@ pub(super) mod cases {
     use zbus::{fdo, BoxDBusError, OwnedObjectPath};
 
     use super::super::{
-        reconcile_with, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
-        Survivors,
+        reconcile_with, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
+        RestartReconciliationError, Survivors,
     };
     use crate::test_fixtures::{peer_connections, FakeRecoveredRoots, TestResult};
     use crate::{
@@ -49,6 +49,8 @@ pub(super) mod cases {
         RootDetach,
         /// Orphaned provider network state cannot be removed.
         Network,
+        /// The Local egress property is not observed.
+        Egress,
         /// A PAI3 root's recorded loop/dm generations are still present.
         RecordedDevices,
         /// A loop device is still backed by a provider image.
@@ -98,6 +100,9 @@ pub(super) mod cases {
         pub detached: Vec<[u8; 16]>,
         /// Whether orphaned network state was removed.
         pub network_cleaned: bool,
+        /// Whether the egress property was probed and observed, after the
+        /// network cleanup.
+        pub egress_proved: bool,
         /// Whether the marker recorded a request on this restart's boot.
         pub request_pending: bool,
         /// When the provider loop sweep ran, measured from the restart's
@@ -223,6 +228,38 @@ pub(super) mod cases {
                 Ok(())
             };
             std::future::ready(removed)
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("injected egress probe failure")]
+    struct EgressFailure;
+
+    /// An egress probe that observes the property unless it `fails`,
+    /// counting the probes it observed and refusing to run before the
+    /// network cleanup.
+    struct Egress<'n> {
+        fails: bool,
+        network: &'n Network,
+        proved: AtomicUsize,
+    }
+
+    impl EgressPropertyProbe for Egress<'_> {
+        type Error = EgressFailure;
+
+        fn probe_egress(&self) -> impl Future<Output = Result<(), EgressFailure>> + Send {
+            assert_eq!(
+                self.network.removed.load(Ordering::SeqCst),
+                1,
+                "egress probed before the orphaned network was removed"
+            );
+            let proved = if self.fails {
+                Err(EgressFailure)
+            } else {
+                self.proved.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            };
+            std::future::ready(proved)
         }
     }
 
@@ -389,6 +426,11 @@ pub(super) mod cases {
             fails: uncertain == UncertainProof::Network,
             removed: AtomicUsize::new(0),
         };
+        let egress = Egress {
+            fails: uncertain == UncertainProof::Egress,
+            network: &network,
+            proved: AtomicUsize::new(0),
+        };
         let parent = File::open(runtime)?;
         let owner = parent.metadata()?.uid();
         let deadlines = (cleanup()?, Instant::now() + overall);
@@ -399,7 +441,7 @@ pub(super) mod cases {
                 reconcile_with(
                     &transport,
                     recovery,
-                    &network,
+                    (&network, &egress),
                     &crashed,
                     deadlines,
                     (
@@ -438,6 +480,7 @@ pub(super) mod cases {
             still_loaded,
             detached,
             network_cleaned: network.removed.load(Ordering::SeqCst) == 1,
+            egress_proved: egress.proved.load(Ordering::SeqCst) == 1,
             request_pending,
             swept,
             finished_after,
