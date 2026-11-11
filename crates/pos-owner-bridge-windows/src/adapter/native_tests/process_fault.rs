@@ -425,6 +425,25 @@ fn run() -> TestResult {
     root.remove()
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DiagnosticTiming {
+    calls: u64,
+    total: Duration,
+    longest: Duration,
+    longest_entered_remaining: Duration,
+}
+
+impl DiagnosticTiming {
+    fn record(&mut self, elapsed: Duration, remaining: Duration) {
+        self.calls += 1;
+        self.total += elapsed;
+        if elapsed > self.longest {
+            self.longest = elapsed;
+            self.longest_entered_remaining = remaining;
+        }
+    }
+}
+
 struct Fixture {
     number: u8,
     profile: FixtureProfile,
@@ -440,6 +459,8 @@ struct Fixture {
     early_presence: Option<crate::RendererPresence>,
     prior_native_wipe: bool,
     deadline: Instant,
+    step_timing: DiagnosticTiming,
+    pump_timing: std::cell::Cell<DiagnosticTiming>,
 }
 
 #[derive(Clone, Copy)]
@@ -494,6 +515,8 @@ impl Fixture {
             early_presence: None,
             prior_native_wipe: false,
             deadline,
+            step_timing: DiagnosticTiming::default(),
+            pump_timing: std::cell::Cell::default(),
         })
     }
 
@@ -587,7 +610,31 @@ impl Fixture {
             early_presence: None,
             prior_native_wipe: false,
             deadline,
+            step_timing: DiagnosticTiming::default(),
+            pump_timing: std::cell::Cell::default(),
         })
+    }
+
+    fn profiled_step(&mut self, driver: &mut CeremonyDriver) -> Step {
+        let entered = Instant::now();
+        let remaining = self.deadline.saturating_duration_since(entered);
+        let step = driver.step(&mut readiness::env(
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        ));
+        self.step_timing.record(entered.elapsed(), remaining);
+        step
+    }
+
+    fn profiled_pump(&self) -> TestResult {
+        let entered = Instant::now();
+        let remaining = self.deadline.saturating_duration_since(entered);
+        let result = readiness::pump(&self.surface);
+        let mut timing = self.pump_timing.get();
+        timing.record(entered.elapsed(), remaining);
+        self.pump_timing.set(timing);
+        result
     }
 
     fn drive(
@@ -597,11 +644,7 @@ impl Fixture {
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && driver.first_receipt_at().is_some()
@@ -611,7 +654,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -767,7 +810,7 @@ impl Fixture {
                 self.evidence_complete = true;
                 return Ok(());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
     }
 
@@ -777,6 +820,13 @@ impl Fixture {
         result: Result<Verified, BridgeError>,
         restart_orphans: Option<CeremonyId>,
     ) -> TestResult {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "DEBUG-535-TIMING case={} step={:?} pump={:?}",
+            self.number,
+            self.step_timing,
+            self.pump_timing.get(),
+        );
         let mut progress = super::trace::Trace::new(u64::from(self.number), Instant::now());
         let _logged = writeln!(
             std::io::stderr(),
@@ -939,11 +989,7 @@ impl Fixture {
         let mut reached_opening = false;
         let mut cancelled = false;
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if !reached_opening
                 && matches!(&step, Step::Pending)
                 && self.surface.recordless_opening_ready()
@@ -1011,7 +1057,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("recordless driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1029,7 +1075,7 @@ impl Fixture {
                 None if Instant::now() >= self.deadline => {
                     return Err("recordless controller completion timed out".into())
                 }
-                None => readiness::pump(&self.surface)?,
+                None => self.profiled_pump()?,
             }
         }
     }
@@ -1084,7 +1130,7 @@ impl Fixture {
             if Instant::now() >= self.deadline {
                 return Err("recordless browser exit timed out".into());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
     }
 }
@@ -1142,11 +1188,7 @@ impl Fixture {
             // The release transition occurs inside this step. Its start is a
             // conservative lower bound for the driver's real release deadline.
             let step_started = Instant::now();
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && has_synthetic_success_prf(driver)
@@ -1159,7 +1201,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("success driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1465,11 +1507,7 @@ impl Fixture {
                     )
                     .map_err(|()| "exit capture could not be armed")?;
             }
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.exit_reached.is_none()
                 && matches!(&step, Step::Pending)
                 && has_synthetic_success_prf(driver)
@@ -1480,7 +1518,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("success exit driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1597,7 +1635,7 @@ impl Fixture {
                 self.evidence_complete = true;
                 return Ok(());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
     }
 }
@@ -1677,11 +1715,7 @@ impl Fixture {
     ) -> Result<(Result<Verified, BridgeError>, ProcessFaultMark), Box<dyn std::error::Error>> {
         let mut reached = None;
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if reached.is_none()
                 && matches!(&step, Step::Pending)
                 && self.surface.awaiting_load_fault_ready()
@@ -1730,7 +1764,7 @@ impl Fixture {
                     ))
                 }
                 Step::Done => return Err("awaiting-load driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1775,11 +1809,7 @@ impl Fixture {
     ) -> Result<(Result<Verified, BridgeError>, ProcessFaultMark), Box<dyn std::error::Error>> {
         let mut reached = None;
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if reached.is_none()
                 && matches!(&step, Step::Pending)
                 && self.surface.navigating_fault_ready()
@@ -1825,7 +1855,7 @@ impl Fixture {
                     return Ok((result, reached.ok_or("navigating state was not observed")?))
                 }
                 Step::Done => return Err("navigating driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1870,11 +1900,7 @@ impl Fixture {
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && driver.posts() == 1
@@ -1926,7 +1952,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("empty-reply driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -1984,7 +2010,7 @@ impl Fixture {
                             },
                         ));
                     }
-                    readiness::pump(&self.surface)?;
+                    self.profiled_pump()?;
                 }
                 Some(true) => {
                     if !controller_held_before_exit(&crate::Native::callback_order()) {
@@ -2068,11 +2094,7 @@ impl Fixture {
         let mut reached = false;
         let mut cancelled = false;
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if !reached && matches!(&step, Step::Pending) && self.surface.recordless_opening_ready()
             {
                 if driver.generation() != 1 || driver.posts() != 0 {
@@ -2106,7 +2128,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("opening driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -2168,7 +2190,7 @@ impl Fixture {
             if clock.now() >= self.deadline {
                 return Err("pending-opening browser exit timed out".into());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
         loop {
             if let Some(success) = self.surface.pending_opening_completion() {
@@ -2189,7 +2211,7 @@ impl Fixture {
             if clock.now() >= self.deadline {
                 return Err("late controller completion was not observed".into());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
     }
 }
@@ -2240,11 +2262,7 @@ impl Fixture {
         let mut writing_seen = None;
         loop {
             let step_started = Instant::now();
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && driver.first_receipt_at().is_some()
@@ -2269,7 +2287,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("writing driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -2382,15 +2400,11 @@ impl Fixture {
                     self.at_posted_ready(driver, target, inject)?;
                 }
             }
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("ready driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -2513,11 +2527,7 @@ impl Fixture {
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && driver.posts() == point.post()
@@ -2579,7 +2589,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("retry empty-reply driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -2812,18 +2822,14 @@ impl Fixture {
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => readiness::pump(&self.surface)?,
+                    Step::Pending => self.profiled_pump()?,
                 }
             } else {
-                let step = driver.step(&mut readiness::env(
-                    &mut self.surface,
-                    &mut self.loopback,
-                    &mut self.store,
-                ));
+                let step = self.profiled_step(driver);
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => readiness::pump(&self.surface)?,
+                    Step::Pending => self.profiled_pump()?,
                 }
             }
         }
@@ -3298,7 +3304,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("pre-record driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -3394,11 +3400,7 @@ impl Fixture {
     ) -> Result<(Result<Verified, BridgeError>, ProcessFaultMark), Box<dyn std::error::Error>> {
         let mut reached = None;
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if reached.is_none() && matches!(&step, Step::Pending) {
                 if let Some(mark) = self.early_renderer_state(driver, phase)? {
                     let presence = self
@@ -3469,7 +3471,7 @@ impl Fixture {
                     return Ok((result, reached.ok_or("early renderer phase not reached")?))
                 }
                 Step::Done => return Err("early renderer driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -3511,7 +3513,7 @@ impl Fixture {
             if Instant::now() >= self.deadline {
                 return Err("early renderer event timed out".into());
             }
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
         }
     }
 }
@@ -3700,7 +3702,7 @@ impl Fixture {
         let mut pump_failed = false;
         if matches!(case, EnvironmentCase::Timeout) {
             while Instant::now() < deadline {
-                pump_failed |= readiness::pump(&self.surface).is_err();
+                pump_failed |= self.profiled_pump().is_err();
             }
         }
         let boundary_completion = self.surface.pre_environment_completion();
@@ -4043,7 +4045,7 @@ impl Fixture {
             crate::adapter::surface::PreEnvironmentRetention::Active,
         );
         while matches!(observation, Ok(None)) && Instant::now() < self.deadline {
-            readiness::pump(&self.surface)?;
+            self.profiled_pump()?;
             observation = self.surface.pre_environment_completion();
         }
         let result = match initial {
@@ -4325,11 +4327,7 @@ impl Fixture {
         failure_stage: &mut Option<&'static str>,
     ) -> DriveResult {
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if provenance.is_none() && driver.posts() == 1 && matches!(&step, Step::Pending) {
                 *provenance = Some(self.surface.fresh_success_provenance(ceremony).map_err(
                     |()| {
@@ -4345,7 +4343,7 @@ impl Fixture {
                     return Err("fresh success driver ended without result".into());
                 }
                 Step::Pending => {
-                    if let Err(error) = readiness::pump(&self.surface) {
+                    if let Err(error) = self.profiled_pump() {
                         *failure_stage = Some("pump");
                         return Err(error);
                     }
@@ -4385,11 +4383,7 @@ impl Fixture {
         use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
 
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
                 if driver.generation() != 1
                     || driver.posts() != 0
@@ -4458,14 +4452,14 @@ impl Fixture {
                     if Instant::now() >= self.deadline {
                         return Err("actual controller callback was not observed".into());
                     }
-                    readiness::pump(&self.surface)?;
+                    self.profiled_pump()?;
                 }
             }
             match step {
                 Step::Finished(_) | Step::Done => {
                     return Err("controller input did not reach the pending stage".into())
                 }
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
     }
@@ -4589,11 +4583,7 @@ impl Fixture {
         use crate::adapter::surface::PreEnvironmentRetention::{Abandoned, Active};
 
         loop {
-            let step = driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            ));
+            let step = self.profiled_step(driver);
             if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
                 break;
             }
@@ -4601,7 +4591,7 @@ impl Fixture {
                 Step::Finished(_) | Step::Done => {
                     return Err("controller did not remain pending".into())
                 }
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => self.profiled_pump()?,
             }
         }
         let active_blocked = self.surface.controller_creation_retention(ceremony) == Some(Active)
@@ -4630,7 +4620,7 @@ impl Fixture {
                 None if Instant::now() >= self.deadline => {
                     return Err("late controller callback was not observed".into())
                 }
-                None => readiness::pump(&self.surface)?,
+                None => self.profiled_pump()?,
             }
         }
         let browser = self.surface.abandoned_completed_browser(ceremony).ok();
