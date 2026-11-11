@@ -6,6 +6,7 @@ use std::io::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -2585,8 +2586,6 @@ impl Fixture {
     }
 }
 
-// Temporary DEBUG-535-4297 observer. Its lifetime encloses the fixture so the
-// existing callback context survives ordinary retirement and all error paths.
 #[test]
 fn diagnostic_repeated_second_retry() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
@@ -2611,6 +2610,8 @@ fn diagnostic_repeated_second_retry() -> TestResult {
     Ok(())
 }
 
+// Temporary DEBUG-535-4297 observer. Its lifetime encloses the fixture so the
+// existing callback context survives ordinary retirement and all error paths.
 struct RetryDiagnostic(u64);
 
 impl Drop for RetryDiagnostic {
@@ -2633,8 +2634,9 @@ fn run_posted_retry(
     point: crate::RetryPoint,
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
+    static NEXT_RETRY_OBSERVATION: AtomicU64 = AtomicU64::new(20_000);
     let observer_started = Instant::now();
-    let diagnostic_case = 20_000 + u64::from(number);
+    let diagnostic_case = NEXT_RETRY_OBSERVATION.fetch_add(1, Ordering::Relaxed);
     let _diagnostic = RetryDiagnostic(diagnostic_case);
     crate::Native::readiness_navigation_case(Some((diagnostic_case, observer_started)));
     let _logged = writeln!(
