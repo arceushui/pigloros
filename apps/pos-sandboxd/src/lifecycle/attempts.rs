@@ -585,7 +585,7 @@ impl LiveAttemptIdentity {
 // rustdoc, as the mutation baseline runs it, also checks their error codes.
 #[cfg_attr(
     target_os = "linux",
-    doc = r#"
+    doc = r"
 ```compile_fail,E0451
 let _forged = pos_sandboxd::LiveAttemptSnapshot { attempts: Vec::new() };
 ```
@@ -595,7 +595,7 @@ fn copy(snapshot: &pos_sandboxd::LiveAttemptSnapshot) -> pos_sandboxd::LiveAttem
     <pos_sandboxd::LiveAttemptSnapshot as Clone>::clone(snapshot)
 }
 ```
-"#
+"
 )]
 #[derive(Debug, Eq, PartialEq)]
 pub struct LiveAttemptSnapshot {
