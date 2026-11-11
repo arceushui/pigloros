@@ -1533,9 +1533,9 @@ mod cases {
         /// The registry I/O operations of one restart over this state.
         const fn restart_io_operations(self) -> usize {
             match self {
-                Self::Running => 132,
-                Self::RequestSent => 132,
-                Self::TwoPrepared => 100,
+                // One attempt, whatever survived of it.
+                Self::Running | Self::RequestSent => 132,
+                Self::TwoPrepared => 194,
             }
         }
 
