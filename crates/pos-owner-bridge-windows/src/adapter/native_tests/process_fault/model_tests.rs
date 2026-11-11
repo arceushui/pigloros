@@ -4,6 +4,7 @@
 //! Modeled process observations exercise the harness's result and trace validation.
 
 use std::cell::RefCell;
+use std::io::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
@@ -31,6 +32,10 @@ const ERROR: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUn
 const MODEL_CASE: u8 = 240;
 
 fn fixture(root: &FixtureRoot) -> Result<(Fixture, Rc<Factory>), Box<dyn std::error::Error>> {
+    let _logged = writeln!(
+        std::io::stderr(),
+        "NATIVE_FAULT_MODEL case={MODEL_CASE} process_observation=scripted native_zeroing=scripted"
+    );
     let model = Factory::new(Creation::Ready, FakeClock::start());
     let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
     let store = WindowsCleanupStore::open(root.0.clone())?;

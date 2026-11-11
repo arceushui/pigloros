@@ -1571,7 +1571,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'b11205c3867f5a78d6b891cd5017b534affc4238b35b502027e4597f1f34ecd1',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': 'd63b838292d7a167a97384a903925d4ce67fa956978dabd2ea551a9bf7344974',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '0597e031bca48ff9ede63dbc0f5a454eb5ba066c5cdf3786bae2facb6b88d712',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': '58339ed1ed417eba7e46174a757573de06453e33224aca5461bd5f1700b9b1bf',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
     'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': 'f987aa8a99b0e5d55e476f1b8db2e4665942dd934997269b54639f7e63030236',

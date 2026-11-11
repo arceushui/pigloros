@@ -2077,6 +2077,7 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/ffi/process_fault.rs", 'if second_identity != (identity, image)', 'if false'),
         (f"{SHIM}/src/adapter/surface/tests/fault_states.rs", ".posted_fault_state(1).is_err()", ".posted_fault_state(1).is_ok()"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "assert_eq!(fixture.evidence_complete, expected.is_none());", "assert!(fixture.evidence_complete);"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "process_observation=scripted native_zeroing=scripted", "process_observation=observed native_zeroing=observed"),
         (f"{SHIM}/src/ffi/process_fault/candidate_tests.rs", 'assert_eq!(calls, ["identity", "snapshot", "identity"]);', 'assert!(calls.is_empty());'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
