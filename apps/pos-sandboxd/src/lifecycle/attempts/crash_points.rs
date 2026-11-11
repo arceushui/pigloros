@@ -39,16 +39,16 @@
 //! Restart reconciliation then runs over what was left. With any one of its
 //! consulted proofs withheld it must fail closed, removing nothing while
 //! admission stays closed. With every proof given it must stop the surviving
-//! unit, detach the surviving root, clean the network and then prove the
-//! egress property, wait out a request still pending on this boot before its
-//! loop sweep, and remove everything, the intent last; the same attempts can then be committed again. Restart
-//! itself is also crashed at each of its registry operations over three
-//! crash states, and the owner open that creates the activation marker at
-//! each of its own; a second restart must converge. A same-boot restart
-//! sweeps exactly when the pending request lapses, even past a shorter
-//! deadline, and a sweep that never returns elapses the deadline the wait
-//! extended without removing anything. The counts are pinned,
-//! so an unreviewed new transition fails here.
+//! unit, detach the surviving root, clean the network and then prove the egress
+//! property, wait out a request still pending on this boot before its loop
+//! sweep, and remove everything, the intent last; the same attempts can then be
+//! committed again. Restart itself is also crashed at each of its registry
+//! operations over three crash states, and the owner open that creates the
+//! activation marker at each of its own; a second restart must converge. A
+//! same-boot restart sweeps exactly when the pending request lapses, even past
+//! a shorter deadline, and a sweep that never returns elapses the deadline the
+//! wait extended without removing anything. The counts are pinned, so an
+//! unreviewed new transition fails here.
 
 // The declaration in `attempts.rs` already turns coverage off. The CRAP gate
 // (cargo-crap 0.2.2) scores a file's functions without the `cfg` of the `mod`
@@ -1071,9 +1071,10 @@ mod cases {
 
     /// Restart on the activation marker's boot, with `proof` withheld though
     /// this crash state does not consult it: it stops the surviving unit,
-    /// detaches the surviving root, cleans the network, waits out a pending
-    /// request before its loop sweep, removes exactly the committed attempts,
-    /// and admission reopens for the same attempts.
+    /// detaches the surviving root, cleans the network, proves the egress
+    /// property, waits out a pending request before its loop sweep, removes
+    /// exactly the committed attempts, and admission reopens for the same
+    /// attempts.
     fn assert_restart_succeeds(
         runtime: &Path,
         survivors: &CrashSurvivors,
