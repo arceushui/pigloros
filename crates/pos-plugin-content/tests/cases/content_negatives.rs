@@ -334,6 +334,17 @@ fn known_local_reference_is_checked_before_later_json_node_exhaustion() -> TestR
     );
 
     fixture.schemas = vec![
+        br##"{"$ref":"#/examples/0","examples":[{}]}"##.to_vec(),
+        later.clone(),
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+
+    fixture.schemas = vec![
         br#"{"$ref":"urn:later"}"#.to_vec(),
         later,
         br#"{"$id":"urn:later","title":"15"}"#.to_vec(),
@@ -344,6 +355,32 @@ fn known_local_reference_is_checked_before_later_json_node_exhaustion() -> TestR
             artifact: Artifact::Schema { index: 1 }
         })
     );
+    Ok(())
+}
+
+#[test]
+fn schema_pointer_fragments_use_rfc6901_and_indexed_resource_roots() -> TestResult {
+    for schema in [
+        json!({"$defs":{"a/b":true},"$ref":"#/$defs/a~1b"}),
+        json!({"$defs":{"a b":true},"$ref":"#/$defs/a%20b"}),
+        json!({"$defs":{"nested":{"$id":"urn:nested", "$defs":{"x":true}, "$ref":"#/$defs/x"}}}),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(&schema)];
+        assert_eq!(result(&fixture)?, Ok(()));
+    }
+    for reference in ["#/$defs/a~2b", "#/$defs/a~", "#/allOf/01"] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(
+            &json!({"$defs":{"a~2b":true},"allOf":[true,true],"$ref":reference}),
+        )];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 }
+            })
+        );
+    }
     Ok(())
 }
 
