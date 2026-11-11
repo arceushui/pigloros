@@ -398,12 +398,16 @@ impl LoopbackListener {
     pub fn diagnostic_timing(&self) -> String {
         self.shared.observations.trace.lock().map_or_else(
             |_| "poisoned".to_owned(),
-            |trace| match trace.as_ref() {
-                Some(trace) => format!(
-                    "case={} events={:?} overflow={}",
-                    trace.case, trace.events, trace.overflow
-                ),
-                None => "unset".to_owned(),
+            |trace| {
+                trace.as_ref().map_or_else(
+                    || "unset".to_owned(),
+                    |trace| {
+                        format!(
+                            "case={} events={:?} overflow={}",
+                            trace.case, trace.events, trace.overflow
+                        )
+                    },
+                )
             },
         )
     }
