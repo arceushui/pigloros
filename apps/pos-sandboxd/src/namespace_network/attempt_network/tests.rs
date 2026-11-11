@@ -574,13 +574,10 @@ fn a_quarantine_keeps_the_probes_own_failure_as_its_source() -> TestResult {
         .err()
         .and_then(std::error::Error::source)
         .ok_or("the quarantine has no source")?;
+    // thiserror exposes the `Option<Box<_>>` source as the `Box` itself.
     let target = source
-        .downcast_ref::<EgressProbeError>()
-        .or_else(|| {
-            source
-                .downcast_ref::<Box<EgressProbeError>>()
-                .map(|boxed| &**boxed)
-        })
+        .downcast_ref::<Box<EgressProbeError>>()
+        .map(|boxed| &**boxed)
         .ok_or("the quarantine's source is not the probe's failure")?;
     assert!(
         matches!(target, EgressProbeError::Target(NetlinkError::Unexpected)),
