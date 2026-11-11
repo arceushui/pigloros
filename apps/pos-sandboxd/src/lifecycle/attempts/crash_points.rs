@@ -411,7 +411,14 @@ fn run(runtime: &Path, count: u8, interruption: Interruption) -> TestResult<Run>
         .start_paused(true)
         .build()?;
     // Opening the owner writes its activation marker before the counted run.
-    let lifecycle = AttemptLifecycle::new(registry(runtime)??);
+    let ledger = crate::StagingLedger::new(crate::StagingLimits {
+        aggregate_bytes: 1024,
+    });
+    let lifecycle = AttemptLifecycle::new(
+        registry(runtime)??,
+        ledger,
+        &crate::ReconciledRestart::for_test(),
+    );
     let crash_at = match interruption {
         Interruption::CrashesAtBoundary(at) => Some(at),
         Interruption::None | Interruption::FailsAtIo(_) | Interruption::CrashesAtIo(_) => None,
@@ -468,9 +475,12 @@ fn assert_live_owner_fails_closed(
     at: usize,
 ) -> TestResult {
     for attempt in ended {
-        let reported = lifecycle.reconcile(&reconcile_request(attempt.attempt_id));
-        match &attempt.cleanup {
-            Ok(cleaned) => {
+        let reported = lifecycle.reconcile(&reconcile_request(attempt.attempt_id()));
+        match attempt.cleanup() {
+            Ok(None) => {
+                return Err(format!("operation {at}: a started attempt was withdrawn").into())
+            }
+            Ok(Some(cleaned)) => {
                 assert!(reported.is_ok(), "operation {at}: {reported:?}");
                 assert_eq!(*survivors, CrashSurvivors::default(), "operation {at}");
                 let key = cleaned.intent().unit_name().attempt_component();
@@ -686,7 +696,11 @@ fn clean_run(count: u8) -> TestResult<Run> {
     let ended = clean.ended.as_ref().ok_or("the clean run crashed")?;
     assert_eq!(ended.len(), usize::from(count));
     for attempt in ended {
-        assert!(attempt.cleanup.is_ok(), "{:?}", attempt.cleanup);
+        assert!(
+            matches!(attempt.cleanup(), Ok(Some(_))),
+            "{:?}",
+            attempt.cleanup()
+        );
     }
     assert_eq!(
         clean.ios,
