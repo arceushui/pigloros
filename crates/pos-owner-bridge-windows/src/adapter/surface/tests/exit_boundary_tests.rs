@@ -153,6 +153,160 @@ fn fresh_success_provenance_binds_record_and_matching_exit_to_owner() -> TestRes
 }
 
 #[test]
+fn fresh_success_provenance_refuses_missing_duplicate_and_unreadable_records() -> TestResult {
+    let mut fixture = buffered_fixture()?;
+    let ceremony = spec(40).ceremony_id;
+    let original = fixture.store.records_now()[0].clone();
+    fixture
+        .store
+        .set_failing(&[pos_owner_bridge::fake::host::StoreOp::List]);
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    fixture.store.set_failing(&[]);
+    fixture
+        .store
+        .delete_record(&original)
+        .map_err(|_| "remove original record")?;
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    fixture.store.preload(vec![0x80]);
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    fixture
+        .store
+        .delete_record(&[0x80])
+        .map_err(|_| "remove malformed record")?;
+    fixture.store.preload(original.clone());
+    fixture.store.preload(original.clone());
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+    assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
+    fixture
+        .store
+        .delete_record(&original)
+        .map_err(|_| "remove duplicate records")?;
+    fixture.store.preload(original);
+    assert!(fixture.surface.fresh_success_provenance(ceremony).is_ok());
+    fixture.finish()
+}
+
+#[test]
+fn exit_capture_rearming_requires_the_same_ceremony_trace_and_unattempted_capture() -> TestResult {
+    let mut fixture = buffered_fixture()?;
+    fixture
+        .surface
+        .zero_close_buffers()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let ceremony = spec(40).ceremony_id;
+    let trace = std::rc::Rc::default();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert!(fixture
+        .surface
+        .arm_exit_capture(ceremony, std::rc::Rc::clone(&trace), Instant::now())
+        .is_err());
+    fixture
+        .surface
+        .arm_exit_capture(ceremony, std::rc::Rc::clone(&trace), deadline)
+        .map_err(|()| "arm original capture")?;
+    fixture
+        .surface
+        .arm_exit_capture(ceremony, std::rc::Rc::clone(&trace), deadline)
+        .map_err(|()| "rearm same unattempted capture")?;
+    assert!(fixture
+        .surface
+        .arm_exit_capture(spec(41).ceremony_id, std::rc::Rc::clone(&trace), deadline)
+        .is_err());
+    assert!(fixture
+        .surface
+        .arm_exit_capture(ceremony, std::rc::Rc::default(), deadline)
+        .is_err());
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture
+        .surface
+        .arm_exit_capture(ceremony, trace, deadline)
+        .is_err());
+    assert!(fixture.surface.classify_exit_boundary(deadline).is_ok());
+    assert!(fixture
+        .surface
+        .classify_exit_boundary(deadline + Duration::from_nanos(1))
+        .is_err());
+    assert!(fixture.surface.classify_exit_boundary(deadline).is_ok());
+    assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
+    fixture.finish()
+}
+
+#[test]
+fn exit_capture_keeps_the_first_close_failure_after_a_successful_retry() -> TestResult {
+    for failure in ["close_buffers", "unsubscribe_view", "close_controller"] {
+        let (mut fixture, deadline) = prepared_fixture(None, Duration::from_secs(10))?;
+        fixture.factory.failure.set(Some(failure));
+        assert!(fixture.surface.close_controller().is_err());
+        fixture.factory.failure.set(None);
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert!(fixture.surface.classify_exit_boundary(deadline).is_err());
+        assert!(fixture
+            .surface
+            .consume_exit_capture(deadline, true)
+            .is_err());
+        assert_retained_without_fault(&mut fixture);
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn exit_capture_rejects_record_loss_and_corruption_without_discarding_the_record() -> TestResult {
+    for before_close in [true, false] {
+        for replacement in [None, Some(vec![0x80])] {
+            let (mut fixture, deadline) = prepared_fixture(None, Duration::from_secs(10))?;
+            if !before_close {
+                fixture
+                    .surface
+                    .close_controller()
+                    .map_err(pos_owner_bridge::SurfaceError::error)?;
+            }
+            let original = fixture.store.records_now()[0].clone();
+            fixture
+                .store
+                .delete_record(&original)
+                .map_err(|_| "remove captured record")?;
+            if let Some(bytes) = replacement {
+                fixture.store.preload(bytes);
+            }
+            let retained = fixture.store.records_now();
+            if before_close {
+                fixture
+                    .surface
+                    .close_controller()
+                    .map_err(pos_owner_bridge::SurfaceError::error)?;
+            }
+            assert!(fixture.surface.classify_exit_boundary(deadline).is_err());
+            assert!(fixture
+                .surface
+                .consume_exit_capture(deadline, true)
+                .is_err());
+            assert_eq!(fixture.store.records_now(), retained);
+            assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
+            assert!(matches!(
+                fixture.surface.open(&spec(41)),
+                std::task::Poll::Ready(Err(_))
+            ));
+            for bytes in retained {
+                fixture
+                    .store
+                    .delete_record(&bytes)
+                    .map_err(|_| "remove modeled corruption")?;
+            }
+            fixture.store.preload(original);
+            fixture.finish()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn exit_capture_refuses_unavailable_or_mismatched_handle_without_releasing_owner() -> TestResult {
     for failure in ["retain_exit", "mismatched_exit_handle"] {
         let (mut fixture, deadline) = closed_fixture_with_failure(Some(failure))?;
