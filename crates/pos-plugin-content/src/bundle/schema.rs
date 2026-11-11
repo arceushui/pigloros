@@ -224,6 +224,30 @@ pub(super) fn validate(inputs: &[(u16, &str, &[u8])]) -> Result<(), (u16, Refusa
         index.references.extend(local.references);
         index.locations.extend(local.locations);
     }
+    first_error = resolve_references(&documents, &index, incomplete, first_error);
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
+    for document in &documents {
+        registry = registry
+            .add(document.base.as_str(), &document.value)
+            .map_err(|_| (document.index, Refusal::ReferenceMismatch))?;
+    }
+    // The fixed retriever refuses external I/O even under feature unification.
+    let registry = registry
+        .prepare()
+        .map_err(|_| (0, Refusal::ReferenceMismatch))?;
+    drop(registry);
+    Ok(())
+}
+
+fn resolve_references(
+    documents: &[Document],
+    index: &Index,
+    incomplete: bool,
+    mut first_error: Option<(u16, Refusal)>,
+) -> Option<(u16, Refusal)> {
     // Recover safe references to indexed resources with one bounded walk.
     let wanted: BTreeSet<_> = index.identifiers.values().copied().collect();
     let mut values = BTreeMap::new();
@@ -265,21 +289,7 @@ pub(super) fn validate(inputs: &[(u16, &str, &[u8])]) -> Result<(), (u16, Refusa
             first_error = Some((reference.index, Refusal::ReferenceMismatch));
         }
     }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-    let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
-    for document in &documents {
-        registry = registry
-            .add(document.base.as_str(), &document.value)
-            .map_err(|_| (document.index, Refusal::ReferenceMismatch))?;
-    }
-    // The fixed retriever refuses external I/O even under feature unification.
-    let registry = registry
-        .prepare()
-        .map_err(|_| (0, Refusal::ReferenceMismatch))?;
-    drop(registry);
-    Ok(())
+    first_error
 }
 
 fn valid_pointer(pointer: &str) -> bool {
