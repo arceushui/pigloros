@@ -440,6 +440,45 @@ mod native_tests {
             ledger = guard.open_nonce_ledger()?;
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
+        refuse_changed_ledger(&guard, ledger, base)?;
+        Ok(())
+    }
+
+    fn refuse_changed_ledger(
+        guard: &WindowsSubjectEncryptorLock,
+        ledger: WindowsNonceLedger<'_>,
+        base: &Path,
+    ) -> TestResult {
+        let path = base.join("PiglorOS").join(LEDGER);
+        let backup = base.join("PiglorOS").join("ledger-observed-backup");
+        ledger.replace_nonce_ledger_bytes(b"original")?;
+        let result = ledger.replace_observing(b"candidate", |stage| {
+            if stage == CommitStage::Created {
+                fs::rename(&path, &backup).map_err(|_| ())?;
+                let mut replacement = crate::Native::create_private_ledger_file(&path)?;
+                replacement.write_all(b"substituted").map_err(|_| ())?;
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(()));
+        assert_eq!(fs::read(&path)?, b"substituted");
+        assert_eq!(fs::read(&backup)?, b"original");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        drop(ledger);
+        fs::remove_file(&path)?;
+        fs::rename(&backup, &path)?;
+        let ledger = guard.open_nonce_ledger()?;
+        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"original");
+
+        let result = ledger.replace_observing(b"candidate", |stage| {
+            if stage == CommitStage::Renamed {
+                fs::write(&path, b"changed after rename").map_err(|_| ())?;
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(()));
+        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"changed after rename");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
         Ok(())
     }
 
