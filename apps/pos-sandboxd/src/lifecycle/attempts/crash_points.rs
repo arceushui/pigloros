@@ -40,9 +40,8 @@
 //! consulted proofs withheld it must fail closed, removing nothing while
 //! admission stays closed. With every proof given it must stop the surviving
 //! unit, detach the surviving root, clean the network and then prove the
-//! egress property, wait out a request
-//! still pending on this boot before its loop sweep, and remove everything,
-//! the intent last; the same attempts can then be committed again. Restart
+//! egress property, wait out a request still pending on this boot before its
+//! loop sweep, and remove everything, the intent last; the same attempts can then be committed again. Restart
 //! itself is also crashed at each of its registry operations over three
 //! crash states, and the owner open that creates the activation marker at
 //! each of its own; a second restart must converge. A same-boot restart
