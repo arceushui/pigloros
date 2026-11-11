@@ -715,11 +715,21 @@ impl Fixture {
         first: ProcessFaultMark,
         deadline: Instant,
     ) -> TestResult {
+        self.observe_fault_with_clock(target, first, deadline, &SystemClock)
+    }
+
+    fn observe_fault_with_clock(
+        &mut self,
+        target: ProcessFaultTarget,
+        first: ProcessFaultMark,
+        deadline: Instant,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         // Progress the owning STA until its actual event; never wait on a process
         // handle or infer an exit from a PID. Query the retained handle once when
         // that event arrives; an indeterminate result fails this case.
         loop {
-            if Instant::now() >= deadline {
+            if clock.now() >= deadline {
                 return Err("native fault event timed out".into());
             }
             if let Some(event) = self
@@ -738,7 +748,7 @@ impl Fixture {
                     .exit_code()
                     .map_err(|()| "exit query failed")?
                     .ok_or("exit still pending at native event")?;
-                if Instant::now() >= deadline {
+                if clock.now() >= deadline {
                     return Err("native fault event timed out".into());
                 }
                 self.trace

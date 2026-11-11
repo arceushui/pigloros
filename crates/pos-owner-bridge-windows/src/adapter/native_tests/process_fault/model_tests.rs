@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::listener::FixtureProfile;
 use pos_owner_bridge::{
-    BridgeError, OwnerWebSurface, ProcessIdentity, SystemClock, UnavailableCode,
+    BridgeError, MonotonicClock, OwnerWebSurface, ProcessIdentity, SystemClock, UnavailableCode,
 };
 use pos_owner_bridge_codec::{CeremonyId, ControlState, ImagePathSha256};
 
@@ -175,7 +175,22 @@ fn modeled_failure_finish_checks_evidence_after_retiring_and_preserves_prior_err
     Ok(())
 }
 
-struct Handle(Result<Option<u32>, ()>);
+struct TickingClock(FakeClock);
+
+impl MonotonicClock for TickingClock {
+    fn now(&self) -> Instant {
+        let now = self.0.now();
+        // Absent events also advance modeled time and reach the deadline.
+        self.0.advance(Duration::from_secs(1));
+        now
+    }
+}
+
+struct Handle {
+    code: Result<Option<u32>, ()>,
+    clock: FakeClock,
+    advance: Duration,
+}
 
 impl ProcessFaultHandle for Handle {
     fn identity(&self) -> ProcessIdentity {
@@ -187,7 +202,8 @@ impl ProcessFaultHandle for Handle {
     }
 
     fn exit_code(&self) -> Result<Option<u32>, ()> {
-        self.0
+        self.clock.advance(self.advance);
+        self.code
     }
 }
 
@@ -196,6 +212,7 @@ fn modeled_fault_observer_requires_a_reached_state_and_unexpired_deadline() -> T
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, _model) = fixture(&root)?;
+    let clock = TickingClock(FakeClock::start());
     assert_eq!(
         fixture
             .observe_fault(ProcessFaultTarget::Browser)
@@ -206,10 +223,25 @@ fn modeled_fault_observer_requires_a_reached_state_and_unexpired_deadline() -> T
     );
     assert_eq!(
         fixture
-            .observe_fault_until(
+            .observe_fault_with_clock(
                 ProcessFaultTarget::Browser,
                 ProcessFaultMark::TerminationCall,
-                Instant::now(),
+                clock.now(),
+                &clock,
+            )
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("native fault event timed out")
+    );
+    crate::Native::reset_process_failure_observations();
+    assert_eq!(
+        fixture
+            .observe_fault_with_clock(
+                ProcessFaultTarget::Renderer,
+                ProcessFaultMark::TerminationCall,
+                clock.now() + Duration::from_secs(5),
+                &clock,
             )
             .err()
             .map(|error| error.to_string())
@@ -224,14 +256,24 @@ fn modeled_fault_observer_requires_a_reached_state_and_unexpired_deadline() -> T
 #[test]
 fn modeled_fault_observer_requires_retained_exit_code_and_ordered_trace() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
-    for (code, expected) in [
-        (Err(()), Some("exit query failed")),
-        (Ok(None), Some("exit still pending at native event")),
+    for (code, advance, expected) in [
+        (Err(()), Duration::ZERO, Some("exit query failed")),
+        (
+            Ok(None),
+            Duration::ZERO,
+            Some("exit still pending at native event"),
+        ),
         (
             Ok(Some(0)),
+            Duration::ZERO,
             Some("ordered native fault evidence is incomplete"),
         ),
-        (Ok(Some(0x535)), None),
+        (Ok(Some(0x535)), Duration::ZERO, None),
+        (
+            Ok(Some(0x535)),
+            Duration::from_secs(6),
+            Some("native fault event timed out"),
+        ),
     ] {
         let root = FixtureRoot::new()?;
         let (mut fixture, model) = fixture(&root)?;
@@ -245,7 +287,13 @@ fn modeled_fault_observer_requires_retained_exit_code_and_ordered_trace() -> Tes
             .clone()
             .ok_or("missing modeled event sink")?;
         let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
-        let handle = Handle(code);
+        let clock = TickingClock(FakeClock::start());
+        let deadline = clock.now() + Duration::from_secs(5);
+        let handle = Handle {
+            code,
+            clock: clock.0.clone(),
+            advance,
+        };
         let first = ProcessFaultMark::Reached(ProcessFaultState {
             phase: ProcessFaultPhase::PostedReceipt,
             topology: ProcessFaultTopology::SealedSingleViewFrameFree,
@@ -260,11 +308,8 @@ fn modeled_fault_observer_requires_retained_exit_code_and_ordered_trace() -> Tes
             ProcessFaultMark::TerminationCall,
         ]);
         fixture.handle = Some(Box::new(handle));
-        let outcome = fixture.observe_fault_until(
-            ProcessFaultTarget::Browser,
-            first,
-            Instant::now() + Duration::from_secs(5),
-        );
+        let outcome =
+            fixture.observe_fault_with_clock(ProcessFaultTarget::Browser, first, deadline, &clock);
         assert_eq!(
             outcome.err().map(|error| error.to_string()).as_deref(),
             expected

@@ -209,4 +209,70 @@ mod tests {
         assert!(native.calls.borrow().contains(&"drop_environment"));
         Ok(())
     }
+
+    #[test]
+    fn idle_native_session_refuses_operations_until_their_owners_exist(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _port = crate::Native::fixed_port_fixture();
+        let mut factory = crate::Native::owner_factory()?;
+        let events = Rc::new(Events::default());
+        let sink: Rc<dyn EventSink> = events.clone();
+        let mut session = Session::new(&factory, events)?;
+        let closed = crate::NativeError {
+            operation: crate::Operation::Controller,
+            failure: crate::Failure::Closed,
+        };
+        let mut reply = pos_owner_bridge::ReplyImage::zeroed();
+        for result in [
+            session.resize_window(480, 640, 96),
+            session.show_window(),
+            session.fit_controller(),
+            session.focus_controller(),
+            session.create_controller(),
+            session.require_shared_interfaces(),
+            session.subscribe_view(sink),
+            session.set_bool(crate::BoolProperty::Script, true),
+            session.navigate_owner(),
+            session.create_buffers(pos_owner_bridge_codec::CeremonyKind::Get, &[], &[0; 64]),
+            session.post(crate::BufferSlot::Request),
+            session.post(crate::BufferSlot::Reply),
+            session.copy_reply(&mut reply),
+        ] {
+            assert_eq!(result, Err(closed));
+        }
+        assert_eq!(session.window().err(), Some(closed));
+        assert_eq!(session.environment().err(), Some(closed));
+        assert_eq!(session.browser_pid().err(), Some(closed));
+        assert_eq!(session.get_bool(crate::BoolProperty::Script), Err(closed));
+        assert_eq!(session.source().err(), Some(closed));
+        assert_eq!(session.load_state(), Err(closed));
+        assert_eq!(session.compare_exchange(0, 1), Err(closed));
+        assert!(reply.as_bytes().iter().all(|byte| *byte == 0));
+        assert!(session.environment_completion().is_none());
+        assert!(session.controller_completion().is_none());
+        assert!(session.environment_creation_completion().is_none());
+        assert!(session.recordless_controller_completion().is_none());
+        assert!(session.early_renderer_presence().is_err());
+        assert!(session.pending_opening_browser_candidate().is_err());
+        assert!(session.recordless_browser_candidate().is_err());
+        assert!(!session.pending());
+        assert!(!session.has_controller()?);
+        assert!(!session.buffer_close_uncertain());
+        assert!(!session.preload_fault_owners_retained());
+        assert!(!session.pending_opening_owners_retained());
+        assert!(!session.recordless_fault_owners_retained());
+        assert!(!session.fault_owners_retained());
+        assert!(!session.exit_fault_owners_retained());
+        for _ in 0..2 {
+            session.close_buffers()?;
+            session.unsubscribe_view()?;
+            session.close_controller()?;
+            session.unsubscribe_exit()?;
+            session.drop_environment()?;
+            session.destroy_window()?;
+        }
+        drop(session);
+        factory.stop()?;
+        Ok(())
+    }
 }
