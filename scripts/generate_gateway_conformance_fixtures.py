@@ -8,10 +8,11 @@ This is the only writer of the payloads, oracles and evidence-status records of 
 subcommand) and runs offline.
 
 It does not use implementation output as an oracle: no Rust, no cargo and no binary of the
-repository. Every expected HTTP exchange is written here by hand from the documented Gateway
-route table (ADR-014 and `apps/piglor-gateway/README.md`) and the exchange grammar and
-normalization of `fixtures/conformance/profiles/gateway-client-conformance/
-normative-requirements.md`. The only computed values are the `society.signal` payload bytes
+repository. Every expected HTTP exchange is written here by hand from the published Gateway v1
+contract (`contracts/gateway/v1/openapi.json` and its problem-type registry) and the exchange
+grammar and normalization of `fixtures/conformance/profiles/gateway-client-conformance/
+normative-requirements.md`. Every expected response body is also validated against the
+contract by `scripts/check_gateway_contract.py`. The only computed values are the `society.signal` payload bytes
 (the encoding the requirements text states) and the independent-evaluation digests, both
 derived here. The only primitive it imports is the BLAKE3 hash of
 `generate_pmf1_golden_vectors.py`.
@@ -45,6 +46,7 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 FIXTURES = ROOT / "fixtures/conformance"
+PROBLEM_TYPES = ROOT / "contracts/gateway/v1/problem-types.json"
 BLAKE3_VECTORS = HERE / "data/blake3_test_vectors.json"
 SCHEMA_DIGESTS_RUST = ROOT / "apps/pos-gateway-conformance-adapter/src/subject/schema_digests.rs"
 
@@ -189,17 +191,54 @@ def observed(status: int, body: object) -> dict:
     return {"status": status, "body": body}
 
 
-def error(status: int) -> dict:
-    """The documented JSON error envelope; its message text is normalized away."""
-    return observed(status, json_body({"error": "<message>"}))
+def problem_titles() -> dict[str, str]:
+    registry = json.loads(PROBLEM_TYPES.read_text(encoding="utf-8"))
+    return {entry["code"]: entry["title"] for entry in registry["problem_types"]}
 
 
-NOT_ROUTED = observed(404, "non-json")
+def route_template(path: str) -> str:
+    """The problem `instance` of a routed request: its route template, never a run-local ID."""
+    base = path.split("?", 1)[0]
+    return re.sub(r"^/v1/timelines/[^/]+/", "/v1/timelines/{timeline_id}/", base)
+
+
+def problem(status: int, code: str, instance: str, retryable: bool = False) -> dict:
+    """An RFC 9457 problem of the v1 registry; its detail text is normalized away."""
+    return observed(
+        status,
+        json_body(
+            {
+                "code": code,
+                "detail": "<message>",
+                "instance": instance,
+                "retryable": retryable,
+                "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+                "status": status,
+                "title": problem_titles()[code],
+                "type": f"urn:pigloros:gateway:v1:problem:{code}",
+            }
+        ),
+    )
+
+
+def routed_problem(status: int, code: str, path: str) -> dict:
+    return problem(status, code, route_template(path))
+
+
+def not_routed(path: str) -> dict:
+    """The answer of a router that serves no such path: `instance` is the request path, whose
+    captured Timeline ID the normalization turns into `<ulid>`."""
+    return problem(404, "not-found-or-unavailable", path.replace("{timeline}", "<ulid>"))
+
+
 REFUSED = {"refused": "capability-denied"}
 EMPTY_PAGE = observed(
     200, json_body({"events": [], "next_cursor": None, "next_from_seq": None})
 )
 TIMELINE_PATH = "/v1/timelines/{timeline}"
+EVENTS_PATH = f"{TIMELINE_PATH}/events"
+ACTIONS_PATH = f"{TIMELINE_PATH}/actions"
+SIGNALS_PATH = f"{TIMELINE_PATH}/signals"
 
 
 def health(router: str = "loopback") -> Exchange:
@@ -225,7 +264,7 @@ def create(name: str, capture: bool = True, expect: dict | None = None) -> Excha
 
 
 def poll(expect: dict, query: str = "", actor: bool = False, router: str = "loopback") -> Exchange:
-    return Exchange(router, "GET", f"{TIMELINE_PATH}/events{query}", expect, actor=actor)
+    return Exchange(router, "GET", f"{EVENTS_PATH}{query}", expect, actor=actor)
 
 
 def signal_request(subject: str) -> dict:
@@ -253,7 +292,7 @@ def signal(subject: str, expect: dict, router: str = "loopback") -> Exchange:
     return Exchange(
         router,
         "POST",
-        f"{TIMELINE_PATH}/signals",
+        SIGNALS_PATH,
         expect,
         body=signal_request(subject),
         has_body=True,
@@ -285,7 +324,7 @@ def action(
         "payload": world_action([0.5, 0.25] if params is None else params),
     }
     return Exchange(
-        "loopback", "POST", f"{TIMELINE_PATH}/actions", expect, body=body, has_body=True
+        "loopback", "POST", ACTIONS_PATH, expect, body=body, has_body=True
     )
 
 
@@ -322,13 +361,21 @@ def denied_subcases() -> list[SubCase]:
             "den.1",
             "an action without a host authorizer is unauthorized and commits nothing",
             "open",
-            [create("den-1"), action(error(401)), poll(EMPTY_PAGE)],
+            [
+                create("den-1"),
+                action(routed_problem(401, "unauthenticated", ACTIONS_PATH)),
+                poll(EMPTY_PAGE),
+            ],
         ),
         SubCase(
             "den.2",
             "an action the fixture authority does not grant is forbidden and commits nothing",
             "authorized",
-            [create("den-2"), action(error(403)), poll(EMPTY_PAGE, actor=True)],
+            [
+                create("den-2"),
+                action(routed_problem(403, "unauthorized", ACTIONS_PATH)),
+                poll(EMPTY_PAGE, actor=True),
+            ],
         ),
         SubCase(
             "den.3",
@@ -340,7 +387,7 @@ def denied_subcases() -> list[SubCase]:
             "den.4",
             "a read without the actor header on an authorized Gateway is unauthorized",
             "authorized",
-            [create("den-4"), poll(error(401))],
+            [create("den-4"), poll(routed_problem(401, "unauthenticated", EVENTS_PATH))],
         ),
     ]
 
@@ -351,32 +398,53 @@ def malformed_subcases() -> list[SubCase]:
             "mal.1",
             "cursor together with from_seq is a bad query",
             "open",
-            [create("mal-1"), poll(error(400), "?from_seq=0&cursor=v1")],
+            [
+                create("mal-1"),
+                poll(routed_problem(400, "invalid-request", EVENTS_PATH), "?from_seq=0&cursor=v1"),
+            ],
         ),
         SubCase(
             "mal.2",
             "a page limit above 100 is a bad query",
             "open",
-            [create("mal-2"), poll(error(400), f"?limit={EVENT_LIMIT + 1}")],
+            [
+                create("mal-2"),
+                poll(routed_problem(400, "invalid-request", EVENTS_PATH), f"?limit={EVENT_LIMIT + 1}"),
+            ],
         ),
         SubCase(
             "mal.3",
             "a Timeline ID that is not a ULID is a bad ID",
             "open",
-            [Exchange("loopback", "GET", "/v1/timelines/not-a-timeline/events", error(400))],
+            [
+                Exchange(
+                    "loopback",
+                    "GET",
+                    "/v1/timelines/not-a-timeline/events",
+                    routed_problem(400, "invalid-request", "/v1/timelines/not-a-timeline/events"),
+                )
+            ],
         ),
         SubCase(
             "mal.4",
             "integer action params are an invalid typed payload and commit nothing",
             "authorized",
-            [create("mal-4"), action(error(422), params=[1, 2]), poll(EMPTY_PAGE, actor=True)],
+            [
+                create("mal-4"),
+                action(routed_problem(422, "admission-rejected", ACTIONS_PATH), params=[1, 2]),
+                poll(EMPTY_PAGE, actor=True),
+            ],
         ),
     ]
 
 
 def resource_subcases() -> list[SubCase]:
     creates = [create(f"res-1-{index:02d}", capture=False) for index in range(1, MAX_TIMELINES + 1)]
-    over = create(f"res-1-{MAX_TIMELINES + 1}", capture=False, expect=error(429))
+    over = create(
+        f"res-1-{MAX_TIMELINES + 1}",
+        capture=False,
+        expect=routed_problem(429, "resource-limit-exceeded", "/v1/timelines"),
+    )
     return [
         SubCase(
             "res.1",
@@ -400,8 +468,8 @@ def redaction_subcases() -> list[SubCase]:
             [
                 create("del-1"),
                 signal(CANARY, observed(201, json_body(signal_view(CANARY, 1)))),
-                poll(NOT_ROUTED, router="spectator"),
-                signal(CANARY, NOT_ROUTED, router="spectator"),
+                poll(not_routed(EVENTS_PATH), router="spectator"),
+                signal(CANARY, not_routed(SIGNALS_PATH), router="spectator"),
                 health("spectator"),
                 ledger("spectator"),
                 poll(observed(200, json_body(page))),
@@ -419,7 +487,9 @@ def downgrade_subcases() -> list[SubCase]:
             "authorized",
             [
                 create("dgr-1"),
-                action(error(400), event_type="world.action"),
+                action(
+                    routed_problem(400, "unsupported-version", ACTIONS_PATH), event_type="world.action"
+                ),
                 poll(EMPTY_PAGE, actor=True),
             ],
         ),
@@ -429,7 +499,9 @@ def downgrade_subcases() -> list[SubCase]:
             "authorized",
             [
                 create("dgr-2"),
-                action(error(403), capability="world.action.submit"),
+                action(
+                    routed_problem(403, "unauthorized", ACTIONS_PATH), capability="world.action.submit"
+                ),
                 poll(EMPTY_PAGE, actor=True),
             ],
         ),
@@ -789,12 +861,14 @@ def normalize(value: object, key: str | None = None) -> object:
     if isinstance(value, list):
         return [normalize(item) for item in value]
     if isinstance(value, str):
-        if key == "id" and re.fullmatch(ULID_PATTERN, value):
-            return "<ulid>"
         if key == "next_cursor" and re.fullmatch(CURSOR_PATTERN, value):
             return "<cursor>"
-        if key == "error":
+        if key == "detail":
             return "<message>"
+        if key in ("id", "instance"):
+            return "/".join(
+                "<ulid>" if re.fullmatch(ULID_PATTERN, part) else part for part in value.split("/")
+            )
     return value
 
 
@@ -804,13 +878,15 @@ def check_normalization() -> None:
         "events": [{"id": ulid, "entity": ulid, "seq": 1}],
         "next_cursor": f"v1.{'ab' * 32}.{ulid}.2",
         "next_from_seq": 2,
-        "error": "no such Timeline",
+        "detail": "no such Timeline",
+        "instance": f"/v1/timelines/{ulid}/events",
     }
     wanted = {
         "events": [{"id": "<ulid>", "entity": ulid, "seq": 1}],
         "next_cursor": "<cursor>",
         "next_from_seq": 2,
-        "error": "<message>",
+        "detail": "<message>",
+        "instance": "/v1/timelines/<ulid>/events",
     }
     if normalize(raw) != wanted:
         raise SystemExit("the normalization rules are broken")

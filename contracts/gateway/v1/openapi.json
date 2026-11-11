@@ -1,0 +1,1186 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "PiglorOS Gateway",
+    "version": "1.0.0-draft",
+    "summary": "The sole public application boundary of PiglorOS (ADR-022).",
+    "description": "Canonical v1 contract of the Gateway (#301). Draft until Wave 9 acceptance: before then Draft fixtures may be replaced without compatibility code. Every failure is an RFC 9457 `application/problem+json` body whose `code` is one of `problem-types.json`. Every mutation that is retry-safe carries an `Idempotency-Key` header. Events are ordered by Timeline sequence, never by wall time. Response schemas are closed so that this revision detects drift; clients must ignore unknown members, because later v1 revisions may add optional ones. No operation creates a real-world effect.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Local mode (loopback listener)."
+    }
+  ],
+  "x-pigloros-problem-types": "problem-types.json",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback",
+          "public"
+        ],
+        "responses": {
+          "200": {
+            "description": "The Gateway is ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthOk"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: the store executor or erasure host is not ready.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/ledger": {
+      "get": {
+        "operationId": "getLedger",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback",
+          "public"
+        ],
+        "responses": {
+          "200": {
+            "description": "The public Prediction Ledger.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LedgerView"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/ledger/predictions": {
+      "post": {
+        "operationId": "createPrediction",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPrediction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The registered prediction.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionCreated"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`: ledger writes are disabled.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`invalid-request`: the prediction is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: no ledger store.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/timelines": {
+      "post": {
+        "operationId": "createTimeline",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTimelineRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created Timeline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineCreated"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: the Timeline bound is reached.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/timelines/{timeline_id}/events": {
+      "get": {
+        "operationId": "listEvents",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TimelineId"
+          },
+          {
+            "name": "from_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Inclusive first sequence. Exclusive with `cursor`."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EventCursor"
+            },
+            "description": "Continuation from `next_cursor`. Exclusive with `from_seq`."
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; required when the host binds an authorizer."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page in Timeline Order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request`: a malformed query, ID, limit or cursor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`append-conflict`: the cursor belongs to an older inventory generation.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: one Event exceeds the response bound.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/timelines/{timeline_id}/actions": {
+      "post": {
+        "operationId": "submitAction",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TimelineId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed Event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventView"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An exact retry: the originally committed Event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request` or `unsupported-version`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict` or `append-conflict`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`invalid-request` or `admission-rejected`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/timelines/{timeline_id}/signals": {
+      "post": {
+        "operationId": "appendSignal",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TimelineId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The committed Society Signal Event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/v1/bridges/owntracks": {
+      "post": {
+        "operationId": "ingestOwnTracksLocation",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "description": "Enabled only on a loopback listener with the OwnTracks bridge configured. Basic authentication with the paired hex handle and secret.",
+        "security": [
+          {
+            "ownTracksBasic": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnTracksLocation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted, duplicate, or an empty body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnTracksAccepted"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`, retryable.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Ulid": {
+        "$id": "urn:pigloros:gateway:v1:schema:ulid",
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+        "description": "A canonical upper-case ULID."
+      },
+      "EventCursor": {
+        "$id": "urn:pigloros:gateway:v1:schema:event-cursor",
+        "type": "string",
+        "pattern": "^v1\\.[0-9a-f]{64}\\.[0-7][0-9A-HJKMNP-TV-Z]{25}\\.[1-9][0-9]*$",
+        "description": "An opaque continuation cursor bound to one Timeline and one host inventory generation. Clients pass it back unchanged; a cursor of an older generation is `append-conflict`."
+      },
+      "IdempotencyKey": {
+        "$id": "urn:pigloros:gateway:v1:schema:idempotency-key",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[!-~]+$",
+        "description": "A caller-generated key of 1 to 128 visible ASCII characters. Repeating the key with the same request bytes returns the original result; reusing it with different bytes is `idempotency-conflict`."
+      },
+      "Problem": {
+        "$id": "urn:pigloros:gateway:v1:schema:problem",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "schema_id",
+          "retryable"
+        ],
+        "description": "An RFC 9457 problem details body. `code` is the stable family of problem-types.json; `type` is its URN. `detail` is safe human-readable text whose wording is not part of the contract.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^urn:pigloros:gateway:v1:problem:[a-z-]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "The matched route template of the failed request; the request path only for an unrouted request."
+          },
+          "code": {
+            "enum": [
+              "invalid-request",
+              "unsupported-version",
+              "incompatible-profile",
+              "unauthenticated",
+              "unauthorized",
+              "consent-invalid",
+              "revoked",
+              "deleted",
+              "not-found-or-unavailable",
+              "admission-rejected",
+              "approval-rejected",
+              "append-conflict",
+              "idempotency-conflict",
+              "artifact-missing",
+              "artifact-untrusted",
+              "replay-claim-insufficient",
+              "dependency-graph-incomplete",
+              "mixed-fork-generation",
+              "counterfactual-incomplete",
+              "resource-limit-exceeded",
+              "temporarily-unavailable",
+              "internal-safe-failure"
+            ]
+          },
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:problem"
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether an identical retry may succeed later."
+          }
+        }
+      },
+      "HealthOk": {
+        "$id": "urn:pigloros:gateway:v1:schema:health",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "LedgerEntry": {
+        "$id": "urn:pigloros:gateway:v1:schema:ledger-entry",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "statement",
+          "predicted_outcome",
+          "confidence",
+          "status",
+          "made_at",
+          "resolve_by",
+          "osf_link"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "predicted_outcome": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "scenario": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "brier_score": {
+            "type": "number"
+          },
+          "made_at": {
+            "type": "string"
+          },
+          "resolve_by": {
+            "type": "string"
+          },
+          "resolved_at": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "boolean"
+          },
+          "osf_link": {
+            "type": "string"
+          }
+        }
+      },
+      "LedgerView": {
+        "$id": "urn:pigloros:gateway:v1:schema:ledger",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "domain",
+          "path",
+          "ledger"
+        ],
+        "properties": {
+          "domain": {
+            "const": "piglor.com"
+          },
+          "path": {
+            "const": "/ledger"
+          },
+          "ledger": {
+            "type": "array",
+            "items": {
+              "$ref": "urn:pigloros:gateway:v1:schema:ledger-entry"
+            }
+          }
+        }
+      },
+      "NewPrediction": {
+        "$id": "urn:pigloros:gateway:v1:schema:new-prediction",
+        "type": "object",
+        "required": [
+          "title",
+          "statement",
+          "predicted_outcome",
+          "confidence",
+          "made_at",
+          "resolve_by",
+          "osf_link"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "predicted_outcome": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "scenario": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "made_at": {
+            "type": "string",
+            "description": "RFC 3339 UTC date-time."
+          },
+          "resolve_by": {
+            "type": "string",
+            "description": "RFC 3339 date."
+          },
+          "osf_link": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "PredictionCreated": {
+        "$id": "urn:pigloros:gateway:v1:schema:prediction-created",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "prediction_id"
+        ],
+        "properties": {
+          "prediction_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateTimelineRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:create-timeline-request",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TimelineCreated": {
+        "$id": "urn:pigloros:gateway:v1:schema:timeline-created",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "head"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "head": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "EventView": {
+        "$id": "urn:pigloros:gateway:v1:schema:event",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "entity",
+          "event_type",
+          "seq",
+          "payload_hex"
+        ],
+        "description": "A committed Event. `seq` is its position in Timeline Order and is the commit receipt; `event_type` names its schema.",
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "entity": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "payload": {
+            "description": "The decoded payload when the canonical CBOR is JSON-compatible; absent otherwise."
+          },
+          "payload_hex": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{2})*$"
+          }
+        }
+      },
+      "EventPage": {
+        "$id": "urn:pigloros:gateway:v1:schema:event-page",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "events",
+          "next_from_seq",
+          "next_cursor"
+        ],
+        "description": "One page of committed Events in ascending Timeline Order. `next_from_seq` is null only when the Timeline is exhausted; `next_cursor` is null when the host binds no inventory generation.",
+        "properties": {
+          "events": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "urn:pigloros:gateway:v1:schema:event"
+            }
+          },
+          "next_from_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:event-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WorldActionV1": {
+        "$id": "urn:pigloros:gateway:v1:schema:world-action-v1",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "actor_entity_id",
+          "body_entity_id",
+          "action_kind",
+          "params",
+          "action_scope",
+          "catalogue_version",
+          "tick"
+        ],
+        "description": "The typed `world.action.v1` proposal. `params` are two JSON floats (X, Z, metres per second); integers are rejected at admission as `admission-rejected` (JSON Schema cannot distinguish them).",
+        "properties": {
+          "actor_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "body_entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "action_kind": {
+            "enum": [
+              "impulse",
+              "target_velocity"
+            ]
+          },
+          "params": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "action_scope": {
+            "const": 0
+          },
+          "catalogue_version": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tick": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ActionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:action-request",
+        "type": "object",
+        "required": [
+          "entity_id",
+          "capability",
+          "payload"
+        ],
+        "description": "One typed simulated action. It affects simulation state only; no route creates a real-world effect.",
+        "properties": {
+          "entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_type": {
+            "const": "world.action.v1",
+            "default": "world.action.v1"
+          },
+          "capability": {
+            "const": "world.action.v1.submit"
+          },
+          "payload": {
+            "$ref": "urn:pigloros:gateway:v1:schema:world-action-v1"
+          }
+        }
+      },
+      "SignalRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:signal-request",
+        "type": "object",
+        "required": [
+          "entity_id",
+          "dimension",
+          "value"
+        ],
+        "properties": {
+          "entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "dimension": {
+            "enum": [
+              "trust",
+              "opinion",
+              "culture",
+              "economy",
+              "polarization"
+            ]
+          },
+          "value": {
+            "type": "number"
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "OwnTracksLocation": {
+        "$id": "urn:pigloros:gateway:v1:schema:owntracks-location",
+        "type": "object",
+        "required": [
+          "_type",
+          "lat",
+          "lon",
+          "tst"
+        ],
+        "description": "An OwnTracks `location` message; every other member is discarded by minimization.",
+        "properties": {
+          "_type": {
+            "const": "location"
+          },
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "lon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "tst": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "OwnTracksAccepted": {
+        "$id": "urn:pigloros:gateway:v1:schema:owntracks-accepted",
+        "type": "array",
+        "maxItems": 0
+      },
+      "AdmissionReceipt": {
+        "$id": "urn:pigloros:gateway:v1:schema:admission-receipt",
+        "type": "object",
+        "additionalProperties": false,
+        "x-pigloros-maturity": "draft",
+        "required": [
+          "schema_id",
+          "request_id",
+          "operation_id",
+          "state",
+          "operation_url",
+          "idempotency_key_digest",
+          "bound_inputs"
+        ],
+        "description": "The 202 answer of an asynchronous admission (Decision Preview, actions of #305/#306). It never claims that an Event committed; the committed Event receipt does.",
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:admission-receipt"
+          },
+          "request_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "operation_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "const": "admitted"
+          },
+          "operation_url": {
+            "type": "string",
+            "pattern": "^/v1/"
+          },
+          "idempotency_key_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "BLAKE3 of the idempotency key; the raw key is never echoed."
+          },
+          "bound_inputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "The digests of the input revisions and profile the admission binds."
+          }
+        }
+      },
+      "CommittedEventReceipt": {
+        "$id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
+        "type": "object",
+        "additionalProperties": false,
+        "x-pigloros-maturity": "draft",
+        "required": [
+          "schema_id",
+          "timeline_id",
+          "event_id",
+          "seq",
+          "event_schema_id",
+          "next_cursor"
+        ],
+        "description": "The authoritative commit receipt: the Event at its Timeline sequence and the cursor that observes its Projection.",
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:committed-event-receipt"
+          },
+          "timeline_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "event_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "event_schema_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "urn:pigloros:gateway:v1:schema:event-cursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "parameters": {
+      "TimelineId": {
+        "name": "timeline_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/IdempotencyKey"
+        }
+      }
+    },
+    "responses": {
+      "Problem": {
+        "description": "A failure of the problem-types.json registry.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "ownTracksBasic": {
+        "type": "http",
+        "scheme": "basic"
+      }
+    }
+  }
+}

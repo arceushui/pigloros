@@ -311,6 +311,9 @@ async fn request_http_with_actor(
     .test_ok()?
 }
 
+/// The next Gateway v1 idempotency key; every request carries a fresh one and reads ignore it.
+static NEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn request_http_blocking_with_actor(
     address: SocketAddr,
     method: &str,
@@ -324,6 +327,7 @@ fn request_http_blocking_with_actor(
     let actor_header = actor.map_or_else(String::new, |actor| {
         format!("x-piglor-actor-entity: {actor}\r\n")
     });
+    let key = NEXT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut stream = TcpStream::connect(address).test_ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -333,7 +337,7 @@ fn request_http_blocking_with_actor(
         .test_ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{actor_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{actor_header}Idempotency-Key: e2e-{key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     )
     .test_ok()?;
