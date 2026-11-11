@@ -3608,6 +3608,40 @@ fn clean_environment_callback_order_preserves_actual_invocation() {
 }
 
 #[test]
+fn modeled_callback_witnesses_bound_repeated_observations_and_reset() {
+    use crate::{CreationCallback, Native, NativeCallbackMoment, NativeCreationMoment};
+    let callback = NativeCallbackMoment::EnvironmentCompletion(true);
+    Native::arm_callback_order();
+    for _ in 0..68 {
+        Native::record_callback(callback);
+    }
+    let callbacks = Native::callback_order();
+    assert_eq!(&callbacks[..64], vec![callback; 64]);
+    assert_eq!(&callbacks[64..], [NativeCallbackMoment::Overflow]);
+    Native::disarm_callback_order();
+    Native::record_callback(callback);
+    assert!(Native::callback_order().is_empty());
+    Native::arm_callback_order();
+    assert!(Native::callback_order().is_empty());
+    Native::disarm_callback_order();
+
+    let creation = NativeCreationMoment::EnvironmentCallback(CreationCallback::Success);
+    Native::arm_creation_order();
+    for _ in 0..36 {
+        Native::creation_moment(creation);
+    }
+    let creations = Native::creation_order();
+    assert_eq!(&creations[..32], vec![creation; 32]);
+    assert_eq!(&creations[32..], [NativeCreationMoment::Overflow]);
+    Native::disarm_creation_order();
+    Native::creation_moment(creation);
+    assert!(Native::creation_order().is_empty());
+    Native::arm_creation_order();
+    assert!(Native::creation_order().is_empty());
+    Native::disarm_creation_order();
+}
+
+#[test]
 fn native_environment_result_retained_through_cancellation() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
