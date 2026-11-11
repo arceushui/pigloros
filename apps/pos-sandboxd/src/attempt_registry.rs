@@ -632,12 +632,13 @@ mod tests {
         }
     }
 
-    /// Run `operation` and crash it immediately before registry I/O operation
-    /// `crash_at` would start: it unwinds through every caller without
-    /// performing that or any later operation, so the disk keeps exactly what
-    /// a process crash at that point leaves. Unwinding runs only in-memory
-    /// destructors. Returns `None` when the crash happened, and the number of
-    /// operations started, the crashed one included.
+    /// Run `operation`, crashing it before registry I/O operation `crash_at`.
+    ///
+    /// The crash unwinds through every caller without performing that or any
+    /// later operation, so the disk keeps exactly what a process crash at that
+    /// point leaves. Unwinding runs only in-memory destructors. Returns `None`
+    /// when the crash happened, and the number of operations started, the
+    /// crashed one included.
     ///
     /// # Panics
     /// Resumes any other panic of `operation`.
