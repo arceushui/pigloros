@@ -2587,6 +2587,30 @@ impl Fixture {
 
 // Temporary DEBUG-535-4297 observer. Its lifetime encloses the fixture so the
 // existing callback context survives ordinary retirement and all error paths.
+#[test]
+fn diagnostic_repeated_second_retry() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    for repetition in 1..=16 {
+        let root = FixtureRoot::new()?;
+        writeln!(
+            std::io::stderr(),
+            "DEBUG-535-4297 minimized=true repetition={repetition} case=81",
+        )?;
+        run_posted_retry(
+            Path::new(&runtime),
+            &root.0,
+            81,
+            ProcessFaultTarget::Renderer,
+            crate::RetryPoint::Second,
+            true,
+        )?;
+        root.remove()?;
+    }
+    Ok(())
+}
+
 struct RetryDiagnostic(u64);
 
 impl Drop for RetryDiagnostic {

@@ -47,7 +47,7 @@ jobs:
           $failed = $false
           foreach ($sample in 1..2) {
             Write-Output "DEBUG-535-4297 sample=$sample stage=begin"
-            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_verified_owned_process_faults_retire --exact --include-ignored --nocapture --test-threads=1
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::diagnostic_repeated_second_retry --exact --include-ignored --nocapture --test-threads=1
             $result = $LASTEXITCODE
             Write-Output "DEBUG-535-4297 sample=$sample exit=$result"
             if ($result -ne 0) { $failed = $true }
