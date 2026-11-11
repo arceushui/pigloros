@@ -46,7 +46,7 @@ jobs:
           Write-Output $checkout
           $failed = $false
           foreach ($sample in 1..2) {
-            $mode = if ($sample -eq 1) { 'fresh' } else { 'held' }
+            $mode = if ($sample -eq 1) { 'held' } else { 'fresh' }
             $env:OWNER_BRIDGE_DIAGNOSTIC_APARTMENT = $mode
             Write-Output "DEBUG-535-413 sample=$sample apartment=$mode stage=begin"
             cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_verified_owned_process_faults_retire --exact --include-ignored --nocapture --test-threads=1
