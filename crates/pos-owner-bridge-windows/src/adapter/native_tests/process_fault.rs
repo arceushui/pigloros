@@ -1902,10 +1902,24 @@ impl Fixture {
                         trace: Rc::clone(&self.trace),
                         deadline,
                     };
+                    let injection_started = Instant::now();
                     self.handle = Some(
                         self.surface
                             .inject_posted_empty_fault(target, seal)
-                            .map_err(|()| "empty-reply owned fault refused")?,
+                            .map_err(|()| {
+                                let returned = Instant::now();
+                                let trace = self.trace.borrow();
+                                let _logged = writeln!(
+                                    std::io::stderr(),
+                                    "DEBUG-535-413 case={} stage=empty-inject-return result=refused elapsed={:?} remaining={:?} trace_count={} trace={:?}",
+                                    self.number,
+                                    returned.saturating_duration_since(injection_started),
+                                    deadline.checked_duration_since(returned),
+                                    trace.len(),
+                                    &trace[..trace.len().min(8)],
+                                );
+                                "empty-reply owned fault refused"
+                            })?,
                     );
                     self.observe_fault(target)?;
                 } else {
@@ -2584,6 +2598,37 @@ impl Fixture {
             }
         }
     }
+}
+
+#[test]
+fn diagnostic_repeated_empty_reply_pair() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    for repetition in 1..=16 {
+        let root = FixtureRoot::new()?;
+        writeln!(
+            std::io::stderr(),
+            "DEBUG-535-413 repetition={repetition} control=65 fault=66",
+        )?;
+        let control = run_posted_empty(
+            Path::new(&runtime),
+            &root.0,
+            65,
+            ProcessFaultTarget::Renderer,
+            false,
+        )?;
+        let fault = run_posted_empty(
+            Path::new(&runtime),
+            &root.0,
+            66,
+            ProcessFaultTarget::Renderer,
+            true,
+        )?;
+        assert_eq!(control, fault);
+        root.remove()?;
+    }
+    Ok(())
 }
 
 #[test]
