@@ -1662,7 +1662,7 @@ mod cases {
             "{:?}",
             hung.result
         );
-        // The wait extended the one-second deadline exactly once.
+        // The wait extended the `SHORT_DEADLINE` exactly once.
         assert_eq!(hung.finished_after, SHORT_DEADLINE + PENDING_REQUEST);
         assert_eq!(snapshot(runtime.path())?, crashed);
         assert_admission_closed(runtime.path(), &crashed, "a hung sweep")?;
