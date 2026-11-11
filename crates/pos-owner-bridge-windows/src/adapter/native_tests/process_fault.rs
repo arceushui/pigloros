@@ -4300,7 +4300,16 @@ impl Fixture {
         provenance: &mut Option<pos_owner_bridge::ProcessIdentity>,
         failure_stage: &mut Option<&'static str>,
     ) -> DriveResult {
+        // Temporary [DEBUG-535-E8] phase observer. Its elapsed time starts here.
+        // The driver and surface retain their existing original deadlines.
+        let mut progress = super::trace::Trace::new(u64::from(self.number), Instant::now());
         loop {
+            progress.update(
+                "DEBUG-535-E8-fresh-active",
+                &self.surface,
+                driver,
+                &self.loopback,
+            );
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -4315,7 +4324,15 @@ impl Fixture {
                 )?);
             }
             match step {
-                Step::Finished(result) => return Ok(result),
+                Step::Finished(result) => {
+                    progress.update(
+                        "DEBUG-535-E8-fresh-finished",
+                        &self.surface,
+                        driver,
+                        &self.loopback,
+                    );
+                    return Ok(result);
+                }
                 Step::Done => {
                     *failure_stage = Some("driver_done");
                     return Err("fresh success driver ended without result".into());
