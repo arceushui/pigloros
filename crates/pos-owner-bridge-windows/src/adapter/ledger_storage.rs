@@ -333,10 +333,11 @@ mod native_tests {
         let control = std::env::var_os(CONTROL).is_some();
         let mut saw_eof = false;
         if control {
-            eprintln!(
+            writeln!(
+                io::stderr(),
                 "storage control profile: {:?}",
                 std::env::var_os("LLVM_PROFILE_FILE")
-            );
+            )?;
         }
         let result = ledger.replace_observing(b"candidate", |stage| {
             if stage == selected {

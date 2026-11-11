@@ -27,6 +27,7 @@ jobs:
           git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/ledger_storage.rs
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/ledger-control.json" --lib -- tests::windows_nonce_ledger_storage_native --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'ledger control witness failed' }
+          if ($env:CARGO_LLVM_COV_TARGET_DIR) { throw "unexpected CARGO_LLVM_COV_TARGET_DIR override" }
           $metadata = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'metadata failed' }
           $profiles = @(Get-ChildItem -LiteralPath (Join-Path $metadata.target_directory 'llvm-cov-target') -Filter '*.profraw' -File | Where-Object { $_.Length -gt 0 })
