@@ -407,7 +407,7 @@ mod zero_witness {
     }
 }
 
-fn valid_aligned_offset(capacity: usize, offset: usize) -> bool {
+const fn valid_aligned_offset(capacity: usize, offset: usize) -> bool {
     offset <= capacity && offset.is_multiple_of(8)
 }
 

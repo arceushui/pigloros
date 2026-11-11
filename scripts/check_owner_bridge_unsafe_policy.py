@@ -1407,7 +1407,7 @@ def _check_zero_witness(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], fo
     relative = "src/ffi/buffers.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "a68adeffc38788c7c28a2c5d2b66ccd1ae69c480d038b2556e17fc237476c028":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "a08b2bebec2a0324b8000446d867fae4b9a4db99e8982153c40a345afa412c80":
         found.append(f"{SHIM}/{relative}: live mapping witness differs from the reviewed atomic readback")
     for pattern in (r"mod\s+zero_witness", r"let\s+witness\s*=\s*zero_witness::before", r"zero_witness::after\s*\("):
         matches = list(re.finditer(pattern, code))
