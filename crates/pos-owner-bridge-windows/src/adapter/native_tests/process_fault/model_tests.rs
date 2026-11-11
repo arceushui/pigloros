@@ -32,7 +32,9 @@ use crate::{
 const ERROR: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 const MODEL_CASE: u8 = 240;
 
-fn fixture(root: &FixtureRoot) -> Result<(Fixture, Rc<Factory>), Box<dyn std::error::Error>> {
+pub(super) fn fixture(
+    root: &FixtureRoot,
+) -> Result<(Fixture, Rc<Factory>), Box<dyn std::error::Error>> {
     let _logged = writeln!(
         std::io::stderr(),
         "NATIVE_FAULT_MODEL case={MODEL_CASE} process_observation=scripted native_zeroing=scripted"

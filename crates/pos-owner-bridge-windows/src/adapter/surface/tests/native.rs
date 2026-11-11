@@ -34,7 +34,7 @@ pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
     pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
-    pub(super) navigation_succeeds: Cell<bool>,
+    pub(in crate::adapter) navigation_succeeds: Cell<bool>,
     pub(in crate::adapter) failure: Cell<Option<&'static str>>,
     pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
     pub(super) source: RefCell<String>,

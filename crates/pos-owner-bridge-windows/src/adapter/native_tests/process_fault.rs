@@ -26,6 +26,7 @@ use crate::{
 
 mod model_tests;
 mod obstruction;
+mod port_tests;
 mod quarantined;
 
 #[test]
