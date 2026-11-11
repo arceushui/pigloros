@@ -624,6 +624,35 @@ fn schema_vocabularies_and_global_index_budgets_are_explicit() -> TestResult {
 }
 
 #[test]
+fn next_schema_root_refuses_an_exhausted_identifier_budget() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas = [20_000, 20_000, 20_000, 5_532]
+        .into_iter()
+        .enumerate()
+        .map(|(resource, count)| {
+            let definitions: serde_json::Map<_, _> = (0..count)
+                .map(|number| {
+                    (
+                        format!("a{number}"),
+                        json!({"$anchor":format!("a{number}")}),
+                    )
+                })
+                .collect();
+            bytes(&json!({"$id":format!("urn:pigloros:boundary:{resource}"), "$defs":definitions}))
+        })
+        .collect();
+    // Its digest sorts after all four earlier schema members.
+    fixture.schemas.push(bytes(&json!({"title":"20"})));
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::BoundsExceeded {
+            artifact: Artifact::Schema { index: 4 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn explicit_schema_id_cannot_collide_with_a_later_implicit_base() -> TestResult {
     use sha2::{Digest as _, Sha256};
     let second = b"true".to_vec();
