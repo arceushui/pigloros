@@ -21,7 +21,7 @@ use super::bind::{
 use super::ledger::ServedLedger;
 use super::serve::{
     read_request, respond, write_hashed, write_owner_response, OwnerWrite, ReadOutcome,
-    ServeContext, SilentReason, TimedRead, MIN_TIMEOUT, REQUEST_BUFFER_BYTES,
+    ServeContext, SilentReason, TimedRead, REQUEST_BUFFER_BYTES,
 };
 use super::{
     accept_loop, dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig,
@@ -550,14 +550,14 @@ fn a_full_buffer_without_the_end_of_the_head_is_too_large() {
 }
 
 #[test]
-fn a_passed_deadline_still_reads_for_the_shortest_limit_a_socket_accepts() {
+fn an_expired_first_byte_deadline_refuses_a_queued_request_without_reading() {
     let timeouts = ListenerTimeouts {
         first_byte: Duration::ZERO,
         ..ListenerConfig::adr().timeouts()
     };
     let (outcome, limits) = read_scripted(vec![Ok(OWNER_REQUEST.to_vec())], timeouts);
-    assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
-    assert_eq!(limits, [MIN_TIMEOUT]);
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert!(limits.is_empty());
 }
 
 #[test]
