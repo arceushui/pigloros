@@ -41,7 +41,7 @@ use pos_reference::sandbox_provider_protocol::{
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::lifecycle::RootRelease;
+use super::{finish_with, RootRelease};
 use crate::{
     AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError, AttemptEnding,
     AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError, CancelSignal, CheckedRoot,
@@ -176,7 +176,7 @@ impl ReconciledAttempt {
 ///
 /// The production implementation is [`VerifiedStagedInput`], whose entry
 /// holds the image and the policy of the exact verified exchange.
-pub(crate) trait AdmittedInput: Send + Sync {
+trait AdmittedInput: Send + Sync {
     /// The attached root this admission activates.
     type Root: RootRelease + Sync + 'static;
 
@@ -246,8 +246,8 @@ impl AdmittedInput for VerifiedStagedInput {
         &'a self,
         directory: &'a PreparedAttemptDirectory,
     ) -> impl Future<Output = Result<VerifiedRootMount, ImageActivationError>> + Send + 'a {
+        let entry = self.entry();
         async move {
-            let entry = self.entry();
             let admission = entry.admission();
             crate::activate_admitted_root(&admission, directory).await
         }
@@ -270,10 +270,10 @@ impl AdmittedInput for VerifiedStagedInput {
 }
 
 /// The result of one execution step.
-pub(crate) type Executed<S, C> = Result<AttemptExecution<S, C>, ExecuteFailure<C>>;
+type Executed<S, C> = Result<AttemptExecution<S, C>, ExecuteFailure<C>>;
 
 /// The execution and terminal cleanup of one attempt, behind one port.
-pub(crate) trait AttemptSteps<I: AdmittedInput>: Sync {
+trait AttemptSteps<I: AdmittedInput>: Sync {
     /// What one execution needs beyond the admission.
     type Launch: Send;
     /// The verified start of the unit.
@@ -292,13 +292,13 @@ pub(crate) trait AttemptSteps<I: AdmittedInput>: Sync {
     ) -> impl Future<Output = Executed<Self::Started, Self::Cgroup>> + Send + 'a;
 
     /// Finish the attempt's terminal cleanup within `deadlines`.
-    fn finish<'a>(
-        &'a self,
+    fn finish(
+        &self,
         directory: PreparedAttemptDirectory,
         cgroup: Option<Self::Cgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a;
+    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_;
 }
 
 /// What one production execution needs beyond the admission.
@@ -385,15 +385,15 @@ where
         }
     }
 
-    fn finish<'a>(
-        &'a self,
+    fn finish(
+        &self,
         directory: PreparedAttemptDirectory,
         cgroup: Option<crate::BoundAttemptCgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
+    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
     {
-        crate::lifecycle::finish_with(self.transport, directory, cgroup, root, deadlines)
+        finish_with(self.transport, directory, cgroup, root, deadlines)
     }
 }
 
@@ -459,7 +459,7 @@ impl<I> AttemptLifecycle<I> {
     /// The lifecycle over a registry owner whose restart reconciliation
     /// completed.
     #[must_use]
-    pub fn new(registry: SystemdAttemptRegistry) -> Self {
+    pub const fn new(registry: SystemdAttemptRegistry) -> Self {
         Self {
             registry,
             attempts: Mutex::new(BTreeMap::new()),
@@ -578,12 +578,12 @@ impl<I> AttemptLifecycle<I> {
     }
 }
 
-impl<I: AdmittedInput> AttemptLifecycle<I> {
+impl<I> AttemptLifecycle<I> {
     /// Take exclusive ownership of `input`'s attempt.
-    pub(crate) fn admit_input(
-        &self,
-        input: I,
-    ) -> Result<OwnedAttempt<'_, I>, AttemptLifecycleError> {
+    fn admit_input(&self, input: I) -> Result<OwnedAttempt<'_, I>, AttemptLifecycleError>
+    where
+        I: AdmittedInput,
+    {
         let attempt_id = input.attempt_id();
         let mut attempts = lock(&self.attempts);
         if attempts.contains_key(&attempt_id) {
@@ -599,6 +599,7 @@ impl<I: AdmittedInput> AttemptLifecycle<I> {
                 ended: waiting,
             },
         );
+        drop(attempts);
         Ok(OwnedAttempt {
             claim: Claim {
                 lifecycle: self,
@@ -702,13 +703,17 @@ impl OwnedAttempt<'_> {
     }
 }
 
-impl<I: AdmittedInput> OwnedAttempt<'_, I> {
-    pub(crate) async fn run_with<S: AttemptSteps<I>>(
+impl<I> OwnedAttempt<'_, I> {
+    async fn run_with<S>(
         self,
         steps: &S,
         launch: S::Launch,
         budget: CleanupBudget,
-    ) -> EndedAttempt<S::Started> {
+    ) -> EndedAttempt<S::Started>
+    where
+        I: AdmittedInput,
+        S: AttemptSteps<I>,
+    {
         let Self { mut claim, input } = self;
         let attempt_id = input.attempt_id();
         claim.started = true;

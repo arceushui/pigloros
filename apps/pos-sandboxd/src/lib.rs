@@ -15,8 +15,6 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
-mod attempt_lifecycle;
-#[cfg(target_os = "linux")]
 mod attempt_registry;
 #[cfg(target_os = "linux")]
 mod execute;
@@ -218,18 +216,17 @@ pub(crate) struct RecordedRootEntry {
 #[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
-pub use attempt_lifecycle::{
-    AttemptLaunch, AttemptLifecycle, AttemptLifecycleError, AttemptProgress, CleanupBudget,
-    EndedAttempt, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
-};
-#[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
     ExecuteFailure, ExecuteJob, LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest,
     UnitCgroup, UnitHost, UnitKiller, UnitState,
 };
 #[cfg(target_os = "linux")]
-pub use lifecycle::{finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError};
+pub use lifecycle::{
+    finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch, AttemptLifecycle,
+    AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt, OwnedAttempt,
+    ReconciledAttempt, SystemdAttemptSteps,
+};
 #[cfg(target_os = "linux")]
 pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
