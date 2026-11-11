@@ -621,7 +621,7 @@ where
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does, and is abandoned once cancellation is requested.
     let released = until(deadline, unless(cancel.clone(), barrier.release(&active))).await;
-    let refused = refusal(released);
+    let refused = released.map_or(Some(ExecuteError::ReleaseTimeout), refusal);
     if let Some(error) = refused {
         let aborted = abort(
             host,
@@ -730,17 +730,16 @@ async fn until<T>(deadline: Instant, future: impl Future<Output = T>) -> Option<
         .ok()
 }
 
-/// Why a release was refused: the barrier failed, cancellation came first, or
-/// the deadline passed (`None`); `None` when the adapter was released.
-fn refusal<E>(released: Option<Option<Result<(), E>>>) -> Option<ExecuteError>
+/// Why a release that ended before the deadline was refused: the barrier
+/// failed, or cancellation came first (`None`); `None` when it released.
+fn refusal<E>(released: Option<Result<(), E>>) -> Option<ExecuteError>
 where
     E: Error + Send + Sync + 'static,
 {
     match released {
-        Some(Some(Ok(()))) => None,
-        Some(Some(Err(error))) => Some(ExecuteError::Barrier(Box::new(error))),
-        Some(None) => Some(ExecuteError::Cancelled),
-        None => Some(ExecuteError::ReleaseTimeout),
+        Some(Ok(())) => None,
+        Some(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
+        None => Some(ExecuteError::Cancelled),
     }
 }
 
