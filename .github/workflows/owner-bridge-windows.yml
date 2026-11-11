@@ -23,6 +23,7 @@ jobs:
       - name: Run ledger witness and measure diagnostic coverage
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           git rev-parse HEAD
           git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/ledger_storage.rs
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/ledger-control.json" --lib -- tests::windows_nonce_ledger_storage_native --exact --nocapture
@@ -35,7 +36,15 @@ jobs:
           $destination = Join-Path $env:RUNNER_TEMP 'ledger-profiles'
           New-Item -ItemType Directory -Force $destination | Out-Null
           foreach ($profile in $profiles) { Copy-Item -LiteralPath $profile.FullName -Destination $destination }
-          $profiles | ForEach-Object { Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName } | Format-List | Out-String | Tee-Object -FilePath (Join-Path $destination 'manifest.txt')
+          $copies = @(Get-ChildItem -LiteralPath $destination -Filter '*.profraw' -File)
+          if ($copies.Count -ne $profiles.Count) { throw 'raw profile copy count mismatch' }
+          $manifest = foreach ($profile in $profiles) {
+            $original = Get-FileHash -Algorithm SHA256 -LiteralPath $profile.FullName
+            $copy = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $destination $profile.Name)
+            if ($original.Hash -cne $copy.Hash) { throw "raw profile hash mismatch: $($profile.Name)" }
+            [pscustomobject]@{ Name = $profile.Name; Bytes = $profile.Length; SHA256 = $original.Hash }
+          }
+          $manifest | ConvertTo-Json | Tee-Object -FilePath (Join-Path $destination 'manifest.json')
       - name: Retain diagnostic coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
