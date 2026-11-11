@@ -68,26 +68,7 @@ impl crate::Native {
             .map_err(|_| "nonce test lock poisoned")?;
         let directory = std::env::temp_dir();
         if let Ok(case) = std::env::var(CASE) {
-            match case.as_str() {
-                "acquire" => {
-                    let guard = WindowsSubjectEncryptorLock::acquire(&directory)?;
-                    assert!(!format!("{guard:?}").is_empty());
-                }
-                "denied" => assert_eq!(
-                    WindowsSubjectEncryptorLock::acquire(&directory).err(),
-                    Some(unavailable())
-                ),
-                "hold" => {
-                    let _guard = WindowsSubjectEncryptorLock::acquire(&directory)?;
-                    writeln!(io::stdout(), "{MARKER}")?;
-                    io::stdout().flush()?;
-                    let mut line = String::new();
-                    assert_eq!(io::stdin().read_line(&mut line)?, 0);
-                }
-                _ => return Err("unknown nonce lock probe".into()),
-            }
-            writeln!(io::stdout(), "{MARKER}")?;
-            return Ok(());
+            return exercise_lock_probe_case(&case, &directory, MARKER);
         }
         let probe = |case: &str| -> Result<(), Box<dyn std::error::Error>> {
             let mut child = Command::new(std::env::current_exe()?)
@@ -163,6 +144,36 @@ impl crate::Native {
 
         exercise_abandonment(&directory)
     }
+}
+
+#[cfg(test)]
+fn exercise_lock_probe_case(
+    case: &str,
+    directory: &Path,
+    marker: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write as _};
+
+    match case {
+        "acquire" => {
+            let guard = WindowsSubjectEncryptorLock::acquire(directory)?;
+            assert!(!format!("{guard:?}").is_empty());
+        }
+        "denied" => assert_eq!(
+            WindowsSubjectEncryptorLock::acquire(directory).err(),
+            Some(unavailable())
+        ),
+        "hold" => {
+            let _guard = WindowsSubjectEncryptorLock::acquire(directory)?;
+            writeln!(io::stdout(), "{marker}")?;
+            io::stdout().flush()?;
+            let mut line = String::new();
+            assert_eq!(io::stdin().read_line(&mut line)?, 0);
+        }
+        _ => return Err("unknown nonce lock probe".into()),
+    }
+    writeln!(io::stdout(), "{marker}")?;
+    Ok(())
 }
 
 #[cfg(test)]
