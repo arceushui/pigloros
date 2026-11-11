@@ -581,6 +581,8 @@ impl LiveAttemptIdentity {
 ///
 /// The attempts are every one that started in this runtime and was not
 /// reconciled, in strictly increasing `AttemptId` order, at most 256.
+// Stable rustdoc checks only that these examples fail to compile; nightly
+// rustdoc, as the mutation baseline runs it, also checks their error codes.
 #[cfg_attr(
     target_os = "linux",
     doc = r#"
@@ -821,6 +823,9 @@ impl<I> AttemptLifecycle<I> {
                 Signalled::Running(ended.clone())
             }
             Some(Slot::Running { state, .. }) => {
+                // Its owner may still call run: the request it would read
+                // under this lock is already gone with the slot, but the
+                // cancel flag keeps every signal of this attempt consistent.
                 state.cancel();
                 Signalled::Withdrawn
             }
@@ -891,7 +896,9 @@ impl<I> AttemptLifecycle<I> {
     /// those ended, within its watchdog and cleanup budget, so no unit can
     /// start or directory disappear after it. Every attempt that started and
     /// was not reconciled is live, whether its cleanup was proved or not: its
-    /// signed terminal evidence is not known here.
+    /// signed terminal evidence is not known here. That set is fixed under the
+    /// attempts lock and the records are read after it is released, so a
+    /// concurrent reconcile may already report a listed attempt as forgotten.
     ///
     /// # Errors
     /// [`AttemptLifecycleError::Fenced`] once a snapshot was handed out, and
@@ -943,6 +950,9 @@ impl<I> AttemptLifecycle<I> {
                 ..
             } = slot
             {
+                // A started run must stop; an unstarted one is withdrawn
+                // below, and its cancel flag records why for any signal its
+                // owner still holds.
                 state.cancel();
                 if *started {
                     running.push(ended.clone());
@@ -1032,13 +1042,17 @@ impl AttemptLifecycle {
     /// Take exclusive ownership of the attempt `input` admitted.
     ///
     /// The lifecycle keeps the admission, and its staging reservation, until
-    /// the attempt is withdrawn before it started or reconciled after it
-    /// ended clean.
+    /// the attempt is withdrawn before it started, its run is dropped part-way
+    /// (after the lifecycle was quarantined), or it is reconciled after it
+    /// ended clean. An attempt that ended with its cleanup unproved keeps it:
+    /// its reconcile reports [`AttemptLifecycleError::CleanupFailed`].
     ///
     /// # Errors
-    /// [`AttemptLifecycleError::AttemptKnown`] when this runtime already owns
-    /// or owned the attempt; the refused input is dropped, releasing its
-    /// reservation.
+    /// [`AttemptLifecycleError::Fenced`] once the runtime was fenced for
+    /// recovery; [`AttemptLifecycleError::AttemptKnown`] when this runtime
+    /// already owns or owned the attempt; and
+    /// [`AttemptLifecycleError::TooManyLiveAttempts`] at 256 live attempts.
+    /// The refused input is dropped, releasing its reservation.
     pub fn admit(
         &self,
         input: VerifiedStagedInput,
