@@ -549,3 +549,87 @@ fn modeled_exit_fault_rejects_duplicate_own_exit_before_querying_handle() -> Tes
     fixture.retire(driver, Err(ERROR), None)?;
     root.remove()
 }
+
+#[test]
+fn modeled_exit_control_requires_unique_callback_zero_status_and_live_deadline() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for (case, status, duplicate, expired, expected) in [
+        ("matching", 0, false, false, None),
+        (
+            "nonzero",
+            1,
+            false,
+            false,
+            Some("control exit code was not zero"),
+        ),
+        (
+            "duplicate",
+            0,
+            true,
+            false,
+            Some("control exit was not the unique matching callback"),
+        ),
+        ("expired", 0, false, true, Some("control exit timed out")),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model) = fixture(&root)?;
+        let spec = fixed_competing_spec(MODEL_CASE);
+        assert!(fixture.surface.open(&spec).is_pending(), "case {case}");
+        assert!(fixture.surface.open(&spec).is_pending(), "case {case}");
+        assert!(
+            matches!(fixture.surface.open(&spec), Poll::Ready(Ok(_))),
+            "case {case}"
+        );
+        let sink = model
+            .sink
+            .borrow()
+            .clone()
+            .ok_or("missing modeled event sink")?;
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        if duplicate {
+            let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        }
+        fixture.handle = Some(Box::new(Handle {
+            code: Ok(Some(status)),
+            clock: FakeClock::start(),
+            advance: Duration::ZERO,
+        }));
+        let deadline = if expired {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_secs(5)
+        };
+        let error = fixture
+            .observe_exit_control(deadline)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(error.as_deref(), expected, "case {case}");
+        assert_eq!(fixture.evidence_complete, expected.is_none(), "case {case}");
+        if expected.is_none() {
+            assert_eq!(
+                *fixture.trace.borrow(),
+                [
+                    ProcessFaultMark::OwnBrowserExited,
+                    ProcessFaultMark::ExitCode(0)
+                ],
+                "case {case}"
+            );
+        } else {
+            assert!(fixture.trace.borrow().is_empty(), "case {case}");
+        }
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        fixture
+            .surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        drop(sink);
+        let driver =
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        fixture.retire(driver, Err(ERROR), None)?;
+        root.remove()?;
+    }
+    Ok(())
+}
