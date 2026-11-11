@@ -57,17 +57,23 @@ pub(super) mod cases {
         SweepHangs,
     }
 
+    /// How long after the activation marker's request a same-boot restart runs.
+    pub const SINCE_REQUEST: Duration = Duration::from_secs(1);
+
+    /// The overall deadline of a `SameBootSoonShortDeadline` restart, far
+    /// shorter than the wait for a request sent `SINCE_REQUEST` before.
+    pub const SHORT_DEADLINE: Duration = Duration::from_secs(1);
+
     /// When the restart runs, relative to the last `MountImage` request that
     /// the registry's activation marker records.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum RestartClock {
         /// On another boot: no previous request can still be served.
         OtherBoot,
-        /// On the marker's boot, one second after its request was sent, so
-        /// the request could still attach a loop device for 69 seconds.
+        /// On the marker's boot, `SINCE_REQUEST` after its request was sent,
+        /// while the request could still attach a loop device.
         SameBootSoon,
-        /// As `SameBootSoon`, with an overall deadline of one second, far
-        /// shorter than that wait.
+        /// As `SameBootSoon`, with the overall `SHORT_DEADLINE`.
         SameBootSoonShortDeadline,
     }
 
@@ -337,10 +343,10 @@ pub(super) mod cases {
     fn restart_clock(runtime: &Path, clock: RestartClock) -> (BootInstant, Duration, bool) {
         let pending = recorded_request(runtime).filter(|_| clock != RestartClock::OtherBoot);
         let now = pending.map_or(([0xee; 16], Duration::from_secs(1_000)), |(boot, sent)| {
-            (boot, sent + Duration::from_secs(1))
+            (boot, sent + SINCE_REQUEST)
         });
         let overall = if clock == RestartClock::SameBootSoonShortDeadline {
-            Duration::from_secs(1)
+            SHORT_DEADLINE
         } else {
             Duration::from_secs(6)
         };
