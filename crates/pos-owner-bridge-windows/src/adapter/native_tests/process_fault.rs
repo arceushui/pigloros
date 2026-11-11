@@ -2624,12 +2624,14 @@ fn run_posted_retry(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));
-    super::trace::Trace::new(diagnostic_case, observer_started).update(
-        "DEBUG-535-4297-G4-attempt-return",
-        &fixture.surface,
-        &driver,
-        &fixture.loopback,
-    );
+    let _diagnostic_observation = catch_unwind(AssertUnwindSafe(|| {
+        super::trace::Trace::new(diagnostic_case, observer_started).update(
+            "DEBUG-535-4297-G4-attempt-return",
+            &fixture.surface,
+            &driver,
+            &fixture.loopback,
+        );
+    }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let state = fixture.reached;
     let native_zeroed = fixture.prior_native_wipe
