@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsFd, OwnedFd};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -153,6 +154,9 @@ pub struct NamespacedLocalNetwork<C, E = HostEgress> {
     namespaces: NetworkNamespaces,
     range: NetworkRange,
     slots: Arc<Slots>,
+    /// Whether an egress probe of this port is running: at most one runs,
+    /// whoever calls it, since every probe uses the same reserved names.
+    probing: AtomicBool,
 }
 
 impl<C, E> NamespacedLocalNetwork<C, E> {
@@ -171,6 +175,7 @@ impl<C, E> NamespacedLocalNetwork<C, E> {
                 count,
                 holders: Mutex::new(Holders::default()),
             }),
+            probing: AtomicBool::new(false),
         }
     }
 }

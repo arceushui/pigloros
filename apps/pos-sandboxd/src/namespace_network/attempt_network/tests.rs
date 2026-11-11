@@ -534,13 +534,54 @@ fn a_quarantined_port_fails_the_probe_first() -> TestResult {
         || Ok(host_with(&[Ipv4Addr::new(10, 0, 0, 1)])),
         probe_network()?,
     );
+    // The probe's own failure is kept as the quarantine's source.
     assert!(
         matches!(
             &probed,
-            Err(EgressProbeError::Quarantined { slot: 0, reason })
+            Err(EgressProbeError::Quarantined { slot: 0, reason, probe: Some(outcome) })
                 if reason == &HostEgressError::Readback.to_string()
+                    && matches!(**outcome, EgressProbeError::Target(_))
         ),
         "{probed:?}"
+    );
+    let source = probed
+        .as_ref()
+        .err()
+        .and_then(std::error::Error::source)
+        .map(ToString::to_string);
+    assert_eq!(
+        source.as_deref(),
+        Some("the egress probe's target could not be set up or removed")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_panicking_probe_lets_the_next_one_run() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, _journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probe = probe_network()?;
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        network.probe_egress_through(
+            || -> Result<NetlinkSession<HostReplies>, NetlinkError> {
+                std::panic::resume_unwind(Box::new("the host read panicked"))
+            },
+            probe,
+        )
+    }));
+    assert!(panicked.is_err());
+    // The panic released the claim: the next probe runs, and fails only on
+    // the unreadable host.
+    let next = network.probe_egress_through(
+        || -> Result<NetlinkSession<HostReplies>, _> { Err(NetlinkError::Unexpected) },
+        probe,
+    );
+    assert!(
+        matches!(
+            next,
+            Err(EgressProbeError::Target(NetlinkError::Unexpected))
+        ),
+        "{next:?}"
     );
     Ok(())
 }
@@ -676,6 +717,7 @@ fn probe_errors_say_what_failed() {
             EgressProbeError::Quarantined {
                 slot: 2,
                 reason: "busy".to_owned(),
+                probe: None,
             },
             "the attempt network port is quarantined at slot 2 (busy)",
         ),
@@ -1180,20 +1222,77 @@ mod privileged {
         Ok(())
     }
 
-    #[test]
-    fn restart_reconciliation_probes_egress_end_to_end() -> TestResult {
-        if !isolated("restart_reconciliation_probes_egress_end_to_end")? {
-            return Ok(());
-        }
+    /// Probe twice through the adapter on `runtime`: the first probe's
+    /// claim ends with it, so the second runs too, and neither leaves a
+    /// namespace behind.
+    fn probe_twice_on(runtime: &tokio::runtime::Runtime) -> TestResult {
         let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
-        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-        // The first probe's claim ends with it, so a second probe runs too.
         for _ in 0..2 {
             let probed = runtime.block_on(crate::EgressPropertyProbe::probe_egress(&probe));
             assert!(probed.is_ok(), "{probed:?}");
             let left = NetworkNamespaces::system().attempt_names();
             assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn restart_reconciliation_probes_egress_end_to_end() -> TestResult {
+        if !isolated("restart_reconciliation_probes_egress_end_to_end")? {
+            return Ok(());
+        }
+        probe_twice_on(&tokio::runtime::Builder::new_current_thread().build()?)
+    }
+
+    /// On a multi-threaded runtime, as in production, the probe's teardown
+    /// takes the `block_in_place` path.
+    #[test]
+    fn restart_reconciliation_probes_egress_end_to_end_on_worker_threads() -> TestResult {
+        if !isolated("restart_reconciliation_probes_egress_end_to_end_on_worker_threads")? {
+            return Ok(());
+        }
+        probe_twice_on(
+            &tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()?,
+        )
+    }
+
+    #[test]
+    fn a_probe_past_its_deadline_releases_the_network_when_it_ends() -> TestResult {
+        if !isolated("a_probe_past_its_deadline_releases_the_network_when_it_ends")? {
+            return Ok(());
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()?;
+        let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
+        // No time at all: the probe starts on the blocking pool and is no
+        // longer awaited, as at the reconciliation deadline.
+        let late = runtime.block_on(tokio::time::timeout(
+            Duration::ZERO,
+            crate::EgressPropertyProbe::probe_egress(&probe),
+        ));
+        assert!(late.is_err(), "{late:?}");
+        // A retry is refused while the earlier probe runs, and runs once it
+        // has ended.
+        let retried = runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let probed = crate::EgressPropertyProbe::probe_egress(&probe).await;
+                if !matches!(probed, Err(EgressProbeError::InFlight))
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    return probed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(retried.is_ok(), "{retried:?}");
+        let left = NetworkNamespaces::system().attempt_names();
+        assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
         Ok(())
     }
 

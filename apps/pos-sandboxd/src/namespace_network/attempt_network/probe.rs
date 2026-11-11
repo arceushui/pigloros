@@ -216,6 +216,10 @@ pub enum EgressProbeError {
         slot: u16,
         /// Why its namespace could not be removed.
         reason: String,
+        /// The probe's own failure, which the quarantine outranks, if it
+        /// failed too.
+        #[source]
+        probe: Option<Box<EgressProbeError>>,
     },
 }
 
@@ -317,6 +321,7 @@ where
         host_session: impl FnOnce() -> Result<NetlinkSession<T>, NetlinkError>,
         probe: EgressProbe,
     ) -> Result<(), EgressProbeError> {
+        let _running = Running::claim(&self.probing).ok_or(EgressProbeError::InFlight)?;
         // The range and the /30 are both aligned, so they overlap exactly
         // when the range holds the /30's network address.
         if self.range.contains(IpAddr::V4(probe.network)) {
@@ -353,16 +358,44 @@ where
         // The probe's connector is gone by now. If its teardown failed, the
         // port is quarantined and no attempt could be established, so the
         // property is not present even when the connection passed. That is
-        // reported first, since it outlasts every other failure.
-        self.unquarantined().and(probed).and(removed)
+        // reported first, since it outlasts every other failure, and carries
+        // the probe's own failure as its source.
+        self.unquarantined(probed.and(removed))
     }
 
-    /// `Ok` unless a slot of the port is quarantined.
-    fn unquarantined(&self) -> Result<(), EgressProbeError> {
+    /// `outcome`, unless a slot of the port is quarantined: then the
+    /// quarantine, with `outcome`'s failure as its source.
+    fn unquarantined(&self, outcome: Result<(), EgressProbeError>) -> Result<(), EgressProbeError> {
         let quarantined = self.slots.holders().quarantined.clone();
-        quarantined.map_or(Ok(()), |(slot, reason)| {
-            Err(EgressProbeError::Quarantined { slot, reason })
-        })
+        match quarantined {
+            None => outcome,
+            Some((slot, reason)) => Err(EgressProbeError::Quarantined {
+                slot,
+                reason,
+                probe: outcome.err().map(Box::new),
+            }),
+        }
+    }
+}
+
+/// Marks the network's egress probe as running until it is dropped, which
+/// happens when the probe ends, however it ends: on return or on a panic.
+#[derive(Debug)]
+struct Running<'a>(&'a AtomicBool);
+
+impl<'a> Running<'a> {
+    /// Mark a probe running, unless one is already.
+    fn claim(probing: &'a AtomicBool) -> Option<Self> {
+        probing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(probing))
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -378,52 +411,27 @@ async fn on_blocking_pool(
         .unwrap_or(Err(EgressProbeError::Interrupted))
 }
 
-/// Marks a probe of one [`LocalEgressProbe`] as running until it is
-/// dropped, which happens when the blocking probe ends, however it ends.
-#[derive(Debug)]
-struct Running(Arc<AtomicBool>);
-
-impl Running {
-    /// Mark a probe running, unless one is already.
-    fn claim(running: &Arc<AtomicBool>) -> Option<Self> {
-        running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self(Arc::clone(running)))
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
 /// Restart reconciliation's egress probe (#1200): the installation's
 /// configured [`EgressProbe`] through the Local network port that attempts
 /// use, so the probe exercises exactly their path.
 ///
-/// At most one probe runs at a time. A probe that outlives the
-/// reconciliation deadline keeps running on the blocking pool, since a
-/// blocking task cannot be cancelled; until it ends, every further probe
-/// fails at once with [`EgressProbeError::InFlight`] instead of starting a
-/// second probe on the same names, so an in-process retry stays closed.
+/// The network runs at most one probe at a time, whichever adapter or
+/// caller starts it. A probe that outlives the reconciliation deadline keeps
+/// running on the blocking pool, since a blocking task cannot be cancelled;
+/// until it ends, every further probe fails at once with
+/// [`EgressProbeError::InFlight`] instead of starting a second probe on the
+/// same names, so an in-process retry stays closed.
 #[derive(Debug)]
 pub struct LocalEgressProbe<C, E = HostEgress> {
     network: Arc<NamespacedLocalNetwork<C, E>>,
     probe: EgressProbe,
-    running: Arc<AtomicBool>,
 }
 
 impl<C, E> LocalEgressProbe<C, E> {
     /// Probe `network`, the port admitted attempts will use, with `probe`.
     #[must_use]
-    pub fn new(network: Arc<NamespacedLocalNetwork<C, E>>, probe: EgressProbe) -> Self {
-        Self {
-            network,
-            probe,
-            running: Arc::default(),
-        }
+    pub const fn new(network: Arc<NamespacedLocalNetwork<C, E>>, probe: EgressProbe) -> Self {
+        Self { network, probe }
     }
 }
 
@@ -437,23 +445,9 @@ where
     type Error = EgressProbeError;
 
     fn probe_egress(&self) -> impl Future<Output = Result<(), EgressProbeError>> + Send {
-        let claimed = Running::claim(&self.running);
         let network = Arc::clone(&self.network);
         let probe = self.probe;
-        async move {
-            match claimed {
-                // The claim moves into the blocking probe and ends with it.
-                Some(running) => {
-                    on_blocking_pool(move || {
-                        let probed = network.probe_egress(probe);
-                        drop(running);
-                        probed
-                    })
-                    .await
-                }
-                None => Err(EgressProbeError::InFlight),
-            }
-        }
+        on_blocking_pool(move || network.probe_egress(probe))
     }
 }
 

@@ -179,16 +179,16 @@ async fn a_probe_on_the_blocking_pool_reports_its_outcome_or_its_interruption() 
 
 #[test]
 fn only_one_probe_is_marked_running_at_a_time() {
-    let running = Arc::default();
-    let first = Running::claim(&running);
+    let probing = AtomicBool::new(false);
+    let first = Running::claim(&probing);
     assert!(first.is_some());
-    assert!(Running::claim(&running).is_none());
+    assert!(Running::claim(&probing).is_none());
     drop(first);
-    assert!(Running::claim(&running).is_some());
+    assert!(Running::claim(&probing).is_some());
 }
 
 #[tokio::test]
-async fn a_probe_is_refused_while_an_earlier_one_runs() -> Result<(), Box<dyn std::error::Error>> {
+async fn no_two_probes_of_one_network_run_at_once() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let namespaces = NetworkNamespaces::pinned_under(directory.path());
     let range = crate::NetworkRange::new(
@@ -197,21 +197,34 @@ async fn a_probe_is_refused_while_an_earlier_one_runs() -> Result<(), Box<dyn st
         std::net::Ipv6Addr::new(0xfd00, 0x913, 0, 0, 0, 0, 0, 0),
         120,
     )?;
-    let network = NamespacedLocalNetwork::new(
+    let network = Arc::new(NamespacedLocalNetwork::new(
         crate::NetlinkNamespaceControl::new(namespaces.clone()),
         HostEgress::new(),
         namespaces,
         range,
-    );
-    let probe = LocalEgressProbe::new(Arc::new(network), EgressProbe::new(PROBE, 7000)?);
-    let earlier = Running::claim(&probe.running);
-    let refused = crate::EgressPropertyProbe::probe_egress(&probe).await;
-    assert!(
-        matches!(refused, Err(EgressProbeError::InFlight)),
-        "{refused:?}"
-    );
+    ));
+    // A /30 inside the attempt range, refused before the host is read.
+    let inside = EgressProbe::new(Ipv4Addr::new(10, 213, 0, 4), 7000)?;
+    let first = LocalEgressProbe::new(Arc::clone(&network), inside);
+    let second = LocalEgressProbe::new(Arc::clone(&network), inside);
+    // While one probe of the network runs, every other path is refused:
+    // both adapters and a direct caller.
+    let earlier = Running::claim(&network.probing);
     assert!(earlier.is_some());
-    // Nothing was started: the pinning directory is still empty.
+    for refused in [
+        crate::EgressPropertyProbe::probe_egress(&first).await,
+        crate::EgressPropertyProbe::probe_egress(&second).await,
+        network.probe_egress(inside),
+    ] {
+        assert!(
+            matches!(refused, Err(EgressProbeError::InFlight)),
+            "{refused:?}"
+        );
+    }
+    // Once it ends, a probe runs again.
+    drop(earlier);
+    let ran = crate::EgressPropertyProbe::probe_egress(&second).await;
+    assert!(matches!(ran, Err(EgressProbeError::Network)), "{ran:?}");
     assert!(std::fs::read_dir(directory.path())?.next().is_none());
     Ok(())
 }
