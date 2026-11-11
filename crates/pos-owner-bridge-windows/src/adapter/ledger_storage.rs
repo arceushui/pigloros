@@ -279,6 +279,7 @@ mod native_tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const PROBE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_PROBE";
+    const CONTROL: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_CONTROL";
     const BASE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_BASE";
     const MARKER: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_MARKER";
     const STAGES: [(&str, CommitStage); 8] = [
@@ -329,16 +330,29 @@ mod native_tests {
             .ok_or("unknown probe stage")?;
         let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
         let ledger = guard.open_nonce_ledger()?;
-        let _result = ledger.replace_observing(b"candidate", |stage| {
+        let control = std::env::var_os(CONTROL).is_some();
+        let mut saw_eof = false;
+        if control {
+            eprintln!(
+                "storage control profile: {:?}",
+                std::env::var_os("LLVM_PROFILE_FILE")
+            );
+        }
+        let result = ledger.replace_observing(b"candidate", |stage| {
             if stage == selected {
-                fs::write(&marker, b"ready").map_err(|_| ())?;
+                fs::write(&marker, requested.as_bytes()).map_err(|_| ())?;
                 let mut line = String::new();
-                io::stdin().read_line(&mut line).map_err(|_| ())?;
+                let bytes = io::stdin().read_line(&mut line).map_err(|_| ())?;
+                saw_eof = bytes == 0;
                 return Err(());
             }
             Ok(())
         });
-        Err("storage probe returned without interruption".into())
+        if control && saw_eof && result == Err(()) {
+            Ok(())
+        } else {
+            Err("storage probe returned without interruption".into())
+        }
     }
 
     fn raw_boundaries(base: &Path) -> TestResult {
@@ -623,65 +637,100 @@ mod native_tests {
     fn crash_stages(fixture: &mut Fixture) -> TestResult {
         let base = fixture.0.clone();
         for (name, stage) in STAGES {
-            let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
-            let ledger = guard.open_nonce_ledger()?;
-            ledger.replace_nonce_ledger_bytes(b"old")?;
-            drop(ledger);
-            drop(guard);
-            let marker = base.join(format!("probe-{name}"));
-            let mut child = Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "tests::windows_nonce_ledger_storage_native",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(PROBE, name)
-                .env(BASE, &base)
-                .env(MARKER, &marker)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let deadline = Instant::now() + Duration::from_secs(30);
-            let mut retired = false;
-            let result = (|| -> TestResult {
-                while !marker.exists() {
-                    if child.try_wait()?.is_some() {
-                        retired = true;
-                        return Err("storage probe exited before its checkpoint".into());
-                    }
-                    if Instant::now() >= deadline {
-                        return Err("storage probe exceeded its deadline".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
+            for control in [false, true] {
+                let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
+                let ledger = guard.open_nonce_ledger()?;
+                ledger.replace_nonce_ledger_bytes(b"old")?;
+                drop(ledger);
+                drop(guard);
+                let marker = base.join(format!("probe-{name}"));
+                let mut command = Command::new(std::env::current_exe()?);
+                if control {
+                    command.env(CONTROL, "1");
                 }
-                child.kill()?;
-                child.wait()?;
-                retired = true;
-                Ok(())
-            })();
-            if !retired {
-                let killed = child.kill();
-                drop(child.stdin.take());
-                let waited = if killed.is_ok() {
-                    child.wait().map(|_| true)
-                } else {
-                    child.try_wait().map(|status| status.is_some())
-                };
-                if !matches!(&waited, Ok(true)) {
-                    fixture.1 = true;
-                    let _diagnostic = writeln!(
-                        io::stderr(),
-                        "storage probe could not be retired: kill={killed:?}, wait={waited:?}"
-                    );
+                let mut child = command
+                    .args([
+                        "--exact",
+                        "tests::windows_nonce_ledger_storage_native",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(PROBE, name)
+                    .env(BASE, &base)
+                    .env(MARKER, &marker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(if control {
+                        Stdio::inherit()
+                    } else {
+                        Stdio::null()
+                    })
+                    .spawn()?;
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut retired = false;
+                let result = (|| -> TestResult {
+                    loop {
+                        match fs::read(&marker) {
+                            Ok(bytes) if bytes == name.as_bytes() => break,
+                            Ok(bytes) if name.as_bytes().starts_with(&bytes) => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Ok(_) => return Err("storage probe marker mismatch".into()),
+                            Err(error) => return Err(error.into()),
+                        }
+                        if child.try_wait()?.is_some() {
+                            retired = true;
+                            return Err("storage probe exited before its checkpoint".into());
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("storage probe exceeded its deadline".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if control {
+                        drop(child.stdin.take());
+                    } else {
+                        child.kill()?;
+                    }
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            retired = true;
+                            if control && !status.success() {
+                                return Err("storage control did not exit successfully".into());
+                            }
+                            if !control && status.success() {
+                                return Err("storage crash probe unexpectedly succeeded".into());
+                            }
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("storage probe exceeded its deadline".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(())
+                })();
+                if !retired {
+                    let killed = child.kill();
+                    drop(child.stdin.take());
+                    let waited = if killed.is_ok() {
+                        child.wait().map(|_| true)
+                    } else {
+                        child.try_wait().map(|status| status.is_some())
+                    };
+                    if !matches!(&waited, Ok(true)) {
+                        fixture.1 = true;
+                        let _diagnostic = writeln!(
+                            io::stderr(),
+                            "storage probe could not be retired: kill={killed:?}, wait={waited:?}"
+                        );
+                    }
                 }
+                result?;
+                fs::remove_file(marker)?;
+                let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
+                let ledger = guard.open_nonce_ledger()?;
+                assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(stage));
             }
-            result?;
-            fs::remove_file(marker)?;
-            let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
-            let ledger = guard.open_nonce_ledger()?;
-            assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(stage));
         }
         Ok(())
     }
