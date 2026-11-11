@@ -132,7 +132,7 @@ fn assert_drive_error<T>(result: Result<T, Box<dyn std::error::Error>>, expected
     );
 }
 
-fn completed_driver(
+fn cancelled_driver(
     fixture: &mut Fixture,
 ) -> Result<(CeremonyDriver, super::CeremonyResult), Box<dyn std::error::Error>> {
     let mut driver =
@@ -148,11 +148,11 @@ fn completed_driver(
 }
 
 #[test]
-fn modeled_fault_stages_refuse_a_completed_driver_without_native_work() -> TestResult {
+fn modeled_fault_stages_refuse_a_cancelled_driver_without_native_work() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
-    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture)?;
     let calls = model.calls.borrow().clone();
     let stages: [(DriveStage, &str); 6] = [
         (Fixture::drive, "driver ended without result"),
@@ -197,12 +197,12 @@ fn modeled_fault_stages_refuse_a_completed_driver_without_native_work() -> TestR
 }
 
 #[test]
-fn modeled_creation_and_exit_stages_refuse_a_completed_driver() -> TestResult {
+fn modeled_creation_and_exit_stages_refuse_a_cancelled_driver() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
     let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture)?;
     let calls = model.calls.borrow().clone();
     assert_drive_error(
         fixture.drive_recordless(&mut driver, false),
@@ -250,12 +250,12 @@ fn modeled_creation_and_exit_stages_refuse_a_completed_driver() -> TestResult {
 }
 
 #[test]
-fn modeled_controller_stages_report_a_completed_driver_without_new_provenance() -> TestResult {
+fn modeled_controller_stages_report_a_cancelled_driver_without_new_provenance() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
     let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let (mut driver, result) = completed_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture)?;
     let calls = model.calls.borrow().clone();
     let mut provenance = None;
     let mut failure_stage = None;
