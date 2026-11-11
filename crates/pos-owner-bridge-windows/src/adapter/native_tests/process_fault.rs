@@ -921,6 +921,71 @@ fn run_case(
     reached.ok_or_else(|| "fault point was not reached".into())
 }
 
+#[test]
+fn native_interaction_cutpoints_outlive_fixture_readiness_ceiling() -> TestResult {
+    type Drive = fn(&mut Fixture, &mut CeremonyDriver, ProcessFaultTarget, bool) -> DriveResult;
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let root = FixtureRoot::new()?;
+    let cases: [(u8, FixtureProfile, Drive, bool); 4] = [
+        (0xe2, FixtureProfile::Pending, Fixture::drive, true),
+        (
+            0xe3,
+            FixtureProfile::SuccessfulGetWritingDelay,
+            Fixture::drive_posted_writing,
+            false,
+        ),
+        (
+            0xe4,
+            FixtureProfile::SuccessfulGetReleaseDelay,
+            Fixture::drive_posted_ready,
+            false,
+        ),
+        (
+            0xe5,
+            FixtureProfile::SuccessfulGetReleaseDelay,
+            Fixture::drive_consuming,
+            false,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (number, profile, drive, inject) in cases {
+        crate::Native::reset_process_failure_observations();
+        let mut fixture = Fixture::new(Path::new(&runtime), &root.0, number, profile)?;
+        // Keep the Surface's readiness bound intact while expiring the
+        // unrelated fixture ceiling for this cutpoint-only regression.
+        fixture.deadline = Instant::now();
+        let _zero_witness = ZeroWitness::arm();
+        let mut driver =
+            readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+        let attempt = catch_unwind(AssertUnwindSafe(|| {
+            drive(
+                &mut fixture,
+                &mut driver,
+                ProcessFaultTarget::Renderer,
+                inject,
+            )
+        }));
+        let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+        let observed = driver.first_receipt_at().is_some()
+            && fixture.reached.is_some()
+            && fixture.evidence_complete;
+        fixture.retire(driver, result, None)?;
+        if let Some(error) = failure {
+            failures.push(format!("case {number}: {error}"));
+        } else if !observed {
+            failures.push(format!("case {number}: interaction evidence missing"));
+        }
+    }
+    root.remove()?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; ").into())
+    }
+}
+
 impl Fixture {
     fn check_recordless_admission(&mut self) -> TestResult {
         if !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
