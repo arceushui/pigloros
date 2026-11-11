@@ -271,3 +271,31 @@ pub(super) fn observe_options(
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::{missing, read_bool};
+    use crate::{Failure, NativeError, Operation};
+    use windows::core::{Error, HRESULT};
+
+    #[test]
+    fn settings_read_failures_keep_their_error_classification() {
+        let error = Error::from_hresult(HRESULT(-1));
+        assert_eq!(
+            read_bool(|_| Err(error)),
+            Err(NativeError {
+                operation: Operation::Settings,
+                failure: Failure::CallFailed,
+            })
+        );
+        assert_eq!(
+            missing(Error::from_hresult(HRESULT(-1))),
+            NativeError {
+                operation: Operation::Settings,
+                failure: Failure::MissingInterface,
+            }
+        );
+    }
+}

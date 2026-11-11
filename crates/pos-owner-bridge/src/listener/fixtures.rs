@@ -14,9 +14,9 @@ pub enum FixtureProfile {
     Popup,
     /// Attempt a popup only after the shared protocol receives a valid pair.
     PopupReceipt,
-    /// Request geolocation, which the real permission handler must deny.
+    /// Request notification permission; the real permission handler must deny it.
     Permission,
-    /// Attempt one fixed denied URI scheme.
+    /// Attempt the fixed Settings URI for isolated External and composed denial cases.
     External,
     /// Attempt navigation to one fixed disallowed loopback path.
     Navigation,
@@ -36,6 +36,18 @@ pub enum FixtureProfile {
     InterleavedPair,
     /// Hold real SDK deliveries for 700 ms, crossing the first two retry windows.
     DelayedDelivery,
+    /// Fixed public test-key assertion for the native Get plan, resolved after 100 ms.
+    /// Exercises successful protocol completion; no real authenticator is used.
+    SuccessfulGet,
+    /// The same assertion, with a declared 2.5 s page stall after `READY`.
+    /// Exercises release expiry and host zeroization of a nonzero reply.
+    SuccessfulGetReleaseDelay,
+    /// Hold the getter for 1.5 s after the core enters `WRITING`, before encoding.
+    /// Adversarial fault scheduling; never part of normal G3 delivery.
+    SuccessfulGetWritingDelay,
+    /// Retain real SDK events until teardown, exercising all real EMPTY retries.
+    /// Adversarial delivery withholding; never a normal G3 delivery case.
+    WithheldDelivery,
 }
 
 impl FixtureProfile {
@@ -54,6 +66,10 @@ impl FixtureProfile {
             Self::DuplicateRequest => &fixture_assets::DUPLICATE_REQUEST,
             Self::InterleavedPair => &fixture_assets::INTERLEAVED_PAIR,
             Self::DelayedDelivery => &fixture_assets::DELAYED_DELIVERY,
+            Self::SuccessfulGet => &fixture_assets::SUCCESSFUL_GET,
+            Self::SuccessfulGetReleaseDelay => &fixture_assets::SUCCESSFUL_GET_RELEASE_DELAY,
+            Self::SuccessfulGetWritingDelay => &fixture_assets::SUCCESSFUL_GET_WRITING_DELAY,
+            Self::WithheldDelivery => &fixture_assets::WITHHELD_DELIVERY,
         }
     }
 }

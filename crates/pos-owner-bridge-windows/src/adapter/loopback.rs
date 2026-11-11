@@ -25,6 +25,16 @@ impl SharedLoopback {
     }
 
     #[cfg(test)]
+    pub(super) fn observation(
+        &self,
+    ) -> Result<pos_owner_bridge::listener::ListenerObservation, BridgeError> {
+        self.0
+            .lock()
+            .map(|listener| listener.observation())
+            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
+    }
+
+    #[cfg(test)]
     pub(super) fn received_request_count(&self) -> Result<u64, BridgeError> {
         self.0
             .lock()
@@ -57,10 +67,13 @@ impl LoopbackPort for SharedLoopback {
     }
 
     fn probe_ipv6(&mut self) -> Result<(), BridgeError> {
-        self.0
+        #[cfg(test)]
+        let _duration = crate::Native::readiness_span("ipv6-probe");
+        let mut listener = self
+            .0
             .lock()
-            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?
-            .probe_ipv6()
+            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
+        listener.probe_ipv6()
     }
 }
 

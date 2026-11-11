@@ -188,7 +188,7 @@ def tree(extra: dict[str, str | None] | None = None, links: dict[str, str] | Non
 
 def fixture(extra: dict[str, str | None] | None = None, links: dict[str, str] | None = None) -> list[str]:
     with tree(extra, links) as root:
-        return CHECKER.violations(root)
+        return CHECKER.violations(root, component_fixture=True)
 
 
 def require_accepted(
@@ -280,6 +280,40 @@ def test_masker() -> None:
     code = CHECKER.scan(multiline).code
     if len(CHECKER.UNSAFE_TOKEN.findall(code)) != 1 or code.count("\n") != multiline.count("\n"):
         raise SystemExit(f"masker mishandled a multi-line string: {code!r}")
+
+
+def test_masker_unicode_word_boundaries() -> None:
+    for word in ("é", "变量", "²", "Ⅻ", "_", "𐐀"):
+        prefix = f"{word}unsafe "
+        raw_identifier = f"r#{word}unsafe"
+        source = prefix + raw_identifier + f' {word}r"unsafe" \t;::\n  // SAFETY: kept\n'
+        expected = (
+            prefix
+            + "_" * len(raw_identifier)
+            + f" {word}r"
+            + " " * len('"unsafe"')
+            + " \t;::\n"
+            + " " * len("  // SAFETY: kept")
+            + "\n"
+        )
+        scanned = CHECKER.scan(source)
+        assert scanned.code == expected
+        assert scanned.code_lines == tuple(expected.split("\n"))
+        assert scanned.comments == {1: "SAFETY: kept"}
+        assert scanned.raw_identifiers == (len(prefix),)
+        assert scanned.source == source
+    source = "r#e\u0301unsafe r#éunsafe \u200cunsafe"
+    expected = "___\u0301unsafe " + "_" * len("r#éunsafe") + " \u200cunsafe"
+    assert CHECKER.scan(source).code == expected
+
+
+def test_masker_run_classes_cover_the_same_unicode_characters() -> None:
+    for codepoint in range(sys.maxunicode + 1):
+        character = chr(codepoint)
+        word = character.isalnum() or character == "_"
+        symbols = not word and character not in "/\"'"
+        assert (CHECKER.WORD_RUN.fullmatch(character) is not None) == word
+        assert (CHECKER.CODE_SYMBOLS.fullmatch(character) is not None) == symbols
 
 
 def test_accepted() -> None:
@@ -1325,13 +1359,21 @@ def test_forbidden_webview_authority() -> None:
 
 
 def test_cli() -> None:
-    clean = run_cli()
+    clean = subprocess.run(
+        [sys.executable, str(CHECKER_PATH), "--root", str(ROOT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if clean.returncode != 0 or "owner-bridge Windows unsafe policy holds" not in clean.stdout:
         raise SystemExit(f"CLI rejected a clean tree: {clean}")
+    incomplete = run_cli()
+    if incomplete.returncode == 0 or "owned-parent" not in incomplete.stderr:
+        raise SystemExit(f"CLI accepted a component fixture as a complete project: {incomplete}")
     dirty = run_cli({SAFE_LIB_PATH: FORBID + "fn f() { unsafe {} }\n", HOST: FORBID + CFG + "pub fn host() {}\n"})
     expected = [at(SAFE_LIB_PATH, 2, RESERVED)]
     lines = dirty.stderr.strip().splitlines()
-    if dirty.returncode == 0 or dirty.stdout or lines != expected:
+    if dirty.returncode == 0 or dirty.stdout or any(line not in lines for line in expected):
         raise SystemExit(f"CLI did not report the expected violation {expected}: {dirty}")
     malformed = run_cli({INV: "[[block\n"})
     if malformed.returncode == 0 or "Traceback" in malformed.stderr or "malformed TOML" not in malformed.stderr:
@@ -1358,8 +1400,826 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
         ])
 
 
+def test_owned_process_fault_authority() -> None:
+    path = ROOT / SHIM / "src/ffi/process_fault.rs"
+    original = path.read_text()
+    if not CHECKER._reviewed_fault_code(CHECKER.scan(original).code):
+        raise SystemExit("the reviewed process fault source is not admitted")
+    mutations = {
+        "arbitrary pid": ("let pid = select(&first, kind)?;", "let pid = 1234;"),
+        "extra rights": ("PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,", "PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | 0x400,"),
+        "wrong exit code": ("const FAULT_EXIT: u32 = 0x535;", "const FAULT_EXIT: u32 = 0;"),
+        "disabled authority": ("if !authority.valid()", "if false"),
+        "removed empty-state recheck": ("buffers.ok_or(())?.load_state().map_err(|_| ())?", "0"),
+        "removed pending-controller recheck": ("pending_controller.ok_or(())?.succeeded().is_some()", "false"),
+        "incomplete second snapshot accepted": ("let second = observe()?;", "let second = observe().unwrap_or_default();"),
+        "first snapshot failure swallowed": ("let first = observe()?;", "let first = observe().unwrap_or_default();"),
+        "writing-state recheck": ("ControlState::Writing as u32", "ControlState::Empty as u32"),
+        "ready-state recheck": ("ControlState::Ready as u32", "ControlState::Empty as u32"),
+        "consuming-state recheck": ("ControlState::Consuming as u32", "ControlState::Empty as u32"),
+        "different source": ("candidates(environment)?", "other_candidates(environment)?"),
+        "indirect termination": ("TerminateProcess(handle, FAULT_EXIT)", "hidden(handle, FAULT_EXIT)"),
+        "ambiguous renderer treated as absence": ("if matches.next().is_some() {\n        return Err(());", "if matches.next().is_some() {\n        return Ok(None);"),
+        "second renderer snapshot suppressed": ("select_optional(&second, COREWEBVIEW2_PROCESS_KIND_RENDERER)? != renderer", "false"),
+        "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
+        "fault call evidence suppressed": ("authority.record(crate::ProcessFaultMark::TerminationCall);", ""),
+        "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
+        "late identity requery restored": ("fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }", "fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }"),
+        "required earlier identity query removed": ("fn observe(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }", "fn observe(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }"),
+        "required identity mismatch accepted": ("if identity != self.retained.identity {", "if false {"),
+        "required image mismatch accepted": ("if image != self.image {", "if false {"),
+    }
+    for name, (old, new) in mutations.items():
+        if old not in original:
+            raise SystemExit(f"missing adversarial mutation target: {name}")
+        changed = original.replace(old, new, 1)
+        if CHECKER._reviewed_fault_code(CHECKER.scan(changed).code):
+            raise SystemExit(f"process fault policy accepted {name}")
+    helper = f"{SHIM}/src/ffi/process_fault.rs"
+    for text in (original.replace("#![cfg(test)]", "", 1),):
+        found = fixture({helper: text})
+        if f"{helper}: process fault helper requires file-scope cfg(test)" not in found:
+            raise SystemExit(f"product fault helper was accepted: {found}")
+    parent = f"{SHIM}/src/ffi/mod.rs"
+    for declaration in ("mod process_fault;", "#[cfg(test)]\npub mod process_fault;"):
+        found = fixture({parent: CFG + declaration})
+        if f"{parent}: process_fault must be a private cfg(test) module" not in found:
+            raise SystemExit(f"product or exported fault module was accepted: {found}")
+    for api in ("TerminateProcess", "PROCESS_TERMINATE", "GetProcessInfos", "GetExitCodeProcess"):
+        source = CFG + f"fn forbidden() {{ {api}(); }}\n"
+        found = fixture({OPS: source})
+        message = at(OPS, 2, "process fault authority belongs only in the test helper")
+        if message not in found:
+            raise SystemExit(f"relocated fault authority {api} was accepted: {found}")
+    # Removing any recorded event or the pre-cleanup evidence gate changes
+    # the reviewed fixture and must be rejected even if the test still exists.
+    fixture_path = ROOT / SHIM / "src/adapter/native_tests/process_fault.rs"
+    fixture_source = fixture_path.read_text()
+    surface_path = ROOT / SHIM / "src/adapter/surface/mod.rs"
+    files = {
+        "src/ffi/session.rs": (ROOT / SHIM / "src/ffi/session.rs").read_text(),
+        "src/adapter/surface/mod.rs": surface_path.read_text(),
+        "src/adapter/native_tests/process_fault.rs": fixture_source,
+        "src/adapter/native_tests/retirement.rs": (ROOT / SHIM / "src/adapter/native_tests/retirement.rs").read_text(),
+    }
+    for old, new in (
+        ("ProcessFaultMark::ExitCode(code)", "ProcessFaultMark::TerminationCall"),
+        ("self.evidence_complete = true;", "self.evidence_complete = false;"),
+        (".posted_fault_event(target)", ".posted_fault_event(ProcessFaultTarget::Browser)"),
+        ("ProcessFaultMark::ControllerCompletion(success)", "ProcessFaultMark::TerminationCall"),
+        ("self.on_consuming().is_err()", "false"),
+        ("let won = self.inner.borrow().reply_compare_exchange(current, new)?;", "let won = true;"),
+        ("Ok(won)", "Ok(true)"),
+        ("self.inner.write_record(record)", "Ok(())"),
+        ("decoded.browser_pid() != browser.browser_pid", "false"),
+        (".push(ProcessFaultMark::RecordWritten)", ".push(ProcessFaultMark::TerminationCall)"),
+        ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
+        ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
+        ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
+        ("match self.surface.pending_opening_completion() {", "match Some(true) {"),
+        ("self.surface.pending_opening_completion().is_none()", "true"),
+        ("controller_held_before_exit(&crate::Native::callback_order())", "true"),
+        ("Instant::now() >= self.deadline", "false"),
+        (".arm_exit_capture(", ".arm_exit_capture_disabled("),
+        ("self.observe_exit_control(deadline)?;", "self.evidence_complete = true;"),
+        ("!self.surface.matching_exit_event()", "false"),
+    ):
+        if old not in fixture_source:
+            raise SystemExit(f"missing ordered-evidence mutation target: {old}")
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(old, new, 1)
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller" not in found:
+            raise SystemExit(f"ordered evidence mutation was accepted: {old}: {found}")
+    # AwaitingLoad can advance during process discovery. The final retained
+    # event guard and the fixture's pre-fault phase observation are both bound.
+    for relative, old, new, expected in (
+        ("src/adapter/surface/mod.rs", "&& events.loaded().is_none()", "&& true", "process fault authority function inject_awaiting_load_fault differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "&& events.started().is_none()", "&& true", "process fault authority function inject_navigating_fault differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "state.generation != u32::from(point.post())", "state.generation != 1", "process fault authority function posted_retry_fault_state differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "self.activation_error.is_some()", "false", "process fault authority function before_record_fault_state differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "generation != 1 || posts != 0", "generation != 1", "process fault authority function awaiting_load_fault_state differs from reviewed code"),
+        ("src/adapter/native_tests/process_fault.rs", ".inject_awaiting_load_fault(ProcessFaultTarget::Browser, seal)", ".inject_exit_fault(seal)", "process fault fixture differs from reviewed sealed caller"),
+    ):
+        changed = dict(files)
+        if old not in changed[relative]:
+            raise SystemExit(f"missing awaiting-load mutation target: {old}")
+        changed[relative] = changed[relative].replace(old, new, 1)
+        scans = {}
+        for item, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"awaiting-load authority mutation was accepted: {old}: {found}")
+    # Each new phase must classify ProcessFailed through completed retirement.
+    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_first_opening_browser", "run_posted_writing", "run_posted_ready", "run_posted_retry", "run_consuming", "run_before_record"):
+        start = fixture_source.find(f"fn {function}(")
+        end = fixture_source.find("\n}", start)
+        body = fixture_source[start:end]
+        marker = ("finish_failed_case(" if function in (
+            "run_awaiting_load", "run_navigating", "run_posted_empty", "run_before_record",
+            "run_posted_writing", "run_posted_ready", "run_posted_retry",
+        ) else "check_final_process_failures(")
+        if start < 0 or end < 0 or marker not in body:
+            raise SystemExit(f"missing final process failure classifier: {function}")
+        mutated = body.replace(marker, "discard_final_assessment(", 1)
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source[:start] + mutated + fixture_source[end:]
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        expected = f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller"
+        if expected not in found:
+            raise SystemExit(f"final process failure classifier bypass was accepted: {function}: {found}")
+    finish = fixture_source[fixture_source.find("fn finish_failed_case("):]
+    if not 0 <= finish.find("self.retire(") < finish.find("check_final_process_failures("):
+        raise SystemExit("shared failed-case classification must follow retirement")
+    for old, new in (
+        ("self.retire(", "self.discard_retire("),
+        ("check_final_process_failures(finish.actual_fault", "discard_final_process_failures(finish.actual_fault"),
+        ("controller_invoked_after_exit(", "discard_callback_order("),
+        ("RendererPresence::Absent", "RendererPresence::Unique"),
+        ("sdk_controller_result(&order, callback)", "true"),
+        ("self.surface.controller_creation_retention(ceremony) == Some(Abandoned)", "true"),
+        ("self.surface.abandoned_completed_browser(ceremony).ok()", "None"),
+        ("|| !sdk_success", "|| false"),
+        ("|| !no_resurrection", "|| false"),
+        ("Some(EnvironmentSdkOutcome::NativeFailure) if obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
+        ("Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
+    ):
+        if old not in fixture_source:
+            raise SystemExit(f"missing new evidence mutation target: {old}")
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(old, new, 1)
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller" not in found:
+            raise SystemExit(f"new evidence bypass accepted: {old}: {found}")
+    # The ordered evidence must come from the actual SDK handlers and a
+    # bounded test-only recorder, not an invented event or a comment decoy.
+    for relative, old, new, expected in (
+        ("src/ffi/creation.rs", "result.is_ok(),", "true,", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "hr.is_err() && value.is_some()", "false", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "crate::CreationCallback::NativeFailure", "crate::CreationCallback::Success", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, result);", "let _ignored = result;", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(*pid));", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, Ok(NativeEvent::BrowserExited { pid: *pid })); crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(*pid));", "callback invocation differs from reviewed SDK path"),
+        ("src/lib.rs", "if order.len() < 64", "if order.len() < 640", "callback ordering recorder differs from reviewed test-only code"),
+    ):
+        changed = dict(files)
+        text = (ROOT / SHIM / relative).read_text()
+        if old not in text:
+            raise SystemExit(f"missing callback evidence mutation target: {old}")
+        changed[relative] = text.replace(old, new, 1)
+        scans = {}
+        for item, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"callback evidence bypass accepted: {relative}: {found}")
+    root_target = 'root.join("environment-obstruction")'
+    if root_target not in fixture_source:
+        raise SystemExit("missing UDF fixture root literal")
+    changed = dict(files)
+    changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(
+        root_target, 'root.join("../other") /* root.join("environment-obstruction") */', 1)
+    scans = {}
+    for relative, source in changed.items():
+        scanned = CHECKER.scan(source)
+        scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+    found = []
+    CHECKER._check_fault_authority(ROOT, scans, found)
+    if f"{SHIM}/src/adapter/native_tests/process_fault.rs: UDF obstruction root must use its fixed fixture child" not in found:
+        raise SystemExit(f"UDF root substitution was accepted: {found}")
+    root_path = "src/adapter/native_tests.rs"
+    root_source = (ROOT / SHIM / root_path).read_text()
+    for old, new, expected in (
+        ('"piglor-native-{}-{}-{}"', '"../escape-{}-{}-{}"', "fixture root must use its fixed temporary name"),
+        ('crate::create_private_directory(&path)?', 'std::fs::create_dir_all(&path)?', "fixture root differs from reviewed private temporary directory"),
+    ):
+        if old not in root_source:
+            raise SystemExit(f"missing fixture provenance mutation target: {old}")
+        changed = dict(files)
+        changed[root_path] = root_source.replace(old, new, 1)
+        scans = {}
+        for relative, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{root_path}: {expected}" not in found:
+            raise SystemExit(f"fixture provenance bypass accepted: {old}: {found}")
+    # Both refusal probes must use the real Surface and preserve its retained
+    # folder, window, ceremony and pre-buffer state around the attempt.
+    for relative, old, new, expected in (
+        ("src/adapter/native_tests/process_fault.rs", "fixture.pre_environment_competitor_blocked(", "fixture.discard_competitor_check(", "process fault fixture differs from reviewed sealed caller"),
+        ("src/adapter/surface/mod.rs", "!self.native.window().ok()?.exists", "false", "process fault authority function pre_environment_retention differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "opening != spec || self.failed_open", "false", "competing-admission observation open differs from reviewed code"),
+        ("src/ffi/session.rs", "self.window_ref()?.snapshot()", "unavailable_window()", "competing-admission observation window differs from reviewed code"),
+        ("src/ffi/window.rs", "IsWindow(Some(self.hwnd))", "IsWindow(None)", "competing-admission observation snapshot differs from reviewed code"),
+    ):
+        changed = dict(files)
+        source = (ROOT / SHIM / relative).read_text()
+        if old not in source:
+            raise SystemExit(f"missing competing-admission mutation target: {old}")
+        changed[relative] = source.replace(old, new, 1)
+        scans = {}
+        for item, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"competing-admission witness bypass accepted: {old}: {found}")
+    # The source-controlled owned-folder obstruction must remain a new,
+    # fixed child file; comments cannot stand in for the actual literal.
+    obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
+    original_obstruction = (ROOT / SHIM / obstruction_path).read_text()
+    for old, new, expected in (
+        ('folder.join("EBWebView")', 'folder.join("other") /* folder.join("EBWebView") */', "UDF obstruction must use its fixed EBWebView child"),
+        ('.create_new(true)', '.create_new(false)', "owned UDF obstruction differs from reviewed fixed fixture"),
+        ('folder != self.expected.as_path()', 'false', "owned UDF obstruction differs from reviewed fixed fixture"),
+    ):
+        if old not in original_obstruction:
+            raise SystemExit(f"missing obstruction mutation target: {old}")
+        changed = dict(files)
+        changed[obstruction_path] = original_obstruction.replace(old, new, 1)
+        scans = {}
+        for relative, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{obstruction_path}: {expected}" not in found:
+            raise SystemExit(f"UDF obstruction boundary bypass accepted: {old}: {found}")
+    # Taking the retired pairs disarms observation; the live pair must be
+    # re-armed before injection and before its later native close.
+    retry = fixture_source.find("fn drive_posted_retry(")
+    arm = fixture_source.find("crate::Native::arm_native_zero_observations();", retry)
+    inject = fixture_source.find(".inject_posted_retry_fault(", retry)
+    if not 0 <= retry < arm < inject:
+        raise SystemExit("retry witness is not re-armed before the fault")
+    changed = dict(files)
+    changed["src/adapter/native_tests/process_fault.rs"] = (
+        fixture_source[:arm] + fixture_source[arm:].replace("crate::Native::arm_native_zero_observations();", "", 1)
+    )
+    scans = {}
+    for relative, text in changed.items():
+        scanned = CHECKER.scan(text)
+        scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+    found = []
+    CHECKER._check_fault_authority(ROOT, scans, found)
+    expected = f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller"
+    if expected not in found:
+        raise SystemExit(f"retry witness disarming was accepted: {found}")
+    # A removed module or an inert hosted test must not disable the gate.
+    found = fixture({helper: original})
+    if f"{SHIM}/src/ffi/mod.rs: process fault helper must have exactly one private cfg(test) declaration" not in found:
+        raise SystemExit(f"missing fault module declaration was accepted: {found}")
+    inert = SHIM_LIB + "#[cfg(test)]\n#[forbid(unsafe_code)]\nmod tests { #[test] fn native_verified_owned_process_faults_retire() { } }\n"
+    found = fixture({helper: original, LIB: inert})
+    expected = f"{LIB}: process fault hosted test must call the real fixture"
+    if expected not in found:
+        raise SystemExit(f"inert process fault test was accepted: {found}")
+    indirect = (
+        (OPS, "fn f() { OpenProcess(1, false, 7); }", "OpenProcess is confined to the fixed probe and fault helper"),
+        (OPS, "fn f() { LoadLibraryW(); }", "indirect process termination authority is forbidden"),
+        (OPS, "fn f() { GetProcAddress(); }", "dynamic lookup must remain the fixed DefWindowProcW lookup"),
+        (f"{SHIM}/src/ffi/process.rs", "use x::OpenProcess; fn f() { OpenProcess(1, false, 7); }", "product process probe must use its fixed query-only OpenProcess"),
+    )
+    for source_path, statement, expected in indirect:
+        found = fixture({source_path: CFG + statement + "\n"})
+        if f"{source_path}: {expected}" not in found:
+            raise SystemExit(f"indirect authority was accepted: {statement}: {found}")
+
+    window = f"{SHIM}/src/ffi/window.rs"
+    approved = 'GetProcAddress(module, PCSTR(c"DefWindowProcW".as_ptr().cast()))'
+    live = CFG + f"use x::GetProcAddress; fn f() {{ let _p = {approved}; }}\n"
+    message = f"{window}: dynamic lookup must remain the fixed DefWindowProcW lookup"
+    if message in fixture({window: live}):
+        raise SystemExit("the fixed executable lookup was rejected")
+    changed = live.replace('c"DefWindowProcW"', 'c"TerminateProcess"')
+    for decoy in (f"// {approved}\n", f"/* {approved} */\n", f'const TEXT: &str = r#"{approved}"#;\n'):
+        for source in (decoy + changed, changed + decoy):
+            if message not in fixture({window: source}):
+                raise SystemExit("a non-executable decoy satisfied the fixed lookup policy")
+
+    observer = "src/ffi/process.rs"
+    observer_source = (ROOT / SHIM / observer).read_text()
+    observer_message = f"{SHIM}/{observer}: shared process identity differs from the reviewed read-only observer"
+
+    def observer_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_fault_authority(
+            ROOT, {observer: (scanned, CHECKER._attributes(scanned.code))}, found
+        )
+        return found
+
+    if observer_message in observer_errors(observer_source):
+        raise SystemExit("the actual shared identity observer was rejected")
+    for old, new in (
+        ("times.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("queried.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("browser_pid: pid,", "browser_pid: 1,"),
+        ("digest.update(unit.to_le_bytes());", "digest.update(unit.to_be_bytes());"),
+        ("PathBuf::from(OsString::from_wide(image))", 'PathBuf::from("unrelated")'),
+    ):
+        if observer_source.count(old) != 1:
+            raise SystemExit(f"missing shared identity mutation target: {old}")
+        if observer_message not in observer_errors(observer_source.replace(old, new, 1)):
+            raise SystemExit(f"the shared identity policy accepted {old} -> {new}")
+
+
+def test_pending_model_callback_references_are_read_only() -> None:
+    relative = "src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs"
+    message = f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths"
+
+    def errors(body: str) -> list[str]:
+        scanned = CHECKER.scan(CFG + f"fn proposed() {{ {body} }}\n")
+        found: list[str] = []
+        CHECKER._check_fault_authority(
+            ROOT, {relative: (scanned, CHECKER._attributes(scanned.code))}, found
+        )
+        return found
+
+    reader = "let _ = crate::Native::callback_order(); let _: Option<crate::NativeCallbackMoment> = None;"
+    if message in errors(reader):
+        raise SystemExit("the reviewed pending model cannot read callback observations")
+    for body in (
+        "crate::Native::arm_callback_order();",
+        "crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(42));",
+        "crate::Native::disarm_callback_order();",
+        "let _ = &crate::CALLBACK_ORDER;",
+        "let _ = crate::Native::creation_order();",
+        "let _ = crate::NativeCreationMoment::EnvironmentReturned(true);",
+    ):
+        if message not in errors(body):
+            raise SystemExit(f"the pending model escaped its read-only callback scope: {body}")
+
+
+def test_fault_profile_bindings() -> None:
+    directory = "crates/pos-owner-bridge"
+    paths = (
+        f"{directory}/src/listener/fixtures.rs",
+        f"{directory}/src/listener/fixture_assets.rs",
+        f"{directory}/assets/qualification/pending.html",
+        f"{directory}/assets/qualification/delayed_delivery.html",
+        f"{directory}/assets/qualification/successful_get_release_delay.html",
+        f"{directory}/assets/qualification/successful_get_writing_delay.html",
+        f"{directory}/assets/qualification/withheld_delivery.html",
+    )
+    sources = {path: (ROOT / path).read_text() for path in paths}
+
+    def errors(changes: dict[str, str]) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, text in {**sources, **changes}.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            found: list[str] = []
+            CHECKER._check_fault_assets(root, found)
+            return found
+
+    if errors({}):
+        raise SystemExit("the actual sealed fault profile bindings were rejected")
+    for path in paths[2:]:
+        if not errors({path: sources[path] + "<iframe></iframe>"}):
+            raise SystemExit(f"changed fault topology was accepted: {path}")
+    for variant, constant, filename in (
+        ("Pending", "PENDING", "pending"),
+        ("DelayedDelivery", "DELAYED_DELIVERY", "delayed_delivery"),
+        ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay"),
+        ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay"),
+        ("WithheldDelivery", "WITHHELD_DELIVERY", "withheld_delivery"),
+    ):
+        catalogue, responses = paths[:2]
+        mapping = f"Self::{variant} => &fixture_assets::{constant}"
+        if not errors({catalogue: sources[catalogue].replace(mapping, f"Self::{variant} => &fixture_assets::OTHER", 1)}):
+            raise SystemExit(f"redirected fault catalogue was accepted: {variant}")
+        redirected = sources[catalogue].replace(mapping, f"Self::{variant} => &fixture_assets::OTHER", 1)
+        decoy = f"std::hint::black_box(match self {{ Self::{variant} => &fixture_assets::{constant}, _ => &fixture_assets::{constant} }});"
+        for text in (redirected + "\n" + decoy, redirected.replace("match self {", decoy + "\nmatch self {", 1)):
+            expected = f"{catalogue}: process fault catalogue differs from reviewed sealed response selection"
+            if expected not in errors({catalogue: text}):
+                raise SystemExit(f"executable catalogue decoy was accepted: {variant}")
+        original = sources[responses]
+        wrong = original.replace(f'qualification/{filename}.html', 'qualification/other.html', 1)
+        decoy = f'const {constant}: Response = Response {{ body: include_bytes!("../../assets/qualification/{filename}.html") }};'
+        for text in (wrong, f"/* {decoy} */\n" + wrong, wrong + f'\nconst TEXT: &str = r#"{decoy}"#;'):
+            expected = f"{responses}: {variant} response must embed the reviewed asset"
+            if expected not in errors({responses: text}):
+                raise SystemExit(f"non-executable fault response decoy was accepted: {variant}")
+
+
+def test_recordless_and_release_authority() -> None:
+    cases = (
+        ("src/ffi/creation.rs", "succeeded", "Result::is_ok", "Result::is_err"),
+        ("src/ffi/session.rs", "recordless_fault_owners_retained", "== Some(true)", "== Some(false)"),
+        ("src/ffi/session.rs", "exit_fault_owners_retained", "self.view.is_none()", "self.view.is_some()"),
+        ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
+        ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),
+        ("src/adapter/surface/mod.rs", "inject_view_fault", "std::time::Instant::now() < deadline", "true"),
+    )
+    for relative, name, old, new in cases:
+        source = (ROOT / SHIM / relative).read_text()
+        marker = source.index(f"fn {name}(")
+        opening = source.index("{", marker)
+        scanned = CHECKER.scan(source)
+        end = CHECKER._matching_brace(scanned.code, opening) + 1
+        body = source[marker:end]
+        if body.count(old) != 1:
+            raise SystemExit(f"missing authority mutation: {relative}::{name}: {old}")
+        mutated = source[:marker] + body.replace(old, new, 1) + source[end:]
+        changed = CHECKER.scan(mutated)
+        found: list[str] = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        expected = f"{SHIM}/{relative}: process fault authority function {name} differs from reviewed code"
+        if expected not in found:
+            raise SystemExit(f"authority bypass was accepted: {relative}::{name}")
+    relative = "src/adapter/surface/mod.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    for declaration in ("recordless_fault: Option<ProcessIdentity>", "recordless_fault: None"):
+        guarded = "#[cfg(test)]\n" + ("    " if "Option" in declaration else "            ") + declaration
+        if source.count(guarded) != 1:
+            raise SystemExit(f"missing recordless field guard: {declaration}")
+        changed = CHECKER.scan(source.replace(guarded, declaration, 1))
+        found = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        if f"{SHIM}/{relative}: recordless fixture identity and initialization require cfg(test)" not in found:
+            raise SystemExit(f"product recordless fixture state was accepted: {declaration}")
+
+
+def test_typed_process_failure_evidence() -> None:
+    relative = "src/ffi/events/control_fixture.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    message = f"{SHIM}/{relative}: process failure observations differ from reviewed typed callbacks"
+    for old, new in (
+        ("_ => NativeProcessFailure::Other", "_ => NativeProcessFailure::BrowserExited"),
+        (".unwrap_or(NativeProcessFailure::Unavailable)", ".unwrap_or(NativeProcessFailure::BrowserExited)"),
+        ("push_observation(failures, result)", "failures.borrow_mut().clear()"),
+        ("PROCESS_FAILURES.with(|failures| failures.borrow().clone())", "Vec::new()"),
+    ):
+        if source.count(old) != 1:
+            raise SystemExit(f"missing typed process failure mutation: {old}")
+        changed = CHECKER.scan(source.replace(old, new, 1))
+        found: list[str] = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        if message not in found:
+            raise SystemExit(f"typed process failure evidence bypass was accepted: {old}")
+
+    relative = "src/lib.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    guarded = "#[cfg(test)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) enum NativeProcessFailure"
+    if source.count(guarded) != 1:
+        raise SystemExit("missing native failure classification cfg mutation")
+    changed = CHECKER.scan(source.replace(guarded, guarded.removeprefix("#[cfg(test)]\n"), 1))
+    found = []
+    CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+    if f"{SHIM}/{relative}: native failure classifications require cfg(test)" not in found:
+        raise SystemExit("product native failure classification was accepted")
+
+
+def test_private_fault_capability_construction() -> None:
+    root = (ROOT / LIB).read_text()
+    surface = "src/adapter/surface/mod.rs"
+    sources = {
+        "src/lib.rs": root,
+        surface: (ROOT / SHIM / surface).read_text(),
+        "src/adapter/native_tests/process_fault.rs": (ROOT / SHIM / "src/adapter/native_tests/process_fault.rs").read_text(),
+    }
+
+    def errors(files: dict[str, str]) -> list[str]:
+        scans = {}
+        for relative, text in files.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found: list[str] = []
+        CHECKER._check_fault_capabilities(scans, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"the private root capabilities were rejected: {errors(sources)}")
+    for marker in ("struct FaultSeal", "impl FaultSeal", "struct FaultAuthority", "impl FaultAuthority"):
+        old = f"#[cfg(test)]\n{marker}"
+        if root.count(old) != 1:
+            raise SystemExit(f"missing capability cfg mutation: {marker}")
+        changed = dict(sources)
+        changed["src/lib.rs"] = root.replace(old, marker, 1)
+        if not errors(changed):
+            raise SystemExit(f"product capability was accepted: {marker}")
+    for statement, expected in (
+        ("type Alias = crate::RetainedExitHandle;", "retained-exit capability belongs only in reviewed paths"),
+        ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
+        ("fn f() { let _seal = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
+        ("fn f() { let _authority = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
+        ("use crate::FaultSeal as Other;", "fault capabilities may not be aliased"),
+        ("use crate::FaultAuthority as Other;", "fault capabilities may not be aliased"),
+        ("impl crate::FaultSeal { fn forged() -> Self { Self(Default::default()) } }", "fault capability implementations belong only in the reviewed root types"),
+        ("impl Default for crate::FaultAuthority { fn default() -> Self { Self {} } }", "fault capability implementations belong only in the reviewed root types"),
+    ):
+        changed = dict(sources)
+        changed["src/adapter/other.rs"] = CFG + statement
+        if f"{SHIM}/src/adapter/other.rs: {expected}" not in errors(changed):
+            raise SystemExit(f"capability construction bypass was accepted: {statement}")
+
+    resurrected = dict(sources)
+    resurrected[surface] += "\nfn inject_exit_fault() { let _ = crate::FaultAuthority {}; }\n"
+    expected = f"{SHIM}/{surface}: fault capability references belong only in reviewed authority paths"
+    if expected not in errors(resurrected):
+        raise SystemExit("removed exit authority could be resurrected by its old name")
+
+    for statement in (
+        "type Alias = crate::FaultAuthority; fn forge() -> Alias { Alias { browser, target, valid, trace } }",
+        "type Alias<T> = T; fn forge() { let _ = Alias::<crate::FaultAuthority> { browser, target, valid, trace }; }",
+        "use crate::{FaultAuthority as Other};",
+        "use crate::FaultAuthority::{self as Other};",
+        "use crate::{self as Root}; type Alias = Root::FaultAuthority;",
+        "type Alias = crate::FaultSeal;",
+        "type Alias<T = crate::FaultAuthority> = T;",
+    ):
+        for relative in ("src/lib.rs", surface, "src/adapter/other.rs"):
+            changed = dict(sources)
+            changed[relative] = changed.get(relative, CFG) + "\n" + statement
+            expected = f"{SHIM}/{relative}: fault capability references belong only in reviewed authority paths"
+            if expected not in errors(changed):
+                raise SystemExit(f"capability alias bypass was accepted in {relative}: {statement}")
+
+
+def test_live_mapping_witness_boundary() -> None:
+    path = "src/ffi/buffers.rs"
+    buffers = (ROOT / SHIM / path).read_text()
+    root = (ROOT / LIB).read_text()
+
+    def errors(buffer_source: str, root_source: str = root) -> list[str]:
+        scans = {}
+        for relative, text in ((path, buffer_source), ("src/lib.rs", root_source)):
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found: list[str] = []
+        CHECKER._check_zero_witness(scans, found)
+        return found
+
+    if errors(buffers):
+        raise SystemExit(f"the live atomic witness was rejected: {errors(buffers)}")
+    for old, new in (
+        ("#[cfg(test)]\nmod zero_witness", "mod zero_witness"),
+        ("#[cfg(test)]\n        let witness =", "let witness ="),
+        ("#[cfg(test)]\n        zero_witness::after", "zero_witness::after"),
+        ("let zeroed = self.zero_from(start);", "let zeroed = Ok(());"),
+        ("zero_witness::after(self, start, witness, zeroed.is_ok());", ""),
+        ("zero_witness::after(self, start, witness, zeroed.is_ok());", "self.base = None; zero_witness::after(self, start, witness, zeroed.is_ok());"),
+        ("before_nonzero: before.before_nonzero,", "before_nonzero: Some(true),"),
+    ):
+        if buffers.count(old) != 1:
+            raise SystemExit(f"missing native witness mutation: {old}")
+        if not errors(buffers.replace(old, new, 1)):
+            raise SystemExit(f"disabled/product/late native witness was accepted: {old}")
+    for old, new in (
+        ("#[cfg(test)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) struct NativeZeroObservation", "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) struct NativeZeroObservation"),
+        ("pub(crate) zeroed: Option<bool>,", "pub(crate) zeroed: bool,"),
+    ):
+        if root.count(old) != 1:
+            raise SystemExit(f"missing native observation mutation: {old}")
+        if not errors(buffers, root.replace(old, new, 1)):
+            raise SystemExit(f"native observation boundary change was accepted: {old}")
+
+
+def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
+    paths = (
+        f"{SHIM}/src/lib.rs",
+        f"{SHIM}/src/ffi/mod.rs",
+        f"{SHIM}/src/ffi/fixture_parent.rs",
+        f"{SHIM}/src/adapter/native_tests.rs",
+        "crates/pos-owner-bridge/src/ceremony/plan.rs",
+    )
+    sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in paths}
+
+    def errors(values: dict[str, str]) -> list[str]:
+        found: list[str] = []
+        CHECKER._check_owned_parent_boundary(values, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"owned-parent baseline rejected: {errors(sources)}")
+    mutations = (
+        (paths[0], "native_host_fixture_child", "renamed_host_fixture_child"),
+        (paths[0], "native_host_fixture_child", ""),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[ignore]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[cfg(any())]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[should_panic]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[cfg_attr(test, ignore)]\n    fn native_host_fixture_child"),
+        (paths[0], "#[cfg(test)]\n#[forbid(unsafe_code)]\nmod tests {", "#[cfg(any())]\n#[forbid(unsafe_code)]\nmod tests {"),
+        (paths[1], "#[cfg(test)]\nmod fixture_parent;", "mod fixture_parent;"),
+        (paths[1], "mod fixture_parent;", "pub mod fixture_parent;"),
+        (paths[2], "struct OwnedParent {", "pub struct OwnedParent {"),
+        (paths[2], "fn child_owner()", "pub fn child_owner()"),
+        (paths[0], "crate::Native::native_host_parent_fixture()", "Ok(())"),
+        (paths[2], '"PIGLOR_HOST_FIXTURE_PARENT"', '"UNREVIEWED_PARENT"'),
+        (paths[2], "self.window.handle().0 as usize", "123_usize"),
+        (paths[2], "self.pump.token.check()?;", ""),
+        (paths[2], "parent.finish()?;", "drop(parent);"),
+        (paths[2], "parent.pump()", "Ok(crate::NativePulse::Timer)"),
+        (paths[3], ".with_test_owner_window(owner_window)", ".with_test_owner_window(123)"),
+        (paths[4], '#[cfg(feature = "test-support")]\nimpl CeremonyPlan {', 'impl CeremonyPlan {'),
+    )
+    for path, old, new in mutations:
+        if old not in sources[path]:
+            raise SystemExit(f"owned-parent mutation anchor missing: {old}")
+        changed = dict(sources, **{path: sources[path].replace(old, new, 1)})
+        if not errors(changed):
+            raise SystemExit(f"owned-parent boundary accepted mutation: {old}")
+    changed = dict(sources, **{"crates/product/src/lib.rs": "fn f(p: CeremonyPlan) { p.with_test_owner_window(1); }"})
+    if not errors(changed):
+        raise SystemExit("owned-parent fixture capability accepted in product source")
+    removed = dict(sources, **{paths[0]: sources[paths[0]].replace("native_host_fixture_child", "removed_child") + "\n// native_host_fixture_child\n"})
+    if not errors(removed):
+        raise SystemExit("owned-parent marker in a comment disabled the required guard")
+    removed = dict(sources, **{paths[0]: sources[paths[0]].replace("native_host_fixture_child", "removed_child") + '\nconst DECOY: &str = "native_host_fixture_child";\n'})
+    if not errors(removed):
+        raise SystemExit("owned-parent marker in a string disabled the required guard")
+    source = sources[paths[0]]
+    marker = "    #[test]\n    fn native_host_fixture_child"
+    start = source.index(marker)
+    spans = [(a, b) for name, a, b in CHECKER._function_spans(CHECKER.scan(source).code) if name == "native_host_fixture_child"]
+    if len(spans) != 1:
+        raise SystemExit("owned-parent child test is missing or ambiguous")
+    end = spans[0][1]
+    nested = source[:start] + "    #[cfg(any())]\n    mod disabled {\n" + source[start:end] + "\n    }" + source[end:]
+    if not errors(dict(sources, **{paths[0]: nested})):
+        raise SystemExit("owned-parent test under a disabled nested module was accepted")
+
+
+def test_external_qualification_is_sealed() -> None:
+    sources = {name: (ROOT / name).read_text(encoding="utf-8") for name in CHECKER.EXTERNAL_FIXTURE_SOURCES}
+    controls = f"{SHIM}/src/adapter/native_tests/controls.rs"
+    assets = "scripts/owner_bridge_assets.py"
+    navigation = f"{SHIM}/src/ffi/events/navigation.rs"
+    resource = f"{SHIM}/src/ffi/events/resource.rs"
+    fixture = f"{SHIM}/src/ffi/events/control_fixture.rs"
+    helper = f"{SHIM}/src/lib.rs"
+
+    def errors(values: dict[str, str]) -> list[str]:
+        found: list[str] = []
+        CHECKER._check_external_fixture(values, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
+    if resource not in CHECKER.EXTERNAL_FIXTURE_SOURCES:
+        raise SystemExit("resource callback diagnostic source binding was removed")
+    mutations = (
+        (f"{SHIM}/src/adapter/host.rs", "Self::start_with_profile(runtime, root, store, crate::require_windows_profile)", "Self::start_with_profile(runtime, root, store, || Ok(()))"),
+        (f"{SHIM}/src/adapter/host.rs", "Self::spawn_with_factory(runtime, root, loopback, store, crate::Native::owner_factory)", "Self::spawn_with_factory(runtime, root, loopback, store, || panic!())"),
+        (f"{SHIM}/src/adapter/surface/tests/fault_admission.rs", "deadline: Instant::now() + Duration::from_secs(10)", "deadline: Instant::now() + Duration::from_secs(3_600)"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/obstruction/tests.rs", "Factory::new(Creation::Ready, FakeClock::start())", "crate::Native::owner_factory().unwrap()"),
+        (resource, 'current.borrow_mut().register(retained_trace)', 'drop(retained_trace)'),
+        (resource, 'self.callbacks.set(count + 1);', ''),
+        (navigation, 'super::resource::reset_readiness_resource();', ''),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'let resource = crate::Native::readiness_resource_snapshot();', 'let resource: Option<(Option<u64>, u8, bool, u8)> = None;'),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'timing.report(number);', ''),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'timing.after_receipt.last_step_return =\n                            timing.before_receipt.last_step_return;', ''),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", 'let step = driver.step(&mut env(surface, loopback, store));', 'let step = Step::Pending;'),
+        (resource, 'if count >= 9', 'if false'),
+        (resource, 'prefix: "NATIVE_RESOURCE",\n        case: super::navigation::readiness_context(),', 'prefix: "NATIVE_RESOURCE",\n        case: None,'),
+        (resource, 'prefix: "NATIVE_RESOURCE",', 'prefix: "NATIVE_RESOURCE_UNIT",'),
+        (resource, 'trace.returning(reporting, false);', 'trace.returning(reporting, true);'),
+        (resource, 'let selected = observe(signals, EventKind::Resource, request);', 'let selected = NativeAction::Allow;'),
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", '!self.native.pending_opening_owners_retained()', 'false'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", '.share_mode(0)', '.share_mode(7)'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !polled.remaining', 'if false'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", 'if !refused || !wiped || !native_wiped', 'if false'),
+        (f"{SHIM}/src/adapter/surface/diagnostics.rs", 'if !keeper_held.get()', 'if false'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", '!self.events.matching_exit_at_boundary(browser.browser_pid)', 'false'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", 'capture.consumed = true;', 'capture.consumed = false;'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", 'self.native.retained_exit_membership(handle.as_ref())?;', ''),
+        (f"{SHIM}/src/lib.rs", 'entries.is_empty() || browser == Some(expected)', 'true'),
+        (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", 'assert_retained_without_fault(&mut expired);', ''),
+        (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", '#[test]\nfn exit_fault_refuses_malformed_or_nonempty_missing_membership', '#[cfg(any())]\n#[test]\nfn exit_fault_refuses_malformed_or_nonempty_missing_membership'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'active_status=259_ambiguous_not_liveness', 'active_status=alive'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'fixture.surface.fresh_success_own_exit(browser)', 'true'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'failure_stage={failure_stage:?}', 'failure_stage=omitted'),
+        (f"{SHIM}/src/adapter/surface/exit_boundary.rs", 'record.creation_filetime() != browser.creation_filetime', 'false'),
+        (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", '#[test]\nfn fresh_success_provenance_binds_record_and_matching_exit_to_owner', '#[cfg(any())]\n#[test]\nfn fresh_success_provenance_binds_record_and_matching_exit_to_owner'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'NATIVE_EXIT_CUTPOINT_OBSERVED', 'NATIVE_EXIT_NOT_OBSERVED'),
+        (f"{SHIM}/src/adapter/surface/tests/exit_boundary_tests.rs", 'assert_eq!(handle.exit_code(), Err(()));', ''),
+        (f"{SHIM}/src/ffi/process_fault.rs", '|| self.observe()?.is_some()', '|| false'),
+        (f"{SHIM}/src/adapter/events.rs", '!self.exit_boundary_invalid.get()', 'true'),
+        (f"{SHIM}/src/ffi/events/control_fixture.rs", 'MAX_OBSERVATIONS: usize = 2', 'MAX_OBSERVATIONS: usize = 1'),
+        (f"{SHIM}/src/ffi/events/control_fixture.rs", 'last.overflowed = true;', 'last.overflowed = false;'),
+        (controls, 'assert!(!before.overflowed);', ''),
+        (controls, 'assert!(!after.overflowed);', ''),
+        (f"{SHIM}/src/adapter/native_tests/session.rs", '.is_some_and(|expected| self.events.exited() == Some(expected))', '.is_none_or(|expected| self.events.exited() == Some(expected))'),
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'std::time::Instant::now() >= self.deadline', 'false'),
+        (f"{SHIM}/src/ffi/session.rs", 'std::time::Instant::now() >= seal.deadline', 'false'),
+        (f"{SHIM}/src/ffi/session.rs", 'self.recordless_controller_completion().is_some()', 'false'),
+        (f"{SHIM}/src/ffi/window.rs", 'self.hwnd.0.is_null()', 'false'),
+        (f"{SHIM}/src/ffi/window.rs", 'self.signals.destroyed.get()', 'false'),
+        (f"{SHIM}/src/ffi/window.rs", 'std::time::Instant::now() >= deadline', 'false'),
+        (f"{SHIM}/src/adapter/surface/controller_qualification.rs", 'self.native.recordless_controller_completion().is_some()', 'false'),
+        (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
+        (f"{SHIM}/src/ffi/process_fault.rs", 'browser_candidate_from_observations(first, || candidates(environment), super::process::inspect)', 'browser_candidate_from_observations(first, || Ok(Vec::new()), super::process::inspect)'),
+        (f"{SHIM}/src/ffi/process_fault.rs", 'if second_identity != (identity, image)', 'if false'),
+        (f"{SHIM}/src/adapter/surface/tests/fault_states.rs", ".posted_fault_state(1).is_err()", ".posted_fault_state(1).is_ok()"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "assert_eq!(fixture.evidence_complete, expected.is_none());", "assert!(fixture.evidence_complete);"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "process_observation=scripted native_zeroing=scripted", "process_observation=observed native_zeroing=observed"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "fresh success driver ended without result", "fresh success accepted a completed driver"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "self.observe_fault_with_clock(target, first, deadline, &SystemClock)", "self.observe_fault_with_clock(target, first, deadline + Duration::from_secs(1), &SystemClock)"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "validate_process_failures(&observed, expected)", "Ok(())"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "verdict.validate()?;", "let _ignored = verdict.validate();"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert!(!*port.reached.borrow());", "assert!(*port.reached.borrow());"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(error.as_deref(), expected);", "let _ignored = expected;"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "(1, 0, other_ceremony, folder, identity(), mismatch)", "(1, 0, other_ceremony, other_folder, identity(), mismatch)"),
+        (f"{SHIM}/src/adapter/surface/tests/native.rs", "preload_owners: Cell::new(false),", "preload_owners: Cell::new(true),"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(port.write_record(&[]), Err(pos_owner_bridge::CleanupError));", ""),
+        (f"{SHIM}/src/ffi/events/mod.rs", "assert_eq!(subscriptions.removers.len(), 1);", "assert!(subscriptions.removers.is_empty());"),
+        (f"{SHIM}/src/ffi/events/mod.rs", "Err(error) => sink.failed(kind, error),", "Err(_) => NativeAction::Handled,"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", "let native_wiped = native_zeroing_observed(observations);", "let native_wiped = true;"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", "observation_count={} observations={:?}", "observation_count=unknown observations=unavailable"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/quarantined.rs", "&observations[..observations.len().min(3)]", "observations"),
+        (f"{SHIM}/src/ffi/events/control_denial.rs", "assert_eq!(navigation.kind(), EventKind::Navigation);", ""),
+        (navigation, "content_loading(None),", ""),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "Box::new(crate::Native::callback_order)", "Box::new(Vec::new)"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs", "assert_eq!(reads.get(), 1);", "assert_eq!(reads.get(), 0);"),
+        (f"{SHIM}/src/adapter/native_tests/readiness.rs", "observation=scripted qualified=false", "observation=native qualified=true"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                return Err("pending-opening browser exit timed out".into());', 'if clock.now() >= self.deadline + Duration::from_secs(1) {\n                return Err("pending-opening browser exit timed out".into());'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", 'if clock.now() >= self.deadline {\n                    return Err("late controller completion was not observed".into());', 'if false {\n                    return Err("late controller completion was not observed".into());'),
+        (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs", "assert!(crate::Native::callback_order().is_empty());", "let _ignored = crate::Native::callback_order();"),
+        (f"{SHIM}/src/ffi/process_fault/candidate_tests.rs", 'assert_eq!(calls, ["identity", "snapshot", "identity"]);', 'assert!(calls.is_empty());'),
+        (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
+        (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
+        (assets, 'ms-settings:privacy-location', 'ms-settings:privacy-location#x'),
+        (controls, 'self.allowance.borrow_mut().take()', 'self.allowance.borrow_mut().clone()'),
+        (controls, 'self.events.loaded() == Some(marker.generation)', 'true'),
+        (controls, 'profile == FixtureProfile::External', 'true'),
+        (controls, '&& !*redirected', ''),
+        (controls, 'if valid {', 'if true {'),
+        (controls, 'self.events.event(event)', 'NativeAction::Observe'),
+        (controls, 'assert_eq!(before.readback, Some(true));', ''),
+        (controls, 'assert_eq!(before.completions, u32::from(before.deferred));', ''),
+        (controls, '!probe.events.invalid()', 'true'),
+        (controls, '!self.events.invalid()', 'true'),
+        (controls, 'self.verified_owner.get() == self.events.loaded()', 'true'),
+        (controls, 'probe.external_profile\n                && probe.verified_owner.get().is_none()', 'probe.isolated_external'),
+        (controls, 'assert_eq!(probe.verified_owner.get(), probe.events.loaded());', ''),
+        (controls, 'assert_eq!(listener.served().count, 1);', ''),
+        (controls, 'served.count == 1', 'served.count > 0'),
+        (controls, 'served.count == 1', 'true'),
+        (controls, 'probe.delivered.get()', 'true'),
+        (controls, 'assert_denials(before_exit, after_exit, kind, mode);', ''),
+        (controls, 'assert_control_retired(&probe, &listener, &before_exit, &after_exit, case, armed);', ''),
+        (controls, 'wait_for_control(&factory, &probe, &listener, &mut armed)', 'Ok(())'),
+        (controls, 'probe.events.exited() == Some(identity.browser_pid)', 'true'),
+        (navigation, 'args.SetCancel(!allow)', 'args.SetCancel(false)'),
+        (f"{SHIM}/src/ffi/events/mod.rs", 'controls::install(view, signals, recovery, subscriptions)', 'Ok(())'),
+        (f"{SHIM}/src/ffi/events/controls.rs", 'add_LaunchingExternalUriScheme', 'add_DisabledExternalUriScheme'),
+        (fixture, 'value.as_bool()', 'true'),
+        (helper, '#[cfg(test)]\n    mod native_tests;', 'mod native_tests;'),
+    )
+    for path, old, new in mutations:
+        if old not in sources[path]:
+            raise SystemExit(f"External mutation anchor missing: {old}")
+        if not errors(dict(sources, **{path: sources[path].replace(old, new, 1)})):
+            raise SystemExit(f"External fixture accepted mutation: {old}")
+    missing_resource = dict(sources)
+    del missing_resource[resource]
+    if f"{resource}: External URI qualification differs from reviewed source" not in errors(missing_resource):
+        raise SystemExit("missing resource callback diagnostic source was accepted")
+    if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
+        raise SystemExit("External allowance escaped into product source")
+    for escaped in (
+        "type Escaped = crate::ControllerParentLossSeal;",
+        "fn escaped() { let call = crate::NativeOperations::lose_controller_parent; }",
+        "fn escaped() { let call = Surface::lose_pending_controller_parent; }",
+        "fn escaped() { let call = Surface::lost_controller_parent_retention; }",
+    ):
+        found = errors(dict(sources, **{"crates/product/src/lib.rs": escaped}))
+        if not any("controller parent loss capability outside sealed test fixture" in item for item in found):
+            raise SystemExit("Controller parent-loss authority escaped its sealed fixture")
+
+
 def main() -> None:
     test_masker()
+    test_masker_unicode_word_boundaries()
+    test_masker_run_classes_cover_the_same_unicode_characters()
     test_accepted()
     test_unsafe_evasions()
     test_ffi_surface()
@@ -1371,6 +2231,15 @@ def main() -> None:
     test_cli()
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
+    test_owned_process_fault_authority()
+    test_pending_model_callback_references_are_read_only()
+    test_fault_profile_bindings()
+    test_recordless_and_release_authority()
+    test_typed_process_failure_evidence()
+    test_private_fault_capability_construction()
+    test_live_mapping_witness_boundary()
+    test_owned_parent_fixture_is_test_only_and_exactly_bound()
+    test_external_qualification_is_sealed()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()

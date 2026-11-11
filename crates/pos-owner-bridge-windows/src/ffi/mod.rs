@@ -6,7 +6,11 @@ mod creation;
 mod directory;
 mod environment;
 mod events;
+#[cfg(test)]
+mod fixture_parent;
 mod process;
+#[cfg(test)]
+mod process_fault;
 mod pump;
 mod registry;
 mod session;

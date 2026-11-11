@@ -301,7 +301,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 178
+line = 213
 function = "observe_mapping"
 operation = "object.Size(&raw mut size)"
 invariant = "live owned STA buffer and initialized distinct writable output."
@@ -309,7 +309,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 182
+line = 217
 function = "observe_mapping"
 operation = "object.Buffer(&raw mut pointer)"
 invariant = "the live buffer owns the mapping; initialized output receives a borrowed pointer used only while that interface is held and not closed."
@@ -317,7 +317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 194
+line = 229
 function = "close_object"
 operation = "object.Close()"
 invariant = "a live owned STA interface; all atomic borrows ended before this call and no pointer access is attempted after it, including on error."
@@ -325,7 +325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 244
+line = 279
 function = "post_request"
 operation = "view.PostSharedBufferToScript( &self.request.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; pointer/COM owners remain on this STA. Request access is read-only."
@@ -333,7 +333,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 257
+line = 292
 function = "post_reply"
 operation = "view.PostSharedBufferToScript( &self.reply.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; this is the reply buffer's sole allowed read/write exposure."
@@ -341,7 +341,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 59
+line = 75
 function = "start"
 operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
 invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
@@ -349,7 +349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 103
+line = 147
 function = "start"
 operation = "environment.CreateCoreWebView2Controller(hwnd, &callback)"
 invariant = "retained live STA environment and callback; the surface keeps its owned top-level HWND alive until this async operation completes."
@@ -357,7 +357,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 47
+line = 45
 function = "subscribe"
 operation = "exit.add_BrowserProcessExited(&callback, &raw mut token)"
 invariant = "newly-created retained STA environment and live callback; initialized unique token output, subscription precedes controller creation."
@@ -365,7 +365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 60
+line = 58
 function = "snapshot"
 operation = "self.raw.BrowserVersionString(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -373,7 +373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 65
+line = 63
 function = "snapshot"
 operation = "environment7.UserDataFolder(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -381,7 +381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 84
+line = 82
 function = "unsubscribe"
 operation = "self.exit.remove_BrowserProcessExited(token)"
 invariant = "exact retained environment and registration token on its creating STA; successful removal is recorded before any retry."
@@ -389,7 +389,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 99
+line = 97
 function = "browser_exited"
 operation = "args.BrowserProcessId(&raw mut pid)"
 invariant = "retained invoking-STA arguments and initialized unique PID output."
@@ -509,7 +509,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 57
+line = 61
 function = "starting"
 operation = "view.add_NavigationStarting(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -517,7 +517,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 61
+line = 65
 function = "starting"
 operation = "remove.remove_NavigationStarting(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -525,7 +525,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 85
+line = 89
 function = "source_changed"
 operation = "view.add_SourceChanged(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -533,7 +533,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 89
+line = 93
 function = "source_changed"
 operation = "remove.remove_SourceChanged(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -541,7 +541,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 109
+line = 113
 function = "content"
 operation = "view.add_ContentLoading(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -549,7 +549,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 113
+line = 117
 function = "content"
 operation = "remove.remove_ContentLoading(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -557,7 +557,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 137
+line = 141
 function = "loaded"
 operation = "view.add_DOMContentLoaded(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -565,7 +565,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 141
+line = 145
 function = "loaded"
 operation = "remove.remove_DOMContentLoaded(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -573,7 +573,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 165
+line = 173
 function = "completed"
 operation = "view.add_NavigationCompleted(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -581,7 +581,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 169
+line = 177
 function = "completed"
 operation = "remove.remove_NavigationCompleted(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -589,7 +589,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 189
+line = 259
 function = "frame"
 operation = "view.add_FrameCreated(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -597,7 +597,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 193
+line = 263
 function = "frame"
 operation = "remove.remove_FrameCreated(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -605,7 +605,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 216
+line = 286
 function = "process"
 operation = "view.add_ProcessFailed(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -613,7 +613,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 220
+line = 290
 function = "process"
 operation = "remove.remove_ProcessFailed(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -621,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 248
+line = 374
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -629,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 264
+line = 406
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 268
+line = 410
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 271
+line = 413
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 282
+line = 424
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 290
+line = 432
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 293
+line = 435
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 308
+line = 450
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 321
+line = 463
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 324
+line = 466
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -701,7 +701,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 78
+line = 258
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -709,7 +709,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 82
+line = 262
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
@@ -717,7 +717,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 87
+line = 271
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
@@ -725,7 +725,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 46
+line = 205
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
@@ -733,7 +733,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 119
+line = 312
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
@@ -741,7 +741,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 126
+line = 319
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
@@ -749,7 +749,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 129
+line = 322
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
@@ -757,7 +757,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 133
+line = 326
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 133
+line = 386
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 138
+line = 391
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 198
+line = 451
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 210
+line = 463
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 239
+line = 492
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 300
+line = 553
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1197,7 +1197,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/text.rs"
-line = 24
+line = 23
 function = "extract"
 operation = "raw.0.wrapping_add(index).read()"
 invariant = "the successful getter transfers a valid NUL-terminated COM allocation retained by _memory. Read only through its first NUL or the fixed extraction bound, whichever occurs first. No unbounded length scan, borrowed native string, or native allocation escapes."
@@ -1253,7 +1253,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 117
+line = 119
 function = "create"
 operation = "GetModuleHandleW(None)"
 invariant = "borrowed current executable module matches the registered class instance; no reference is released or transferred by this call."
@@ -1261,7 +1261,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 129
+line = 131
 function = "create"
 operation = "CreateWindowExW( WINDOW_EX_STYLE(0), w!( ), w!( ), WS_OVERLAPPEDWINDOW, x, y, width, height, owner, None, Some(HINSTANCE(executable.0)), None, )"
 invariant = "registered system-procedure class and static title; checked scalar placement/size and optional opaque owner HWND. The window is top-level, never child or message-only, and starts hidden."
@@ -1269,7 +1269,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 162
+line = 169
 function = "show"
 operation = "ShowWindow(self.hwnd, SW_SHOWNORMAL)"
 invariant = "live owned top-level window on this STA. This return value reports prior visibility, not whether showing succeeded."
@@ -1277,7 +1277,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 165
+line = 173
 function = "show"
 operation = "SetForegroundWindow(self.hwnd)"
 invariant = "live owned window. Foreground rights may deny the request; the caller independently verifies the actual foreground within 1s."
@@ -1285,7 +1285,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 170
+line = 191
 function = "foreground"
 operation = "GetForegroundWindow()"
 invariant = "a scalar observation of the current foreground HWND."
@@ -1293,7 +1293,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 178
+line = 203
 function = "foreground"
 operation = "GetWindow(foreground, GW_OWNER)"
 invariant = "HWNDs are opaque identifiers checked by Windows. This queries the owner chain without dereferencing process memory."
@@ -1301,7 +1301,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 190
+line = 236
 function = "bounds"
 operation = "GetClientRect(self.hwnd, &raw mut rectangle)"
 invariant = "live owned window and distinct initialized writable RECT."
@@ -1309,7 +1309,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 197
+line = 243
 function = "snapshot"
 operation = "IsWindow(Some(self.hwnd))"
 invariant = "scalar existence observation of our STA-owned HWND. No new ceremony window is created before this session's retirement ends."
@@ -1317,7 +1317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 214
+line = 260
 function = "snapshot"
 operation = "GetDpiForWindow(self.hwnd)"
 invariant = "our still-live creating-STA HWND; scalar observation only."
@@ -1325,7 +1325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 234
+line = 280
 function = "resize"
 operation = "SetWindowPos( self.hwnd, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE, )"
 invariant = "checked dimensions and live STA HWND, preserving position, stacking and activation. No retained application pointer."
@@ -1333,7 +1333,15 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 255
+line = 309
+function = "lose_controller_parent"
+operation = "DestroyWindow(self.hwnd)"
+invariant = "Creating STA and exact live session-owned parent, with uninvoked real controller callback before the original deadline; retain Window, environment, callback and apartment through reentrant completion and ordinary retirement."
+hosted_test = "native_controller_failure_from_owned_parent_loss"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 321
 function = "destroy"
 operation = "DestroyWindow(self.hwnd)"
 invariant = "exactly one successful destruction of this STA-owned window after normal controller/buffer/environment cleanup."
@@ -1341,7 +1349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 272
+line = 338
 function = "initial_dpi"
 operation = "GetDpiForWindow(owner)"
 invariant = "query the supplied opaque owner HWND; a zero readback fails later checked dimension conversion rather than selecting a fallback."
@@ -1349,7 +1357,7 @@ hosted_test = "native_owned_window_reads_owner_dpi"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 267
+line = 333
 function = "initial_dpi"
 operation = "GetDpiForSystem()"
 invariant = "scalar system DPI query for placement on the primary monitor."
@@ -1357,7 +1365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 292
+line = 358
 function = "outer_rectangle"
 operation = "AdjustWindowRectExForDpi( &raw mut rectangle, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0), dpi, )"
 invariant = "initialized writable client RECT, fixed top-level style, no menu, checked nonzero DPI and no retained pointer."
@@ -1365,7 +1373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 317
+line = 383
 function = "centered"
 operation = "MonitorFromWindow(owner.unwrap_or_default(), MONITOR_DEFAULTTOPRIMARY)"
 invariant = "opaque optional owner HWND; Windows selects its monitor or the primary monitor when no window is supplied. No application pointer."
@@ -1373,7 +1381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 324
+line = 390
 function = "centered"
 operation = "GetMonitorInfoW(monitor, &raw mut information)"
 invariant = "monitor returned by Windows, initialized MONITORINFO of its documented 40-byte layout, distinct writable output."
@@ -1485,7 +1493,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 73
+line = 97
 function = "readback"
 operation = "NewWindow::Handled"
 invariant = "exact retained callback args, same STA; initialized BOOL output, read only after the real Handled setter succeeded. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1493,7 +1501,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 80
+line = 104
 function = "readback"
 operation = "Permission::State"
 invariant = "exact retained callback args on this STA and initialized enum output. No permission state is granted by this observation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1501,7 +1509,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 87
+line = 111
 function = "readback"
 operation = "Download::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output, no download path or operation is read or accepted. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1509,7 +1517,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 93
+line = 117
 function = "readback"
 operation = "External::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no URI is passed to an application launcher. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1517,7 +1525,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 99
+line = 123
 function = "readback"
 operation = "Authentication::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no credential/response object is accessed. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1525,7 +1533,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 113
+line = 137
 function = "navigation"
 operation = "Navigation::Cancel"
 invariant = "Actual invoking-STA navigation args, after Cancel=true succeeded; initialized BOOL output. The observation never authorizes navigation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1533,8 +1541,80 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 28
+line = 31
 function = "process_failed"
 operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
 invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."
 hosted_test = "native_readonly_write_crashes_the_exact_renderer_and_retires"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 110
+function = "drop"
+operation = "CloseHandle"
+invariant = "Single close of the retained process object on every exit path."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 122
+function = "exit_code"
+operation = "GetExitCodeProcess"
+invariant = "Immediate query on the live retained process handle with a writable output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 138
+function = "candidates"
+operation = "GetProcessInfos"
+invariant = "Current retained environment on its creating STA; no other source."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 141
+function = "candidates"
+operation = "Count"
+invariant = "Live collection and initialized count; reject more than 64."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 148
+function = "candidates"
+operation = "GetValueAtIndex"
+invariant = "Index stays within the checked bounded collection."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 152
+function = "candidates"
+operation = "ProcessId"
+invariant = "Live collection item and initialized unique output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 154
+function = "candidates"
+operation = "Kind"
+invariant = "Live collection item and initialized unique output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 213
+function = "open_owned_process"
+operation = "OpenProcess"
+invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 226
+function = "terminate_owned_process"
+operation = "TerminateProcess"
+invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."
+hosted_test = "native_verified_owned_process_faults_retire"

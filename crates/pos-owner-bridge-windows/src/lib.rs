@@ -14,6 +14,95 @@ mod ffi;
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCallbackMoment {
+    EnvironmentCompletion(bool),
+    ControllerCompletion(bool),
+    BrowserExit(u32),
+    DriverTimeout,
+    Overflow,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CALLBACK_ORDER: std::cell::RefCell<Option<Vec<NativeCallbackMoment>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Native {
+    fn arm_callback_order() {
+        CALLBACK_ORDER.with(|order| *order.borrow_mut() = Some(Vec::new()));
+    }
+
+    fn record_callback(moment: NativeCallbackMoment) {
+        CALLBACK_ORDER.with(|order| {
+            if let Some(order) = order.borrow_mut().as_mut() {
+                if order.len() < 64 {
+                    order.push(moment);
+                } else if order.last() != Some(&NativeCallbackMoment::Overflow) {
+                    order.push(NativeCallbackMoment::Overflow);
+                }
+            }
+        });
+    }
+
+    fn callback_order() -> Vec<NativeCallbackMoment> {
+        CALLBACK_ORDER.with(|order| order.borrow().as_ref().cloned().unwrap_or_default())
+    }
+
+    fn disarm_callback_order() {
+        CALLBACK_ORDER.with(|order| *order.borrow_mut() = None);
+    }
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCreationMoment {
+    EnvironmentReturned(bool),
+    EnvironmentCallback(CreationCallback),
+    ControllerReturned(bool),
+    ControllerCallback(CreationCallback),
+    Overflow,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CreationCallback {
+    Success,
+    NativeFailure,
+    MissingInterface,
+    Inconsistent,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CREATION_ORDER: std::cell::RefCell<Option<Vec<NativeCreationMoment>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Native {
+    fn arm_creation_order() {
+        CREATION_ORDER.with(|order| *order.borrow_mut() = Some(Vec::new()));
+    }
+    fn creation_moment(moment: NativeCreationMoment) {
+        CREATION_ORDER.with(|order| {
+            if let Some(order) = order.borrow_mut().as_mut() {
+                if order.len() < 32 {
+                    order.push(moment);
+                } else if order.last() != Some(&NativeCreationMoment::Overflow) {
+                    order.push(NativeCreationMoment::Overflow);
+                }
+            }
+        });
+    }
+    fn creation_order() -> Vec<NativeCreationMoment> {
+        CREATION_ORDER.with(|order| order.borrow().as_ref().cloned().unwrap_or_default())
+    }
+    fn disarm_creation_order() {
+        CREATION_ORDER.with(|order| *order.borrow_mut() = None);
+    }
+}
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
@@ -240,6 +329,27 @@ pub(crate) enum BufferSlot {
     Reply,
 }
 
+/// Unit-test evidence captured from live native mappings before Close.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeZeroObservation {
+    pub(crate) slot: BufferSlot,
+    pub(crate) before_nonzero: Option<bool>,
+    pub(crate) zeroed: Option<bool>,
+    pub(crate) header_present: Option<bool>,
+    pub(crate) header_unchanged: Option<bool>,
+}
+
+/// Classified callback evidence; a normal matching browser-exit event is separate.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeProcessFailure {
+    MainRendererExited,
+    BrowserExited,
+    Other,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativePulse {
     Timer,
@@ -281,6 +391,7 @@ pub(crate) struct ControlObservation {
     pub(crate) readback: Option<bool>,
     pub(crate) completions: u32,
     pub(crate) retired: bool,
+    pub(crate) overflowed: bool,
 }
 
 #[cfg(test)]
@@ -360,10 +471,323 @@ pub(crate) trait NativeFactory: StaPump {
     fn session(&self) -> NativeResult<Box<dyn NativeOperations>>;
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultTarget {
+    Browser,
+    Renderer,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererPresence {
+    Absent,
+    Unique,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultLifecycle {
+    Quarantined,
+    PostedReceipt,
+    PostedEmpty,
+    PostedWriting,
+    PostedReady,
+    PostedConsuming,
+    BeforeRecord,
+    PostedRetry(RetryPoint),
+    AwaitingLoad,
+    Navigating,
+    ReleasingSuccess,
+    AwaitingExitSuccess,
+    RecordlessOpening,
+    PendingOpening,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetryPoint {
+    Second,
+    Third,
+    Fourth,
+    Fifth,
+    Sixth,
+    Seventh,
+    Eighth,
+}
+
+#[cfg(test)]
+impl RetryPoint {
+    const fn post(self) -> u8 {
+        match self {
+            Self::Second => 2,
+            Self::Third => 3,
+            Self::Fourth => 4,
+            Self::Fifth => 5,
+            Self::Sixth => 6,
+            Self::Seventh => 7,
+            Self::Eighth => 8,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultPhase {
+    PostedReceipt,
+    PostedEmpty,
+    PostedWriting,
+    PostedReady,
+    PostedConsuming,
+    PostedRetry,
+    ReleasingSuccess,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultTopology {
+    SealedSingleViewFrameFree,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessFaultState {
+    pub(crate) phase: ProcessFaultPhase,
+    pub(crate) topology: ProcessFaultTopology,
+    pub(crate) generation: u32,
+    pub(crate) reply_state: u32,
+    pub(crate) record_count: usize,
+    pub(crate) posts: u8,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessExitState {
+    pub(crate) generation: u32,
+    pub(crate) record_count: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultMark {
+    ReachedQuarantined(ProcessExitState),
+    Reached(ProcessFaultState),
+    ReachedExit(ProcessExitState),
+    RendererPresence(RendererPresence),
+    AwaitingLoad {
+        generation: u32,
+        record_count: usize,
+    },
+    Navigating {
+        generation: u32,
+        record_count: usize,
+    },
+    RecordlessOpening {
+        generation: u32,
+        record_count: usize,
+    },
+    PendingOpening {
+        generation: u32,
+        record_count: usize,
+    },
+    ControllerCompletion(bool),
+    RecordWritten,
+    BeforeRecord {
+        generation: u32,
+        record_count: usize,
+    },
+    Selected(pos_owner_bridge::ProcessIdentity),
+    TerminationCall,
+    MainRendererExited,
+    OwnBrowserExited,
+    ExitCode(u32),
+}
+
+#[cfg(test)]
+pub(crate) trait ProcessFaultHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity;
+    fn exit_code(&self) -> Result<Option<u32>, ()>;
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExitMembershipKind {
+    Browser,
+    Other,
+}
+
+#[cfg(test)]
+fn retained_exit_membership(
+    entries: &[(u32, ExitMembershipKind)],
+    expected: u32,
+) -> Result<(), ()> {
+    if entries.len() > 64 || expected == 0 {
+        return Err(());
+    }
+    let mut browser = None;
+    for (index, &(pid, kind)) in entries.iter().enumerate() {
+        if pid == 0 || entries[..index].iter().any(|(earlier, _)| *earlier == pid) {
+            return Err(());
+        }
+        if kind == ExitMembershipKind::Browser && browser.replace(pid).is_some() {
+            return Err(());
+        }
+    }
+    if entries.is_empty() || browser == Some(expected) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+#[cfg(test)]
+trait RetainedExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity;
+    fn observe(&self) -> Result<Option<u32>, ()>;
+    fn terminate(&mut self, authority: &FaultAuthority) -> Result<(), ()>;
+    fn into_fault(self: Box<Self>) -> Box<dyn ProcessFaultHandle>;
+}
+
+#[cfg(test)]
+type FaultTrace = Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>;
+
+/// A one-use test capability constructed only by the sealed fault fixture.
+#[cfg(test)]
+struct FaultSeal {
+    trace: FaultTrace,
+    deadline: std::time::Instant,
+}
+
+#[cfg(test)]
+impl FaultSeal {
+    fn into_parts(self) -> (FaultTrace, std::time::Instant) {
+        (self.trace, self.deadline)
+    }
+}
+
+/// One-use authority for the current owned parent during controller creation.
+#[cfg(test)]
+struct ControllerParentLossSeal {
+    deadline: std::time::Instant,
+}
+
+#[cfg(test)]
+impl ControllerParentLossSeal {
+    const fn into_deadline(self) -> std::time::Instant {
+        self.deadline
+    }
+}
+
+/// Bound to the exact Surface observer and validated process identity.
+#[cfg(test)]
+struct FaultAuthority {
+    browser: pos_owner_bridge::ProcessIdentity,
+    target: ProcessFaultTarget,
+    lifecycle: ProcessFaultLifecycle,
+    valid: Rc<dyn Fn() -> bool>,
+    trace: FaultTrace,
+}
+
+#[cfg(test)]
+impl FaultAuthority {
+    const fn browser(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.browser
+    }
+    const fn target(&self) -> ProcessFaultTarget {
+        self.target
+    }
+    const fn lifecycle(&self) -> ProcessFaultLifecycle {
+        self.lifecycle
+    }
+    fn valid(&self) -> bool {
+        (self.valid)()
+    }
+    fn record(&self, mark: ProcessFaultMark) {
+        self.trace.borrow_mut().push(mark);
+    }
+}
+
 /// Native ownership operations; lifecycle outcomes are selected by the adapter.
 /// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
 /// buffer offset, or caller-provided COM callback crosses this interface.
 pub(crate) trait NativeOperations {
+    #[cfg(test)]
+    fn retain_exit_browser(
+        &self,
+        _authority: &FaultAuthority,
+    ) -> Result<Box<dyn RetainedExitHandle>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn retained_exit_membership(&self, _handle: &dyn RetainedExitHandle) -> Result<(), ()> {
+        Err(())
+    }
+    #[cfg(test)]
+    fn inject_process_fault(
+        &self,
+        _authority: &FaultAuthority,
+    ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn environment_creation_completion(&self) -> Option<bool> {
+        None
+    }
+
+    #[cfg(test)]
+    fn early_renderer_presence(&self) -> Result<RendererPresence, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn lose_controller_parent(&mut self, _seal: ControllerParentLossSeal) -> Result<(), ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn pending_opening_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        None
+    }
+
+    #[cfg(test)]
+    fn preload_fault_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn exit_fault_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn recordless_fault_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn fault_owners_retained(&self) -> bool {
+        false
+    }
+
     fn create_window(
         &mut self,
         owner: Option<u64>,
@@ -476,35 +900,25 @@ mod tests {
     }
 
     #[test]
+    fn native_verified_owned_process_faults_retire() -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_verified_owned_process_faults_retire()
+    }
+
+    #[test]
+    fn native_controller_failure_from_owned_parent_loss() -> Result<(), Box<dyn std::error::Error>>
+    {
+        crate::Native::native_controller_failure_from_owned_parent_loss()
+    }
+
+    #[test]
     fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
-            crate::Native::native_host_lifecycle()?;
-        }
-        Ok(())
+        crate::Native::native_host_fixture_child()
     }
 
     #[test]
     fn native_host_opens_fresh_environments_and_retires_before_reuse(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let _port = crate::Native::fixed_port_fixture();
-        let mut child = std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact", "tests::native_host_fixture_child", "--nocapture"])
-            .env("PIGLOR_HOST_LIFECYCLE_CHILD", "1")
-            .spawn()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                // Retain the child through its ordinary native retirement.
-                // A late exit still fails this deadline; killing the host
-                // would destroy its STA owners while a browser may live.
-                if std::time::Instant::now() >= deadline {
-                    return Err("native host fixture exceeded its independent wall deadline".into());
-                }
-                assert!(status.success());
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        crate::Native::native_host_parent_fixture()
     }
 
     #[test]

@@ -23,6 +23,7 @@ BRIDGE = "crates/pos-owner-bridge"
 COPIED = (
     CHECKER,
     "scripts/owner_bridge_assets.py",
+    "scripts/owner_bridge_webauthn_fixtures.py",
     f"{BRIDGE}/assets/owner-core.js",
     f"{BRIDGE}/assets/owner-shell.html",
     f"{BRIDGE}/assets/owner-production.js",
@@ -112,8 +113,25 @@ class OwnerBridgeVectorChecker(unittest.TestCase):
         self.edit(f"{BRIDGE}/assets/qualification/pending.html", replace_once("var STATE = 10;", "var STATE = 9;"))
         self.assert_rejected("owner bundle drift")
 
+    def test_permission_diagnostic_cannot_be_retargeted(self) -> None:
+        self.edit(
+            f"{BRIDGE}/assets/qualification/permission.html",
+            replace_once("http://localhost:49291/permission-diag/noresult", "https://example.invalid/noresult"),
+        )
+        self.assert_rejected("owner bundle drift")
+
+    def test_permission_fixture_requests_only_notification_permission(self) -> None:
+        page = (self.tree / BRIDGE / "assets/qualification/permission.html").read_text(encoding="utf-8")
+        self.assertEqual(page.count("window.Notification.requestPermission()"), 1)
+        self.assertNotIn("navigator.geolocation", page)
+        self.assertNotIn("new Notification(", page)
+        self.assertIn('window.Notification.permission !== "default"', page)
+        self.assertIn('permission-diag/noresult"); }, 12000)', page)
+        for stage in ("denied", "default", "unexpectedgranted", "unexpectedstate", "rejected", "exception", "unavailable", "noresult", "unknown"):
+            self.assertEqual(page.count(f"http://localhost:49291/permission-diag/{stage}\""), 1)
+
     def test_a_fixture_cannot_change_its_response_headers(self) -> None:
-        self.edit(f"{BRIDGE}/src/listener/fixture_assets.rs", replace_once("geolocation=(self)", "geolocation=()"))
+        self.edit(f"{BRIDGE}/src/listener/fixture_assets.rs", replace_first("geolocation=()", "geolocation=(self)"))
         self.assert_rejected("owner bundle drift")
 
     def test_a_fixture_cannot_change_the_bound_digest(self) -> None:

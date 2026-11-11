@@ -54,22 +54,26 @@ impl Trace {
             served.integrity_ok,
             surface.fixture_progress(),
         );
-        self.report(progress);
+        self.report(progress, Some(loopback));
     }
 
     pub(super) fn queued(&mut self, surface: &Surface) {
-        self.report(format!("stage=before-plan {}", surface.fixture_progress()));
+        self.report(
+            format!("stage=before-plan {}", surface.fixture_progress()),
+            None,
+        );
     }
 
-    fn report(&mut self, progress: String) {
+    fn report(&mut self, progress: String, loopback: Option<&SharedLoopback>) {
         let now = Instant::now();
         if progress != self.previous || now.duration_since(self.reported) >= Duration::from_secs(5)
         {
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
-                "NATIVE_PROGRESS case={} elapsed={:?} {progress}",
+                "NATIVE_PROGRESS case={} elapsed={:?} {progress} listener={:?}",
                 self.case,
                 now.duration_since(self.started),
+                loopback.map(SharedLoopback::observation),
             );
             self.previous = progress;
             self.reported = now;

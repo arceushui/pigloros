@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::ExitMembershipKind::{Browser, Other};
 use crate::{
     BoolProperty, BufferSlot, ClientBounds, EnvironmentOptions, EnvironmentSnapshot, EventSink,
     Failure, NativeError, NativeFactory, NativeOperations, NativePath, NativePulse, NativeResult,
@@ -17,7 +18,7 @@ use pos_owner_bridge::ReplyImage;
 use pos_owner_bridge_codec::CeremonyKind;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum Creation {
+pub(in crate::adapter) enum Creation {
     SynchronousFailure,
     CallbackFailure,
     MissingView,
@@ -25,13 +26,17 @@ pub(super) enum Creation {
     Ready,
 }
 
-pub(super) struct Factory {
-    pub(super) creation: Cell<Creation>,
-    pub(super) calls: RefCell<Vec<&'static str>>,
-    pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
+pub(in crate::adapter) struct Factory {
+    pub(in crate::adapter) creation: Cell<Creation>,
+    pub(super) environment_creation: Cell<Creation>,
+    pub(super) environment_completions: Cell<u32>,
+    pub(super) controller_completions: Cell<u32>,
+    pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
+    pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
-    pub(super) navigation_succeeds: Cell<bool>,
-    pub(super) failure: Cell<Option<&'static str>>,
+    pub(in crate::adapter) navigation_succeeds: Cell<bool>,
+    pub(in crate::adapter) failure: Cell<Option<&'static str>>,
+    pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
     pub(super) source: RefCell<String>,
     pub(super) state: Cell<u32>,
     pub(super) invalidate_request: Cell<bool>,
@@ -39,19 +44,27 @@ pub(super) struct Factory {
     pub(super) dpi: Cell<u32>,
     pub(super) window_exists: Cell<bool>,
     pub(super) close_requested: Cell<bool>,
+    pub(super) exit_code: Cell<Option<u32>>,
+    pub(in crate::adapter) preload_owners: Cell<bool>,
+    pub(super) renderer_presence: Cell<Option<crate::RendererPresence>>,
+    pub(in crate::adapter) pending_browser: Cell<Option<pos_owner_bridge::ProcessIdentity>>,
     pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
 }
 
 impl Factory {
-    pub(super) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
+    pub(in crate::adapter) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
         Rc::new(Self {
             creation: Cell::new(creation),
+            environment_creation: Cell::new(Creation::Ready),
+            environment_completions: Cell::new(0),
+            controller_completions: Cell::new(0),
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
             foreground: Cell::new(true),
             navigation_succeeds: Cell::new(false),
             failure: Cell::new(None),
+            mismatched_setting: Cell::new(None),
             source: RefCell::new(crate::OWNER_URL.to_owned()),
             state: Cell::new(0),
             invalidate_request: Cell::new(false),
@@ -59,6 +72,10 @@ impl Factory {
             dpi: Cell::new(96),
             window_exists: Cell::new(true),
             close_requested: Cell::new(false),
+            exit_code: Cell::new(None),
+            preload_owners: Cell::new(false),
+            renderer_presence: Cell::new(None),
+            pending_browser: Cell::new(None),
             client: Cell::new(ClientBounds {
                 left: 0,
                 top: 0,
@@ -72,6 +89,16 @@ impl Factory {
 
 impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
+        if self.failure.get() == Some("panic_pump") {
+            self.failure.set(None);
+            std::panic::resume_unwind(Box::new("modeled pump panic"));
+        }
+        if self.failure.get() == Some("pump") {
+            return Err(NativeError {
+                operation: Operation::Sta,
+                failure: Failure::CallFailed,
+            });
+        }
         if self.creation.get() == Creation::Pending
             && self.calls.borrow().contains(&"create_controller")
         {
@@ -107,6 +134,48 @@ struct Session {
     controller: bool,
 }
 
+struct ExitHandle {
+    factory: Rc<Factory>,
+    identity: pos_owner_bridge::ProcessIdentity,
+}
+
+impl crate::ProcessFaultHandle for ExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.identity
+    }
+    fn exit_code(&self) -> Result<Option<u32>, ()> {
+        if self.factory.failure.get() == Some("exit_final_query") {
+            Err(())
+        } else {
+            Ok(self.factory.exit_code.get())
+        }
+    }
+}
+
+impl crate::RetainedExitHandle for ExitHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.identity
+    }
+    fn observe(&self) -> Result<Option<u32>, ()> {
+        if self.factory.failure.get() == Some("exit_observation") {
+            Err(())
+        } else {
+            Ok(self.factory.exit_code.get())
+        }
+    }
+    fn terminate(&mut self, authority: &crate::FaultAuthority) -> Result<(), ()> {
+        if !authority.valid() || self.factory.exit_code.get().is_some() {
+            return Err(());
+        }
+        self.factory.calls.borrow_mut().push("terminate_exit");
+        self.factory.exit_code.set(Some(0x535));
+        Ok(())
+    }
+    fn into_fault(self: Box<Self>) -> Box<dyn crate::ProcessFaultHandle> {
+        self
+    }
+}
+
 impl Session {
     fn call(&self, name: &'static str) {
         self.factory.calls.borrow_mut().push(name);
@@ -125,6 +194,81 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn preload_fault_owners_retained(&self) -> bool {
+        self.controller
+            && self.factory.preload_owners.get()
+            && self.factory.sink.borrow().is_some()
+            && self.factory.failure.get() != Some("preload-owner")
+    }
+
+    fn early_renderer_presence(&self) -> Result<crate::RendererPresence, ()> {
+        self.check("early_renderer_presence").map_err(|_| ())?;
+        self.factory.renderer_presence.get().ok_or(())
+    }
+
+    fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
+        if self.controller
+            || self.factory.failure.get() == Some("exit_membership")
+            || handle.identity().browser_pid != 42
+        {
+            return Err(());
+        }
+        let entries = match self.factory.failure.get() {
+            Some("exit_membership_missing") => vec![(41, Other)],
+            Some("exit_membership_malformed") => vec![(42, Browser), (42, Other)],
+            Some("exit_membership_empty") => Vec::new(),
+            _ => vec![(42, Browser)],
+        };
+        crate::retained_exit_membership(&entries, handle.identity().browser_pid)
+    }
+
+    fn retain_exit_browser(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
+        if !self.controller
+            || !authority.valid()
+            || self.factory.failure.get() == Some("retain_exit")
+            || self.factory.exit_code.get().is_some()
+        {
+            return Err(());
+        }
+        let mut identity = authority.browser();
+        if self.factory.failure.get() == Some("mismatched_exit_handle") {
+            identity.creation_filetime += 1;
+        }
+        Ok(Box::new(ExitHandle {
+            factory: Rc::clone(&self.factory),
+            identity,
+        }))
+    }
+    fn exit_fault_owners_retained(&self) -> bool {
+        self.factory.sink.borrow().is_some()
+            && !self.controller
+            && self.factory.failure.get() != Some("exit_owners")
+    }
+
+    fn pending_opening_owners_retained(&self) -> bool {
+        self.controller_pending
+            && self.factory.failure.get() != Some("pending-owner")
+            && (self.factory.failure.get() != Some("pending-owner-after")
+                || !self.factory.calls.borrow().contains(&"pending_candidate"))
+    }
+
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+        self.call("pending_candidate");
+        self.check("pending_candidate").map_err(|_| ())?;
+        Ok(self.factory.pending_browser.get())
+    }
+
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        (self.factory.failure.get() == Some("pending-callback-after")
+            && self.factory.calls.borrow().contains(&"pending_candidate"))
+        .then_some(true)
+    }
+
     fn create_window(&mut self, _: Option<u64>, _: u32, _: u32) -> NativeResult<()> {
         self.effect("create_window")
     }
@@ -164,7 +308,21 @@ impl NativeOperations for Session {
         Ok(())
     }
     fn environment_completion(&mut self) -> Option<NativeResult<()>> {
-        std::mem::take(&mut self.environment_pending).then_some(Ok(()))
+        if self.factory.environment_creation.get() == Creation::Pending
+            || !std::mem::take(&mut self.environment_pending)
+        {
+            return None;
+        }
+        self.factory
+            .environment_completions
+            .set(self.factory.environment_completions.get().saturating_add(1));
+        Some(
+            if self.factory.environment_creation.get() == Creation::CallbackFailure {
+                Err(failed())
+            } else {
+                Ok(())
+            },
+        )
     }
     fn environment(&self) -> NativeResult<EnvironmentSnapshot> {
         self.check("environment")?;
@@ -192,6 +350,9 @@ impl NativeOperations for Session {
         if !std::mem::take(&mut self.controller_pending) {
             return None;
         }
+        self.factory
+            .controller_completions
+            .set(self.factory.controller_completions.get().saturating_add(1));
         let creation = self.factory.creation.get();
         self.controller = creation != Creation::CallbackFailure;
         Some(if creation == Creation::Ready {
@@ -221,7 +382,8 @@ impl NativeOperations for Session {
     }
     fn get_bool(&self, property: BoolProperty) -> NativeResult<bool> {
         self.check("get_bool")?;
-        Ok(property == BoolProperty::Script)
+        Ok((property == BoolProperty::Script)
+            != (self.factory.mismatched_setting.get() == Some(property)))
     }
     fn navigate_owner(&self) -> NativeResult<()> {
         self.call("navigate");
@@ -280,6 +442,7 @@ impl NativeOperations for Session {
     fn close_controller(&mut self) -> NativeResult<()> {
         self.effect("close_controller")?;
         self.controller = false;
+        self.factory.exit_code.set(Some(0));
         Ok(())
     }
     fn unsubscribe_exit(&mut self) -> NativeResult<()> {

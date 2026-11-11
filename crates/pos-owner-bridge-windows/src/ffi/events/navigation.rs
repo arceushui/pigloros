@@ -42,12 +42,16 @@ fn starting(
     let observed = Rc::clone(signals);
     let cancellation = Rc::clone(recovery);
     let intercepted = view.clone();
+    #[cfg(test)]
+    let allow_reports = std::cell::Cell::new(0_u8);
     let handler = NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
         navigation_start(
             args,
             intercepted.clone(),
             Rc::clone(&observed),
             &cancellation,
+            #[cfg(test)]
+            &allow_reports,
         );
         Ok(())
     }));
@@ -151,12 +155,16 @@ fn completed(
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    // Capture the owning case now, not when a possibly late callback arrives.
+    #[cfg(test)]
+    let case = READINESS_CASE.with(std::cell::Cell::get);
+    #[cfg(test)]
+    let reports = std::cell::Cell::new(0_u8);
     let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
-        observe(
-            observed.as_ref(),
-            EventKind::NavigationCompleted,
-            navigation_completed(args),
-        );
+        let result = navigation_completed(args);
+        #[cfg(test)]
+        trace_completion("NATIVE_NAVIGATION_COMPLETED", case, &reports, &result);
+        observe(observed.as_ref(), EventKind::NavigationCompleted, result);
         Ok(())
     }));
     subscriptions.register(
@@ -169,6 +177,68 @@ fn completed(
             unsafe { remove.remove_NavigationCompleted(token) }
         },
     )
+}
+
+// Bounded diagnostics for the subscription's original case and time origin.
+#[cfg(test)]
+fn trace_completion(
+    prefix: &'static str,
+    case: Option<(u64, std::time::Instant)>,
+    reports: &std::cell::Cell<u8>,
+    result: &Result<NativeEvent>,
+) {
+    use std::io::Write as _;
+    let Some((case, started)) = case else {
+        return;
+    };
+    let count = reports.get();
+    if count >= 9 {
+        return;
+    }
+    reports.set(count + 1);
+    if count == 8 {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "{prefix} case={case} elapsed={:?} overflow=true",
+            started.elapsed()
+        );
+        return;
+    }
+    if let Ok(NativeEvent::NavigationCompleted { id, success }) = result {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "{prefix} case={case} elapsed={:?} id={id} success={success}",
+            started.elapsed()
+        );
+    } else {
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "{prefix} case={case} elapsed={:?} observation=unavailable",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn readiness_completion_trace_is_bounded_and_disabled_without_a_case() {
+    let reports = std::cell::Cell::new(0);
+    let result = Ok(NativeEvent::NavigationCompleted {
+        id: 2,
+        success: true,
+    });
+    trace_completion("NATIVE_NAVIGATION_COMPLETED_UNIT", None, &reports, &result);
+    assert_eq!(reports.get(), 0);
+    let case = Some((42, std::time::Instant::now()));
+    trace_completion(
+        "NATIVE_NAVIGATION_COMPLETED_UNIT",
+        case,
+        &reports,
+        &Err(unavailable()),
+    );
+    for _ in 0..12 {
+        trace_completion("NATIVE_NAVIGATION_COMPLETED_UNIT", case, &reports, &result);
+    }
+    assert_eq!(reports.get(), 9);
 }
 
 fn frame(
@@ -222,11 +292,67 @@ fn process(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static READINESS_CASE: std::cell::Cell<Option<(u64, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+    static READINESS_OPERATIONS: std::cell::RefCell<std::collections::BTreeSet<&'static str>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn readiness_context() -> Option<(u64, std::time::Instant)> {
+    READINESS_CASE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn readiness_navigation_case(case: Option<(u64, std::time::Instant)>) {
+        super::resource::reset_readiness_resource();
+        READINESS_CASE.with(|current| current.set(case));
+        READINESS_OPERATIONS.with(|operations| operations.borrow_mut().clear());
+    }
+
+    pub(crate) fn readiness_span(operation: &'static str) -> impl Drop {
+        let case = READINESS_CASE.with(std::cell::Cell::get).filter(|_| {
+            READINESS_OPERATIONS.with(|operations| operations.borrow_mut().insert(operation))
+        });
+        ReadinessSpan {
+            operation,
+            case,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(test)]
+struct ReadinessSpan {
+    operation: &'static str,
+    case: Option<(u64, std::time::Instant)>,
+    started: std::time::Instant,
+}
+
+#[cfg(test)]
+impl Drop for ReadinessSpan {
+    fn drop(&mut self) {
+        if let Some((case, origin)) = self.case {
+            use std::io::Write as _;
+            let _logged_or_unavailable = writeln!(
+                std::io::stderr(),
+                "NATIVE_READINESS_OPERATION case={case} operation={} entered={:?} returned={:?} duration={:?}",
+                self.operation,
+                self.started.saturating_duration_since(origin),
+                origin.elapsed(),
+                self.started.elapsed(),
+            );
+        }
+    }
+}
+
 fn navigation_start(
     args: Option<ICoreWebView2NavigationStartingEventArgs>,
     view: ICoreWebView2,
     sink: Rc<dyn EventSink>,
     recovery: &Recovery,
+    #[cfg(test)] allow_reports: &std::cell::Cell<u8>,
 ) {
     let Some(args) = args else {
         sink.failed(EventKind::Navigation, unavailable());
@@ -245,7 +371,23 @@ fn navigation_start(
         );
     }
     // SAFETY: live invoking-STA arguments; only the safe policy can select Allow.
-    if unsafe { args.SetCancel(!allow) }.is_err() {
+    let set_cancel = unsafe { args.SetCancel(!allow) };
+    #[cfg(test)]
+    if allow && allow_reports.get() < 16 {
+        use std::io::Write as _;
+        allow_reports.set(allow_reports.get() + 1);
+        READINESS_CASE.with(|current| {
+            if let Some((case, started)) = current.get() {
+                let _logged_or_unavailable = writeln!(
+                    std::io::stderr(),
+                    "NATIVE_NAVIGATION_ALLOW case={case} elapsed={:?} success={}",
+                    started.elapsed(),
+                    set_cancel.is_ok()
+                );
+            }
+        });
+    }
+    if set_cancel.is_err() {
         sink.failed(EventKind::Navigation, unavailable());
         if !allow {
             recovery.control(Control::Navigation { _args: Some(args) }, view, sink);
@@ -326,4 +468,29 @@ fn navigation_completed(
         id,
         success: success.as_bool(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::{content_loading, dom_loaded, navigation_completed};
+    use crate::{Failure, NativeError, Operation};
+
+    #[test]
+    fn modeled_missing_navigation_arguments_refuse_before_native_access() {
+        for result in [
+            content_loading(None),
+            dom_loaded(None, None),
+            navigation_completed(None),
+        ] {
+            assert_eq!(
+                result.err(),
+                Some(NativeError {
+                    operation: Operation::Subscription,
+                    failure: Failure::CallFailed,
+                })
+            );
+        }
+    }
 }

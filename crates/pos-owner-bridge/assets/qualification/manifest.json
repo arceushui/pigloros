@@ -15,12 +15,12 @@
       "response_sha256": "b3be505b89691ee36938d9d51d03c6c248ca6ba527b7653b1660ce0029068fa2"
     },
     "permission": {
-      "html_sha256": "5e97496b6d18b732e3045d361626c5425f3373eb21945aee047b892cfc3db866",
-      "response_sha256": "48b92ddd2a3430e837192a905fee4c61db958f2ba57743bda3cb438fceed6a8c"
+      "html_sha256": "c687cdc943cd9a9cbc373eeabdae434cc4450939e6c8d0cd50a151e1b116830b",
+      "response_sha256": "3f0b9e8352b5c022a4aef52b61740ea2b9d30879cd399fc5d30557838ede937a"
     },
     "external": {
-      "html_sha256": "f4ddacd17cb9003e8569e9b8a809ad2e837ced9f533c6e775a7921b4866720ae",
-      "response_sha256": "787a041d30e663ce3dd36f65aba0db035129b7fffecdd47e3d28243eefa58a0c"
+      "html_sha256": "45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4",
+      "response_sha256": "322be009dd8b8c034dce5a8885ebbcbc26db4e68d20a5c221834797255e45eea"
     },
     "navigation": {
       "html_sha256": "203593fc7d99507042c1138d8b75149784cd96a6f920a6ad20296c249bd4d7f2",
@@ -47,12 +47,28 @@
       "response_sha256": "06c90d540c9391c718d9711110c4f42bc7b0d26ddb8c85f43bdf75e8b48b42f9"
     },
     "interleaved_pair": {
-      "html_sha256": "2aa0aeaaadf2d92c6215f8a3657d14f46d5f5a9cffbd03250acb287c81a36ebd",
-      "response_sha256": "fbae034224c7cecc5b251a646ecd6caad1b5ef5731ac8a9cf01a3c22e02127b2"
+      "html_sha256": "3840f5fc730446659529b3f2db56a6d9ff11bdc878ebc410613c1de8620e194c",
+      "response_sha256": "19f16e2ea75f08d619be30d608d422382579974ab59f1583bb89ec04643eb517"
     },
     "delayed_delivery": {
       "html_sha256": "1bf521a4a1ff47ccf652d1ec9859c717b169412fde00e4ab3e743e9f8f31e653",
       "response_sha256": "a446fa29d2377886b434b05c0458fa649f354b7421b57dc55d78b2f021b0e604"
+    },
+    "successful_get": {
+      "html_sha256": "c403526e7654c6ac7196eeeb4ce7bf1b70027339b0a8e6e0965902c8eb0fdbbd",
+      "response_sha256": "2d6ec8f2525fb96f018a6db3c8e196d2e0de6074b2920213c97877570eb08333"
+    },
+    "successful_get_release_delay": {
+      "html_sha256": "1d09cd8be58999eaec6b3d602873c0ec52c01db407a82faac424cde1a48076e1",
+      "response_sha256": "813eb44809e9a5b14b78a4e9c3295a717aa0b7e82b22681b04a1753eb4c9a70d"
+    },
+    "successful_get_writing_delay": {
+      "html_sha256": "835d8dcc1fb948e541e4c05bed41ef528adbf6dbc9c48ef09e5f07a5a8f35b65",
+      "response_sha256": "3b4162f9fca0d6a658dd43a56d92d6ad7b8916873491941d530ea2f2b4bc2967"
+    },
+    "withheld_delivery": {
+      "html_sha256": "cd8dfa06a751630390ab12db964bb347862671a8b75fa31a214e8cd814ea841a",
+      "response_sha256": "330a585ee7fcee1c74a37b2d46379d548b5b737c9c170fbce9623cff41317d0f"
     }
   }
 }

@@ -34,21 +34,21 @@ pub(super) const POPUP_RECEIPT: Response = Response {
 
 pub(super) const PERMISSION: Response = Response {
     body: include_bytes!("../../assets/qualification/permission.html"),
-    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13685\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=(self)\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-b7cYoyzJhekhXmmnpt1HhCXEl3ocT1qxlzITxBJX6SE='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14657\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-3k/j07lNK/GyPoiCWhvn5tCGGOLh/jQOSnrbtu3CGgo='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
     digest: [
-        0x48, 0xb9, 0x2d, 0xdd, 0x2a, 0x34, 0x30, 0xe8, 0x37, 0x19, 0x2a, 0x90, 0x5f, 0xee, 0x4c,
-        0x61, 0xdb, 0x95, 0x8f, 0x2b, 0xa5, 0x77, 0x43, 0xbd, 0xa3, 0xcb, 0x43, 0x8f, 0xce, 0xed,
-        0x6a, 0x8c,
+        0x3f, 0x0b, 0x9e, 0x83, 0x52, 0xb5, 0xc0, 0x22, 0xa4, 0xae, 0xf5, 0x2b, 0x61, 0x74, 0x0e,
+        0xa2, 0xb9, 0xd3, 0x08, 0x79, 0xcd, 0x39, 0x9f, 0xc5, 0xd3, 0x05, 0x57, 0x83, 0x8e, 0xde,
+        0x93, 0x7a,
     ],
 };
 
 pub(super) const EXTERNAL: Response = Response {
     body: include_bytes!("../../assets/qualification/external.html"),
-    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13677\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-oZ08ZawwuJs25gP4CvmX9rKhQWKCxZdkju1M9ahKQVo='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13701\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-KeY2siPw3icKYef4a4S4523L2xRsBllOG0MGMvykjCs='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
     digest: [
-        0x78, 0x7a, 0x04, 0x1d, 0x30, 0xe6, 0x63, 0xce, 0x3d, 0xd3, 0x6f, 0x65, 0xab, 0xa0, 0xdb,
-        0x03, 0x51, 0x29, 0xb7, 0xff, 0xfe, 0xcd, 0xd4, 0x7e, 0x3d, 0x28, 0x24, 0x3e, 0xef, 0xa5,
-        0x8a, 0x0c,
+        0x32, 0x2b, 0xe0, 0x09, 0xdd, 0x8b, 0x8c, 0x03, 0x4d, 0xce, 0x5a, 0x88, 0x85, 0xeb, 0xbc,
+        0xbc, 0x26, 0xdb, 0x4e, 0x68, 0xd2, 0x0a, 0x5c, 0x22, 0x18, 0x34, 0x79, 0x72, 0x55, 0xe4,
+        0x5e, 0xea,
     ],
 };
 
@@ -114,11 +114,11 @@ pub(super) const DUPLICATE_REQUEST: Response = Response {
 
 pub(super) const INTERLEAVED_PAIR: Response = Response {
     body: include_bytes!("../../assets/qualification/interleaved_pair.html"),
-    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14448\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-VI6RysaG8MPIkoxvWHlHdmt5gJYx9jWFM0y1JXL2WTE='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14579\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-SO8C6ZIPfDtNBRatu/chzyhUwARuluScrupnqOXaJ1A='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
     digest: [
-        0xfb, 0xae, 0x03, 0x42, 0x24, 0xc7, 0xce, 0xcc, 0x5b, 0x25, 0x1a, 0x64, 0x6e, 0xcd, 0x6c,
-        0xaa, 0xd1, 0xb5, 0xef, 0x57, 0x31, 0xac, 0x8a, 0x9c, 0xf0, 0x1a, 0x3c, 0x22, 0xe0, 0x21,
-        0x27, 0xb2,
+        0x19, 0xf1, 0x6e, 0x2e, 0xa7, 0x5f, 0x08, 0xd6, 0x19, 0xbe, 0x30, 0xd6, 0x08, 0xd4, 0x22,
+        0x38, 0x25, 0x79, 0x97, 0x4a, 0xb5, 0x9f, 0x15, 0x83, 0xbb, 0x89, 0xec, 0x04, 0x64, 0x3e,
+        0xb5, 0x17,
     ],
 };
 
@@ -129,5 +129,45 @@ pub(super) const DELAYED_DELIVERY: Response = Response {
         0xa4, 0x46, 0xfa, 0x29, 0xd2, 0x37, 0x78, 0x86, 0xb4, 0x34, 0xb0, 0x5c, 0x04, 0x58, 0xfa,
         0x64, 0x9f, 0x35, 0x4b, 0x74, 0x21, 0xb5, 0x7d, 0xc5, 0x5d, 0x78, 0xb2, 0xf0, 0x21, 0xb0,
         0xe6, 0x04,
+    ],
+};
+
+pub(super) const SUCCESSFUL_GET: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15437\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-P4h/RiUG1ahJgWqIU2Hsdbucc5MgkijBox2BEuB9gQ0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x2d, 0x6e, 0xc8, 0xf2, 0x52, 0x5f, 0xb9, 0x6f, 0x01, 0x8a, 0x6d, 0xb3, 0xc8, 0xe1, 0x96,
+        0xd2, 0xe0, 0xde, 0x60, 0x74, 0xb2, 0x92, 0x02, 0x13, 0xc9, 0x78, 0x77, 0x57, 0x0e, 0xb0,
+        0x83, 0x33,
+    ],
+};
+
+pub(super) const SUCCESSFUL_GET_RELEASE_DELAY: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get_release_delay.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15619\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-mpE6qDdLEL4DK2Tne3XEc7yxxJaIzy7qmU0D0XNj9R8='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x81, 0x3e, 0xb4, 0x48, 0x09, 0xe9, 0xa5, 0xb1, 0x4b, 0x78, 0xa4, 0xe9, 0xc3, 0x29, 0x5a,
+        0x71, 0x7a, 0xa0, 0xb7, 0xe8, 0x2b, 0x22, 0x68, 0x1b, 0x04, 0xa1, 0x75, 0x3e, 0xb4, 0xc9,
+        0xa7, 0x0d,
+    ],
+};
+
+pub(super) const SUCCESSFUL_GET_WRITING_DELAY: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get_writing_delay.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15562\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-dWbBlJuyFJx0Cy8SeM6tGxmdqDoy0kN2d1+QmZgSe80='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x3b, 0x41, 0x62, 0xf9, 0xfc, 0xa0, 0xd6, 0xa6, 0x58, 0xdd, 0x43, 0xa5, 0x6d, 0x92, 0xd6,
+        0xad, 0x7b, 0x89, 0x16, 0x87, 0x34, 0x91, 0x94, 0x1d, 0x53, 0x0e, 0xa2, 0xf2, 0xb4, 0xbc,
+        0x29, 0x67,
+    ],
+};
+
+pub(super) const WITHHELD_DELIVERY: Response = Response {
+    body: include_bytes!("../../assets/qualification/withheld_delivery.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13868\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-b1pWruVfMy+kETDg7Q9ZbVNRhpQR+aoIZTf5FwsNs2g='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x33, 0x0a, 0x58, 0x5e, 0xe7, 0xfc, 0xee, 0x1c, 0x74, 0xa3, 0x7b, 0x2d, 0x46, 0x37, 0x9d,
+        0x54, 0x8b, 0x5b, 0x73, 0x7c, 0x9c, 0x17, 0x0f, 0xbc, 0xe9, 0x62, 0x3c, 0xff, 0x41, 0x31,
+        0x7d, 0x0f,
     ],
 };

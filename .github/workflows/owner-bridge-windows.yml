@@ -10,7 +10,7 @@ permissions:
 jobs:
   owner-bridge-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUSTC_BOOTSTRAP: '1'
     steps:
@@ -64,8 +64,26 @@ jobs:
           $metadata | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/owner-windows-metadata.json"
           $ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
           if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
-          if ($LASTEXITCODE -ne 0) { throw 'Native coverage execution failed' }
+          $marker = Join-Path $env:RUNNER_TEMP ("owner-desktop-stop-" + [guid]::NewGuid().ToString('N'))
+          $observer = $null
+          try {
+            $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
+          } catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
+          try {
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored --nocapture
+            $nativeResult = $LASTEXITCODE
+          } finally {
+            try {
+              [System.IO.File]::WriteAllText($marker, 'stop')
+              if ($null -ne $observer) {
+                $finished = Wait-Job -Job $observer -Timeout 6
+                if ($null -eq $finished) { Write-Output 'NATIVE_DESKTOP observer_stop=unknown' }
+                if ($observer.State -ne 'Completed') { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
+                Receive-Job -Job $observer -ErrorAction SilentlyContinue
+              }
+            } catch { Write-Output 'NATIVE_DESKTOP observer_output=unknown' }
+          }
+          if ($nativeResult -ne 0) { throw 'Native coverage execution failed' }
       - name: Enforce both changed-line Windows coverage floors
         shell: pwsh
         env:
@@ -133,4 +151,63 @@ jobs:
             ${{ runner.temp }}/owner-windows-coverage.json
             ${{ runner.temp }}/owner-windows-safe-full.json
             ${{ runner.temp }}/owner-windows-ffi-full.json
+          if-no-files-found: error
+      # Failed test profiles are diagnostic only and never qualify a coverage gate.
+      - name: Export failed native coverage diagnostics
+        if: ${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = Join-Path $env:RUNNER_TEMP 'owner-windows-failed-diagnostic'
+          New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          $receipt = [ordered]@{
+            version = 1
+            qualification = 'failed-measurement-diagnostic-only'
+            expected_checkout = $env:GITHUB_SHA
+            checkout = $null
+            cargo_llvm_cov_version = 'unavailable'
+            profile_directory = $null
+            profile_files = 0
+            json = 'unavailable'
+            lcov = 'unavailable'
+            detail = 'profile unavailable'
+          }
+          try {
+            $checkout = git rev-parse HEAD
+            $receipt.checkout = $checkout
+            if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'checkout mismatch' }
+            $version = cargo llvm-cov --version
+            if ($LASTEXITCODE -eq 0 -and $version) { $receipt.cargo_llvm_cov_version = $version }
+            $rawMetadata = Get-Content -Raw "$env:RUNNER_TEMP/owner-windows-metadata.json"
+            $metadata = $rawMetadata | ConvertFrom-Json
+            $ignore = $rawMetadata | python scripts/owner_bridge_windows_cov_ignore.py
+            if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'coverage scope unavailable' }
+            $targetOverride = [Environment]::GetEnvironmentVariable('CARGO_LLVM_COV_TARGET_DIR')
+            $profileDirectory = if ($null -ne $targetOverride) {
+              [System.IO.Path]::GetFullPath($targetOverride, (Get-Location).Path)
+            } else {
+              Join-Path $metadata.target_directory 'llvm-cov-target'
+            }
+            $receipt.profile_directory = $profileDirectory
+            $profiles = @(Get-ChildItem -LiteralPath $profileDirectory -Filter '*.profraw' -File | Where-Object { $_.Length -gt 0 })
+            $receipt.profile_files = $profiles.Count
+            if ($profiles.Count -eq 0) { throw 'profile unavailable' }
+            cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --ignore-filename-regex "$ignore" --output-path "$directory/diagnostic.json"
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath "$directory/diagnostic.json") -and (Get-Item -LiteralPath "$directory/diagnostic.json").Length -gt 0) { $receipt.json = 'available' }
+            cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --no-default-ignore-filename-regex --ignore-filename-regex "$ignore" --output-path "$directory/diagnostic.lcov"
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath "$directory/diagnostic.lcov") -and (Get-Item -LiteralPath "$directory/diagnostic.lcov").Length -gt 0) { $receipt.lcov = 'available' }
+            $receipt.detail = 'export attempted; available reports reflect failed test execution and are not qualification evidence'
+          } catch {
+            $receipt.detail = "diagnostic export unavailable: $($_.Exception.Message)"
+          } finally {
+            if ($receipt.json -ne 'available') { Remove-Item -LiteralPath "$directory/diagnostic.json" -ErrorAction SilentlyContinue }
+            if ($receipt.lcov -ne 'available') { Remove-Item -LiteralPath "$directory/diagnostic.lcov" -ErrorAction SilentlyContinue }
+            $receipt | ConvertTo-Json | Set-Content -LiteralPath "$directory/failure-receipt.json" -Encoding utf8
+          }
+      - name: Retain failed native coverage diagnostics
+        if: ${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-windows-failed-diagnostic-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-windows-failed-diagnostic/
           if-no-files-found: error

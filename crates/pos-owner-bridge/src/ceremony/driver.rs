@@ -489,7 +489,7 @@ impl CeremonyDriver {
         if self.served_settling(env.loopback.served(), now) {
             return Step::Pending;
         }
-        self.post_pair(env, now, navigation)
+        self.post_pair(env, navigation)
     }
 
     /// Whether a served count of zero may still be the benign race with the listener thread.
@@ -546,18 +546,28 @@ impl CeremonyDriver {
             .map_err(protocol_from_codec)
     }
 
-    fn post_pair(&mut self, env: &mut StepEnv<'_>, now: Instant, navigation: NavigationId) -> Step {
+    fn post_pair(&mut self, env: &mut StepEnv<'_>, navigation: NavigationId) -> Step {
+        // The probe or prior-pair retirement may have consumed the remaining budget.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         if let Err(error) = check_served(env.loopback.served()) {
+            let now = env.clock.now();
             return self.fail(env, now, error);
         }
         let reply_header = match self.write_request() {
             Ok(header) => header,
-            Err(error) => return self.fail(env, now, error),
+            Err(error) => {
+                let now = env.clock.now();
+                return self.fail(env, now, error);
+            }
         };
         if let Err(error) = env
             .surface
             .create_and_write(&self.slots.request, &reply_header)
         {
+            let now = env.clock.now();
             return self.fail(env, now, error.error());
         }
         self.buffers_live = true;
@@ -567,6 +577,7 @@ impl CeremonyDriver {
         // the buffers were written, so a completion that arrived meanwhile cannot be posted over.
         let served = env.loopback.served();
         if let Err(error) = check_served(served) {
+            let now = env.clock.now();
             return self.fail(env, now, error);
         }
         let guard = PostGuard {
@@ -574,7 +585,13 @@ impl CeremonyDriver {
             navigation_id: navigation,
             served_count: served.count,
         };
+        // Mapping creation and the final served check also run inside the original budget.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         if let Err(error) = env.surface.post(&guard) {
+            let now = env.clock.now();
             return self.fail(env, now, error.error());
         }
         self.posts += 1;
@@ -704,7 +721,7 @@ impl CeremonyDriver {
         if let Err(error) = self.bump_generation() {
             return self.fail(env, now, error);
         }
-        self.post_pair(env, now, navigation)
+        self.post_pair(env, navigation)
     }
 
     fn consume(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
@@ -725,7 +742,15 @@ impl CeremonyDriver {
             Err(error) => return self.fail_unexpected(error.error(), now),
         }
         match self.verify_reply(env) {
-            Ok(verified) => self.finish_success(env, now, verified),
+            Ok(verified) => {
+                // A surface callback may be delivered reentrantly during the
+                // successful consume/verify step. It still precedes release.
+                if let Some(error) = self.drain_events(env.surface) {
+                    let error = self.bump_generation().err().unwrap_or(error);
+                    return self.fail(env, now, error);
+                }
+                self.finish_success(env, now, verified)
+            }
             Err(error) => self.fail(env, now, error),
         }
     }

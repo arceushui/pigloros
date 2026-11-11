@@ -223,3 +223,37 @@ impl Drop for Held {
         super::control_fixture::update(self.observation, |record| record.retired = true);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::Control;
+    use crate::{EventKind, Failure, NativeError, Operation};
+
+    #[test]
+    fn modeled_missing_control_arguments_refuse_deferral_before_native_access() {
+        for (control, kind) in [
+            (Control::NewWindow(None), EventKind::NewWindow),
+            (Control::Permission(None), EventKind::Permission),
+            (Control::Download(None), EventKind::Download),
+            (Control::External(None), EventKind::ExternalUri),
+            (Control::Authentication(None), EventKind::Authentication),
+        ] {
+            assert_eq!(control.kind(), kind);
+            assert_eq!(
+                control.defer().err(),
+                Some(NativeError {
+                    operation: Operation::Subscription,
+                    failure: Failure::CallFailed,
+                })
+            );
+        }
+        let navigation = Control::Navigation { _args: None };
+        assert_eq!(navigation.kind(), EventKind::Navigation);
+        assert_eq!(
+            navigation.defer().map(|deferral| deferral.is_none()),
+            Ok(true)
+        );
+    }
+}

@@ -402,7 +402,9 @@ jobs:
           shared-key: reference-evaluator-release
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install evaluator packaging tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Build and verify standalone evaluator release evidence
         run: |
           shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
@@ -435,7 +437,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install fixture verification tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Obtain pinned offline SCS1 derivation inputs
         env:
           SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
@@ -499,7 +503,9 @@ jobs:
           shared-key: conformance-materialization
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fixture verification tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Reject non-main manual artifact publication
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
@@ -736,6 +742,7 @@ jobs:
       - name: Install the musl and aarch64 cross toolchains
         run: |
           set -euo pipefail
+          bash scripts/prepare-ubuntu-package-mirror.sh
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build the provider binary as a static ELF for each architecture
@@ -1734,7 +1741,9 @@ jobs:
         with:
           tool: cargo-depgraph
       - name: Install graphviz
-        run: sudo apt-get update && sudo apt-get install -y graphviz
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install -y graphviz
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts
