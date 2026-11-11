@@ -25,7 +25,7 @@ use super::{
 use crate::evaluator_protocol::{
     encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
 };
-use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole};
+use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole, SandboxArchitecture};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -202,10 +202,20 @@ fn feature_digest(features: &[String]) -> TestResult<[u8; 32]> {
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// The protocol code every architecture-qualified record carries. This is
+/// deliberately an independent encoding, not the production `code()`.
+const fn architecture_code(architecture: SandboxArchitecture) -> u64 {
+    match architecture {
+        SandboxArchitecture::X86_64 => 0,
+        SandboxArchitecture::Aarch64 => 1,
+    }
+}
+
 fn provider_manifest(
     authority: &ProviderAuthority,
     binary_digest: [u8; 32],
     features_digest: [u8; 32],
+    architecture: SandboxArchitecture,
 ) -> TestResult<Vec<u8>> {
     sign_record(
         "SPM1",
@@ -223,7 +233,7 @@ fn provider_manifest(
                 integer(1),
                 integer(1),
             ])]),
-            Value::Array(vec![integer(0)]),
+            Value::Array(vec![integer(architecture_code(architecture))]),
             digest([13; 32]),
             digest([14; 32]),
             digest([15; 32]),
@@ -237,11 +247,11 @@ fn provider_manifest(
     )
 }
 
-fn syscall_record() -> TestResult<Vec<u8>> {
+fn syscall_record(architecture: SandboxArchitecture) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(vec![
         Value::Text("SCS1".to_owned()),
         integer(1),
-        integer(0),
+        integer(architecture_code(architecture)),
         Value::Array(vec![Value::Text("read".to_owned())]),
         Value::Array(vec![Value::Text("read".to_owned())]),
     ]);
@@ -254,7 +264,10 @@ fn syscall_record() -> TestResult<Vec<u8>> {
     ]))?)
 }
 
-fn host_profile(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+fn host_profile(
+    authority: &ProviderAuthority,
+    architecture: SandboxArchitecture,
+) -> TestResult<Vec<u8>> {
     let proofs = ordered(
         crate::sandbox_provider_protocol::REQUIRED_HOST_FEATURES
             .iter()
@@ -272,7 +285,7 @@ fn host_profile(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
         Value::Array(vec![
             Value::Text("HCP1".to_owned()),
             integer(1),
-            integer(0),
+            integer(architecture_code(architecture)),
             Value::Text("6.12.0".to_owned()),
             Value::Array(proofs),
             digest([19; 32]),
@@ -289,6 +302,7 @@ fn conformance_report(
     binary_digest: [u8; 32],
     features_digest: [u8; 32],
     host_profile_digest: [u8; 32],
+    architecture: SandboxArchitecture,
 ) -> TestResult<Vec<u8>> {
     let capability = Value::Array(vec![
         Value::Text(ROOT_SELECTOR_CAPABILITY.to_owned()),
@@ -308,7 +322,7 @@ fn conformance_report(
             digest([12; 32]),
             digest(*hasher.finalize().as_bytes()),
             digest(features_digest),
-            integer(0),
+            integer(architecture_code(architecture)),
             digest(host_profile_digest),
             integer(0),
             Value::Text("reviewer".to_owned()),
@@ -387,7 +401,7 @@ fn image_manifest(
             Value::Text("SIM1".to_owned()),
             integer(1),
             Value::Text("image".to_owned()),
-            integer(0),
+            integer(architecture_code(signing.architecture)),
             integer(u64::try_from(root_image.len())?),
             digest(*blake3::hash(root_image).as_bytes()),
             Value::Array(partitions),
@@ -562,6 +576,7 @@ pub(crate) fn admitted_state_with_arguments(
     arguments: &[String],
 ) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
+    let architecture = signing.architecture;
     let trust = provider_trust(&authority, signing)?;
     let trust_digest = signed_record_digest(&trust)?;
     let revocation = provider_revocation(&authority, trust_digest)?;
@@ -574,17 +589,23 @@ pub(crate) fn admitted_state_with_arguments(
     let provider_binary_digest = *blake3::hash(provider_binary).as_bytes();
     let hard_caps = broker_hard_caps()?;
     let hard_caps_digest = *blake3::hash(&hard_caps).as_bytes();
-    let manifest = provider_manifest(&authority, provider_binary_digest, features_digest)?;
+    let manifest = provider_manifest(
+        &authority,
+        provider_binary_digest,
+        features_digest,
+        architecture,
+    )?;
     let manifest_digest = signed_record_digest(&manifest)?;
-    let syscall = syscall_record()?;
+    let syscall = syscall_record(architecture)?;
     let syscall_digest = signed_record_digest(&syscall)?;
-    let host = host_profile(&authority)?;
+    let host = host_profile(&authority, architecture)?;
     let host_digest = signed_record_digest(&host)?;
     let report = conformance_report(
         &authority,
         provider_binary_digest,
         features_digest,
         host_digest,
+        architecture,
     )?;
     let report_digest = signed_record_digest(&report)?;
     let image = image_manifest(
@@ -653,8 +674,10 @@ pub(crate) fn admitted_state_with_arguments(
     })
 }
 
-/// The release signing material one fixture's SIM1 and TRS1 bind.
+/// The release signing material one fixture's SIM1 and TRS1 bind, and the
+/// architecture its SIM1 and every provider record select.
 pub(crate) struct ImageSigning {
+    pub(crate) architecture: SandboxArchitecture,
     pub(crate) root_hash: [u8; 32],
     pub(crate) proof: Vec<u8>,
     pub(crate) certificate: &'static [u8],
@@ -666,25 +689,33 @@ impl ImageSigning {
     /// as its root-verity-sig partition embeds them.
     pub(crate) fn ddi(architecture: &str) -> TestResult<Self> {
         // The kernel's x509 descriptions of each signer.der: CN, then SKID.
-        let (root_hash, proof, certificate, key_description): (&[u8], &[u8], _, _) =
-            match architecture {
-                "x86-64" => (
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/root-hash.txt"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/proof.der"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/signer.der").as_slice(),
-                    "PiglorOS SIM1 DDI fixture x86-64: \
-                     e0b3c91db94dc506da3652b0ace1603e49009f3e",
-                ),
-                "arm64" => (
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/root-hash.txt"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/proof.der"),
-                    include_bytes!("../../../tests/vectors/sim1-ddi/arm64/signer.der").as_slice(),
-                    "PiglorOS SIM1 DDI fixture arm64: \
-                     cee4947773692d91c1a7e728a9b98d6223ec099d",
-                ),
-                _ => return Err("unknown DDI fixture".into()),
-            };
+        let (architecture, root_hash, proof, certificate, key_description): (
+            _,
+            &[u8],
+            &[u8],
+            _,
+            _,
+        ) = match architecture {
+            "x86-64" => (
+                SandboxArchitecture::X86_64,
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/root-hash.txt"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/proof.der"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/x86-64/signer.der").as_slice(),
+                "PiglorOS SIM1 DDI fixture x86-64: \
+                 e0b3c91db94dc506da3652b0ace1603e49009f3e",
+            ),
+            "arm64" => (
+                SandboxArchitecture::Aarch64,
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/root-hash.txt"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/proof.der"),
+                include_bytes!("../../../tests/vectors/sim1-ddi/arm64/signer.der").as_slice(),
+                "PiglorOS SIM1 DDI fixture arm64: \
+                 cee4947773692d91c1a7e728a9b98d6223ec099d",
+            ),
+            _ => return Err("unknown DDI fixture".into()),
+        };
         Ok(Self {
+            architecture,
             root_hash: hex_digest(root_hash)?,
             proof: proof.to_vec(),
             certificate,
