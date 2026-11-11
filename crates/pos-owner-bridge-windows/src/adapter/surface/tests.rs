@@ -21,6 +21,7 @@ use native::{Creation, Factory};
 
 mod exit_boundary_tests;
 mod fault_admission;
+mod fault_states;
 pub(in crate::adapter) mod native;
 mod pending_creation;
 mod posting;

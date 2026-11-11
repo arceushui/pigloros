@@ -914,7 +914,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "f88bd48684a63723208aa883583b88e7ade4861d3d81361649ae71a335f54546"
+    return hashlib.sha256(normalized).hexdigest() == "d4580bff9072b4c91328ad609e585d6fba084d3a0af745f7506371be21af35c5"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1583,9 +1583,11 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': 'cb1183dcf3a1ac2894f15137f3601a86d2a6a4d7cde0dc071c8b56f2ea120302',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '0669c03257c31be00fa41c224b3031eeaeccaab4936cbbb7eec4006ad5742fd8',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'cd03f37467a3ea75879ea5a999b3d317157ec30cccea673188a7c13dd158bf2e',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'dfdd903dcebe3fa0c7cc9d247f70b35b3fa134aee95a9f9e25490242e20d0ca5',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'b4c4bb72f34ec52881856cd15933be1cde646104f1ad76eceaa9a6efb13e7139',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '184716e9896fe0fb73d246212df0c41d773c8f5a6848f9deee166579b07e33ba',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '8d8defab324f9fcc8d7b18b0c8cde6d754477f7bd741b479c9773811cb98bd87',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '1b5d6ae1ebe5a082ccec9b7de3abdf75f5358fe287220b1e15ddb5587d89838e',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',

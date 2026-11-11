@@ -382,6 +382,14 @@ fn browser_candidate_from_first(
     environment: &ICoreWebView2Environment,
     first: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
 ) -> Result<ProcessIdentity, ()> {
+    browser_candidate_from_observations(first, || candidates(environment), super::process::inspect)
+}
+
+fn browser_candidate_from_observations(
+    first: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
+    snapshot: impl FnOnce() -> Result<Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>, ()>,
+    mut inspect: impl FnMut(u32) -> Result<Option<(ProcessIdentity, std::path::PathBuf)>, ()>,
+) -> Result<ProcessIdentity, ()> {
     let _logged_or_unavailable = writeln!(
         std::io::stderr(),
         "NATIVE_PROCESS_SNAPSHOT first-snapshot={}",
@@ -402,14 +410,14 @@ fn browser_candidate_from_first(
             if count == 0 { "zero" } else { "multiple" }
         );
     })?;
-    let (identity, image) = super::process::inspect(pid)
+    let (identity, image) = inspect(pid)
         .map_err(|()| {
             fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-error");
         })?
         .ok_or_else(|| {
             fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-absent");
         })?;
-    let second = candidates(environment).map_err(|()| {
+    let second = snapshot().map_err(|()| {
         fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-snapshot-incomplete");
     })?;
     let _logged_or_unavailable = writeln!(
@@ -436,7 +444,7 @@ fn browser_candidate_from_first(
         fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=browser-changed");
         return Err(());
     }
-    let second_identity = super::process::inspect(pid)
+    let second_identity = inspect(pid)
         .map_err(|()| {
             fault_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-error");
         })?
@@ -449,6 +457,8 @@ fn browser_candidate_from_first(
     }
     Ok(identity)
 }
+
+mod candidate_tests;
 
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,
