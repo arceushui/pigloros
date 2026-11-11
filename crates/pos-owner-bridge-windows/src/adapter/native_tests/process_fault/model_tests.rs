@@ -72,6 +72,8 @@ pub(super) fn fixture(
             early_presence: None,
             prior_native_wipe: false,
             deadline,
+            step_timing: super::DiagnosticTiming::default(),
+            pump_timing: std::cell::Cell::default(),
         },
         model,
     ))
