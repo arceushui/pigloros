@@ -1309,10 +1309,14 @@ mod privileged {
         let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
         // No time at all: the probe starts on the blocking pool and is no
         // longer awaited, as at the reconciliation deadline.
-        let late = runtime.block_on(tokio::time::timeout(
-            Duration::ZERO,
-            crate::EgressPropertyProbe::probe_egress(&probe),
-        ));
+        // The timer needs the runtime, so it is made inside it.
+        let late = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::ZERO,
+                crate::EgressPropertyProbe::probe_egress(&probe),
+            )
+            .await
+        });
         assert!(late.is_err(), "{late:?}");
         // A retry is refused while the earlier probe runs, and runs once it
         // has ended.
