@@ -39,6 +39,8 @@ pub(in crate::adapter) struct Factory {
     pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
     pub(super) environment_arguments: Cell<&'static str>,
     pub(super) environment_options: Cell<EnvironmentOptions>,
+    pub(super) environment_version: Cell<&'static str>,
+    pub(super) environment_folder: RefCell<Option<PathBuf>>,
     pub(super) source: RefCell<String>,
     pub(super) state: Cell<u32>,
     pub(super) invalidate_request: Cell<bool>,
@@ -69,6 +71,8 @@ impl Factory {
             mismatched_setting: Cell::new(None),
             environment_arguments: Cell::new(""),
             environment_options: Cell::new(super::super::super::settings::OPTIONS),
+            environment_version: Cell::new("153.0.4234.48"),
+            environment_folder: RefCell::new(None),
             source: RefCell::new(crate::OWNER_URL.to_owned()),
             state: Cell::new(0),
             invalidate_request: Cell::new(false),
@@ -331,9 +335,17 @@ impl NativeOperations for Session {
     fn environment(&self) -> NativeResult<EnvironmentSnapshot> {
         self.check("environment")?;
         Ok(EnvironmentSnapshot {
-            version: NativeText::fixture("153.0.4234.48"),
+            version: NativeText::fixture(self.factory.environment_version.get()),
             folder: NativePath::from_utf16(
-                &self.folder.as_os_str().encode_wide().collect::<Vec<_>>(),
+                &self
+                    .factory
+                    .environment_folder
+                    .borrow()
+                    .as_ref()
+                    .unwrap_or(&self.folder)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
             )?,
             arguments: NativeText::fixture(self.factory.environment_arguments.get()),
             options: self.factory.environment_options.get(),

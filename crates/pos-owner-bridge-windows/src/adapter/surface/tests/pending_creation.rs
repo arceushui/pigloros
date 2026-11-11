@@ -369,3 +369,84 @@ fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> 
     }
     Ok(())
 }
+
+#[test]
+fn mismatched_environment_identity_refuses_controller_and_retires_recordless() -> TestResult {
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        Version,
+        RelativeFolder,
+        OtherFolder,
+        MissingFolder,
+    }
+    for case in [
+        Case::Version,
+        Case::RelativeFolder,
+        Case::OtherFolder,
+        Case::MissingFolder,
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        let selected = spec(124);
+        let competing = spec(125);
+        match case {
+            Case::Version => fixture.factory.environment_version.set("153.0.4234.47"),
+            Case::RelativeFolder => {
+                *fixture.factory.environment_folder.borrow_mut() = Some("relative".into())
+            }
+            Case::OtherFolder => {
+                *fixture.factory.environment_folder.borrow_mut() = Some(fixture.root.clone())
+            }
+            Case::MissingFolder => {
+                *fixture.factory.environment_folder.borrow_mut() =
+                    Some(fixture.root.join("missing"))
+            }
+        }
+        assert_eq!(
+            fixture
+                .open(&selected)
+                .map_err(pos_owner_bridge::SurfaceError::error),
+            Err(pos_owner_bridge::BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::RuntimeIntegrity,
+            )),
+            "case {case:?}",
+        );
+        assert_eq!(
+            fixture.factory.environment_completions.get(),
+            1,
+            "case {case:?}"
+        );
+        assert_eq!(count(&fixture, "create_controller"), 0, "case {case:?}");
+        assert!(!fixture.surface.idle(), "case {case:?}");
+        competing_open_is_refused(&mut fixture, &competing);
+        fixture.assert_no_ceremony_data();
+        assert!(
+            fixture.root.join(&selected.folder_name).is_dir(),
+            "case {case:?}"
+        );
+        assert!(
+            fixture
+                .surface
+                .poll_failed_open()
+                .map_err(pos_owner_bridge::SurfaceError::error)?,
+            "case {case:?}"
+        );
+        assert!(fixture.surface.idle(), "case {case:?}");
+        assert!(
+            fixture.root.join(&selected.folder_name).is_dir(),
+            "case {case:?}"
+        );
+        assert!(fixture.store.removed_folders().is_empty(), "case {case:?}");
+        fixture.factory.environment_version.set("153.0.4234.48");
+        *fixture.factory.environment_folder.borrow_mut() = None;
+        assert_eq!(
+            fixture
+                .open(&competing)
+                .map_err(pos_owner_bridge::SurfaceError::error)?
+                .browser_pid,
+            42,
+            "case {case:?}"
+        );
+        fixture.finish()?;
+    }
+    Ok(())
+}
