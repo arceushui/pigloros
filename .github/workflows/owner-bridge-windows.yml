@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   diagnostic:
-    name: diagnostic baseline quarantine cases
+    name: diagnostic instrumented baseline quarantine cases
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -21,7 +21,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
-          components: clippy
+          components: clippy,llvm-tools-preview
+      - name: Install diagnostic coverage producer
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-llvm-cov
       - name: Enforce the Windows unsafe inventory
         run: python scripts/check_owner_bridge_unsafe_policy.py
       - name: Lint native adapter and portable bridge
@@ -32,7 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: DIAGNOSTIC three baseline native quarantine samples
+      - name: DIAGNOSTIC three instrumented baseline native quarantine samples
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -45,7 +49,7 @@ jobs:
           $nativeFailed = $false
           foreach ($sample in 1..3) {
             Write-Output "DIAGNOSTIC_QUARANTINE_SAMPLE sample=$sample started=true"
-            cargo test -p pos-owner-bridge-windows --all-features --locked --lib native_quarantined_faults_do_not_release_the_keeper -- --include-ignored --nocapture --test-threads=1
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- native_quarantined_faults_do_not_release_the_keeper --include-ignored --nocapture --test-threads=1
             $sampleResult = $LASTEXITCODE
             Write-Output "DIAGNOSTIC_QUARANTINE_SAMPLE sample=$sample exit_code=$sampleResult"
             if ($sampleResult -ne 0) { $nativeFailed = $true }
