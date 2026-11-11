@@ -106,6 +106,11 @@ fn change_identity(fixture: &mut Fixture, change_after: usize) {
 fn modeled_early_renderer_snapshot_rechecks_identity_and_retains_the_owner() -> TestResult {
     for change_after in [0, 1] {
         let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.preload_owners.set(true);
+        fixture
+            .factory
+            .renderer_presence
+            .set(Some(crate::RendererPresence::Absent));
         fixture
             .open(&spec(40))
             .map_err(pos_owner_bridge::SurfaceError::error)?;
@@ -130,6 +135,7 @@ fn modeled_early_renderer_snapshot_rechecks_identity_and_retains_the_owner() -> 
 #[test]
 fn modeled_before_record_snapshot_refuses_a_changed_browser_identity() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.preload_owners.set(true);
     let identity = fixture
         .open(&spec(40))
         .map_err(pos_owner_bridge::SurfaceError::error)?;
@@ -146,6 +152,7 @@ fn modeled_before_record_snapshot_refuses_a_changed_browser_identity() -> TestRe
 fn modeled_navigation_snapshots_require_the_original_browser_and_one_record() -> TestResult {
     for awaiting_load in [false, true] {
         let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.preload_owners.set(true);
         fixture.factory.navigation_succeeds.set(true);
         fixture
             .open(&spec(40))
@@ -211,6 +218,7 @@ fn create_buffers(fixture: &mut Fixture, generation: u32) -> TestResult {
 fn modeled_posted_snapshots_require_identity_generation_record_and_post_counts() -> TestResult {
     for retry in [false, true] {
         let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.preload_owners.set(true);
         fixture.ready()?;
         let generation: u8 = if retry { 2 } else { 1 };
         create_buffers(&mut fixture, u32::from(generation))?;

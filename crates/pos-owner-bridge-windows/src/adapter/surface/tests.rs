@@ -265,6 +265,7 @@ fn reused_surface_observes_only_the_admitted_opening() -> TestResult {
 fn quarantined_fault_refuses_missing_state_and_unheld_keeper() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
+    assert!(!fixture.surface.native.preload_fault_owners_retained());
     assert!(fixture.surface.generation.is_none());
     assert!(fixture.store.records_now().is_empty());
     assert!(fixture.surface.native.early_renderer_presence().is_err());

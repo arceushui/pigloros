@@ -45,6 +45,8 @@ pub(in crate::adapter) struct Factory {
     pub(super) window_exists: Cell<bool>,
     pub(super) close_requested: Cell<bool>,
     pub(super) exit_code: Cell<Option<u32>>,
+    pub(super) preload_owners: Cell<bool>,
+    pub(super) renderer_presence: Cell<Option<crate::RendererPresence>>,
     pub(in crate::adapter) pending_browser: Cell<Option<pos_owner_bridge::ProcessIdentity>>,
     pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
@@ -71,6 +73,8 @@ impl Factory {
             window_exists: Cell::new(true),
             close_requested: Cell::new(false),
             exit_code: Cell::new(None),
+            preload_owners: Cell::new(false),
+            renderer_presence: Cell::new(None),
             pending_browser: Cell::new(None),
             client: Cell::new(ClientBounds {
                 left: 0,
@@ -182,13 +186,14 @@ impl Session {
 impl NativeOperations for Session {
     fn preload_fault_owners_retained(&self) -> bool {
         self.controller
+            && self.factory.preload_owners.get()
             && self.factory.sink.borrow().is_some()
             && self.factory.failure.get() != Some("preload-owner")
     }
 
     fn early_renderer_presence(&self) -> Result<crate::RendererPresence, ()> {
         self.check("early_renderer_presence").map_err(|_| ())?;
-        Ok(crate::RendererPresence::Absent)
+        self.factory.renderer_presence.get().ok_or(())
     }
 
     fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
