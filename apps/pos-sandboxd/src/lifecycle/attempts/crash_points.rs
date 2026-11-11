@@ -50,7 +50,7 @@ use crate::{
 const SIM1: [u8; 32] = [9; 32];
 
 /// The registry I/O operations of one clean lifecycle.
-const IO_OPERATIONS: usize = 96;
+const IO_OPERATIONS: usize = 173;
 
 /// A crash boundary between two lifecycle steps that are not registry I/O.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
