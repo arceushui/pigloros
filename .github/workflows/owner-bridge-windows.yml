@@ -32,7 +32,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: DIAGNOSTIC model and FFI boundaries and three fresh-session samples
+      - name: DIAGNOSTIC Surface and witness models and three fresh-session samples
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -42,8 +42,12 @@ jobs:
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
           Write-Output $checkout
-          cargo test -p pos-owner-bridge-windows --all-features --locked --lib adapter::surface::tests::exit_boundary_tests -- --include-ignored --nocapture --test-threads=1
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib adapter::surface::tests -- --include-ignored --nocapture --test-threads=1
           $modelResult = $LASTEXITCODE
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib tests::native_api -- --include-ignored --nocapture --test-threads=1
+          $apiResult = $LASTEXITCODE
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib modeled_callback_witnesses_bound_repeated_observations_and_reset -- --include-ignored --nocapture --test-threads=1
+          $witnessResult = $LASTEXITCODE
           cargo test -p pos-owner-bridge-windows --all-features --locked --lib ffi:: -- --include-ignored --nocapture --test-threads=1
           $ffiResult = $LASTEXITCODE
           $nativeFailed = $false
@@ -54,5 +58,5 @@ jobs:
             Write-Output "DIAGNOSTIC_FRESH_SAMPLE sample=$sample exit_code=$sampleResult"
             if ($sampleResult -ne 0) { $nativeFailed = $true }
           }
-          Write-Output "DIAGNOSTIC_ONLY model_exit=$modelResult ffi_exit=$ffiResult native_failed=$nativeFailed"
-          if ($modelResult -ne 0 -or $ffiResult -ne 0 -or $nativeFailed) { throw 'One or more diagnostic cases failed' }
+          Write-Output "DIAGNOSTIC_ONLY model_exit=$modelResult api_exit=$apiResult witness_exit=$witnessResult ffi_exit=$ffiResult native_failed=$nativeFailed"
+          if ($modelResult -ne 0 -or $apiResult -ne 0 -or $witnessResult -ne 0 -or $ffiResult -ne 0 -or $nativeFailed) { throw 'One or more diagnostic cases failed' }
