@@ -363,7 +363,7 @@ fn log_callback(
     let served = listener.served();
     writeln!(
         std::io::stderr(),
-        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} result={:?}",
+        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} listener_observation={:?} result={:?}",
         probe.delivered.get(),
         probe.failures.get(),
         listener.received_request_count(),
@@ -372,6 +372,7 @@ fn log_callback(
         probe.events.started(),
         probe.events.loaded(),
         probe.events.invalid(),
+        listener.observation(),
         callback.as_ref().map_err(ToString::to_string)
     )?;
     Ok(())
