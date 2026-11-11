@@ -380,7 +380,8 @@ mod cases {
             steps: &FixtureSteps<'_>,
         ) -> TestResult<EndedAttempt<()>> {
             let owned = self.lifecycle.admit_input(input)?;
-            let ended = owned.run_with(steps, (), budget()?).await;
+            let budget = budget()?;
+            let ended = Box::pin(owned.run_with(steps, (), budget)).await;
             Ok(ended)
         }
     }
@@ -508,7 +509,7 @@ mod cases {
         ));
         let fixture = manager(1).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        cleaned(&owned.run_with(&steps, (), budget()?).await)?;
+        cleaned(&Box::pin(owned.run_with(&steps, (), budget()?)).await)?;
         assert!(matches!(
             runtime.lifecycle.admit_input(FakeInput::new(1)),
             Err(AttemptLifecycleError::AttemptKnown)
@@ -558,7 +559,7 @@ mod cases {
         let request = cancel_request(1, grant(1));
         let (cancelled, ended) = tokio::join!(
             runtime.lifecycle.cancel(&request),
-            owned.run_with(&steps, (), budget()?)
+            Box::pin(owned.run_with(&steps, (), budget()?))
         );
         assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
         assert!(ended.cancelled());
@@ -585,7 +586,8 @@ mod cases {
                 steps.executing().await;
                 runtime.lifecycle.cancel(&cancel_request(1, grant(1))).await
             };
-            let (cancelled, ended) = tokio::join!(cancel, owned.run_with(&steps, (), budget()?));
+            let (cancelled, ended) =
+                tokio::join!(cancel, Box::pin(owned.run_with(&steps, (), budget()?)));
             assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
             assert!(ended.cancelled());
             assert!(matches!(
@@ -614,7 +616,7 @@ mod cases {
             .admit_input(FakeInput::new(1).activating(Activation::Slow))?;
         // Cancel once the directory exists, while the root is being activated:
         // the execution's claim of the directory is then fenced.
-        let run = owned.run_with(&steps, (), budget()?);
+        let run = Box::pin(owned.run_with(&steps, (), budget()?));
         let fenced = async {
             loop {
                 let running = lock(&runtime.lifecycle.attempts)
@@ -659,7 +661,7 @@ mod cases {
         };
         // The broker dies after the cancellation was requested.
         let died = async {
-            let run = owned.run_with(&steps, (), budget()?);
+            let run = Box::pin(owned.run_with(&steps, (), budget()?));
             let abandoned = tokio::time::timeout(Duration::from_secs(1), run).await;
             assert!(abandoned.is_err());
             TestResult::Ok(())
@@ -691,7 +693,7 @@ mod cases {
         let fixture = manager(2).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime.lifecycle.admit_input(FakeInput::new(2))?;
-        drop(owned.run_with(&steps, (), budget()?));
+        drop(Box::pin(owned.run_with(&steps, (), budget()?)));
         // Nothing was committed, so nothing needs restart reconciliation.
         assert!(!exists(&runtime.record(1)?));
         assert!(runtime.admits()?);
@@ -740,7 +742,7 @@ mod cases {
                 .await?,
             SandboxCancellationResult::CancelledAndCleaned
         );
-        let ended = owned.run_with(&steps, (), budget()?).await;
+        let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
         assert!(ended.cancelled());
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
         assert!(matches!(ended.cleanup(), Ok(None)));
@@ -934,7 +936,7 @@ mod cases {
             TeardownFixture::new(1, TeardownStop::LeavesPopulated, TeardownReset::Unload).await?;
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
         let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-        cleaned(&owned.run_with(&steps, (), budget).await)?;
+        cleaned(&Box::pin(owned.run_with(&steps, (), budget)).await)?;
         assert!(runtime.admits()?);
         Ok(())
     }
@@ -1026,7 +1028,7 @@ mod cases {
             (None, None, None)
         );
         // The withdrawn attempt cannot start any more.
-        let ended = idle.run_with(&steps, (), budget()?).await;
+        let ended = Box::pin(idle.run_with(&steps, (), budget()?)).await;
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
         // Admission is closed for good, and the snapshot is handed out once.
         assert!(matches!(
@@ -1051,7 +1053,7 @@ mod cases {
         let owned = runtime
             .lifecycle
             .admit_input(FakeInput::new(1).activating(Activation::Slow))?;
-        let run = owned.run_with(&steps, (), budget()?);
+        let run = Box::pin(owned.run_with(&steps, (), budget()?));
         // Fence once the directory exists, while the root is being activated.
         let fence = async {
             loop {
@@ -1098,7 +1100,7 @@ mod cases {
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound)
             .behaving(Behaviour::RunsUntilCancelled);
         let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-        let run = owned.run_with(&steps, (), budget()?);
+        let run = Box::pin(owned.run_with(&steps, (), budget()?));
         let fence = async {
             steps.executing().await;
             runtime.lifecycle.fence_and_snapshot().await
@@ -1281,7 +1283,8 @@ mod cases {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps = SystemdAttemptSteps::new(transport, &FailClosedLocalNetwork, store);
             let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-            let ended = owned.run_with(&steps, launch(barrier), budget()?).await;
+            let budget = budget()?;
+            let ended = Box::pin(owned.run_with(&steps, launch(barrier), budget)).await;
             Ok(ended)
         }
 
@@ -1356,9 +1359,7 @@ mod cases {
             let (_store_root, store) = crate::test_fixtures::capture_store()?;
             let steps =
                 SystemdAttemptSteps::new(&fixture.transport, &FailClosedLocalNetwork, store);
-            let ended = owned
-                .run(&steps, launch(|_| Ok(OpenBarrier)), budget()?)
-                .await;
+            let ended = Box::pin(owned.run(&steps, launch(|_| Ok(OpenBarrier)), budget()?)).await;
             assert_eq!(ended.attempt_id(), request.attempt_id);
             // No mountfsd serves the container: nothing was mounted or started.
             assert!(matches!(ended.progress(), AttemptProgress::NotActivated(_)));
