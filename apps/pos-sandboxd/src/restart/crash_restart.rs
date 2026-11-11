@@ -171,9 +171,12 @@ pub(super) mod cases {
 
         fn list_units_by_patterns(
             &self,
-            _states: Vec<String>,
-            _patterns: Vec<String>,
+            states: Vec<String>,
+            patterns: Vec<String>,
         ) -> fdo::Result<Vec<UnitRow>> {
+            // The interface macro reads every argument, so an underscore name
+            // is refused; the filters are owned and unused.
+            drop((states, patterns));
             loaded_names(&self.loaded)?
                 .iter()
                 .map(String::as_str)
