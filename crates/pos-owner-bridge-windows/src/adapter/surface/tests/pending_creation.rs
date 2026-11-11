@@ -10,6 +10,32 @@ use super::{spec, Creation, Fixture, TestResult};
 use crate::NativeEvent;
 
 #[test]
+fn modeled_session_refusal_keeps_public_open_idle_and_allows_a_fresh_open() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let selected = spec(40);
+    let before = fixture.factory.calls.borrow().clone();
+    fixture.factory.failure.set(Some("session"));
+    assert_eq!(
+        fixture.surface.open(&selected),
+        Poll::Ready(Err(pos_owner_bridge::SurfaceError::new(
+            pos_owner_bridge::BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::InterfaceUnavailable,
+            ),
+        ))),
+    );
+    assert!(fixture.surface.idle());
+    assert!(!fixture.root.join(&selected.folder_name).exists());
+    assert_eq!(*fixture.factory.calls.borrow(), before);
+    fixture.assert_no_ceremony_data();
+    fixture.factory.failure.set(None);
+    let identity = fixture
+        .open(&selected)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    fixture.finish()
+}
+
+#[test]
 fn modeled_mismatched_folder_refuses_before_window_creation_and_allows_fresh_open() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     let correct = spec(40);
