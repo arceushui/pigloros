@@ -101,14 +101,19 @@ impl crate::Native {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?;
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while child.try_wait()?.is_none() {
-                if Instant::now() >= deadline {
-                    child.kill()?;
-                    child.wait()?;
-                    return Err("nonce lock probe exceeded its deadline".into());
+            let observed = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while child.try_wait()?.is_none() {
+                    if Instant::now() >= deadline {
+                        return Err("nonce lock probe exceeded its deadline".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                Ok(())
+            })();
+            if let Err(error) = observed {
+                let _cleanup = retire_child(&mut child);
+                return Err(error);
             }
             let output = child.wait_with_output()?;
             assert!(output.status.success(), "{output:?}");
@@ -171,40 +176,53 @@ fn exercise_abandonment(directory: &Path) -> Result<(), Box<dyn std::error::Erro
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let output = child.stdout.take().ok_or("missing child stdout")?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut output = io::BufReader::new(output);
-        let result = (|| -> io::Result<bool> {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                if output.read_line(&mut line)? == 0 {
-                    return Ok(false);
+    let mut reader = None;
+    let observed = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let output = child.stdout.take().ok_or("missing child stdout")?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        reader = Some(std::thread::spawn(move || {
+            let mut output = io::BufReader::new(output);
+            let result = (|| -> io::Result<bool> {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if output.read_line(&mut line)? == 0 {
+                        return Ok(false);
+                    }
+                    if line.contains(MARKER) {
+                        return Ok(true);
+                    }
                 }
-                if line.contains(MARKER) {
-                    return Ok(true);
-                }
-            }
-        })();
-        let _sent = sender.send(result);
-    });
-    let ready = receiver.recv_timeout(Duration::from_secs(30));
-    if !matches!(ready, Ok(Ok(true))) {
-        if child.try_wait()?.is_none() {
-            child.kill()?;
+            })();
+            let _sent = sender.send(result);
+        }));
+        if !matches!(receiver.recv_timeout(Duration::from_secs(30)), Ok(Ok(true))) {
+            return Err("abandoned lock probe failed to become ready".into());
         }
-        child.wait()?;
-        reader.join().map_err(|_| "nonce lock reader panicked")?;
-        return Err("abandoned lock probe failed to become ready".into());
-    }
-    reader.join().map_err(|_| "nonce lock reader panicked")?;
-    let retained = crate::SubjectMutex::retain_second_handle().map_err(|()| unavailable())?;
-    child.kill()?;
-    child.wait()?;
+        crate::SubjectMutex::retain_second_handle().map_err(|()| unavailable().into())
+    })();
+    let retired = retire_child(&mut child);
+    let joined = reader.map_or(Ok(()), |reader| {
+        reader.join().map_err(|_| "nonce lock reader panicked")
+    });
+    let retained = observed?;
+    retired?;
+    joined?;
     let guard = WindowsSubjectEncryptorLock::acquire(directory)?;
     assert!(guard.mutex.was_abandoned());
     drop(guard);
     drop(retained);
     Ok(())
+}
+
+#[cfg(test)]
+fn retire_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    let observed = child.try_wait();
+    let killed = if matches!(observed, Ok(Some(_))) {
+        Ok(())
+    } else {
+        child.kill()
+    };
+    let waited = child.wait();
+    observed.map(|_| ()).and(killed).and(waited.map(|_| ()))
 }
