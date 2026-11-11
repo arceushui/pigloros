@@ -73,7 +73,10 @@ mod cases {
             GENEROUS_WATCHDOG_MS,
         );
         let execution = tokio::time::timeout(Duration::from_secs(10), outcome).await???;
-        assert_eq!(execution.ending, AttemptEnding::Cancelled);
+        assert_eq!(
+            execution.ending,
+            AttemptEnding::Cancelled { watchdog: None }
+        );
         assert!(Arc::ptr_eq(
             &execution.cgroup.kills,
             &scenario.host.cgroup_kills
@@ -93,8 +96,14 @@ mod cases {
         let outcome =
             cancelled_after_release(&mut scenario, SandboxExecutionMode::Local, mode, 200);
         let execution = tokio::time::timeout(Duration::from_secs(10), outcome).await???;
-        // Cancellation outranks the watchdog that later closed the silent channel.
-        assert_eq!(execution.ending, AttemptEnding::Cancelled);
+        // Cancellation outranks the watchdog that later closed the silent
+        // channel, and keeps its acknowledged SIGKILL as evidence.
+        assert_eq!(
+            execution.ending,
+            AttemptEnding::Cancelled {
+                watchdog: Some(true)
+            }
+        );
         assert!(matches!(&execution.network, NetworkEvidence::Local(_)));
         let entries = scenario.entries();
         let stop = entries.iter().position(|entry| entry == "stop");
@@ -118,6 +127,51 @@ mod cases {
         let execution = scenario.run_on(&LoopbackNetwork, job, recheck).await?;
         assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
         assert!(!scenario.cancel.is_requested());
+        Ok(())
+    }
+
+    /// Run a Local attempt whose cancellation is requested as the launcher
+    /// release completes, with `adapter` on FD 3 under `watchdog_ms`.
+    async fn cancelled_at_release(
+        adapter: AdapterScript,
+        watchdog_ms: u64,
+    ) -> TestResult<AttemptExecution<String, FakeCgroup>> {
+        let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+        let mut scenario = Scenario::new()?;
+        scenario.host.adapter = adapter;
+        let cancel = Arc::new(AttemptCancel::new());
+        scenario.cancel = AttemptCancel::new();
+        let mut job = scenario.job(ATTEMPT, SandboxExecutionMode::Local, mode, watchdog_ms)?;
+        job.cancel = cancel.signal();
+        scenario.barrier.cancel_on_release = Some(cancel);
+        let recheck = root_for(&scenario.log, &job.attempt);
+        let run = scenario.run_on(&LoopbackNetwork, job, recheck);
+        Ok(tokio::time::timeout(Duration::from_secs(10), run).await??)
+    }
+
+    #[tokio::test]
+    async fn a_cancellation_outranks_a_watchdog_expiry_and_keeps_its_kill() -> TestResult {
+        let execution = cancelled_at_release(AdapterScript::Silent, 150).await?;
+        assert_eq!(
+            execution.ending,
+            AttemptEnding::Cancelled {
+                watchdog: Some(true)
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cancellation_outranks_a_proxy_protocol_failure() -> TestResult {
+        let execution = cancelled_at_release(AdapterScript::ProtocolViolation, 30_000).await?;
+        assert_eq!(
+            execution.ending,
+            AttemptEnding::Cancelled { watchdog: None }
+        );
+        assert_eq!(
+            execution.network.termination(),
+            Some(LocalNetworkTermination::ProtocolFailure)
+        );
         Ok(())
     }
 }

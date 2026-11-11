@@ -400,7 +400,11 @@ pub enum AttemptEnding {
     /// requested (not proven): the terminal cleanup's bounded grace,
     /// escalation and emptiness proof follow through the retained cgroup.
     /// Cancellation outranks every other ending (ADR-069 §8).
-    Cancelled,
+    Cancelled {
+        /// `Some` when the watchdog also expired while the Local proxy was
+        /// being joined: whether its SIGKILL was acknowledged.
+        watchdog: Option<bool>,
+    },
 }
 
 /// The network evidence of one attempt, for SPR1 and SAU1.
@@ -909,8 +913,9 @@ enum Finish {
     Watchdog { killed: bool },
     /// The proxy session ended in a protocol failure and the unit was killed.
     ProtocolFailure { killed: bool },
-    /// Cancellation was requested and a stop of the unit was requested.
-    Cancelled,
+    /// Cancellation was requested and a stop of the unit was requested;
+    /// whether a watchdog SIGKILL was acknowledged, if the watchdog expired.
+    Cancelled { watchdog: Option<bool> },
 }
 
 impl Finish {
@@ -921,7 +926,7 @@ impl Finish {
             Self::Watchdog { killed: false } => AttemptEnding::WatchdogKillFailed,
             Self::ProtocolFailure { killed: true } => AttemptEnding::ProtocolFailureKilled,
             Self::ProtocolFailure { killed: false } => AttemptEnding::ProtocolFailureKillFailed,
-            Self::Cancelled => AttemptEnding::Cancelled,
+            Self::Cancelled { watchdog } => AttemptEnding::Cancelled { watchdog },
         }
     }
 }
@@ -992,7 +997,7 @@ where
     let protocol_failure =
         served.session.termination() == Some(LocalNetworkTermination::ProtocolFailure);
     let finish = match expired {
-        _ if cancelled => Finish::Cancelled,
+        watchdog if cancelled => Finish::Cancelled { watchdog },
         Some(killed) => {
             // SIGKILL ran during the join; the rest follows in the usual order.
             finish_kill(host, unit, Some(cgroup), bounds.call).await;
@@ -1021,7 +1026,7 @@ where
     match unless(cancel, wait_empty(cgroup, bounds.deadline)).await {
         None => {
             request_stop(host, unit, bounds.call).await;
-            Ok(Finish::Cancelled)
+            Ok(Finish::Cancelled { watchdog: None })
         }
         Some(Ok(true)) => Ok(Finish::Empty),
         Some(Ok(false)) => Ok(Finish::Watchdog {

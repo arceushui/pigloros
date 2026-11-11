@@ -159,23 +159,63 @@ pub(crate) struct LauncherFacts {
 }
 
 #[cfg(target_os = "linux")]
-/// The root facts a PAI3 record retained at activation, decoded for
-/// comparison with a fresh kernel readback. These are claims, not evidence.
-/// The held image's identity is PAI2's, not repeated here.
+/// The root facts a PAI3 record retained at activation.
+///
+/// They are decoded for comparison with a fresh kernel readback: claims, not
+/// evidence. The held image's identity is PAI2's, not repeated here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordedRoot {
     /// The attached root's mount ID.
-    pub mount_id: u64,
+    pub(crate) mount_id: u64,
     /// The root inode on the mapper device.
-    pub inode: u64,
+    pub(crate) inode: u64,
     /// The mapper's device and disk sequence.
-    pub mapper: ((u32, u32), u64),
+    pub(crate) mapper: ((u32, u32), u64),
     /// The mapper's UUID.
-    pub mapper_uuid: String,
+    pub(crate) mapper_uuid: String,
     /// The loop device's name.
-    pub loop_name: String,
+    pub(crate) loop_name: String,
     /// The loop device's device and disk sequence.
-    pub loop_device: ((u32, u32), u64),
+    pub(crate) loop_device: ((u32, u32), u64),
+}
+
+#[cfg(target_os = "linux")]
+impl RecordedRoot {
+    /// The attached root's mount ID.
+    #[must_use]
+    pub const fn mount_id(&self) -> u64 {
+        self.mount_id
+    }
+
+    /// The root inode on the mapper device.
+    #[must_use]
+    pub const fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    /// The mapper's device and disk sequence.
+    #[must_use]
+    pub const fn mapper(&self) -> ((u32, u32), u64) {
+        self.mapper
+    }
+
+    /// The mapper's UUID.
+    #[must_use]
+    pub const fn mapper_uuid(&self) -> &str {
+        self.mapper_uuid.as_str()
+    }
+
+    /// The loop device's name.
+    #[must_use]
+    pub const fn loop_name(&self) -> &str {
+        self.loop_name.as_str()
+    }
+
+    /// The loop device's device and disk sequence.
+    #[must_use]
+    pub const fn loop_device(&self) -> ((u32, u32), u64) {
+        self.loop_device
+    }
 }
 
 /// The held image `(device, inode)` the test fixtures record and read back.
@@ -233,9 +273,9 @@ pub use execute::{
 };
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
-    finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch, AttemptLifecycle,
-    AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt, LiveAttemptIdentity,
-    LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
+    finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
+    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt,
+    LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{
