@@ -98,6 +98,8 @@ pub(super) mod cases {
         /// start, and whether the registry and directories were unchanged
         /// then; `None` when it did not run.
         pub swept: Option<(Duration, bool)>,
+        /// When the restart returned, measured from its start.
+        pub finished_after: Duration,
     }
 
     type UnitRow = (
@@ -424,6 +426,7 @@ pub(super) mod cases {
             .collect();
         let still_loaded = loaded.lock().map_err(|_| "poisoned fake manager")?.clone();
         let swept = *swept.lock().unwrap_or_else(PoisonError::into_inner);
+        let finished_after = start.elapsed();
         Ok(Restarted {
             result,
             still_loaded,
@@ -431,6 +434,7 @@ pub(super) mod cases {
             network_cleaned: network.removed.load(Ordering::SeqCst) == 1,
             request_pending,
             swept,
+            finished_after,
         })
     }
 }
