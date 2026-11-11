@@ -395,6 +395,8 @@ struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     fault: BarrierFault,
+    /// Requested as the release completes, so supervision sees it first.
+    cancel_on_release: Option<Arc<AttemptCancel>>,
 }
 
 impl FakeBarrier {
@@ -403,6 +405,7 @@ impl FakeBarrier {
             log: Arc::clone(log),
             released: Arc::default(),
             fault: BarrierFault::None,
+            cancel_on_release: None,
         }
     }
 }
@@ -441,9 +444,13 @@ impl LaunchBarrier for FakeBarrier {
             Ok(())
         };
         let hang = self.fault == BarrierFault::Hang;
+        let cancel = self.cancel_on_release.clone();
         async move {
             if hang {
                 std::future::pending::<()>().await;
+            }
+            if let Some(cancel) = cancel {
+                cancel.cancel();
             }
             outcome
         }

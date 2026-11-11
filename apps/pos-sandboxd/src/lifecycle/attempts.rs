@@ -22,8 +22,10 @@
 //! Any failure to prove cleanup, and any run dropped after it started,
 //! quarantines the lifecycle: the registry owner commits no further intent
 //! and the staging ledger issues no further grant, before AGR1. Only restart
-//! reconciliation and a fresh ledger reopen admission. A quarantined attempt
-//! keeps its admitted input, and with it its staging reservation.
+//! reconciliation and a fresh ledger reopen admission. An attempt whose run
+//! ended keeps its admitted input, and with it its staging reservation, until
+//! it is reconciled; a run dropped part-way drops its input with it, which
+//! releases that reservation.
 //!
 //! The ownership table and its tombstones live in memory, for this runtime
 //! only (owner decision, 2026-11-11). A restarted provider forgets them; that
@@ -66,8 +68,10 @@ use crate::{
 /// The most live attempts one snapshot carries (ADR-069 §4.1, RCC1).
 const MAX_LIVE_ATTEMPTS: usize = 256;
 
-/// One attempt's terminal cleanup budget, measured from the moment its
-/// execution returns, divided into strictly ordered phases.
+/// One attempt's terminal cleanup budget.
+///
+/// It is measured from the moment the execution returns and divided into
+/// strictly ordered phases.
 ///
 /// The lifecycle chooses no default grace period; the provider configures it.
 #[derive(Clone, Copy, Debug)]
@@ -114,8 +118,9 @@ pub enum AttemptLifecycleError {
     /// no second snapshot is taken.
     #[error("the runtime was fenced for recovery")]
     Fenced,
-    /// More live attempts than one snapshot may carry; admission stays closed.
-    #[error("more than 256 live attempts")]
+    /// The runtime already has 256 live attempts, as many as one recovery
+    /// snapshot carries.
+    #[error("the runtime already has 256 live attempts")]
     TooManyLiveAttempts,
     /// No attempt with this identity is known, or it was reconciled.
     #[error("the attempt is unknown")]
@@ -140,6 +145,9 @@ pub enum AttemptLifecycleError {
 /// How far an attempt got before its terminal cleanup.
 #[derive(Debug)]
 pub enum AttemptProgress<S> {
+    /// Cancellation was requested before the run started: nothing was
+    /// committed and nothing needs cleanup.
+    Withdrawn,
     /// No attempt directory was prepared; see the cleanup's error.
     NotPrepared,
     /// Cancellation was requested before the root was activated.
@@ -164,32 +172,77 @@ pub enum AttemptProgress<S> {
     },
 }
 
-/// One attempt after its terminal cleanup, for its classification and
-/// signed terminal records (#443).
+/// The terminal cleanup of an ended attempt.
+///
+/// It is `Ok(None)` when the attempt was withdrawn before anything was
+/// committed.
+pub type AttemptCleanup = Result<Option<CompletedAttemptCleanup>, AttemptLifecycleError>;
+
+/// One attempt after its terminal cleanup.
+///
+/// It is evidence for the attempt's classification and signed terminal
+/// records (#443). Only the lifecycle creates one.
 #[derive(Debug)]
 pub struct EndedAttempt<S> {
-    /// The attempt identity.
-    pub attempt_id: [u8; 16],
-    /// Whether cancellation was requested; it outranks every other outcome.
-    pub cancelled: bool,
-    /// How far the attempt got.
-    pub progress: AttemptProgress<S>,
-    /// The completed cleanup, or why it was not proved. An error leaves the
-    /// registry quarantined and the intent for restart reconciliation.
-    pub cleanup: Result<CompletedAttemptCleanup, AttemptLifecycleError>,
+    attempt_id: [u8; 16],
+    cancelled: bool,
+    progress: AttemptProgress<S>,
+    cleanup: AttemptCleanup,
 }
 
-/// An attempt whose cleanup was proved and whose admission was released.
+impl<S> EndedAttempt<S> {
+    /// The attempt identity.
+    #[must_use]
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
+    /// Whether cancellation was requested before the attempt ended; it
+    /// outranks every other outcome.
+    #[must_use]
+    pub const fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// How far the attempt got.
+    #[must_use]
+    pub const fn progress(&self) -> &AttemptProgress<S> {
+        &self.progress
+    }
+
+    /// The completed cleanup, or why it was not proved. An error leaves the
+    /// lifecycle quarantined and the intent for restart reconciliation.
+    #[must_use]
+    pub const fn cleanup(&self) -> &AttemptCleanup {
+        &self.cleanup
+    }
+
+    /// The progress and cleanup by value, for the terminal records.
+    #[must_use]
+    pub fn into_parts(self) -> (AttemptProgress<S>, AttemptCleanup) {
+        (self.progress, self.cleanup)
+    }
+}
+
+/// An attempt reported clean and forgotten: its admission was released.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciledAttempt {
-    intent: PlannedAttemptIntent,
+    attempt_id: [u8; 16],
+    intent: Option<PlannedAttemptIntent>,
 }
 
 impl ReconciledAttempt {
-    /// The planned ownership whose resources and intent were removed.
+    /// The attempt identity.
     #[must_use]
-    pub const fn intent(&self) -> &PlannedAttemptIntent {
-        &self.intent
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
+    /// The planned ownership whose resources and intent were removed; `None`
+    /// for an attempt withdrawn before anything was committed.
+    #[must_use]
+    pub const fn intent(&self) -> Option<&PlannedAttemptIntent> {
+        self.intent.as_ref()
     }
 }
 
@@ -330,8 +383,10 @@ pub struct AttemptLaunch<F> {
     pub barrier: F,
 }
 
-/// The production steps: the systemd transport, the Local network and the
-/// capture store of the provider.
+/// The production attempt steps.
+///
+/// They use the systemd transport, the Local network and the capture store
+/// of the provider.
 pub struct SystemdAttemptSteps<'a, N, F> {
     transport: &'a SystemdTransientUnitTransport,
     network: &'a N,
@@ -451,9 +506,11 @@ impl RunState {
     }
 }
 
-/// One live attempt of a [`LiveAttemptSnapshot`], as this runtime and its
-/// durable record know it. Every identity is a claim for the sealed recovery
-/// (#349) to correlate with fresh kernel evidence, never evidence itself.
+/// One live attempt of a [`LiveAttemptSnapshot`].
+///
+/// Its identities are as this runtime and its durable record know them. Each
+/// is a claim for the sealed recovery (#349) to correlate with fresh kernel
+/// evidence, never evidence itself.
 #[derive(Debug, Eq, PartialEq)]
 pub struct LiveAttemptIdentity {
     attempt_id: [u8; 16],
@@ -513,14 +570,21 @@ impl LiveAttemptIdentity {
     }
 }
 
-/// The live attempts of a runtime fenced for recovery: the exact identity
-/// handoff to the sealed recovery (#349).
+/// The live attempts of a runtime fenced for recovery.
+///
+/// This is the exact identity handoff to the sealed recovery (#349).
 ///
 /// Only [`AttemptLifecycle::fence_and_snapshot`] creates one, once per
 /// runtime; it has no public constructor and cannot be cloned:
 ///
 /// ```compile_fail,E0451
 /// let _forged = pos_sandboxd::LiveAttemptSnapshot { attempts: Vec::new() };
+/// ```
+///
+/// ```compile_fail,E0599
+/// fn copy(snapshot: &pos_sandboxd::LiveAttemptSnapshot) -> pos_sandboxd::LiveAttemptSnapshot {
+///     pos_sandboxd::LiveAttemptSnapshot::clone(snapshot)
+/// }
 /// ```
 ///
 /// The attempts are every one admitted to this runtime and not reconciled,
@@ -540,11 +604,12 @@ impl LiveAttemptSnapshot {
 
 #[derive(Debug)]
 enum Slot<I> {
-    /// Owned by one run.
+    /// Owned by one owner; `started` once its run began to commit.
     Running {
         grant: [u8; 32],
         state: Arc<RunState>,
         ended: watch::Receiver<bool>,
+        started: bool,
     },
     /// Ended; `cleaned` is the removed intent when cleanup was proved.
     Ended {
@@ -553,12 +618,29 @@ enum Slot<I> {
         cleaned: Option<PlannedAttemptIntent>,
         _input: Option<I>,
     },
-    /// Reconciled; cancel and execute requests for the attempt are unknown
-    /// from now on, and a repeated reconcile names the same grant.
+    /// Reconciled, or withdrawn before it started (`intent` is `None`):
+    /// cancel and execute requests for the attempt are unknown from now on,
+    /// and a repeated reconcile names the same grant.
     Reconciled {
         grant: [u8; 32],
-        intent: PlannedAttemptIntent,
+        intent: Option<PlannedAttemptIntent>,
     },
+}
+
+impl<I> Slot<I> {
+    const fn is_live(&self) -> bool {
+        !matches!(self, Self::Reconciled { .. })
+    }
+}
+
+/// What a cancellation found.
+enum Signalled {
+    /// The attempt had already ended, clean.
+    Terminal,
+    /// The attempt had not started; it was withdrawn.
+    Withdrawn([u8; 32]),
+    /// The attempt runs; this wakes when it ended.
+    Running(watch::Receiver<bool>),
 }
 
 /// The live attempts of one provider runtime over one registry owner.
@@ -566,8 +648,10 @@ enum Slot<I> {
 pub struct AttemptLifecycle<I = VerifiedStagedInput> {
     registry: SystemdAttemptRegistry,
     ledger: StagingLedger,
-    // Set once by the recovery snapshot; no attempt is admitted afterwards.
+    // Set by the first recovery fence; no attempt is admitted afterwards.
     fenced: AtomicBool,
+    // Set once a recovery snapshot was handed out.
+    snapshot_taken: AtomicBool,
     attempts: Mutex<BTreeMap<[u8; 16], Slot<I>>>,
 }
 
@@ -592,6 +676,7 @@ impl<I> AttemptLifecycle<I> {
             registry,
             ledger,
             fenced: AtomicBool::new(false),
+            snapshot_taken: AtomicBool::new(false),
             attempts: Mutex::new(BTreeMap::new()),
         }
     }
@@ -620,9 +705,11 @@ impl<I> AttemptLifecycle<I> {
         request: &SandboxCancelRequest,
     ) -> Result<SandboxCancellationResult, AttemptLifecycleError> {
         let attempt_id = request.attempt_id;
-        let signalled = self.signal_cancel(attempt_id, request.agr1_digest)?;
-        let Some(mut ended) = signalled else {
-            return Ok(SandboxCancellationResult::AlreadyTerminal);
+        let mut ended = match self.signal_cancel(attempt_id, request.agr1_digest)? {
+            Signalled::Terminal => return Ok(SandboxCancellationResult::AlreadyTerminal),
+            // Nothing was committed, so nothing remains to clean up.
+            Signalled::Withdrawn(_) => return Ok(SandboxCancellationResult::CancelledAndCleaned),
+            Signalled::Running(ended) => ended,
         };
         // A dropped run ends the wait too; the slot then says what is known.
         ended.wait_for(|ended| *ended).await.ok();
@@ -646,26 +733,45 @@ impl<I> AttemptLifecycle<I> {
         )
     }
 
-    /// Signal a running attempt; `None` when it already ended.
+    /// Request the cancellation of an attempt under the attempts lock: a
+    /// started run is signalled and fenced, an unstarted one is withdrawn.
     fn signal_cancel(
         &self,
         attempt_id: [u8; 16],
         grant_digest: [u8; 32],
-    ) -> Result<Option<watch::Receiver<bool>>, AttemptLifecycleError> {
-        match lock(&self.attempts).get(&attempt_id) {
-            None | Some(Slot::Reconciled { .. }) => Err(AttemptLifecycleError::UnknownAttempt),
-            Some(Slot::Running { grant, .. } | Slot::Ended { grant, .. })
-                if *grant != grant_digest =>
-            {
-                Err(AttemptLifecycleError::GrantMismatch)
+    ) -> Result<Signalled, AttemptLifecycleError> {
+        let mut attempts = lock(&self.attempts);
+        let slot = attempts
+            .get_mut(&attempt_id)
+            .ok_or(AttemptLifecycleError::UnknownAttempt)?;
+        let signalled = match slot {
+            Slot::Reconciled { .. } => return Err(AttemptLifecycleError::UnknownAttempt),
+            Slot::Running { grant, .. } | Slot::Ended { grant, .. } if *grant != grant_digest => {
+                return Err(AttemptLifecycleError::GrantMismatch)
             }
-            Some(Slot::Ended { cleaned: None, .. }) => Err(AttemptLifecycleError::CleanupFailed),
-            Some(Slot::Ended { .. }) => Ok(None),
-            Some(Slot::Running { state, ended, .. }) => {
+            Slot::Ended { cleaned: None, .. } => return Err(AttemptLifecycleError::CleanupFailed),
+            Slot::Ended { .. } => Signalled::Terminal,
+            Slot::Running {
+                state,
+                ended,
+                started: true,
+                ..
+            } => {
                 state.cancel();
-                Ok(Some(ended.clone()))
+                Signalled::Running(ended.clone())
             }
+            Slot::Running { grant, state, .. } => {
+                state.cancel();
+                Signalled::Withdrawn(*grant)
+            }
+        };
+        if let Signalled::Withdrawn(grant) = signalled {
+            *slot = Slot::Reconciled {
+                grant,
+                intent: None,
+            };
         }
+        Ok(signalled)
     }
 
     /// Report the attempt `request` names as reconciled, release its retained
@@ -692,9 +798,11 @@ impl<I> AttemptLifecycle<I> {
         if grant != request.agr1_digest {
             return Err(AttemptLifecycleError::GrantMismatch);
         }
+        let attempt_id = request.attempt_id;
         let intent = match slot {
             Slot::Reconciled { intent, .. } => {
                 return Ok(ReconciledAttempt {
+                    attempt_id,
                     intent: intent.clone(),
                 })
             }
@@ -705,13 +813,16 @@ impl<I> AttemptLifecycle<I> {
         };
         let reconciled = Slot::Reconciled {
             grant,
-            intent: intent.clone(),
+            intent: Some(intent.clone()),
         };
         let released = std::mem::replace(slot, reconciled);
         drop(attempts);
         // The retained admission is released outside the attempts lock.
         drop(released);
-        Ok(ReconciledAttempt { intent })
+        Ok(ReconciledAttempt {
+            attempt_id,
+            intent: Some(intent),
+        })
     }
 
     /// Fence this runtime for recovery and snapshot its live attempts: the
@@ -719,22 +830,25 @@ impl<I> AttemptLifecycle<I> {
     ///
     /// Admission closes permanently first: no attempt is admitted afterwards,
     /// the registry commits no new intent and the staging ledger issues no
-    /// new grant. Every attempt admitted and not reconciled is live, whether
-    /// it still runs or ended; an ended one is included conservatively,
-    /// since its signed terminal evidence is not known here.
+    /// new grant. Every attempt that has not started is withdrawn, and every
+    /// running one is cancelled; the snapshot is taken only once each of
+    /// those ended, within its watchdog and cleanup budget, so no unit can
+    /// start or directory disappear after it. Every attempt that started and
+    /// was not reconciled is live, whether its cleanup was proved or not: its
+    /// signed terminal evidence is not known here.
     ///
     /// # Errors
-    /// [`AttemptLifecycleError::Fenced`] for every call after the first;
-    /// [`AttemptLifecycleError::TooManyLiveAttempts`] above 256 live
-    /// attempts; and a live attempt's unreadable or malformed record. Each
-    /// leaves admission closed.
-    pub fn fence_and_snapshot(&self) -> Result<LiveAttemptSnapshot, AttemptLifecycleError> {
-        let attempts = lock(&self.attempts);
-        if self.fenced.swap(true, Ordering::AcqRel) {
-            return Err(AttemptLifecycleError::Fenced);
-        }
+    /// [`AttemptLifecycleError::Fenced`] once a snapshot was handed out, and
+    /// a live attempt's unreadable or malformed record, after which a later
+    /// call may try again. Admission stays closed either way.
+    pub async fn fence_and_snapshot(&self) -> Result<LiveAttemptSnapshot, AttemptLifecycleError> {
+        let running = self.fence();
         self.quarantine();
-        let live: Vec<([u8; 16], Arc<RunState>)> = attempts
+        for mut ended in running {
+            // A dropped run ends the wait too.
+            ended.wait_for(|ended| *ended).await.ok();
+        }
+        let live: Vec<([u8; 16], Arc<RunState>)> = lock(&self.attempts)
             .iter()
             .filter_map(|(attempt_id, slot)| match slot {
                 Slot::Running { state, .. } | Slot::Ended { state, .. } => {
@@ -743,14 +857,48 @@ impl<I> AttemptLifecycle<I> {
                 Slot::Reconciled { .. } => None,
             })
             .collect();
-        drop(attempts);
-        if live.len() > MAX_LIVE_ATTEMPTS {
-            return Err(AttemptLifecycleError::TooManyLiveAttempts);
-        }
-        live.into_iter()
+        let attempts = live
+            .into_iter()
             .map(|(attempt_id, state)| self.identity(attempt_id, &state))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|attempts| LiveAttemptSnapshot { attempts })
+            .collect::<Result<Vec<_>, _>>()?;
+        if self.snapshot_taken.swap(true, Ordering::AcqRel) {
+            return Err(AttemptLifecycleError::Fenced);
+        }
+        Ok(LiveAttemptSnapshot { attempts })
+    }
+
+    /// Close admission under the attempts lock, withdraw every unstarted
+    /// attempt and cancel every running one; the waits for the latter.
+    fn fence(&self) -> Vec<watch::Receiver<bool>> {
+        let mut attempts = lock(&self.attempts);
+        self.fenced.store(true, Ordering::Release);
+        let mut running = Vec::new();
+        for slot in attempts.values_mut() {
+            let withdrawn = match slot {
+                Slot::Running {
+                    state,
+                    ended,
+                    started: true,
+                    ..
+                } => {
+                    state.cancel();
+                    running.push(ended.clone());
+                    None
+                }
+                Slot::Running { grant, state, .. } => {
+                    state.cancel();
+                    Some(*grant)
+                }
+                Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+            };
+            if let Some(grant) = withdrawn {
+                *slot = Slot::Reconciled {
+                    grant,
+                    intent: None,
+                };
+            }
+        }
+        running
     }
 
     /// One live attempt's identities, its durable record read back.
@@ -786,6 +934,10 @@ impl<I> AttemptLifecycle<I> {
         if attempts.contains_key(&attempt_id) {
             return Err(AttemptLifecycleError::AttemptKnown);
         }
+        // A recovery snapshot must be able to carry every live attempt.
+        if attempts.values().filter(|slot| slot.is_live()).count() >= MAX_LIVE_ATTEMPTS {
+            return Err(AttemptLifecycleError::TooManyLiveAttempts);
+        }
         let state = Arc::new(RunState {
             sim1_digest: input.sim1_digest(),
             cancel: AttemptCancel::new(),
@@ -798,6 +950,7 @@ impl<I> AttemptLifecycle<I> {
                 grant: input.grant_digest(),
                 state: Arc::clone(&state),
                 ended: waiting,
+                started: false,
             },
         );
         drop(attempts);
@@ -833,9 +986,9 @@ impl AttemptLifecycle {
 
 /// The exclusive owner of one admitted attempt until it ended.
 ///
-/// Dropping it before its run finished records the attempt as ended without
-/// proved cleanup; once the run started, it also quarantines the registry
-/// owner.
+/// Dropping it before its run started withdraws the attempt: nothing was
+/// committed. Dropping its run part-way records the attempt as ended without
+/// proved cleanup and quarantines the lifecycle.
 #[derive(Debug)]
 pub struct OwnedAttempt<'l, I = VerifiedStagedInput> {
     claim: Claim<'l, I>,
@@ -856,9 +1009,25 @@ struct Claim<'l, I> {
 }
 
 impl<I> Claim<'_, I> {
-    /// Record the attempt as ended, retaining `input` until reconciliation;
-    /// then wake every waiting cancellation.
-    fn end(&mut self, input: Option<I>, cleaned: Option<PlannedAttemptIntent>) {
+    /// Mark the run started, before its first commit; `false` when the
+    /// attempt was withdrawn first. A withdrawn claim has nothing to record.
+    fn begin(&mut self) -> bool {
+        let began = match lock(&self.lifecycle.attempts).get_mut(&self.attempt_id) {
+            Some(Slot::Running { started, .. }) => {
+                *started = true;
+                true
+            }
+            _ => false,
+        };
+        self.started = began;
+        self.finished = !began;
+        began
+    }
+
+    /// Record the attempt as ended, retaining `input` until reconciliation,
+    /// then wake every waiting cancellation. Returns whether cancellation was
+    /// requested, read under the same lock that a cancellation takes.
+    fn end(&mut self, input: Option<I>, cleaned: Option<PlannedAttemptIntent>) -> bool {
         self.finished = true;
         let ended = Slot::Ended {
             grant: self.grant,
@@ -866,7 +1035,22 @@ impl<I> Claim<'_, I> {
             cleaned,
             _input: input,
         };
-        lock(&self.lifecycle.attempts).insert(self.attempt_id, ended);
+        let mut attempts = lock(&self.lifecycle.attempts);
+        let cancelled = self.state.cancel.is_requested();
+        attempts.insert(self.attempt_id, ended);
+        drop(attempts);
+        self.ended.send_replace(true);
+        cancelled
+    }
+
+    /// Forget an owner that never started: nothing was committed.
+    fn withdraw(&mut self) {
+        self.finished = true;
+        let withdrawn = Slot::Reconciled {
+            grant: self.grant,
+            intent: None,
+        };
+        lock(&self.lifecycle.attempts).insert(self.attempt_id, withdrawn);
         self.ended.send_replace(true);
     }
 }
@@ -877,8 +1061,10 @@ impl<I> Drop for Claim<'_, I> {
             if self.started {
                 // The run was abandoned: nothing about its resources is proved.
                 self.lifecycle.quarantine();
+                self.end(None, None);
+            } else {
+                self.withdraw();
             }
-            self.end(None, None);
         }
     }
 }
@@ -918,7 +1104,14 @@ impl<I> OwnedAttempt<'_, I> {
     {
         let Self { mut claim, input } = self;
         let attempt_id = input.attempt_id();
-        claim.started = true;
+        if !claim.begin() {
+            return EndedAttempt {
+                attempt_id,
+                cancelled: true,
+                progress: AttemptProgress::Withdrawn,
+                cleanup: Ok(None),
+            };
+        }
         let prepared = PlannedAttemptIntent::new(attempt_id, input.sim1_digest())
             .and_then(|intent| claim.lifecycle.registry.commit_planned(&intent))
             .and_then(|planned| input.prepare(planned));
@@ -937,13 +1130,12 @@ impl<I> OwnedAttempt<'_, I> {
         if cleaned.is_none() {
             claim.lifecycle.quarantine();
         }
-        let cancelled = claim.state.cancel.is_requested();
-        claim.end(Some(input), cleaned);
+        let cancelled = claim.end(Some(input), cleaned);
         EndedAttempt {
             attempt_id,
             cancelled,
             progress,
-            cleanup,
+            cleanup: cleanup.map(Some),
         }
     }
 }
