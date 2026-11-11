@@ -496,3 +496,56 @@ fn modeled_fault_observer_requires_retained_exit_code_and_ordered_trace() -> Tes
     }
     Ok(())
 }
+
+#[test]
+fn modeled_exit_fault_rejects_duplicate_own_exit_before_querying_handle() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let spec = fixed_competing_spec(MODEL_CASE);
+    assert!(fixture.surface.open(&spec).is_pending());
+    assert!(fixture.surface.open(&spec).is_pending());
+    assert!(matches!(fixture.surface.open(&spec), Poll::Ready(Ok(_))));
+    let sink = model
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing modeled event sink")?;
+    let _first = sink.event(NativeEvent::BrowserExited { pid: 42 });
+    let _duplicate = sink.event(NativeEvent::BrowserExited { pid: 42 });
+    let clock = TickingClock(FakeClock::start());
+    let deadline = clock.now() + Duration::from_secs(5);
+    fixture.handle = Some(Box::new(Handle {
+        code: Ok(Some(0x535)),
+        clock: clock.0.clone(),
+        advance: Duration::from_secs(6),
+    }));
+    let first = ProcessFaultMark::ReachedExit(crate::ProcessExitState {
+        generation: 1,
+        record_count: 1,
+    });
+    let before = clock.0.now();
+    let error = fixture
+        .observe_fault_with_clock(ProcessFaultTarget::Browser, first, deadline, &clock)
+        .err()
+        .map(|error| error.to_string());
+    assert_eq!(
+        error.as_deref(),
+        Some("exit event was not the unique matching callback")
+    );
+    assert_eq!(clock.0.now() - before, Duration::from_secs(1));
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.trace.borrow().is_empty());
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    drop(sink);
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+    fixture.retire(driver, Err(ERROR), None)?;
+    root.remove()
+}

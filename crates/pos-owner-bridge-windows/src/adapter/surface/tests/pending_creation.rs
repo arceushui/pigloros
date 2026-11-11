@@ -298,9 +298,10 @@ fn immediate_precontroller_failure_blocks_admission_until_recordless_retirement(
 #[test]
 fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> TestResult {
     let required = super::super::super::settings::OPTIONS;
-    for (arguments, options) in [
-        ("--unexpected", required),
+    for (case, arguments, options) in [
+        ("arguments", "--unexpected", required),
         (
+            "extensions",
             "",
             crate::EnvironmentOptions {
                 extensions: true,
@@ -308,6 +309,7 @@ fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> 
             },
         ),
         (
+            "crash reporting",
             "",
             crate::EnvironmentOptions {
                 custom_crash_reporting: false,
@@ -315,6 +317,7 @@ fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> 
             },
         ),
         (
+            "exclusive folder",
             "",
             crate::EnvironmentOptions {
                 exclusive_folder: false,
@@ -328,14 +331,21 @@ fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> 
         fixture.factory.environment_arguments.set(arguments);
         fixture.factory.environment_options.set(options);
         assert_eq!(
-            fixture.open(&selected).map_err(|error| error.error()),
+            fixture
+                .open(&selected)
+                .map_err(pos_owner_bridge::SurfaceError::error),
             Err(pos_owner_bridge::BridgeError::Unavailable(
                 pos_owner_bridge::UnavailableCode::InterfaceUnavailable,
             )),
+            "case {case}",
         );
-        assert_eq!(fixture.factory.environment_completions.get(), 1);
-        assert_eq!(count(&fixture, "create_controller"), 0);
-        assert!(!fixture.surface.idle());
+        assert_eq!(
+            fixture.factory.environment_completions.get(),
+            1,
+            "case {case}"
+        );
+        assert_eq!(count(&fixture, "create_controller"), 0, "case {case}");
+        assert!(!fixture.surface.idle(), "case {case}");
         competing_open_is_refused(&mut fixture, &competing);
         fixture.assert_no_ceremony_data();
         assert!(fixture.root.join(&selected.folder_name).is_dir());
