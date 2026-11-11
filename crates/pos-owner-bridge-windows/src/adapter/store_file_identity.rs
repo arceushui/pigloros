@@ -111,6 +111,14 @@ impl crate::Native {
             ))
         );
         drop(directory);
+        let device = File::open("NUL")?;
+        assert_eq!(
+            store_file_id(&device),
+            Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable
+            ))
+        );
+        drop(device);
         let result = Command::new("icacls.exe")
             .arg(&moved)
             .args(["/grant", "*S-1-1-0:(R)"])
