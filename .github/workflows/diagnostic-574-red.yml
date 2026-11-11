@@ -1,0 +1,12 @@
+name: diagnostic-574-red
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  public-bundle-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Run normal public bundle test target
+        run: cargo test -p pos-plugin-content --test bundle_public --all-features --locked -- --include-ignored
