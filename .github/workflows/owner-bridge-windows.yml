@@ -70,7 +70,7 @@ jobs:
             $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
           } catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
           try {
-            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored --nocapture
             $nativeResult = $LASTEXITCODE
           } finally {
             try {

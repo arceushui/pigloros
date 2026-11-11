@@ -540,6 +540,10 @@ impl Fixture {
             Ok(Err(error)) => error,
             Err(_) => "process fault fixture panicked".into(),
         };
+        super::diagnostic(format_args!(
+            "fault.drive.failed case={} error={failure}",
+            self.number
+        ));
         let result = readiness::cancel_driver(
             driver,
             &mut self.surface,
@@ -1629,6 +1633,10 @@ fn run_success_exit(
         && observations
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
+    super::diagnostic(format_args!(
+        "exit_case.before_retire case={number} driver_error={:?} fixture_error={failure:?} reached={reached:?} verified={verified} complete={complete} native_zeroed={native_zeroed}",
+        result.as_ref().err()
+    ));
     fixture.retire(driver, result, None)?;
     let actual_fault =
         inject && reached.is_some_and(|state| matches!(state, ExitBoundary::ActiveStatus(_)));

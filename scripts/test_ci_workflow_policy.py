@@ -792,6 +792,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         coverage = native["jobs"]["owner-bridge-windows"]["steps"][8]
         for before, after in (
             ("--include-ignored", "--include-ignored --skip native"),
+            (" --nocapture", ""),
             ("$nativeResult = $LASTEXITCODE", "$nativeResult = 0"),
             ("[System.IO.File]::WriteAllText($marker, 'stop')", "Write-Output 'not stopped'"),
         ):
