@@ -2080,6 +2080,8 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "process_observation=scripted native_zeroing=scripted", "process_observation=observed native_zeroing=observed"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "fresh success driver ended without result", "fresh success accepted a completed driver"),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "self.observe_fault_with_clock(target, first, deadline, &SystemClock)", "self.observe_fault_with_clock(target, first, deadline + Duration::from_secs(1), &SystemClock)"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "validate_process_failures(&observed, expected)", "Ok(())"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "verdict.validate()?;", "let _ignored = verdict.validate();"),
         (f"{SHIM}/src/ffi/process_fault/candidate_tests.rs", 'assert_eq!(calls, ["identity", "snapshot", "identity"]);', 'assert!(calls.is_empty());'),
         (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),

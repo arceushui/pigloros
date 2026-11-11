@@ -43,73 +43,67 @@ type CeremonyResult = Result<Verified, BridgeError>;
 type DriveResult = Result<CeremonyResult, Box<dyn std::error::Error>>;
 type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
 
-fn expected_process_failures(
+fn validate_process_failures(
     observed: &[crate::NativeProcessFailure],
     expected: Option<ProcessFaultTarget>,
-) -> bool {
+) -> TestResult {
     use crate::NativeProcessFailure::{BrowserExited, MainRendererExited};
-    match expected {
+    let matches = match expected {
         None => observed.is_empty(),
         Some(ProcessFaultTarget::Renderer) => observed == [MainRendererExited],
         Some(ProcessFaultTarget::Browser) => observed.is_empty() || observed == [BrowserExited],
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err("unexpected or unclassified native process failure during complete case".into())
     }
 }
 
 fn check_final_process_failures(expected: Option<ProcessFaultTarget>) -> TestResult {
     let observed = crate::Native::classified_process_failure_observations();
-    if !expected_process_failures(&observed, expected) {
-        return Err(
-            "unexpected or unclassified native process failure during complete case".into(),
-        );
-    }
-    Ok(())
+    validate_process_failures(&observed, expected)
 }
 
 #[test]
 fn final_failure_evidence_rejects_late_and_unclassified_events() {
     use crate::NativeProcessFailure::{BrowserExited, MainRendererExited, Other, Unavailable};
-    assert!(expected_process_failures(&[], None));
-    assert!(expected_process_failures(
-        &[MainRendererExited],
-        Some(ProcessFaultTarget::Renderer)
-    ));
-    assert!(expected_process_failures(
-        &[],
-        Some(ProcessFaultTarget::Browser)
-    ));
-    assert!(expected_process_failures(
-        &[BrowserExited],
-        Some(ProcessFaultTarget::Browser)
-    ));
+    assert!(validate_process_failures(&[], None).is_ok());
+    assert!(
+        validate_process_failures(&[MainRendererExited], Some(ProcessFaultTarget::Renderer))
+            .is_ok()
+    );
+    assert!(validate_process_failures(&[], Some(ProcessFaultTarget::Browser)).is_ok());
+    assert!(validate_process_failures(&[BrowserExited], Some(ProcessFaultTarget::Browser)).is_ok());
     for expected in [
         None,
         Some(ProcessFaultTarget::Renderer),
         Some(ProcessFaultTarget::Browser),
     ] {
         for late in [Other, Unavailable, BrowserExited, MainRendererExited] {
-            assert!(!expected_process_failures(
-                &[MainRendererExited, late],
-                expected
-            ));
-            assert!(!expected_process_failures(&[BrowserExited, late], expected));
+            assert!(validate_process_failures(&[MainRendererExited, late], expected).is_err());
+            assert!(validate_process_failures(&[BrowserExited, late], expected).is_err());
         }
-        assert!(!expected_process_failures(&[Other], expected));
-        assert!(!expected_process_failures(&[Unavailable], expected));
+        assert!(validate_process_failures(&[Other], expected).is_err());
+        assert!(validate_process_failures(&[Unavailable], expected).is_err());
     }
-    assert!(!expected_process_failures(&[BrowserExited], None));
-    assert!(!expected_process_failures(&[MainRendererExited], None));
-    assert!(!expected_process_failures(
-        &[],
-        Some(ProcessFaultTarget::Renderer)
-    ));
-    assert!(!expected_process_failures(
-        &[BrowserExited],
-        Some(ProcessFaultTarget::Renderer)
-    ));
-    assert!(!expected_process_failures(
-        &[MainRendererExited],
-        Some(ProcessFaultTarget::Browser)
-    ));
+    assert!(validate_process_failures(&[BrowserExited], None).is_err());
+    assert!(validate_process_failures(&[MainRendererExited], None).is_err());
+    assert!(validate_process_failures(&[], Some(ProcessFaultTarget::Renderer)).is_err());
+    assert!(
+        validate_process_failures(&[BrowserExited], Some(ProcessFaultTarget::Renderer)).is_err()
+    );
+    assert!(
+        validate_process_failures(&[MainRendererExited], Some(ProcessFaultTarget::Browser))
+            .is_err()
+    );
+    assert_eq!(
+        validate_process_failures(&[Other], None)
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("unexpected or unclassified native process failure during complete case")
+    );
 }
 
 fn fixed_competing_spec(byte: u8) -> SurfaceSpec {
@@ -1231,32 +1225,34 @@ struct ReleaseVerdict {
 }
 
 impl ReleaseVerdict {
-    fn valid(&self) -> bool {
-        if !self.complete || !self.wipe.native {
-            return false;
+    fn validate(&self) -> TestResult {
+        let valid = self.complete
+            && self.wipe.native
+            && ((self.verified && self.error.is_none())
+                || (matches!(self.mode, ReleaseMode::BrowserFault)
+                    && self.error
+                        == Some(BridgeError::Quarantine(
+                            pos_owner_bridge::QuarantineCode::ControllerCloseFailed,
+                        ))
+                    && self.wipe.request_and_prf
+                    && self.wipe.plan_if_quarantined
+                    && self.blocked
+                    && self.close.is_some_and(|close| {
+                        close.removed
+                            == Err(crate::NativeError {
+                                operation: crate::Operation::Subscription,
+                                failure: crate::Failure::CallFailed,
+                            })
+                            && close.closed.is_ok()
+                            && close.buffers_closed
+                            && !close.buffers_uncertain
+                            && close.had_controller
+                    })));
+        if valid {
+            Ok(())
+        } else {
+            Err("successful release or nonzero native reply wipe was not established".into())
         }
-        if self.verified && self.error.is_none() {
-            return true;
-        }
-        matches!(self.mode, ReleaseMode::BrowserFault)
-            && self.error
-                == Some(BridgeError::Quarantine(
-                    pos_owner_bridge::QuarantineCode::ControllerCloseFailed,
-                ))
-            && self.wipe.request_and_prf
-            && self.wipe.plan_if_quarantined
-            && self.blocked
-            && self.close.is_some_and(|close| {
-                close.removed
-                    == Err(crate::NativeError {
-                        operation: crate::Operation::Subscription,
-                        failure: crate::Failure::CallFailed,
-                    })
-                    && close.closed.is_ok()
-                    && close.buffers_closed
-                    && !close.buffers_uncertain
-                    && close.had_controller
-            })
     }
 }
 
@@ -1288,12 +1284,12 @@ fn release_verdict_requires_the_exact_observed_quarantine_evidence() {
         },
         close: Some(close),
     };
-    assert!(verdict.valid());
+    assert!(verdict.validate().is_ok());
     verdict.mode = ReleaseMode::Standard;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.mode = ReleaseMode::BrowserFault;
     verdict.close = None;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(CloseObservation {
         closed: Err(crate::NativeError {
             operation: crate::Operation::Controller,
@@ -1301,47 +1297,85 @@ fn release_verdict_requires_the_exact_observed_quarantine_evidence() {
         }),
         ..close
     });
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(CloseObservation {
         removed: Ok(()),
         ..close
     });
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(CloseObservation {
         buffers_uncertain: true,
         ..close
     });
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(CloseObservation {
         buffers_closed: false,
         ..close
     });
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(CloseObservation {
         had_controller: false,
         ..close
     });
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.close = Some(close);
     verdict.complete = false;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.complete = true;
     verdict.wipe.request_and_prf = false;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.wipe.request_and_prf = true;
     verdict.wipe.plan_if_quarantined = false;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.wipe.plan_if_quarantined = true;
     verdict.wipe.native = false;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.wipe.native = true;
     verdict.blocked = false;
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
     verdict.blocked = true;
     verdict.error = Some(BridgeError::Quarantine(
         pos_owner_bridge::QuarantineCode::CleanupTimeout,
     ));
-    assert!(!verdict.valid());
+    assert!(verdict.validate().is_err());
+}
+
+#[test]
+fn release_verdict_requires_complete_verified_success_and_native_zeroing() {
+    let mut verdict = ReleaseVerdict {
+        mode: ReleaseMode::Standard,
+        error: None,
+        verified: true,
+        complete: true,
+        blocked: false,
+        wipe: WipeObservation {
+            request_and_prf: false,
+            plan_if_quarantined: false,
+            native: true,
+        },
+        close: None,
+    };
+    assert!(verdict.validate().is_ok());
+    verdict.complete = false;
+    assert!(verdict.validate().is_err());
+    verdict.complete = true;
+    verdict.wipe.native = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.native = true;
+    verdict.verified = false;
+    assert!(verdict.validate().is_err());
+    verdict.verified = true;
+    verdict.error = Some(BridgeError::Quarantine(
+        pos_owner_bridge::QuarantineCode::CleanupTimeout,
+    ));
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("successful release or nonzero native reply wipe was not established")
+    );
 }
 
 fn run_success_releasing(
@@ -1404,9 +1438,7 @@ fn run_success_releasing(
     if let Some(error) = failure {
         return Err(error);
     }
-    if !verdict.valid() {
-        return Err("successful release or nonzero native reply wipe was not established".into());
-    }
+    verdict.validate()?;
     reached.ok_or_else(|| "successful release point was not reached".into())
 }
 
