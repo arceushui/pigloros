@@ -126,7 +126,7 @@ fn snapshot_open_enforces_gpt_bounds_on_both_architectures() -> TestResult {
             } else {
                 Err(SelectorBoundaryError::ArtifactInvalid)
             };
-            // A local, so no match temporary changes drop order across editions.
+            // Bound to a local only for the edition-2024 drop-order lint.
             let outcome = snapshot_open(architecture, &original, &partitions, edit);
             match outcome {
                 Ok(outcome) if outcome == expected => {}
