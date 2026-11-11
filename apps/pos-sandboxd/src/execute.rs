@@ -960,7 +960,8 @@ where
 /// Serve the Local proxy. At the watchdog the unit is killed while the proxy
 /// thread is still being joined, so a slow connector cannot delay the kill.
 /// Cancellation requests a stop of the unit, which closes the adapter's end
-/// of the channel, while the join continues; the session's evidence is kept.
+/// of the channel, while the join continues until the session ends or the
+/// watchdog closes it; the session's evidence is kept.
 async fn serve_local<H, C>(
     host: &H,
     unit: &TransientServiceUnitName,

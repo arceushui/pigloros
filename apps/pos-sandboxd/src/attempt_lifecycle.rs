@@ -436,8 +436,12 @@ enum Slot<I> {
         cleaned: Option<PlannedAttemptIntent>,
         _input: Option<I>,
     },
-    /// Reconciled; requests for the attempt are unknown from now on.
-    Reconciled { intent: PlannedAttemptIntent },
+    /// Reconciled; cancel and execute requests for the attempt are unknown
+    /// from now on, and a repeated reconcile names the same grant.
+    Reconciled {
+        grant: [u8; 32],
+        intent: PlannedAttemptIntent,
+    },
 }
 
 /// The live attempts of one provider runtime over one registry owner.
@@ -464,11 +468,16 @@ impl<I> AttemptLifecycle<I> {
 
     /// Cancel the attempt `request` names, and wait for its cleanup.
     ///
+    /// An attempt that ended on its own while the request was waiting is
+    /// reported cancelled as well: cancellation outranks every other outcome
+    /// (ADR-069 §8). The wait is bounded by the attempt's watchdog and its
+    /// cleanup budget.
+    ///
     /// # Errors
     /// [`AttemptLifecycleError::UnknownAttempt`] and
     /// [`AttemptLifecycleError::GrantMismatch`] refuse a request for another
-    /// attempt or grant; [`AttemptLifecycleError::CleanupFailed`] reports a
-    /// cancelled attempt whose cleanup was not proved.
+    /// attempt or grant; [`AttemptLifecycleError::CleanupFailed`] reports an
+    /// attempt whose cleanup was not proved.
     pub async fn cancel(
         &self,
         request: &SandboxCancelRequest,
@@ -513,6 +522,7 @@ impl<I> AttemptLifecycle<I> {
             {
                 Err(AttemptLifecycleError::GrantMismatch)
             }
+            Some(Slot::Ended { cleaned: None, .. }) => Err(AttemptLifecycleError::CleanupFailed),
             Some(Slot::Ended { .. }) => Ok(None),
             Some(Slot::Running { state, ended, .. }) => {
                 state.cancel();
@@ -538,26 +548,32 @@ impl<I> AttemptLifecycle<I> {
         let slot = attempts
             .get_mut(&request.attempt_id)
             .ok_or(AttemptLifecycleError::UnknownAttempt)?;
+        let (Slot::Running { grant, .. }
+        | Slot::Ended { grant, .. }
+        | Slot::Reconciled { grant, .. }) = slot;
+        let grant = *grant;
+        if grant != request.agr1_digest {
+            return Err(AttemptLifecycleError::GrantMismatch);
+        }
         let intent = match slot {
-            Slot::Reconciled { intent } => {
+            Slot::Reconciled { intent, .. } => {
                 return Ok(ReconciledAttempt {
                     intent: intent.clone(),
                 })
-            }
-            Slot::Running { grant, .. } | Slot::Ended { grant, .. }
-                if *grant != request.agr1_digest =>
-            {
-                return Err(AttemptLifecycleError::GrantMismatch)
             }
             Slot::Running { .. } => return Err(AttemptLifecycleError::AttemptActive),
             Slot::Ended { cleaned, .. } => cleaned
                 .clone()
                 .ok_or(AttemptLifecycleError::CleanupFailed)?,
         };
-        // Replacing the ended slot releases its retained admission.
-        *slot = Slot::Reconciled {
+        let reconciled = Slot::Reconciled {
+            grant,
             intent: intent.clone(),
         };
+        let released = std::mem::replace(slot, reconciled);
+        drop(attempts);
+        // The retained admission is released outside the attempts lock.
+        drop(released);
         Ok(ReconciledAttempt { intent })
     }
 }
@@ -590,6 +606,7 @@ impl<I: AdmittedInput> AttemptLifecycle<I> {
                 grant: input.grant_digest(),
                 state,
                 ended,
+                started: false,
                 finished: false,
             },
             input,
@@ -614,8 +631,9 @@ impl AttemptLifecycle {
 
 /// The exclusive owner of one admitted attempt until it ended.
 ///
-/// Dropping it before its run finished quarantines the registry owner and
-/// records the attempt as ended without proved cleanup.
+/// Dropping it before its run finished records the attempt as ended without
+/// proved cleanup; once the run started, it also quarantines the registry
+/// owner.
 #[derive(Debug)]
 pub struct OwnedAttempt<'l, I = VerifiedStagedInput> {
     claim: Claim<'l, I>,
@@ -629,6 +647,9 @@ struct Claim<'l, I> {
     grant: [u8; 32],
     state: Arc<RunState>,
     ended: watch::Sender<bool>,
+    // Set before the first registry commit; an owner dropped earlier left
+    // nothing behind.
+    started: bool,
     finished: bool,
 }
 
@@ -650,8 +671,10 @@ impl<I> Claim<'_, I> {
 impl<I> Drop for Claim<'_, I> {
     fn drop(&mut self) {
         if !self.finished {
-            // The run was abandoned: nothing about its resources is proved.
-            self.lifecycle.registry.quarantine();
+            if self.started {
+                // The run was abandoned: nothing about its resources is proved.
+                self.lifecycle.registry.quarantine();
+            }
             self.end(None, None);
         }
     }
@@ -688,6 +711,7 @@ impl<I: AdmittedInput> OwnedAttempt<'_, I> {
     ) -> EndedAttempt<S::Started> {
         let Self { mut claim, input } = self;
         let attempt_id = input.attempt_id();
+        claim.started = true;
         let prepared = PlannedAttemptIntent::new(attempt_id, input.sim1_digest())
             .and_then(|intent| claim.lifecycle.registry.commit_planned(&intent))
             .and_then(|planned| input.prepare(planned));
