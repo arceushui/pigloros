@@ -144,6 +144,12 @@ pub(super) fn navigation(args: &ICoreWebView2NavigationStartingEventArgs) -> Res
 }
 
 impl crate::Native {
+    pub(crate) fn model_main_renderer_exit() {
+        PROCESS_FAILURES.with(|failures| {
+            push_observation(failures, crate::NativeProcessFailure::MainRendererExited);
+        });
+    }
+
     pub(crate) fn reset_process_failure_observations() {
         PROCESS_FAILURES.with(|failures| failures.borrow_mut().clear());
         RENDERER_STATES.with(|states| states.borrow_mut().clear());

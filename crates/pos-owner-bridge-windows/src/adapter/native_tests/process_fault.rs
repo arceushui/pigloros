@@ -1138,7 +1138,18 @@ impl Fixture {
     }
 
     fn observe_recordless(&mut self, browser: pos_owner_bridge::ProcessIdentity) -> TestResult {
+        self.observe_recordless_with_clock(browser, &SystemClock)
+    }
+
+    fn observe_recordless_with_clock(
+        &mut self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         loop {
+            if clock.now() >= self.deadline {
+                return Err("recordless browser exit timed out".into());
+            }
             if let Some(event) = self
                 .surface
                 .recordless_fault_event()
@@ -1152,6 +1163,9 @@ impl Fixture {
                     .exit_code()
                     .map_err(|()| "recordless exit query failed")?
                     .ok_or("recordless process exit pending")?;
+                if clock.now() >= self.deadline {
+                    return Err("recordless browser exit timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -1172,9 +1186,6 @@ impl Fixture {
                 }
                 self.evidence_complete = true;
                 return Ok(());
-            }
-            if Instant::now() >= self.deadline {
-                return Err("recordless browser exit timed out".into());
             }
             readiness::pump(&self.surface)?;
         }
@@ -2070,7 +2081,7 @@ impl Fixture {
                             .inject_posted_empty_fault(target, seal)
                             .map_err(|()| "empty-reply owned fault refused")?,
                     );
-                    self.observe_fault(target)?;
+                    self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
                 } else {
                     self.evidence_complete = true;
                 }
@@ -2718,7 +2729,7 @@ impl Fixture {
                             .inject_posted_retry_fault(target, point, seal)
                             .map_err(|()| "retry empty-reply owned fault refused")?,
                     );
-                    self.observe_fault(target)?;
+                    self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
                 } else {
                     self.evidence_complete = true;
                 }
@@ -2821,7 +2832,18 @@ impl ConsumingPort<'_> {
     }
 
     fn observe_consuming(&self, state: ProcessFaultState) -> TestResult {
+        self.observe_consuming_with_clock(state, &SystemClock)
+    }
+
+    fn observe_consuming_with_clock(
+        &self,
+        state: ProcessFaultState,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         loop {
+            if clock.now() >= self.deadline {
+                return Err("consuming event timed out".into());
+            }
             if let Some(event) = self
                 .inner
                 .borrow()
@@ -2835,6 +2857,9 @@ impl ConsumingPort<'_> {
                     .exit_code()
                     .map_err(|()| "consuming exit query failed")?
                     .ok_or("consuming exit still pending")?;
+                if clock.now() >= self.deadline {
+                    return Err("consuming event timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -2854,9 +2879,6 @@ impl ConsumingPort<'_> {
                     return Err("consuming fault evidence incomplete".into());
                 }
                 return Ok(());
-            }
-            if Instant::now() >= self.deadline {
-                return Err("consuming event timed out".into());
             }
             readiness::pump(&self.inner.borrow())?;
         }
@@ -3256,7 +3278,19 @@ impl BeforeRecordStore<'_, '_> {
         browser: pos_owner_bridge::ProcessIdentity,
         first: ProcessFaultMark,
     ) -> TestResult {
+        self.observe_before_record_with_clock(browser, first, &SystemClock)
+    }
+
+    fn observe_before_record_with_clock(
+        &self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        first: ProcessFaultMark,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         loop {
+            if clock.now() >= self.deadline {
+                return Err("pre-record browser exit timed out".into());
+            }
             if let Some(event) = self
                 .surface
                 .borrow()
@@ -3271,6 +3305,9 @@ impl BeforeRecordStore<'_, '_> {
                     .exit_code()
                     .map_err(|()| "pre-record exit query failed")?
                     .ok_or("pre-record process exit pending")?;
+                if clock.now() >= self.deadline {
+                    return Err("pre-record browser exit timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -3294,9 +3331,6 @@ impl BeforeRecordStore<'_, '_> {
                     return Err("pre-record fault evidence incomplete".into());
                 }
                 return Ok(());
-            }
-            if Instant::now() >= self.deadline {
-                return Err("pre-record browser exit timed out".into());
             }
             readiness::pump(&self.surface.borrow())?;
         }
@@ -3634,7 +3668,18 @@ impl Fixture {
     }
 
     fn observe_early_renderer(&mut self, first: ProcessFaultMark) -> TestResult {
+        self.observe_early_renderer_with_clock(first, &SystemClock)
+    }
+
+    fn observe_early_renderer_with_clock(
+        &mut self,
+        first: ProcessFaultMark,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         loop {
+            if clock.now() >= self.deadline {
+                return Err("early renderer event timed out".into());
+            }
             if let Some(event) = self
                 .surface
                 .posted_fault_event(ProcessFaultTarget::Renderer)
@@ -3649,6 +3694,9 @@ impl Fixture {
                     .exit_code()
                     .map_err(|()| "early renderer exit query failed")?
                     .ok_or("early renderer exit pending")?;
+                if clock.now() >= self.deadline {
+                    return Err("early renderer event timed out".into());
+                }
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
@@ -3666,9 +3714,6 @@ impl Fixture {
                 }
                 self.evidence_complete = true;
                 return Ok(());
-            }
-            if Instant::now() >= self.deadline {
-                return Err("early renderer event timed out".into());
             }
             readiness::pump(&self.surface)?;
         }

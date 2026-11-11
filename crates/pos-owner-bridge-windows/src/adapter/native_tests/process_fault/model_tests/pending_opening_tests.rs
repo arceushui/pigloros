@@ -344,3 +344,43 @@ fn modeled_pending_observer_preserves_pump_failures_before_exit_or_completion() 
     }
     Ok(())
 }
+
+#[test]
+fn modeled_recordless_observer_enforces_deadline_before_event_and_after_query() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for (at_boundary, advance, accepted) in [
+        (false, Duration::ZERO, true),
+        (true, Duration::ZERO, false),
+        (false, Duration::from_secs(6), false),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, clock) = pending(&root)?;
+        exit(&model)?;
+        fixture.trace.borrow_mut().clear();
+        fixture.trace.borrow_mut().extend([
+            ProcessFaultMark::RecordlessOpening {
+                generation: 1,
+                record_count: 0,
+            },
+            ProcessFaultMark::Selected(BROWSER),
+            ProcessFaultMark::TerminationCall,
+        ]);
+        fixture.handle = Some(Box::new(Handle {
+            code: Ok(Some(0x535)),
+            clock: clock.0.clone(),
+            advance,
+        }));
+        fixture.deadline = clock.0.now()
+            + if at_boundary {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(5)
+            };
+        let result = fixture.observe_recordless_with_clock(BROWSER, &clock);
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(fixture.evidence_complete, accepted);
+        assert_eq!(fixture.trace.borrow().len(), if accepted { 5 } else { 3 });
+        retire(root, fixture, &model)?;
+    }
+    Ok(())
+}
