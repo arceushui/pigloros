@@ -554,22 +554,42 @@ fn modeled_exit_fault_rejects_duplicate_own_exit_before_querying_handle() -> Tes
 fn modeled_exit_control_requires_unique_callback_zero_status_and_live_deadline() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     for (case, status, duplicate, expired, expected) in [
-        ("matching", 0, false, false, None),
+        ("matching", Ok(Some(0)), false, false, None),
         (
             "nonzero",
-            1,
+            Ok(Some(1)),
             false,
             false,
             Some("control exit code was not zero"),
         ),
         (
             "duplicate",
-            0,
+            Ok(Some(0)),
             true,
             false,
             Some("control exit was not the unique matching callback"),
         ),
-        ("expired", 0, false, true, Some("control exit timed out")),
+        (
+            "expired",
+            Ok(Some(0)),
+            false,
+            true,
+            Some("control exit timed out"),
+        ),
+        (
+            "query failed",
+            Err(()),
+            false,
+            false,
+            Some("control exit query failed"),
+        ),
+        (
+            "status pending",
+            Ok(None),
+            false,
+            false,
+            Some("control exit code was not zero"),
+        ),
     ] {
         let root = FixtureRoot::new()?;
         let (mut fixture, model) = fixture(&root)?;
@@ -590,7 +610,7 @@ fn modeled_exit_control_requires_unique_callback_zero_status_and_live_deadline()
             let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
         }
         fixture.handle = Some(Box::new(Handle {
-            code: Ok(Some(status)),
+            code: status,
             clock: FakeClock::start(),
             advance: Duration::ZERO,
         }));
