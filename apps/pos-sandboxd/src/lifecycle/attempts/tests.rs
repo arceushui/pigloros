@@ -43,6 +43,9 @@ mod cases {
         activation: Activation,
         // A staging reservation the admission holds until it is released.
         charge: Option<crate::StagingCharge>,
+        // A run whose cancellation is requested while its directory is
+        // prepared, after it started and before anything can be fenced.
+        cancel_while_preparing: Option<Arc<std::sync::OnceLock<Arc<RunState>>>>,
     }
 
     impl FakeInput {
@@ -53,6 +56,7 @@ mod cases {
                 sim1: SIM1,
                 activation: Activation::Released,
                 charge: None,
+                cancel_while_preparing: None,
             }
         }
 
@@ -110,6 +114,13 @@ mod cases {
             &self,
             planned: CommittedPlannedAttempt,
         ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
+            if let Some(state) = self
+                .cancel_while_preparing
+                .as_ref()
+                .and_then(|state| state.get())
+            {
+                state.cancel();
+            }
             planned.prepare_fixture_directory()
         }
 
@@ -554,14 +565,21 @@ mod cases {
         let fixture = manager(1).await?;
         let calls = fixture.calls();
         let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-        let owned = runtime.lifecycle.admit_input(FakeInput::new(1))?;
-        // The cancellation is requested before the run prepares anything.
-        let request = cancel_request(1, grant(1));
-        let (cancelled, ended) = tokio::join!(
-            runtime.lifecycle.cancel(&request),
-            Box::pin(owned.run_with(&steps, (), budget()?))
-        );
-        assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
+        let hook = Arc::new(std::sync::OnceLock::new());
+        let mut input = FakeInput::new(1);
+        input.cancel_while_preparing = Some(Arc::clone(&hook));
+        let owned = runtime.lifecycle.admit_input(input)?;
+        let state = lock(&runtime.lifecycle.attempts)
+            .get(&[1; 16])
+            .and_then(|slot| match slot {
+                Slot::Running { state, .. } => Some(Arc::clone(state)),
+                Slot::Ended { .. } | Slot::Reconciled { .. } => None,
+            });
+        hook.set(state.ok_or("no running slot")?)
+            .map_err(|_| "hook already set")?;
+        // The cancellation lands after the run started, before its directory
+        // could be fenced: the run sees it before activating anything.
+        let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
         assert!(ended.cancelled());
         assert!(matches!(
             ended.progress(),
