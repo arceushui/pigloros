@@ -1443,6 +1443,41 @@ fn run_success_releasing(
     reached.ok_or_else(|| "successful release point was not reached".into())
 }
 
+#[test]
+fn native_release_cutpoint_uses_release_window_after_fixture_readiness_ceiling() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let root = FixtureRoot::new()?;
+    crate::Native::reset_process_failure_observations();
+    let number = 0xe0;
+    let mut fixture = Fixture::new(
+        Path::new(&runtime),
+        &root.0,
+        number,
+        FixtureProfile::SuccessfulGetReleaseDelay,
+    )?;
+    // Surface retains its original readiness deadline. Only the unrelated
+    // fixture-wide ceiling is expired to exercise a later release cutpoint.
+    fixture.deadline = Instant::now();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_success_releasing(&mut driver, ProcessFaultTarget::Browser, false)
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let reached = fixture.reached;
+    let complete = fixture.evidence_complete;
+    let verified = result.is_ok() && has_synthetic_success_prf(&driver);
+    fixture.retire(driver, result, None)?;
+    root.remove()?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    assert!(verified && complete);
+    assert!(reached.is_some());
+    Ok(())
+}
+
 impl Fixture {
     fn drive_success_exit(
         &mut self,
