@@ -8,6 +8,7 @@ on:
       - rust-toolchain.toml
       - crates/pos-reference/**
       - scripts/measure_sim1_proof_heap.py
+      - scripts/prepare-ubuntu-package-mirror.sh
       - .github/workflows/sim1-proof-risk.yml
   workflow_dispatch:
 

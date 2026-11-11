@@ -493,8 +493,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(prefix, "#!/usr/bin/env bash\nset -euo pipefail\n")
         self.assertEqual(separator, "\nsudo ")
         expressions = [
-            "s|mirror+file:/etc/apt/apt-mirrors.txt|https://mirrors.edge.kernel.org/ubuntu|g",
-            "s|mirror+file:/etc/apt/apt-security-mirrors.txt|https://mirrors.edge.kernel.org/ubuntu|g",
+            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
+            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
         ]
         arguments = shlex.split(command.replace("\\\n", ""))
         self.assertEqual(arguments, [
@@ -509,15 +509,21 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "Suites: noble-security\nComponents: main universe\n"
             "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
             "URIs: https://packages.microsoft.com/ubuntu/24.04/prod\n"
+            "# URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "X-Notes: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
         )
         completed = subprocess.run(
             ["sed", "-e", expressions[0], "-e", expressions[1]],
             input=original, text=True, capture_output=True, check=True,
         )
         expected = original.replace(
-            "mirror+file:/etc/apt/apt-mirrors.txt", "https://mirrors.edge.kernel.org/ubuntu",
+            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
+            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
         ).replace(
-            "mirror+file:/etc/apt/apt-security-mirrors.txt", "https://mirrors.edge.kernel.org/ubuntu",
+            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
+            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
         )
         self.assertEqual(completed.stdout, expected)
 
@@ -534,6 +540,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                         self.assertLess(run.index(prepare), run.index("sudo apt-get"))
                         installers.append(step["name"])
         self.assertEqual(len(installers), 6)
+        paths = workflow_triggers(load_workflow(
+            CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml"),
+        ))["pull_request"]["paths"]
+        self.assertIn("scripts/prepare-ubuntu-package-mirror.sh", paths)
 
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
