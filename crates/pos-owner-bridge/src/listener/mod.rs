@@ -172,17 +172,18 @@ struct Observations {
 struct DiagnosticTrace {
     case: u64,
     origin: Instant,
-    events: Vec<(&'static str, Option<Duration>, Option<Duration>)>,
+    events: Vec<(usize, &'static str, Option<Duration>, Option<Duration>)>,
     overflow: bool,
 }
 
 #[cfg(feature = "test-support")]
 impl Observations {
-    fn stamp(&self, stage: &'static str, accepted: Instant, at: Instant) {
+    fn stamp(&self, id: usize, stage: &'static str, accepted: Instant, at: Instant) {
         if let Ok(mut trace) = self.trace.lock() {
             if let Some(trace) = trace.as_mut() {
                 if trace.events.len() < 32 {
                     trace.events.push((
+                        id,
                         stage,
                         accepted.checked_duration_since(trace.origin),
                         at.checked_duration_since(trace.origin),
@@ -224,6 +225,8 @@ struct SlotGuard {
     shared: Arc<Shared>,
     #[cfg(feature = "test-support")]
     accepted: bool,
+    #[cfg(feature = "test-support")]
+    trace_id: usize,
 }
 
 impl SlotGuard {
@@ -232,6 +235,8 @@ impl SlotGuard {
             shared: Arc::clone(shared),
             #[cfg(feature = "test-support")]
             accepted: false,
+            #[cfg(feature = "test-support")]
+            trace_id: 0,
         })
     }
 }
@@ -263,9 +268,17 @@ fn dispatch(
 ) {
     let context = Arc::clone(context);
     let work: Work = Box::new(move || {
+        #[cfg(feature = "test-support")]
+        let trace_id = slot.trace_id;
         let _slot = slot;
         if stream.set_nonblocking(false).is_ok() {
-            serve_connection(stream, accepted_at, &context);
+            serve_connection(
+                stream,
+                accepted_at,
+                &context,
+                #[cfg(feature = "test-support")]
+                trace_id,
+            );
         }
     });
     // A failed spawn has already dropped the work, so there is nothing further to do.
@@ -333,11 +346,15 @@ fn accept_loop(
             let accepted_at = Instant::now();
             #[cfg(feature = "test-support")]
             {
+                slot.accepted = true;
+                slot.trace_id = shared
+                    .observations
+                    .accepted
+                    .fetch_add(1, Ordering::SeqCst)
+                    .wrapping_add(1);
                 shared
                     .observations
-                    .stamp("accept", accepted_at, accepted_at);
-                slot.accepted = true;
-                shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
+                    .stamp(slot.trace_id, "accept", accepted_at, accepted_at);
                 shared.observations.handling.fetch_add(1, Ordering::SeqCst);
             }
             dispatch(stream, accepted_at, slot, context, spawn_thread);

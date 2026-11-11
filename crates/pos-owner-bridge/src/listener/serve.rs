@@ -206,6 +206,7 @@ pub(super) fn serve_connection(
     mut stream: TcpStream,
     accepted_at: Instant,
     context: &ServeContext,
+    #[cfg(feature = "test-support")] trace_id: usize,
 ) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
     let outcome = read_request(
@@ -218,7 +219,7 @@ pub(super) fn serve_connection(
             {
                 context
                     .observations
-                    .stamp("first-byte", accepted_at, Instant::now());
+                    .stamp(trace_id, "first-byte", accepted_at, Instant::now());
                 context
                     .received
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -230,15 +231,15 @@ pub(super) fn serve_connection(
             let observations = &context.observations;
             let counter = match reason {
                 SilentReason::Eof => {
-                    observations.stamp("silent-eof", accepted_at, Instant::now());
+                    observations.stamp(trace_id, "silent-eof", accepted_at, Instant::now());
                     &observations.silent_eof
                 }
                 SilentReason::Timeout => {
-                    observations.stamp("silent-timeout", accepted_at, Instant::now());
+                    observations.stamp(trace_id, "silent-timeout", accepted_at, Instant::now());
                     &observations.silent_timeout
                 }
                 SilentReason::Other => {
-                    observations.stamp("silent-error", accepted_at, Instant::now());
+                    observations.stamp(trace_id, "silent-error", accepted_at, Instant::now());
                     &observations.silent_error
                 }
             };
@@ -254,7 +255,7 @@ pub(super) fn serve_connection(
         };
         context
             .observations
-            .stamp(stage, accepted_at, Instant::now());
+            .stamp(trace_id, stage, accepted_at, Instant::now());
         let counter = match outcome {
             ReadOutcome::Silent => &context.observations.silent,
             ReadOutcome::Complete(_) => &context.observations.complete,
