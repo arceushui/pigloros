@@ -60,4 +60,3 @@ jobs:
         run: bash scripts/verify-conformance-fixtures.sh
       - name: Exercise conformance fixture rejection boundaries
         run: bash scripts/test-conformance-fixture-validation.sh
-
