@@ -154,12 +154,16 @@ fn observe_case(
     keeper: &mut QuarantineKeeper,
     folder: &Path,
     keeper_held: &std::rc::Rc<std::cell::Cell<bool>>,
-    (refused, wiped, native_wiped): (bool, bool, bool),
+    (refused, wiped, observations): (bool, bool, &[crate::NativeZeroObservation]),
     target: ProcessFaultTarget,
     inject: bool,
 ) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
+    let native_wiped = native_zeroing_observed(observations);
     if !refused || !wiped || !native_wiped {
-        return Err("quarantine mappings or secrets were not wiped".into());
+        return Err(format!(
+            "quarantine mappings or secrets were not wiped: case={} refused={refused} wiped={wiped} native_wiped={native_wiped} observations={observations:?}",
+            fixture.number
+        ).into());
     }
     let state = fixture
         .surface
@@ -253,7 +257,6 @@ fn run_case(
         && driver.prf().iter().all(|byte| *byte == 0)
         && driver.plan_secrets_clear();
     let observations = crate::Native::take_native_zero_observations();
-    let native_wiped = native_zeroing_observed(&observations);
     let folder = root
         .join(format!("process-fault-{number}"))
         .join(pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
@@ -285,7 +288,7 @@ fn run_case(
             &mut keeper,
             &folder,
             &keeper_held,
-            (refused, wiped, native_wiped),
+            (refused, wiped, &observations),
             target,
             inject,
         )
@@ -332,6 +335,73 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
 mod tests {
     use super::*;
     use crate::NativeEvent;
+
+    #[test]
+    fn modeled_quarantine_wipe_refusals_identify_the_failed_observation() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = super::super::FixtureRoot::new()?;
+        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let observations = [
+            crate::NativeZeroObservation {
+                slot: crate::BufferSlot::Request,
+                before_nonzero: Some(true),
+                zeroed: Some(true),
+                header_present: None,
+                header_unchanged: None,
+            },
+            crate::NativeZeroObservation {
+                slot: crate::BufferSlot::Reply,
+                before_nonzero: Some(true),
+                zeroed: Some(true),
+                header_present: Some(true),
+                header_unchanged: Some(true),
+            },
+        ];
+        let calls = model.calls.borrow().clone();
+        let mut keeper = QuarantineKeeper::new();
+        let keeper_held = std::rc::Rc::new(std::cell::Cell::new(false));
+        for (refused, wiped, observations, expected) in [
+            (
+                false,
+                true,
+                observations.as_slice(),
+                "refused=false wiped=true native_wiped=true",
+            ),
+            (
+                true,
+                false,
+                observations.as_slice(),
+                "refused=true wiped=false native_wiped=true",
+            ),
+            (
+                true,
+                true,
+                &[][..],
+                "refused=true wiped=true native_wiped=false",
+            ),
+        ] {
+            let error = observe_case(
+                &mut fixture,
+                &mut keeper,
+                &root.0,
+                &keeper_held,
+                (refused, wiped, observations),
+                ProcessFaultTarget::Browser,
+                false,
+            )
+            .err()
+            .map(|error| error.to_string());
+            let error = error.ok_or("modeled invalid wipe evidence was accepted")?;
+            assert!(error.starts_with("quarantine mappings or secrets were not wiped: case=240 "));
+            assert!(error.contains(expected));
+            assert!(error.contains("observations=["));
+            assert!(fixture.surface.idle());
+            assert!(fixture.trace.borrow().is_empty());
+            assert_eq!(*model.calls.borrow(), calls);
+        }
+        drop(fixture);
+        root.remove()
+    }
 
     #[test]
     fn modeled_quarantine_driver_done_refuses_without_native_work() -> TestResult {
