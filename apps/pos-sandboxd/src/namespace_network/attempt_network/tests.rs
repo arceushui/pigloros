@@ -567,14 +567,32 @@ fn a_quarantine_keeps_the_probes_own_failure_as_its_source() -> TestResult {
         ),
         "{probed:?}"
     );
+    // The quarantine's `source()` is the probe's `Target` failure, whose own
+    // `source()` is the host read's failure.
     let source = probed
         .as_ref()
         .err()
         .and_then(std::error::Error::source)
-        .map(ToString::to_string);
+        .ok_or("the quarantine has no source")?;
+    let target = source
+        .downcast_ref::<EgressProbeError>()
+        .or_else(|| {
+            source
+                .downcast_ref::<Box<EgressProbeError>>()
+                .map(|boxed| &**boxed)
+        })
+        .ok_or("the quarantine's source is not the probe's failure")?;
+    assert!(
+        matches!(target, EgressProbeError::Target(NetlinkError::Unexpected)),
+        "{target:?}"
+    );
     assert_eq!(
-        source.as_deref(),
-        Some("the egress probe's target could not be set up or removed")
+        source.to_string(),
+        "the egress probe's target could not be set up or removed"
+    );
+    assert_eq!(
+        source.source().map(ToString::to_string),
+        Some(NetlinkError::Unexpected.to_string())
     );
     Ok(())
 }
