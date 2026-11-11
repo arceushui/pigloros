@@ -285,7 +285,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '5dd77263ed0cdaddd230f8b812e53d12393d2eccd2f054420bdcba5c9c3270f2',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'dbbe6c051cc58c894cca9045512db69ccedf36b7d2d0a4a4e12022e79d9fc07b',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
 

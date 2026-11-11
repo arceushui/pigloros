@@ -4,7 +4,9 @@
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge::{CleanupStore, OwnerWebSurface, RequestImage};
-use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, CleanupRecordV1, OwnerBridgeControlV1};
+use pos_owner_bridge_codec::{
+    CeremonyId, CeremonyKind, CleanupRecordV1, ImagePathSha256, OwnerBridgeControlV1,
+};
 
 use super::{spec, Creation, Fixture, TestResult};
 use crate::adapter::surface::ExitBoundary;
@@ -102,26 +104,38 @@ fn fresh_success_provenance_binds_record_and_matching_exit_to_owner() -> TestRes
         .delete_record(original)
         .map_err(|_| "delete record")?;
     let selected = spec(40);
-    let wrong = CleanupRecordV1::new(
-        ceremony,
-        &selected.folder_name,
-        browser.browser_pid + 1,
-        browser.creation_filetime,
-        browser.image_path_sha256,
-    )
-    .map_err(|error| error.to_string())?;
-    let mut encoded = [0; 4096];
-    let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
-        .map_err(|error| error.to_string())?;
-    fixture
-        .store
-        .write_record(&encoded[..size])
-        .map_err(|_| "wrong record")?;
-    assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
-    fixture
-        .store
-        .delete_record(&encoded[..size])
-        .map_err(|_| "delete wrong record")?;
+    for (pid, created, image) in [
+        (
+            browser.browser_pid + 1,
+            browser.creation_filetime,
+            browser.image_path_sha256,
+        ),
+        (
+            browser.browser_pid,
+            browser.creation_filetime + 1,
+            browser.image_path_sha256,
+        ),
+        (
+            browser.browser_pid,
+            browser.creation_filetime,
+            ImagePathSha256::from_bytes([8; 32]),
+        ),
+    ] {
+        let wrong = CleanupRecordV1::new(ceremony, &selected.folder_name, pid, created, image)
+            .map_err(|error| error.to_string())?;
+        let mut encoded = [0; 4096];
+        let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
+            .map_err(|error| error.to_string())?;
+        fixture
+            .store
+            .write_record(&encoded[..size])
+            .map_err(|_| "wrong record")?;
+        assert!(fixture.surface.fresh_success_provenance(ceremony).is_err());
+        fixture
+            .store
+            .delete_record(&encoded[..size])
+            .map_err(|_| "delete wrong record")?;
+    }
     fixture
         .store
         .write_record(original)
