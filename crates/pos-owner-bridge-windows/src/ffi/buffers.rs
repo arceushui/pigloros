@@ -142,16 +142,51 @@ impl Mapping {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn all_zero_from(&self, start: usize) -> Result<bool> {
+        // The private close path supplies only its fixed 0/64 offset after
+        // mapping capacity/alignment admission; no caller-selected range enters.
+        let mut zero = true;
+        for index in start / 8..self.capacity / 8 {
+            if index == STATE_CHUNK {
+                zero &= self.state()?.load(Ordering::SeqCst) == 0;
+                zero &= self.flags()?.load(Ordering::SeqCst) == 0;
+            } else {
+                zero &= self.word64(index)?.load(Ordering::SeqCst) == 0;
+            }
+        }
+        Ok(zero)
+    }
+
+    #[cfg(test)]
+    fn header_words(&self) -> Result<[u64; 8]> {
+        let mut words = [0; 8];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = if index == STATE_CHUNK {
+                u64::from(self.state()?.load(Ordering::SeqCst))
+                    | (u64::from(self.flags()?.load(Ordering::SeqCst)) << 32)
+            } else {
+                self.word64(index)?.load(Ordering::SeqCst)
+            };
+        }
+        Ok(words)
+    }
+
     fn close(&mut self) -> Result<()> {
         if self.base.is_none() {
             return Ok(());
         }
         // Reply headers are never reset during retirement/terminal cleanup.
-        let zeroed = self.zero_from(if self.role == ControlRole::Request {
+        let start = if self.role == ControlRole::Request {
             0
         } else {
             64
-        });
+        };
+        #[cfg(test)]
+        let witness = zero_witness::before(self, start);
+        let zeroed = self.zero_from(start);
+        #[cfg(test)]
+        zero_witness::after(self, start, witness, zeroed.is_ok());
         // Even a failed Close makes pointer validity uncertain. Retain the COM
         // owner/error latch but never access this pointer again.
         self.base = None;
@@ -292,5 +327,82 @@ const fn unavailable() -> NativeError {
     NativeError {
         operation: Operation::Buffers,
         failure: Failure::CallFailed,
+    }
+}
+
+#[cfg(test)]
+mod zero_witness {
+    use super::Mapping;
+    use crate::{BufferSlot, NativeZeroObservation};
+    use pos_owner_bridge_codec::ControlRole;
+    use std::cell::RefCell;
+
+    std::thread_local! {
+        static OBSERVATIONS: RefCell<Option<Vec<NativeZeroObservation>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Before {
+        before_nonzero: Option<bool>,
+        header: Option<[u64; 8]>,
+    }
+
+    pub(super) fn before(mapping: &Mapping, start: usize) -> Option<Before> {
+        if !OBSERVATIONS.with(|observations| observations.borrow().is_some()) {
+            return None;
+        }
+        Some(Before {
+            before_nonzero: mapping.all_zero_from(start).ok().map(|zero| !zero),
+            header: if mapping.role == ControlRole::Reply {
+                mapping.header_words().ok()
+            } else {
+                None
+            },
+        })
+    }
+
+    pub(super) fn after(
+        mapping: &Mapping,
+        start: usize,
+        before: Option<Before>,
+        zero_succeeded: bool,
+    ) {
+        let Some(before) = before else {
+            return;
+        };
+        let zeroed = if zero_succeeded {
+            mapping.all_zero_from(start).ok()
+        } else {
+            None
+        };
+        let header_present = before.header.map(|old| old.iter().any(|word| *word != 0));
+        let header_unchanged = before
+            .header
+            .and_then(|old| mapping.header_words().ok().map(|new| old == new));
+        let slot = if mapping.role == ControlRole::Request {
+            BufferSlot::Request
+        } else {
+            BufferSlot::Reply
+        };
+        OBSERVATIONS.with(|observations| {
+            if let Some(observations) = observations.borrow_mut().as_mut() {
+                observations.push(NativeZeroObservation {
+                    slot,
+                    before_nonzero: before.before_nonzero,
+                    zeroed,
+                    header_present,
+                    header_unchanged,
+                });
+            }
+        });
+    }
+
+    impl crate::Native {
+        pub(crate) fn arm_native_zero_observations() {
+            OBSERVATIONS.with(|observations| *observations.borrow_mut() = Some(Vec::new()));
+        }
+
+        pub(crate) fn take_native_zero_observations() -> Vec<NativeZeroObservation> {
+            OBSERVATIONS.with(|observations| observations.borrow_mut().take().unwrap_or_default())
+        }
     }
 }

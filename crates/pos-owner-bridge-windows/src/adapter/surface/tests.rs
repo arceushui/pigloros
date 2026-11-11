@@ -19,7 +19,11 @@ use super::{RuntimeAdmission, Surface};
 use crate::{NativeEvent, NativeFactory};
 use native::{Creation, Factory};
 
-mod native;
+mod exit_boundary_tests;
+mod fault_admission;
+mod fault_states;
+pub(in crate::adapter) mod native;
+mod pending_creation;
 mod posting;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -142,7 +146,7 @@ impl Drop for Fixture {
     }
 }
 
-struct Runtime(PathBuf);
+pub(in crate::adapter) struct Runtime(pub(in crate::adapter) PathBuf);
 
 impl RuntimeAdmission for Runtime {
     fn root(&self) -> &Path {
@@ -202,6 +206,11 @@ fn outer_event_ticks_retry_failed_close_until_own_exit_without_reopening() -> Te
             fixture.surface.open(&spec(99)),
             Poll::Ready(Err(_))
         ));
+        if let Some(sink) = fixture.factory.sink.borrow().as_ref() {
+            sink.event(NativeEvent::BrowserExited { pid: 43 });
+        }
+        assert!(fixture.surface.finish().is_err());
+        assert!(!fixture.surface.idle());
         fixture.exit();
         fixture
             .surface
@@ -210,6 +219,72 @@ fn outer_event_ticks_retry_failed_close_until_own_exit_without_reopening() -> Te
         assert!(fixture.surface.idle());
     }
     Ok(())
+}
+
+#[test]
+fn reused_surface_observes_only_the_admitted_opening() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.ready()?;
+    fixture.factory.failure.set(Some("close_buffers"));
+    assert!(fixture.surface.close_controller().is_err());
+    let first = fixture
+        .surface
+        .initial_close_observation()
+        .ok_or("missing close observation")?;
+    assert!(!first.buffers_closed);
+    assert!(matches!(
+        fixture.surface.open(&spec(41)),
+        Poll::Ready(Err(_))
+    ));
+    assert_eq!(fixture.surface.initial_close_observation(), Some(first));
+    fixture.finish()?;
+    fixture
+        .open(&spec(41))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(fixture.surface.initial_close_observation(), None);
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let second = fixture
+        .surface
+        .initial_close_observation()
+        .ok_or("missing new close observation")?;
+    assert!(second.removed.is_ok());
+    assert!(second.buffers_closed);
+    fixture.exit();
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(test)]
+fn quarantined_fault_refuses_missing_state_and_unheld_keeper() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.ready()?;
+    assert!(!fixture.surface.native.preload_fault_owners_retained());
+    assert!(fixture.surface.generation.is_none());
+    assert!(fixture.store.records_now().is_empty());
+    assert!(fixture.surface.native.early_renderer_presence().is_err());
+    assert!(fixture.surface.quarantined_fault_state().is_err());
+    let before = fixture.factory.calls.borrow().clone();
+    let seal = crate::FaultSeal {
+        trace: Rc::new(std::cell::RefCell::new(Vec::new())),
+        deadline: std::time::Instant::now() + Duration::from_secs(1),
+    };
+    assert!(fixture
+        .surface
+        .inject_quarantined_fault(
+            crate::ProcessFaultTarget::Renderer,
+            seal,
+            Rc::new(std::cell::Cell::new(false)),
+        )
+        .is_err());
+    assert_eq!(*fixture.factory.calls.borrow(), before);
+    fixture.finish()
 }
 
 #[test]
@@ -271,6 +346,63 @@ fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestRes
         .finish()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     assert!(fixture.surface.idle());
+    Ok(())
+}
+
+#[test]
+fn pending_browser_observation_rechecks_controller_ownership_and_completion() -> TestResult {
+    for failure in [
+        None,
+        Some("pending-owner-after"),
+        Some("pending-callback-after"),
+    ] {
+        let mut fixture = Fixture::new(Creation::Pending)?;
+        let selected = spec(6);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        fixture.factory.failure.set(failure);
+        let observation = fixture.surface.prepare_pending_opening_browser();
+        if failure.is_none() {
+            assert!(matches!(observation, Ok(None)));
+        } else {
+            assert!(observation.is_err());
+        }
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == "create_controller")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == "pending_candidate")
+                .count(),
+            1
+        );
+        fixture.assert_no_ceremony_data();
+        fixture.factory.failure.set(None);
+        fixture.surface.abandon_opening();
+        assert!(!fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(!fixture.surface.idle());
+        fixture.factory.creation.set(Creation::CallbackFailure);
+        assert!(fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+    }
     Ok(())
 }
 

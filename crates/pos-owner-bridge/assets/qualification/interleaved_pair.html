@@ -351,7 +351,7 @@ function ownerProtocol(credentials, nativePort) {
   function deliveryPort() {
     var port = window.chrome && window.chrome.webview;
     if (!port) { return null; }
-    var done = false, first = null, held = null;
+    var done = false, first = null, held = null, waiting = [];
     return {
       releaseBuffer: function (buffer) { port.releaseBuffer(buffer); },
       addEventListener: function (name, listener) {
@@ -361,10 +361,13 @@ function ownerProtocol(credentials, nativePort) {
           if (!done && generation === first && event.additionalData.role === "reply") {
             held = event; return;
           }
-          if (!done && generation !== first && event.additionalData.role === "reply") { return; }
+          if (!done && generation !== first && event.additionalData.role === "reply") {
+            waiting.push(event); return;
+          }
           listener(event);
           if (!done && generation !== first && held && event.additionalData.role === "request") {
             done = true; var delayed = held; held = null; listener(delayed);
+            var queued = waiting; waiting = []; queued.forEach(listener);
           }
         });
       }

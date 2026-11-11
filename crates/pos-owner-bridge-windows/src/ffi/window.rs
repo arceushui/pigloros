@@ -103,6 +103,8 @@ fn register_class() -> std::result::Result<(), ()> {
 pub(super) struct Window {
     hwnd: HWND,
     pub(super) signals: Rc<WindowSignals>,
+    #[cfg(test)]
+    foreground_trace: RefCell<(Vec<usize>, usize)>,
 }
 
 pub(super) fn prepare_class() -> Result<()> {
@@ -149,7 +151,12 @@ impl Window {
                 .borrow_mut()
                 .insert(hwnd.0 as usize, Rc::downgrade(&signals))
         });
-        Ok(Self { hwnd, signals })
+        Ok(Self {
+            hwnd,
+            signals,
+            #[cfg(test)]
+            foreground_trace: RefCell::new((Vec::new(), 0)),
+        })
     }
 
     pub(super) const fn handle(&self) -> HWND {
@@ -160,28 +167,67 @@ impl Window {
         // SAFETY: live owned top-level window on this STA. This return value
         // reports prior visibility, not whether showing succeeded.
         let _previous_visibility = unsafe { ShowWindow(self.hwnd, SW_SHOWNORMAL) };
-        // SAFETY: live owned window. Foreground rights may deny the request;
-        // the caller independently verifies the actual foreground within 1s.
-        let _requested = unsafe { SetForegroundWindow(self.hwnd) };
+        let _requested = {
+            // SAFETY: live owned window. Foreground rights may deny the request;
+            // the caller independently verifies the actual foreground within 1s.
+            let requested = unsafe { SetForegroundWindow(self.hwnd) };
+            #[cfg(test)]
+            {
+                use std::io::Write as _;
+                let _written = writeln!(
+                    std::io::stderr(),
+                    "NATIVE_FOREGROUND show hwnd={:#x} requested={}",
+                    self.hwnd.0 as usize,
+                    requested.as_bool()
+                );
+                let _observed = self.foreground();
+            }
+            requested
+        };
     }
 
     pub(super) fn foreground(&self) -> bool {
         // SAFETY: a scalar observation of the current foreground HWND.
         let mut foreground = unsafe { GetForegroundWindow() };
         let mut seen = std::collections::BTreeSet::new();
+        #[cfg(test)]
+        let mut chain = vec![foreground.0 as usize];
         while !foreground.0.is_null() && seen.insert(foreground.0 as usize) {
             if foreground == self.hwnd {
+                #[cfg(test)]
+                self.trace_foreground(&chain, true);
                 return true;
             }
             // SAFETY: HWNDs are opaque identifiers checked by Windows. This
             // queries the owner chain without dereferencing process memory.
             let owner = unsafe { GetWindow(foreground, GW_OWNER) };
             let Ok(owner) = owner else {
+                #[cfg(test)]
+                self.trace_foreground(&chain, false);
                 return false;
             };
             foreground = owner;
+            #[cfg(test)]
+            chain.push(foreground.0 as usize);
         }
+        #[cfg(test)]
+        self.trace_foreground(&chain, false);
         false
+    }
+
+    #[cfg(test)]
+    fn trace_foreground(&self, chain: &[usize], matched: bool) {
+        use std::io::Write as _;
+        let mut trace = self.foreground_trace.borrow_mut();
+        if trace.0 != chain && trace.1 < 16 {
+            let _written = writeln!(
+                std::io::stderr(),
+                "NATIVE_FOREGROUND observe hwnd={:#x} chain={chain:x?} matched={matched}",
+                self.hwnd.0 as usize
+            );
+            trace.0 = chain.to_vec();
+            trace.1 += 1;
+        }
     }
 
     pub(super) fn bounds(&self) -> Result<RECT> {
@@ -243,6 +289,26 @@ impl Window {
             )
         }
         .map_err(|_| unavailable())
+    }
+
+    #[cfg(test)]
+    pub(super) fn lose_controller_parent(
+        &mut self,
+        seal: crate::ControllerParentLossSeal,
+    ) -> Result<()> {
+        let deadline = seal.into_deadline();
+        if self.hwnd.0.is_null()
+            || self.signals.destroyed.get()
+            || std::time::Instant::now() >= deadline
+        {
+            return Err(unavailable());
+        }
+        // SAFETY: the sealed caller checked the creating STA, the exact owned
+        // live parent, and an uninvoked controller callback before its deadline.
+        // Keep this Window and all session owners alive across reentrant callback.
+        unsafe { DestroyWindow(self.hwnd) }.map_err(|_| unavailable())?;
+        self.signals.destroyed.set(true);
+        Ok(())
     }
 
     pub(super) fn destroy(&mut self) -> Result<()> {
@@ -370,3 +436,6 @@ impl crate::Native {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

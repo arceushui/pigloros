@@ -14,14 +14,34 @@ import json
 import re
 from pathlib import Path
 
+from owner_bridge_webauthn_fixtures import N, ecdsa_der_signature, ecdsa_signature_values
+
 ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = ROOT / "crates/pos-owner-bridge"
 ASSETS = BRIDGE / "assets"
-PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication", "readonly_write", "readonly_control", "duplicate_request", "interleaved_pair", "delayed_delivery")
+PROFILES = (
+    "pending", "popup", "popup_receipt", "permission", "external", "navigation",
+    "download", "authentication", "readonly_write", "readonly_control",
+    "duplicate_request", "interleaved_pair", "delayed_delivery", "successful_get",
+    "successful_get_release_delay", "successful_get_writing_delay", "withheld_delivery",
+)
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
-    "permission": "navigator.geolocation.getCurrentPosition(function () {}, function () {});",
-    "external": 'window.location.href = "pigloros-qualification-denied://attempt";',
+    "permission": (
+        "var reported = false; "
+        "function report(uri) { if (!reported) { reported = true; window.location.href = uri; } } "
+        "setTimeout(function () { report(\"http://localhost:49291/permission-diag/noresult\"); }, 12000); "
+        "try { if (!window.Notification || !window.Notification.requestPermission) { report(\"http://localhost:49291/permission-diag/unavailable\"); } "
+        "else if (window.Notification.permission !== \"default\") { report(\"http://localhost:49291/permission-diag/unexpectedstate\"); } "
+        "else { window.Notification.requestPermission().then(function (state) { "
+        "if (state === \"denied\") { report(\"http://localhost:49291/permission-diag/denied\"); } "
+        "else if (state === \"default\") { report(\"http://localhost:49291/permission-diag/default\"); } "
+        "else if (state === \"granted\") { report(\"http://localhost:49291/permission-diag/unexpectedgranted\"); } "
+        "else { report(\"http://localhost:49291/permission-diag/unknown\"); } "
+        "}, function () { report(\"http://localhost:49291/permission-diag/rejected\"); }); } } "
+        "catch (_) { report(\"http://localhost:49291/permission-diag/exception\"); }"
+    ),
+    "external": 'setTimeout(function () { window.location.href = "ms-settings:privacy-location"; }, 1000);',
     "navigation": 'window.location.href = "http://localhost:49291/denied-navigation";',
 }
 
@@ -55,10 +75,13 @@ def delivery_port(profile: str) -> str:
             "          }\n"
             # Receipt must imply the declared insertion actually ran, even if
             # the SDK delivers the first reply after a complete newer pair.
-            "          if (!done && generation !== first && event.additionalData.role === \"reply\") { return; }\n"
+            "          if (!done && generation !== first && event.additionalData.role === \"reply\") {\n"
+            "            waiting.push(event); return;\n"
+            "          }\n"
             "          listener(event);\n"
             "          if (!done && generation !== first && held && event.additionalData.role === \"request\") {\n"
             "            done = true; var delayed = held; held = null; listener(delayed);\n"
+            "            var queued = waiting; waiting = []; queued.forEach(listener);\n"
             "          }\n"
         ),
         "delayed_delivery": (
@@ -70,11 +93,13 @@ def delivery_port(profile: str) -> str:
             "            }, 700);\n"
             "          }\n"
         ),
+        "withheld_delivery": "          queue.push(event);\n",
     }
     declarations = {
         "duplicate_request": "done = false",
-        "interleaved_pair": "done = false, first = null, held = null",
+        "interleaved_pair": "done = false, first = null, held = null, waiting = []",
         "delayed_delivery": "done = false, queue = []",
+        "withheld_delivery": "queue = []",
     }
     return (
         "  function deliveryPort() {\n"
@@ -93,13 +118,86 @@ def delivery_port(profile: str) -> str:
     )
 
 
+def successful_get_bootstrap(pause: str = "none") -> str:
+    """One fixed public test-key assertion, never real-authenticator PRF qualification."""
+    challenge = bytes([2]) * 32
+    client = (
+        b'{"type":"webauthn.get","challenge":"'
+        + base64.urlsafe_b64encode(challenge).rstrip(b"=")
+        + b'","origin":"http://localhost:49291"}'
+    )
+    auth = digest(b"localhost") + b"\x05\x00\x00\x00\x01"
+    r, s = ecdsa_signature_values(auth + digest(client))
+    signature = ecdsa_der_signature(r, min(s, N - s))
+    # One adversarial variant holds the next task after READY for release expiry;
+    # the other holds this getter after the core's real WRITING CAS, before bytes
+    # are encoded. Neither changes core bytes, host clocks, or normal G3 delivery.
+    stalls = {
+        "none": "",
+        "release": (
+            "          queueMicrotask(function () {\n"
+            "            var until = performance.now() + 2500;\n"
+            "            while (performance.now() < until) { /* declared release delay */ }\n"
+            "          });\n"
+        ),
+        "writing": (
+            "          var until = performance.now() + 1500;\n"
+            "          while (performance.now() < until) { /* declared writing delay */ }\n"
+        ),
+    }
+    return (
+        "(function () {\n"
+        "  function bytes(hex) {\n"
+        "    return new Uint8Array(hex.match(/../g).map(function (pair) { return parseInt(pair, 16); })).buffer;\n"
+        "  }\n"
+        "  function equal(value, hex) {\n"
+        "    var actual = new Uint8Array(value), expected = new Uint8Array(bytes(hex));\n"
+        "    return actual.length === expected.length && actual.every(function (byte, index) { return byte === expected[index]; });\n"
+        "  }\n"
+        "  function unsupported() { return Promise.reject(new DOMException(\"Sealed Get fixture\", \"NotSupportedError\")); }\n"
+        "  function get(options) {\n"
+        "    var key = options.publicKey;\n"
+        f"    if (key.rpId !== \"localhost\" || !equal(key.challenge, \"{challenge.hex()}\") ||\n"
+        "        key.allowCredentials.length !== 1 || !equal(key.allowCredentials[0].id, \"8081\") ||\n"
+        f"        !equal(key.extensions.prf.eval.first, \"{(bytes([3]) * 32).hex()}\")) {{ return unsupported(); }}\n"
+        "    return new Promise(function (resolve, reject) {\n"
+        "      function aborted() { clearTimeout(timer); reject(new DOMException(\"Fixture aborted\", \"AbortError\")); }\n"
+        "      var timer = setTimeout(function () {\n"
+        "        options.signal.removeEventListener(\"abort\", aborted);\n"
+        "        resolve({ rawId: bytes(\"8081\"), response: {\n"
+        f"          clientDataJSON: bytes(\"{client.hex()}\"),\n"
+        f"          authenticatorData: bytes(\"{auth.hex()}\"),\n"
+        f"          signature: bytes(\"{signature.hex()}\"),\n"
+        f"          userHandle: bytes(\"{(bytes([4]) * 32).hex()}\")\n"
+        "        }, getClientExtensionResults: function () {\n"
+        + stalls[pause]
+        + f"          return {{ prf: {{ results: {{ first: bytes(\"{bytes(range(0xA0, 0xC0)).hex()}\") }} }} }};\n"
+        "        } });\n"
+        "      }, 100);\n"
+        "      if (options.signal.aborted) { aborted(); }\n"
+        "      else { options.signal.addEventListener(\"abort\", aborted, { once: true }); }\n"
+        "    });\n"
+        "  }\n"
+        "  ownerProtocol({ create: unsupported, get: get },\n"
+        "    function () { return window.chrome && window.chrome.webview; });\n"
+        "})();\n"
+    )
+
+
 def fixture_bootstrap(profile: str) -> str:
+    success_modes = {
+        "successful_get": "none",
+        "successful_get_release_delay": "release",
+        "successful_get_writing_delay": "writing",
+    }
+    if profile in success_modes:
+        return successful_get_bootstrap(success_modes[profile])
     # The credential adapter only waits for abort and never invokes a real
     # authenticator. Separate native-event adapters below induce declared faults.
     trigger = TRIGGERS.get(profile, "")
     native = "function () { return window.chrome && window.chrome.webview; }"
     prelude = ""
-    if profile in ("duplicate_request", "interleaved_pair", "delayed_delivery"):
+    if profile in ("duplicate_request", "interleaved_pair", "delayed_delivery", "withheld_delivery"):
         prelude = delivery_port(profile)
         native = "deliveryPort"
     if profile in ("readonly_write", "readonly_control"):
@@ -162,7 +260,6 @@ def response_head(body: bytes, profile: str) -> str:
         "download": 'Content-Disposition: attachment; filename="denied-fixture.txt"\r\n',
         "authentication": 'WWW-Authenticate: Basic realm="sealed-owner-qualification"\r\n',
     }.get(profile, "")
-    geolocation = "(self)" if profile == "permission" else "()"
     return (
         f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
         f"Content-Length: {len(body)}\r\n{extra}"
@@ -170,7 +267,7 @@ def response_head(body: bytes, profile: str) -> str:
         "Referrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\n"
         "Cross-Origin-Resource-Policy: same-origin\r\n"
         "Permissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), "
-        f"clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation={geolocation}\r\n"
+        "clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\n"
         "Connection: close\r\n"
         "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         f"script-src 'sha256-{csp_hash(script)}'; style-src 'sha256-{csp_hash(style)}'; "

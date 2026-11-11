@@ -10,7 +10,12 @@ mod events;
 mod ledger_storage;
 #[cfg(any(test, feature = "test-support"))]
 mod nonce_ledger;
+
+#[cfg(test)]
+mod fixture_parent;
 mod process;
+#[cfg(test)]
+mod process_fault;
 mod pump;
 mod registry;
 mod session;

@@ -357,7 +357,7 @@ function ownerProtocol(credentials, nativePort) {
   }
   ownerProtocol({ create: pending, get: pending },
     function () { return window.chrome && window.chrome.webview; });
-  window.addEventListener("DOMContentLoaded", function () { window.location.href = "pigloros-qualification-denied://attempt"; }, { once: true });
+  window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { window.location.href = "ms-settings:privacy-location"; }, 1000); }, { once: true });
 })();
 
 </script>

@@ -357,7 +357,7 @@ function ownerProtocol(credentials, nativePort) {
   }
   ownerProtocol({ create: pending, get: pending },
     function () { return window.chrome && window.chrome.webview; });
-  window.addEventListener("DOMContentLoaded", function () { navigator.geolocation.getCurrentPosition(function () {}, function () {}); }, { once: true });
+  window.addEventListener("DOMContentLoaded", function () { var reported = false; function report(uri) { if (!reported) { reported = true; window.location.href = uri; } } setTimeout(function () { report("http://localhost:49291/permission-diag/noresult"); }, 12000); try { if (!window.Notification || !window.Notification.requestPermission) { report("http://localhost:49291/permission-diag/unavailable"); } else if (window.Notification.permission !== "default") { report("http://localhost:49291/permission-diag/unexpectedstate"); } else { window.Notification.requestPermission().then(function (state) { if (state === "denied") { report("http://localhost:49291/permission-diag/denied"); } else if (state === "default") { report("http://localhost:49291/permission-diag/default"); } else if (state === "granted") { report("http://localhost:49291/permission-diag/unexpectedgranted"); } else { report("http://localhost:49291/permission-diag/unknown"); } }, function () { report("http://localhost:49291/permission-diag/rejected"); }); } } catch (_) { report("http://localhost:49291/permission-diag/exception"); } }, { once: true });
 })();
 
 </script>

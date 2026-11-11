@@ -15,21 +15,33 @@ use windows::core::BOOL;
 std::thread_local! {
     static FAULT: Cell<(EventKind, ControlFault)> = const { Cell::new((EventKind::NewWindow, ControlFault::Normal)) };
     static OBSERVATIONS: RefCell<Vec<ControlObservation>> = const { RefCell::new(Vec::new()) };
-    static PROCESS_FAILURES: RefCell<Vec<Option<bool>>> = const { RefCell::new(Vec::new()) };
+    static PROCESS_FAILURES: RefCell<Vec<crate::NativeProcessFailure>> = const { RefCell::new(Vec::new()) };
     static RENDERER_STATES: RefCell<Vec<crate::RendererStateObservation>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>) {
-    let result = args.and_then(|args| {
-        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-        // SAFETY: actual ProcessFailed callback args on the invoking STA and
-        // initialized enum output. This test-only read distinguishes the exact
-        // owned view's main renderer exit from other native failure kinds.
-        unsafe { args.ProcessFailedKind(&raw mut kind) }
-            .ok()
-            .map(|()| kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED)
-    });
-    PROCESS_FAILURES.with(|failures| failures.borrow_mut().push(result));
+    use crate::NativeProcessFailure;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+    let result = args
+        .and_then(|args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            // SAFETY: actual ProcessFailed callback args on the invoking STA and
+            // initialized enum output. This test-only read distinguishes the exact
+            // owned view's main renderer exit from other native failure kinds.
+            unsafe { args.ProcessFailedKind(&raw mut kind) }
+                .ok()
+                .map(|()| match kind {
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
+                        NativeProcessFailure::MainRendererExited
+                    }
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
+                        NativeProcessFailure::BrowserExited
+                    }
+                    _ => NativeProcessFailure::Other,
+                })
+        })
+        .unwrap_or(NativeProcessFailure::Unavailable);
+    PROCESS_FAILURES.with(|failures| push_observation(failures, result));
 }
 
 pub(super) fn mode(kind: EventKind) -> ControlFault {
@@ -47,6 +59,12 @@ pub(super) fn begin(kind: EventKind) -> usize {
     OBSERVATIONS.with(|observations| {
         let mut observations = observations.borrow_mut();
         let id = observations.len();
+        if id >= MAX_OBSERVATIONS {
+            if let Some(last) = observations.last_mut() {
+                last.overflowed = true;
+            }
+            return usize::MAX;
+        }
         observations.push(ControlObservation {
             kind,
             deferred: false,
@@ -54,13 +72,19 @@ pub(super) fn begin(kind: EventKind) -> usize {
             readback: None,
             completions: 0,
             retired: false,
+            overflowed: false,
         });
         id
     })
 }
 
 pub(super) fn update(id: usize, update: impl FnOnce(&mut ControlObservation)) {
-    OBSERVATIONS.with(|observations| update(&mut observations.borrow_mut()[id]));
+    OBSERVATIONS.with(|observations| {
+        let mut observations = observations.borrow_mut();
+        if let Some(observation) = observations.get_mut(id) {
+            update(observation);
+        }
+    });
 }
 
 pub(super) fn readback(control: &Control) -> Result<bool> {
@@ -126,7 +150,7 @@ impl crate::Native {
     }
 
     pub(crate) fn record_renderer_state(state: crate::RendererStateObservation) {
-        RENDERER_STATES.with(|states| states.borrow_mut().push(state));
+        RENDERER_STATES.with(|states| push_observation(states, state));
     }
 
     pub(crate) fn renderer_state_observations() -> Vec<crate::RendererStateObservation> {
@@ -134,6 +158,23 @@ impl crate::Native {
     }
 
     pub(crate) fn process_failure_observations() -> Vec<Option<bool>> {
+        use crate::NativeProcessFailure;
+        PROCESS_FAILURES.with(|failures| {
+            failures
+                .borrow()
+                .iter()
+                .map(|failure| match failure {
+                    NativeProcessFailure::MainRendererExited => Some(true),
+                    NativeProcessFailure::BrowserExited | NativeProcessFailure::Other => {
+                        Some(false)
+                    }
+                    NativeProcessFailure::Unavailable => None,
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn classified_process_failure_observations() -> Vec<crate::NativeProcessFailure> {
         PROCESS_FAILURES.with(|failures| failures.borrow().clone())
     }
 
@@ -145,4 +186,52 @@ impl crate::Native {
     pub(crate) fn control_observations() -> Vec<ControlObservation> {
         OBSERVATIONS.with(|observations| observations.borrow().clone())
     }
+}
+
+// Process-failure and renderer-state consumers accept at most one observation.
+// Control observations can use both slots; further callbacks set an overflow
+// flag so a bounded snapshot cannot hide an extra control callback.
+const MAX_OBSERVATIONS: usize = 2;
+
+fn push_observation<T>(observations: &RefCell<Vec<T>>, value: T) {
+    let mut observations = observations.borrow_mut();
+    if observations.len() < MAX_OBSERVATIONS {
+        observations.push(value);
+    }
+}
+
+#[test]
+fn repeated_callbacks_remain_failed_evidence_without_unbounded_storage() {
+    use crate::{Native, NativeProcessFailure, RendererStateObservation};
+
+    Native::set_control_fault(EventKind::Navigation, ControlFault::Normal);
+    Native::reset_process_failure_observations();
+    let missing_state = RendererStateObservation {
+        generation: None,
+        reply_state: None,
+        record_count: None,
+    };
+    for _ in 0..10_000 {
+        let id = begin(EventKind::Navigation);
+        update(id, |record| record.attempts += 1);
+        process_failed(None);
+        Native::record_renderer_state(missing_state);
+    }
+    let controls = Native::control_observations();
+    assert_eq!(controls.len(), MAX_OBSERVATIONS);
+    assert!(controls.iter().all(|record| record.attempts == 1));
+    assert!(!controls[0].overflowed);
+    assert!(controls[1].overflowed);
+    update(1, |record| record.retired = true);
+    assert!(Native::control_observations()[1].overflowed);
+    assert_eq!(
+        Native::classified_process_failure_observations(),
+        [NativeProcessFailure::Unavailable; MAX_OBSERVATIONS]
+    );
+    assert_eq!(
+        Native::renderer_state_observations(),
+        [missing_state; MAX_OBSERVATIONS]
+    );
+    Native::set_control_fault(EventKind::Navigation, ControlFault::Normal);
+    Native::reset_process_failure_observations();
 }

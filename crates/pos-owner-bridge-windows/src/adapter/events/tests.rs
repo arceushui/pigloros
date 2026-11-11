@@ -17,6 +17,33 @@ fn start(events: &Events, uri: &str, id: u64, redirected: bool) -> NativeAction 
 }
 
 #[test]
+fn permission_diagnostic_navigations_are_closed_and_still_denied() {
+    for stage in [
+        "denied",
+        "default",
+        "unexpectedgranted",
+        "unexpectedstate",
+        "rejected",
+        "exception",
+        "unavailable",
+        "noresult",
+        "unknown",
+    ] {
+        let uri = format!("http://localhost:49291/permission-diag/{stage}");
+        assert_eq!(permission_diagnostic(&uri), Some(stage));
+        let events = Events::default();
+        events.begin();
+        assert_eq!(start(&events, OWNER_URL, 1, false), NativeAction::Allow);
+        assert_eq!(start(&events, &uri, 2, false), NativeAction::Cancel);
+        assert!(events.invalid());
+    }
+    assert_eq!(
+        permission_diagnostic("http://localhost:49291/permission-diag/private"),
+        None
+    );
+}
+
+#[test]
 fn exactly_one_initial_navigation_and_matching_document_are_admitted() {
     let events = Events::default();
     events.begin();
@@ -272,4 +299,46 @@ fn callback_storm_collapses_to_one_loss_and_resource_count_saturates() {
         NativeAction::BlockResource
     );
     assert_eq!(events.blocked_resources(), u32::MAX);
+}
+
+#[test]
+fn already_exited_boundary_requires_one_own_exit_without_other_invalid_events() {
+    let empty = Events::default();
+    empty.expect_browser(42);
+    assert!(!empty.matching_exit_at_boundary(42));
+
+    let own = Events::default();
+    own.expect_browser(42);
+    own.event(NativeEvent::BrowserExited { pid: 42 });
+    assert!(own.invalid());
+    assert!(own.matching_exit_at_boundary(42));
+    assert!(!own.matching_exit_at_boundary(43));
+    assert_eq!(
+        own.take(),
+        Some(SurfaceEvent::BrowserExited { browser_pid: 42 })
+    );
+    assert!(own.matching_exit_at_boundary(42));
+
+    let foreign = Events::default();
+    foreign.expect_browser(42);
+    foreign.event(NativeEvent::BrowserExited { pid: 43 });
+    foreign.event(NativeEvent::BrowserExited { pid: 42 });
+    assert!(!foreign.matching_exit_at_boundary(42));
+
+    let prior = Events::default();
+    prior.event(NativeEvent::BrowserExited { pid: 42 });
+    prior.expect_browser(42);
+    assert!(!prior.matching_exit_at_boundary(42));
+
+    let other = Events::default();
+    other.expect_browser(42);
+    other.controller_lost();
+    other.event(NativeEvent::BrowserExited { pid: 42 });
+    assert!(!other.matching_exit_at_boundary(42));
+
+    let duplicate = Events::default();
+    duplicate.expect_browser(42);
+    duplicate.event(NativeEvent::BrowserExited { pid: 42 });
+    duplicate.event(NativeEvent::BrowserExited { pid: 42 });
+    assert!(!duplicate.matching_exit_at_boundary(42));
 }

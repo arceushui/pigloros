@@ -15,13 +15,19 @@ fn extract(read: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> Native
     if raw.is_null() {
         return Ok(Vec::new());
     }
-    let mut units = Vec::new();
-    for index in 0..=MAX_TEXT_UNITS {
+    bounded_units(|index| {
         // SAFETY: the successful getter transfers a valid NUL-terminated COM
         // allocation retained by _memory. Read only through its first NUL or
         // the fixed extraction bound, whichever occurs first. No unbounded
         // length scan, borrowed native string, or native allocation escapes.
-        let unit = unsafe { raw.0.wrapping_add(index).read() };
+        unsafe { raw.0.wrapping_add(index).read() }
+    })
+}
+
+fn bounded_units(mut read: impl FnMut(usize) -> u16) -> NativeResult<Vec<u16>> {
+    let mut units = Vec::new();
+    for index in 0..=MAX_TEXT_UNITS {
+        let unit = read(index);
         if unit == 0 {
             return Ok(units);
         }
@@ -50,3 +56,6 @@ const fn failure(failure: Failure) -> NativeError {
         failure,
     }
 }
+
+#[cfg(test)]
+mod tests;

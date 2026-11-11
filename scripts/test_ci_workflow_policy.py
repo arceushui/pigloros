@@ -487,6 +487,64 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
+    def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
+        source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
+        prefix, separator, command = source.partition("\nsudo ")
+        self.assertEqual(prefix, "#!/usr/bin/env bash\nset -euo pipefail\n")
+        self.assertEqual(separator, "\nsudo ")
+        expressions = [
+            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
+            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
+        ]
+        arguments = shlex.split(command.replace("\\\n", ""))
+        self.assertEqual(arguments, [
+            "sed", "-i", "-e", expressions[0], "-e", expressions[1],
+            "/etc/apt/sources.list.d/ubuntu.sources",
+        ])
+        original = (
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "Suites: noble-security\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "URIs: https://packages.microsoft.com/ubuntu/24.04/prod\n"
+            "# URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "X-Notes: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
+        )
+        completed = subprocess.run(
+            ["sed", "-e", expressions[0], "-e", expressions[1]],
+            input=original, text=True, capture_output=True, check=True,
+        )
+        expected = original.replace(
+            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
+            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
+        ).replace(
+            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
+            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
+        )
+        self.assertEqual(completed.stdout, expected)
+
+    def test_ubuntu_dependency_installers_prepare_the_mirror_before_apt(self) -> None:
+        installers = []
+        for path in (CI_WORKFLOW_PATH, CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml")):
+            for job in load_workflow(path)["jobs"].values():
+                for step in job.get("steps", []):
+                    run = step.get("run", "")
+                    if "sudo apt-get" in run:
+                        lines = [line.strip() for line in run.splitlines()]
+                        prepare = "bash scripts/prepare-ubuntu-package-mirror.sh"
+                        self.assertIn(prepare, lines)
+                        self.assertLess(run.index(prepare), run.index("sudo apt-get"))
+                        installers.append(step["name"])
+        self.assertEqual(len(installers), 6)
+        paths = workflow_triggers(load_workflow(
+            CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml"),
+        ))["pull_request"]["paths"]
+        self.assertIn("scripts/prepare-ubuntu-package-mirror.sh", paths)
+
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
@@ -770,7 +828,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w.update(env={"FAKE_COVERAGE": "1"}),
             lambda w: w[True].update(pull_request_target={}),
             lambda w: w["jobs"].update(fabricate={"runs-on": "ubuntu-latest"}),
-            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 45.0}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 60.0}),
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
             lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
         ):
@@ -786,6 +844,29 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     native_policy.check(native, sources)
         with self.assertRaises(native_policy.PolicyError):
             native_policy.check(native, {})
+
+    def test_desktop_observer_cannot_change_native_evidence_or_control_processes(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        coverage = native["jobs"]["owner-bridge-windows"]["steps"][8]
+        for before, after in (
+            ("--include-ignored", "--include-ignored --skip native"),
+            (" --nocapture", ""),
+            ("$nativeResult = $LASTEXITCODE", "$nativeResult = 0"),
+            ("[System.IO.File]::WriteAllText($marker, 'stop')", "Write-Output 'not stopped'"),
+        ):
+            changed = copy.deepcopy(native)
+            run = changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"]
+            self.assertEqual(run.count(before), 1)
+            changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"] = run.replace(before, after)
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        self.assertIn("cargo llvm-cov", coverage["run"])
+        sources = native_policy.producer_sources()
+        name = "scripts/observe-owner-desktop.ps1"
+        for payload in ("Stop-Process -Id 1", "Get-CimInstance Win32_Process | Select-Object CommandLine"):
+            altered = dict(sources, **{name: sources[name] + "\n" + payload})
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(native, altered)
 
     def test_windows_owner_lane_rejects_missing_or_weakened_gates(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -821,6 +902,33 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     )
                     self.assertEqual(actual.returncode == 0, result == expected)
 
+    def test_failed_native_diagnostics_cannot_qualify_or_weaken_measurement(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for name, field, before, after in (
+            ("Export failed native coverage diagnostics", "if", "steps.coverage.outcome == 'failure'", "steps.coverage.outcome == 'success'"),
+            ("Export failed native coverage diagnostics", "run", "cargo llvm-cov report -p", "cargo llvm-cov -p"),
+            ("Export failed native coverage diagnostics", "run", "failed-measurement-diagnostic-only", "qualified"),
+            ("Export failed native coverage diagnostics", "run", "Get-ChildItem -LiteralPath $profileDirectory", "Get-ChildItem -LiteralPath $metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "Join-Path $metadata.target_directory 'llvm-cov-target'", "$metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "CARGO_LLVM_COV_TARGET_DIR", "CARGO_TARGET_DIR"),
+            ("Retain failed native coverage diagnostics", "name", "owner-windows-failed-diagnostic-", "owner-windows-lcov-"),
+            ("Retain failed native coverage diagnostics", "path", "owner-windows-failed-diagnostic/", "owner-windows.lcov"),
+        ):
+            changed = copy.deepcopy(native)
+            step = next(s for s in changed["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            target = step["with"] if field in ("name", "path") else step
+            self.assertIn(before, target[field])
+            target[field] = target[field].replace(before, after)
+            with self.subTest(name=name, field=field), self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        measurement = next(s for s in steps if s.get("id") == "coverage")
+        self.assertNotIn("continue-on-error", measurement)
+        report = next(s for s in steps if s.get("name") == "Export failed native coverage diagnostics")
+        self.assertIn("profile unavailable", report["run"])
+        self.assertIn("failure()", report["if"])
+        self.assertNotIn("--fail-under", report["run"])
+
     def test_windows_single_native_run_keeps_fixtures_and_documentation_required(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
@@ -832,6 +940,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         native_tests_at = next(index for index, step in enumerate(steps) if step.get("id") == "coverage")
         self.assertLess(runtime_at, native_tests_at)
         for name, before, after in (
+            (
+                "Measure only shim source coverage",
+                "--no-fail-fast",
+                "",
+            ),
             (
                 "Measure only shim source coverage",
                 "-- --include-ignored",
@@ -1358,6 +1471,7 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
                      'save-if': "${{ github.ref == 'refs/heads/main' }}"}},
            {'name': 'Install the musl and aarch64 cross toolchains',
             'run': 'set -euo pipefail\n'
+                   'bash scripts/prepare-ubuntu-package-mirror.sh\n'
                    'sudo apt-get update\n'
                    'sudo apt-get install --yes --no-install-recommends musl-tools '
                    'gcc-aarch64-linux-gnu libc6-dev-arm64-cross\n'},

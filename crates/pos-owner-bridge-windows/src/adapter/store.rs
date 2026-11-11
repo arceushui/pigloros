@@ -41,10 +41,10 @@ impl WindowsCleanupStore {
 
 impl CleanupStore for WindowsCleanupStore {
     fn write_record(&mut self, record: &[u8]) -> Result<(), CleanupError> {
-        self.0
-            .lock()
-            .map_err(|_| CleanupError)?
-            .write_record(record)
+        #[cfg(test)]
+        let _duration = crate::Native::readiness_span("record-publication");
+        let mut store = self.0.lock().map_err(|_| CleanupError)?;
+        store.write_record(record)
     }
 
     fn delete_record(&mut self, record: &[u8]) -> Result<(), CleanupError> {

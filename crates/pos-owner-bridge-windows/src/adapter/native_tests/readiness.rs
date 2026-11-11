@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
 use pos_owner_bridge::ceremony::plan::{CeremonyPlan, StoredGet, Verified};
 use pos_owner_bridge::fake::signer::FIXTURE_COSE_KEY;
-use pos_owner_bridge::{BridgeError, CleanupStore, LifecycleCode, QuarantineKeeper, SystemClock};
+use pos_owner_bridge::{BridgeError, CleanupStore, LifecycleCode, SystemClock};
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, CoseEs256PublicKey, OwnerUserHandle, PrfInput, WebAuthnChallenge,
 };
@@ -20,7 +20,7 @@ use pos_owner_bridge_codec::{
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
 use super::trace::{worker_stage, Trace};
-use super::TestResult;
+use super::{retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
@@ -121,6 +121,74 @@ fn run_worker(
     outcome
 }
 
+// Constant-memory observations of existing driver and STA pump calls.
+#[derive(Default)]
+struct ProgressBand {
+    step_entered: u32,
+    step_returned: u32,
+    pump_entered: u32,
+    pump_returned: u32,
+    max_step: Duration,
+    max_pump: Duration,
+    max_interstep: Duration,
+    last_step_return: Option<Instant>,
+}
+
+impl ProgressBand {
+    fn enter_step(&mut self) -> Instant {
+        let now = Instant::now();
+        self.step_entered = self.step_entered.saturating_add(1);
+        if let Some(last) = self.last_step_return {
+            self.max_interstep = self.max_interstep.max(now.saturating_duration_since(last));
+        }
+        now
+    }
+
+    fn return_step(&mut self, started: Instant) {
+        let now = Instant::now();
+        self.step_returned = self.step_returned.saturating_add(1);
+        self.max_step = self.max_step.max(now.saturating_duration_since(started));
+        self.last_step_return = Some(now);
+    }
+
+    fn enter_pump(&mut self) -> Instant {
+        self.pump_entered = self.pump_entered.saturating_add(1);
+        Instant::now()
+    }
+
+    fn return_pump(&mut self, started: Instant) {
+        self.pump_returned = self.pump_returned.saturating_add(1);
+        self.max_pump = self.max_pump.max(started.elapsed());
+    }
+}
+
+#[derive(Default)]
+struct ProgressTiming {
+    before_receipt: ProgressBand,
+    after_receipt: ProgressBand,
+}
+
+impl ProgressTiming {
+    const fn band(&mut self, received: bool) -> &mut ProgressBand {
+        if received {
+            &mut self.after_receipt
+        } else {
+            &mut self.before_receipt
+        }
+    }
+
+    fn report(&self, case: u64) {
+        let before = &self.before_receipt;
+        let after = &self.after_receipt;
+        let _logged = writeln!(std::io::stderr(),
+            "NATIVE_G3_CALL_TIMING case={case} before_step_entered={} before_step_returned={} before_pump_entered={} before_pump_returned={} before_max_step={:?} before_max_pump={:?} before_max_interstep={:?} after_step_entered={} after_step_returned={} after_pump_entered={} after_pump_returned={} after_max_step={:?} after_max_pump={:?} after_max_interstep={:?}",
+            before.step_entered, before.step_returned, before.pump_entered, before.pump_returned,
+            before.max_step, before.max_pump, before.max_interstep,
+            after.step_entered, after.step_returned, after.pump_entered, after.pump_returned,
+            after.max_step, after.max_pump, after.max_interstep);
+    }
+}
+
 fn run_ceremony(
     surface: &mut Surface,
     loopback: &mut SharedLoopback,
@@ -136,35 +204,50 @@ fn run_ceremony(
     // cancellation or browser retirement is unresolved, even after receipt.
     let _visible = acquire_foreground(surface, foreground, number)?;
     let started = Instant::now();
+    surface.begin_readiness_timing(number, started);
+    crate::Native::readiness_navigation_case(Some((number, started)));
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
     let mut driver = new_driver(id, started)?;
     let mut trace = Trace::new(number, started);
     let mut receipt = None;
+    let mut timing = ProgressTiming::default();
     // Keep both the driver and its native owners outside the unwind boundary.
     // An assertion failure must enter the same release/exit path as an error.
     let attempt = catch_unwind(AssertUnwindSafe(
         || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
             loop {
                 trace.update("active", surface, &driver, loopback);
+                let step_started = timing.band(receipt.is_some()).enter_step();
                 let step = driver.step(&mut env(surface, loopback, store));
+                timing.band(receipt.is_some()).return_step(step_started);
                 if receipt.is_none() {
                     if let Some(observed) = driver.first_receipt_at() {
                         // Observe the driver's accepted page advance, including
                         // one consumed/wiped within that same step. Host release
                         // states and invalid values cannot satisfy this oracle.
                         receipt = Some(observed);
+                        // Include the boundary between this return and the first
+                        // step entered after observing the receipt.
+                        timing.after_receipt.last_step_return =
+                            timing.before_receipt.last_step_return;
                         surface.controller_lost();
                     }
                 }
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("readiness driver finished without a result".into()),
-                    Step::Pending => pump(surface)?,
+                    Step::Pending => {
+                        let pump_started = timing.band(receipt.is_some()).enter_pump();
+                        let pumped = pump(surface);
+                        timing.band(receipt.is_some()).return_pump(pump_started);
+                        pumped?;
+                    }
                 }
             }
         },
     ));
+    timing.report(number);
     let (result, failure) = match attempt {
         Ok(Ok(result)) => (result, None),
         Ok(Err(error)) => (
@@ -178,28 +261,23 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
-    let mut keeper = QuarantineKeeper::new();
-    let reply = keeper.finish(driver, result);
-    let mut quarantined = reply.driver.is_none();
-    surface.abandon_opening();
-    // Caller timeouts do not authorize destruction. Keep the exact environment,
-    // exit handler, record, driver and STA until actual retirement succeeds.
-    while quarantined || !surface.idle() {
-        if quarantined {
-            let poll = keeper.poll(|driver| {
-                trace.update("quarantine", surface, driver, loopback);
-                driver.poll_cleanup(&mut env(surface, loopback, store))
-            });
-            quarantined = poll.remaining;
-        } else {
-            let _retired_or_retained = surface.poll_failed_open();
-        }
-        if quarantined || !surface.idle() {
-            pump_retaining(surface);
-        }
-    }
+    retirement::retire(
+        surface,
+        loopback,
+        store,
+        driver,
+        result,
+        |surface, driver, loopback| {
+            trace.update("quarantine", surface, driver, loopback);
+        },
+    );
+    surface.report_readiness_timing();
+    let resource = crate::Native::readiness_resource_snapshot();
+    let _logged = writeln!(std::io::stderr(),
+        "NATIVE_G3_RESOURCE_SNAPSHOT case={number} fields=(captured_case,entries,overflow,subscriptions) snapshot={resource:?}");
+    crate::Native::readiness_navigation_case(None);
     if let Some(error) = failure {
-        return Err(error);
+        return Err(format!("{error}; resource snapshot={resource:?}").into());
     }
     if receipt.is_none_or(|received| received >= deadline)
         || !matches!(
@@ -209,7 +287,7 @@ fn run_ceremony(
             ))
         )
     {
-        return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}").into());
+        return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}, resource snapshot={resource:?}").into());
     }
     Ok(())
 }
@@ -296,5 +374,106 @@ pub(super) fn pump_retaining(surface: &Surface) {
         // Match the host's retention behavior after a pump failure. No owner is
         // discarded merely because the event loop is temporarily unavailable.
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use pos_owner_bridge::fake::clock::FakeClock;
+    use pos_owner_bridge::listener::FixtureProfile;
+    use pos_owner_bridge::{CleanupStore, SystemClock};
+    use pos_owner_bridge_codec::CeremonyId;
+
+    use super::{
+        run_ceremony, Foreground, SharedLoopback, Surface, TestResult, WindowsCleanupStore,
+    };
+    use crate::adapter::native_tests::FixtureRoot;
+    use crate::adapter::surface::tests::native::{Creation, Factory};
+    use crate::adapter::surface::tests::Runtime;
+    use crate::NativeFactory;
+
+    #[test]
+    fn modeled_readiness_failures_retire_before_reporting_and_release_foreground() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        for (creation, failure, expected) in [
+            (Creation::Ready, Some("pump"), "Sta: CallFailed"),
+            (
+                Creation::Ready,
+                Some("panic_pump"),
+                "native readiness case panicked",
+            ),
+            (
+                Creation::SynchronousFailure,
+                None,
+                "packaged Get readiness/cancellation failed",
+            ),
+        ] {
+            let number = 10_240;
+            let _logged = writeln!(std::io::stderr(), "NATIVE_READINESS_MODEL case={number} observation=scripted qualified=false expected={expected}");
+            let root = FixtureRoot::new()?;
+            let model = Factory::new(creation, FakeClock::start());
+            model.failure.set(failure);
+            let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
+            let mut store = WindowsCleanupStore::open(root.0.clone())?;
+            let mut loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
+            let mut surface = Surface::new(
+                Rc::clone(&factory),
+                Arc::new(Runtime(root.0.clone())),
+                root.0.clone(),
+                Box::new(loopback.clone()),
+                Box::new(store.clone()),
+                Box::new(SystemClock),
+            )
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+            let foreground = Foreground::default();
+            let error = run_ceremony(
+                &mut surface,
+                &mut loopback,
+                &mut store,
+                &foreground,
+                CeremonyId::from_bytes([240; 16]),
+                number,
+            )
+            .err()
+            .map(|error| error.to_string());
+            assert!(error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(expected)));
+            assert!(surface.idle());
+            assert!(store.records()?.is_empty());
+            assert_eq!(store.folders()?.len(), 1);
+            let calls = model.calls.borrow();
+            let unsubscribe = calls
+                .iter()
+                .position(|call| *call == "unsubscribe_exit")
+                .ok_or("exit handler was not retired")?;
+            let released = calls
+                .iter()
+                .position(|call| *call == "drop_environment")
+                .ok_or("environment was not retired")?;
+            let destroyed = calls
+                .iter()
+                .position(|call| *call == "destroy_window")
+                .ok_or("window was not retired")?;
+            assert!(unsubscribe < released && released < destroyed);
+            assert!(!calls.contains(&"navigate"));
+            assert!(!calls.contains(&"create_buffers"));
+            assert!(!calls.contains(&"post"));
+            let next = foreground.request(number + 1, Instant::now())?;
+            assert!(next.is_next(Instant::now())?);
+            drop(next);
+            drop(calls);
+            drop(surface);
+            drop(loopback);
+            drop(store);
+            drop(factory);
+            root.remove()?;
+        }
+        Ok(())
     }
 }

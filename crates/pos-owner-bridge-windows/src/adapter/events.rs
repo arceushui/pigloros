@@ -23,6 +23,8 @@ pub(super) struct Events {
     content_seen: Cell<bool>,
     expected_pid: Cell<Option<u32>>,
     exited: Cell<Option<u32>>,
+    #[cfg(test)]
+    exit_boundary_invalid: Cell<bool>,
     blocked_resources: Cell<u32>,
 }
 
@@ -50,8 +52,17 @@ impl Events {
     pub(super) fn expect_browser(&self, pid: u32) {
         self.expected_pid.set(Some(pid));
         if self.exited.get() == Some(pid) {
+            #[cfg(test)]
+            self.exit_boundary_invalid.set(true);
             self.invalid.set(true);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn matching_exit_at_boundary(&self, pid: u32) -> bool {
+        !self.exit_boundary_invalid.get()
+            && self.expected_pid.get() == Some(pid)
+            && self.exited.get() == Some(pid)
     }
 
     pub(super) fn take(&self) -> Option<SurfaceEvent> {
@@ -69,6 +80,12 @@ impl Events {
         if event == SurfaceEvent::ControllerLost && self.lost_emitted.replace(true) {
             return;
         }
+        #[cfg(test)]
+        if !matches!(event, SurfaceEvent::DomContentLoaded(_))
+            && !matches!(event, SurfaceEvent::BrowserExited { browser_pid } if self.expected_pid.get() == Some(browser_pid))
+        {
+            self.exit_boundary_invalid.set(true);
+        }
         let invalid = match event {
             SurfaceEvent::DomContentLoaded(_) => false,
             SurfaceEvent::BrowserExited { browser_pid } => {
@@ -81,6 +98,8 @@ impl Events {
         }
         let mut queue = self.queue.borrow_mut();
         if queue.len() == MAX_EVENTS {
+            #[cfg(test)]
+            self.exit_boundary_invalid.set(true);
             self.invalid.set(true);
             self.lost_emitted.set(true);
             queue.clear();
@@ -95,6 +114,11 @@ impl Events {
     }
 
     fn navigation(&self, uri: &str, id: u64, redirected: bool) -> NativeAction {
+        #[cfg(test)]
+        if let Some(stage) = permission_diagnostic(uri) {
+            use std::io::Write as _;
+            let _written = writeln!(std::io::stderr(), "NATIVE_PERMISSION stage={stage}");
+        }
         if self.allow_start.replace(false)
             && self.started.get().is_none()
             && uri == OWNER_URL
@@ -145,6 +169,10 @@ impl Events {
     }
 
     fn browser_exit(&self, pid: u32) {
+        #[cfg(test)]
+        if self.exited.get().is_some() {
+            self.exit_boundary_invalid.set(true);
+        }
         if pid == 0 {
             self.controller_lost();
             return;
@@ -157,6 +185,22 @@ impl Events {
             self.exited.set(Some(pid));
         }
         self.emit(SurfaceEvent::BrowserExited { browser_pid: pid });
+    }
+}
+
+#[cfg(test)]
+fn permission_diagnostic(uri: &str) -> Option<&'static str> {
+    match uri {
+        "http://localhost:49291/permission-diag/denied" => Some("denied"),
+        "http://localhost:49291/permission-diag/default" => Some("default"),
+        "http://localhost:49291/permission-diag/unexpectedgranted" => Some("unexpectedgranted"),
+        "http://localhost:49291/permission-diag/unexpectedstate" => Some("unexpectedstate"),
+        "http://localhost:49291/permission-diag/rejected" => Some("rejected"),
+        "http://localhost:49291/permission-diag/exception" => Some("exception"),
+        "http://localhost:49291/permission-diag/unavailable" => Some("unavailable"),
+        "http://localhost:49291/permission-diag/noresult" => Some("noresult"),
+        "http://localhost:49291/permission-diag/unknown" => Some("unknown"),
+        _ => None,
     }
 }
 

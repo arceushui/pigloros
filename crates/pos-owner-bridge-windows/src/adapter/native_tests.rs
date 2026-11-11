@@ -20,12 +20,14 @@ use pos_owner_bridge_codec::{
 use super::events::Events;
 use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, StaPump};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+pub(in crate::adapter) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 mod controls;
 mod denial;
 mod foreground;
+mod process_fault;
 mod readiness;
+mod retirement;
 mod session;
 mod trace;
 
@@ -115,10 +117,10 @@ const RESOURCE_CASES: [(u8, bool, crate::ResourceDenialFixture, u32); 7] = [
     (0x26, true, crate::ResourceDenialFixture::MissingDeferral, 0),
 ];
 
-struct FixtureRoot(PathBuf);
+pub(in crate::adapter) struct FixtureRoot(pub(in crate::adapter) PathBuf);
 
 impl FixtureRoot {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub(in crate::adapter) fn new() -> Result<Self, Box<dyn std::error::Error>> {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "piglor-native-{}-{}-{}",
@@ -132,7 +134,7 @@ impl FixtureRoot {
 
     // Only successful, explicitly retired fixtures may erase recovery metadata.
     // Errors and unwinds leave the protected root available for diagnosis/restart.
-    fn remove(self) -> TestResult {
+    pub(in crate::adapter) fn remove(self) -> TestResult {
         std::fs::remove_dir_all(self.0)?;
         Ok(())
     }
@@ -366,7 +368,7 @@ impl crate::Native {
         Ok(())
     }
 
-    pub(crate) fn native_host_lifecycle() -> TestResult {
+    pub(crate) fn native_host_lifecycle(owner_window: u64) -> TestResult {
         let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
         let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
@@ -384,8 +386,7 @@ impl crate::Native {
                 // desktop profile. Exercise the same STA worker beneath that
                 // admission boundary without qualifying Server as a product OS.
                 let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
-                let loopback = super::loopback::SharedLoopback::start()?;
-                crate::WindowsOwnerHost::spawn(runtime, root.0.clone(), loopback, store.clone())?
+                crate::WindowsOwnerHost::start_fixture(runtime, root.0.clone(), store.clone())?
             }
             Err(error) => return Err(error.into()),
         };
@@ -408,7 +409,8 @@ impl crate::Native {
                 OwnerUserHandle::from_bytes([2; 32]),
                 PrfInput::from_bytes([3; 32]),
                 Instant::now(),
-            );
+            )
+            .with_test_owner_window(owner_window);
             let reply = host.run(CeremonyDriver::for_test(plan));
             assert!(matches!(
                 reply.result,
@@ -624,6 +626,13 @@ fn exercise_unacknowledged_buffers(
     let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)
         .map_err(|error| error.to_string())?
         .encode();
+    assert!(native
+        .create_buffers(
+            CeremonyKind::Create,
+            &request[..request.len() - 1],
+            &reply_header
+        )
+        .is_err());
     native.create_buffers(CeremonyKind::Create, &request, &reply_header)?;
     assert!(native
         .create_buffers(CeremonyKind::Create, &request, &reply_header)

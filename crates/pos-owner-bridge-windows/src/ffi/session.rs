@@ -1,5 +1,13 @@
 #![cfg(windows)]
 
+#[cfg(test)]
+use std::io::Write as _;
+
+#[cfg(test)]
+fn pending_opening_diagnostic(message: &'static str) {
+    let _logged_or_unavailable = writeln!(std::io::stderr(), "{message}");
+}
+
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -108,6 +116,251 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    #[cfg(test)]
+    fn retain_exit_browser(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
+        if !self.preload_fault_owners_retained()
+            || self.window.is_none()
+            || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+        {
+            return Err(());
+        }
+        let environment = self.environment_ref().map_err(|_| ())?;
+        self.denials.expect_browser(authority.browser().browser_pid);
+        super::process_fault::retain_exit_browser(&environment.raw, authority)
+    }
+
+    #[cfg(test)]
+    fn retained_exit_membership(&self, handle: &dyn crate::RetainedExitHandle) -> Result<(), ()> {
+        if !self.exit_fault_owners_retained() {
+            return Err(());
+        }
+        super::process_fault::observe_retained_exit_membership(
+            &self.environment_ref().map_err(|_| ())?.raw,
+            handle,
+        )
+    }
+
+    #[cfg(test)]
+    fn inject_process_fault(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        self.check().map_err(|_| ())?;
+        let environment = self.environment_ref().map_err(|_| ())?;
+        if !environment.subscribed() {
+            return Err(());
+        }
+        match authority.lifecycle() {
+            crate::ProcessFaultLifecycle::Quarantined => {
+                if !self.preload_fault_owners_retained()
+                    || self.window.is_none()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
+            crate::ProcessFaultLifecycle::PostedReceipt
+            | crate::ProcessFaultLifecycle::PostedEmpty
+            | crate::ProcessFaultLifecycle::PostedWriting
+            | crate::ProcessFaultLifecycle::PostedReady
+            | crate::ProcessFaultLifecycle::PostedConsuming
+            | crate::ProcessFaultLifecycle::PostedRetry(_)
+            | crate::ProcessFaultLifecycle::ReleasingSuccess => {
+                if self.controller.is_none()
+                    || self.view.is_none()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
+            crate::ProcessFaultLifecycle::AwaitingLoad
+            | crate::ProcessFaultLifecycle::Navigating
+            | crate::ProcessFaultLifecycle::BeforeRecord => {
+                if !self.preload_fault_owners_retained()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
+            crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
+            crate::ProcessFaultLifecycle::PendingOpening => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.pending_opening_owners_retained()
+                    || self.recordless_controller_completion().is_some()
+                    || self.pending_opening_browser_candidate()? != Some(authority.browser())
+                {
+                    return Err(());
+                }
+                self.denials.expect_browser(authority.browser().browser_pid);
+            }
+            crate::ProcessFaultLifecycle::RecordlessOpening => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.recordless_fault_owners_retained()
+                    || super::process_fault::browser_candidate(&environment.raw)?
+                        != authority.browser()
+                {
+                    return Err(());
+                }
+                // The exact environment subscription already exists; arm its
+                // recovery observer before the fixed fault can be invoked.
+                self.denials.expect_browser(authority.browser().browser_pid);
+            }
+        }
+        super::process_fault::inject(
+            &environment.raw,
+            authority,
+            self.buffers.as_ref(),
+            self.controller_creation.as_ref(),
+        )
+    }
+
+    #[cfg(test)]
+    fn environment_creation_completion(&self) -> Option<bool> {
+        self.check().ok()?;
+        self.environment_creation.as_ref()?.environment_succeeded()
+    }
+
+    #[cfg(test)]
+    fn early_renderer_presence(&self) -> Result<crate::RendererPresence, ()> {
+        if !self.preload_fault_owners_retained() {
+            return Err(());
+        }
+        let pid = self.browser_pid().map_err(|_| ())?;
+        let browser = super::process::inspect(pid)?.ok_or(())?.0;
+        super::process_fault::renderer_presence(
+            &self.environment_ref().map_err(|_| ())?.raw,
+            browser,
+        )
+    }
+
+    #[cfg(test)]
+    fn preload_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_none()
+            && self.controller.is_some()
+            && self.view.is_some()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn exit_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self.window.is_some()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_none()
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn lose_controller_parent(&mut self, seal: crate::ControllerParentLossSeal) -> Result<(), ()> {
+        if std::time::Instant::now() >= seal.deadline
+            || !self.pending_opening_owners_retained()
+            || self.recordless_controller_completion().is_some()
+            || !self
+                .window_ref()
+                .map_err(|_| ())?
+                .snapshot()
+                .map_err(|_| ())?
+                .exists
+        {
+            return Err(());
+        }
+        // No callback-result borrow survives the call: the SDK may complete
+        // controller creation reentrantly inside DestroyWindow.
+        self.window
+            .as_mut()
+            .ok_or(())?
+            .lose_controller_parent(seal)
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    fn pending_opening_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_some()
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+        if !self.pending_opening_owners_retained() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
+            return Err(());
+        }
+        if self.recordless_controller_completion().is_some() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
+            return Err(());
+        }
+        let candidate = super::process_fault::pending_browser_candidate(
+            &self.environment_ref().map_err(|_| ())?.raw,
+        )?;
+        if !self.pending_opening_owners_retained()
+            || self.recordless_controller_completion().is_some()
+        {
+            return Err(());
+        }
+        Ok(candidate)
+    }
+
+    #[cfg(test)]
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        self.check().ok()?;
+        self.controller_creation.as_ref()?.succeeded()
+    }
+
+    #[cfg(test)]
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if !self.recordless_fault_owners_retained() {
+            return Err(());
+        }
+        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
+    }
+
+    #[cfg(test)]
+    fn recordless_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.recordless_controller_completion() == Some(true)
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller.is_some()
+            && self.view.is_some()
+            && self.buffers.is_some()
+    }
+
     fn create_window(&mut self, owner: Option<u64>, width: u32, height: u32) -> NativeResult<()> {
         self.check()?;
         if self.window.is_some() {
@@ -298,6 +551,10 @@ impl NativeOperations for Session {
             // SAFETY: retained creating-STA controller; all buffer borrows ended.
             // Failure retains the COM owner so the safe policy can quarantine/retry.
             unsafe { controller.Close() }.map_err(failed)?;
+            // Close has released the view's handlers. Retrying removers on the
+            // closed view can fail forever; the earlier unsubscribe error is
+            // still returned by the surface and follows its quarantine path.
+            self.subscriptions.view_closed();
             self.shared = None;
             self.view = None;
             self.controller = None;
