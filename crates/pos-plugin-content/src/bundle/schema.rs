@@ -37,9 +37,9 @@ impl Document {
         if !jsonschema::draft202012::meta::is_valid(&value) {
             return Err(Refusal::Malformed);
         }
-        let base = uri::from_str(&format!("urn:pigloros:plugin-schema:sha256:{digest}"))
-            .map_err(|_| Refusal::Malformed)?;
-        Ok(Self { index, base, value })
+        uri::from_str(&format!("urn:pigloros:plugin-schema:sha256:{digest}"))
+            .map(|base| Self { index, base, value })
+            .map_err(|_| Refusal::Malformed)
     }
 }
 
@@ -295,10 +295,8 @@ mod tests {
     use super::Offline;
 
     #[test]
-    fn offline_retriever_refuses_even_when_called_directly(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let target = uri::from_str("https://example.invalid/never-fetch")?;
-        assert!(Offline.retrieve(&target).is_err());
-        Ok(())
+    fn offline_retriever_refuses_even_when_called_directly() {
+        assert!(uri::from_str("https://example.invalid/never-fetch")
+            .is_ok_and(|target| Offline.retrieve(&target).is_err()));
     }
 }

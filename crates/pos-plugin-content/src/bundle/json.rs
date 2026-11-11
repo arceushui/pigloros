@@ -144,17 +144,14 @@ mod tests {
     // bytes cannot represent byte strings or infinities; exercise that narrow
     // trait contract without adding a product parser override.
     #[test]
-    fn the_serde_visitor_refuses_byte_strings_and_nonfinite_numbers(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn the_serde_visitor_refuses_byte_strings_and_nonfinite_numbers() {
         let mut budget = Budget::default();
-        let error = Node {
+        let result = Node {
             budget: &mut budget,
             depth: 0,
         }
-        .deserialize(BorrowedBytesDeserializer::<Error>::new(b"not JSON"))
-        .err()
-        .ok_or("byte string unexpectedly accepted")?;
-        assert!(error.to_string().contains("bounded JSON"));
+        .deserialize(BorrowedBytesDeserializer::<Error>::new(b"not JSON"));
+        assert!(result.is_err_and(|error| error.to_string().contains("bounded JSON")));
         for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             assert!(Node {
                 budget: &mut budget,
@@ -163,6 +160,5 @@ mod tests {
             .visit_f64::<Error>(value)
             .is_err());
         }
-        Ok(())
     }
 }

@@ -34,7 +34,7 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     if nonempty(value.get("spdxVersion"))? != "SPDX-2.3" {
         return Err(Refusal::UnsupportedFormat);
     }
-    if !validator()?.is_valid(value)
+    if !validator().is_ok_and(|validator| validator.is_valid(value))
         || value.get("SPDXID").and_then(Value::as_str) != Some("SPDXRef-DOCUMENT")
         || value.get("dataLicense").and_then(Value::as_str) != Some("CC0-1.0")
     {
@@ -49,34 +49,39 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     for creator in items(creation, "creators") {
         nonempty(Some(creator))?;
     }
-    let mut elements = BTreeMap::new();
-    elements.insert("SPDXRef-DOCUMENT", (value, false));
-    for field in ["packages", "files", "snippets"] {
-        for element in items(value, field) {
-            let id = nonempty(element.get("SPDXID"))?;
-            if elements
-                .insert(id, (element, field != "snippets"))
-                .is_some()
-            {
+    let initial = BTreeMap::from([("SPDXRef-DOCUMENT", (value, false))]);
+    ["packages", "files", "snippets"]
+        .into_iter()
+        .flat_map(|field| items(value, field).map(move |element| (field, element)))
+        .try_fold(initial, |mut elements, (field, element)| {
+            nonempty(element.get("SPDXID")).and_then(|id| {
+                if elements
+                    .insert(id, (element, field != "snippets"))
+                    .is_some()
+                {
+                    Err(Refusal::ReferenceMismatch)
+                } else {
+                    Ok(elements)
+                }
+            })
+        })
+        .and_then(|elements| {
+            let external: BTreeSet<_> = items(value, "externalDocumentRefs")
+                .map(|document| {
+                    let id = nonempty(document.get("externalDocumentId"))?;
+                    if !identifier(id, "DocumentRef-", true) {
+                        return Err(Refusal::Malformed);
+                    }
+                    Ok(id)
+                })
+                .collect::<Result<_, _>>()?;
+            if external.len() != items(value, "externalDocumentRefs").count() {
                 return Err(Refusal::ReferenceMismatch);
             }
-        }
-    }
-    let external: BTreeSet<_> = items(value, "externalDocumentRefs")
-        .map(|document| {
-            let id = nonempty(document.get("externalDocumentId"))?;
-            if !identifier(id, "DocumentRef-", true) {
-                return Err(Refusal::Malformed);
-            }
-            Ok(id)
+            let described = described_targets(value, &elements, &external)?;
+            licences(value, &external)?;
+            bind_component(&described, &elements, component)
         })
-        .collect::<Result<_, _>>()?;
-    if external.len() != items(value, "externalDocumentRefs").count() {
-        return Err(Refusal::ReferenceMismatch);
-    }
-    let described = described_targets(value, &elements, &external)?;
-    licences(value, &external)?;
-    bind_component(&described, &elements, component)
 }
 
 fn described_targets<'a>(
