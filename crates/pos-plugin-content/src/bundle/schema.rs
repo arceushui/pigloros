@@ -271,8 +271,11 @@ fn resolve_references(
                     reference.fragment
                 ))
             });
-        if !valid && first_error.is_none_or(|(first, _)| reference.index < first) {
-            first_error = Some((reference.index, Refusal::ReferenceMismatch));
+        if !valid {
+            first_error = first_error
+                .into_iter()
+                .chain([(reference.index, Refusal::ReferenceMismatch)])
+                .min_by_key(|(index, _)| *index);
         }
     }
     first_error

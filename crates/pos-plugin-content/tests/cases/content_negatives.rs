@@ -653,6 +653,37 @@ fn next_schema_root_refuses_an_exhausted_identifier_budget() -> TestResult {
 }
 
 #[test]
+fn schema_reference_budget_is_shared_across_documents() -> TestResult {
+    for extra in [0, 1] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![
+            bytes(&json!({"title":"a", "allOf":vec![json!({"$ref":"#"}); 32_768]})),
+            bytes(&json!({"title":"b", "allOf":vec![json!({"$ref":"#"}); 32_768 + extra]})),
+        ];
+        let expected = if extra == 0 {
+            Ok(())
+        } else {
+            Err(Error::BoundsExceeded {
+                artifact: Artifact::Schema { index: 1 },
+            })
+        };
+        assert_eq!(result(&fixture)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn resolves_a_resource_nested_inside_a_schema_array() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas = vec![bytes(&json!({
+        "$ref":"urn:pigloros:nested#node",
+        "allOf":[{"$id":"urn:pigloros:nested", "$anchor":"node"}]
+    }))];
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
 fn explicit_schema_id_cannot_collide_with_a_later_implicit_base() -> TestResult {
     use sha2::{Digest as _, Sha256};
     let second = b"true".to_vec();
