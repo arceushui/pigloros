@@ -8,8 +8,9 @@ use pos_owner_bridge::ProcessIdentity;
 use pos_owner_bridge_codec::ImagePathSha256;
 
 use super::{
-    browser_candidate_from_observations, verified_exit_observation, COREWEBVIEW2_PROCESS_KIND,
-    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER,
+    browser_candidate_from_observations, renderer_presence_from_observations,
+    verified_exit_observation, COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
 
 type IdentityObservation = Result<Option<(ProcessIdentity, PathBuf)>, ()>;
@@ -24,6 +25,225 @@ fn identity() -> ProcessIdentity {
 
 fn process_image() -> (ProcessIdentity, PathBuf) {
     (identity(), PathBuf::from("owned-browser"))
+}
+
+type Snapshot = Result<Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>, ()>;
+
+fn modeled_presence(
+    snapshots: Vec<Snapshot>,
+    identities: Vec<(u32, IdentityObservation)>,
+) -> (Result<crate::RendererPresence, ()>, Vec<&'static str>) {
+    let calls = RefCell::new(Vec::new());
+    let mut snapshots = snapshots.into_iter();
+    let mut identities = identities.into_iter();
+    let result = renderer_presence_from_observations(
+        identity(),
+        || {
+            calls.borrow_mut().push("snapshot");
+            snapshots.next().unwrap_or(Err(()))
+        },
+        |pid| {
+            calls
+                .borrow_mut()
+                .push(if pid == 11 { "browser" } else { "renderer" });
+            let (expected_pid, observed) = identities.next().unwrap_or((0, Err(())));
+            assert_eq!(pid, expected_pid);
+            observed
+        },
+    );
+    (result, calls.into_inner())
+}
+
+fn browser_entry() -> (u32, COREWEBVIEW2_PROCESS_KIND) {
+    (11, COREWEBVIEW2_PROCESS_KIND_BROWSER)
+}
+
+fn renderer_entry() -> (u32, COREWEBVIEW2_PROCESS_KIND) {
+    (12, COREWEBVIEW2_PROCESS_KIND_RENDERER)
+}
+
+fn renderer_image() -> (ProcessIdentity, PathBuf) {
+    let mut renderer = identity();
+    renderer.browser_pid = 12;
+    (renderer, PathBuf::from("owned-browser"))
+}
+
+#[test]
+fn modeled_renderer_presence_rechecks_the_exact_snapshot_and_identities() {
+    let browser = process_image();
+    let renderer = renderer_image();
+    let absent = vec![browser_entry()];
+    let (result, calls) = modeled_presence(
+        vec![Ok(absent.clone()), Ok(absent)],
+        vec![
+            (11, Ok(Some(browser.clone()))),
+            (11, Ok(Some(browser.clone()))),
+        ],
+    );
+    assert_eq!(result, Ok(crate::RendererPresence::Absent));
+    assert_eq!(calls, ["snapshot", "browser", "snapshot", "browser"]);
+
+    let present = vec![browser_entry(), renderer_entry()];
+    let (result, calls) = modeled_presence(
+        vec![Ok(present.clone()), Ok(present)],
+        vec![
+            (11, Ok(Some(browser.clone()))),
+            (12, Ok(Some(renderer.clone()))),
+            (11, Ok(Some(browser))),
+            (12, Ok(Some(renderer))),
+        ],
+    );
+    assert_eq!(result, Ok(crate::RendererPresence::Unique));
+    assert_eq!(
+        calls,
+        ["snapshot", "browser", "renderer", "snapshot", "browser", "renderer"]
+    );
+}
+
+#[test]
+fn modeled_renderer_presence_refuses_initial_snapshot_or_browser_failures() {
+    for first in [
+        Err(()),
+        Ok(vec![]),
+        Ok(vec![(99, COREWEBVIEW2_PROCESS_KIND_BROWSER)]),
+        Ok(vec![
+            browser_entry(),
+            (99, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+        ]),
+    ] {
+        let (result, calls) = modeled_presence(vec![first], vec![]);
+        assert_eq!(result, Err(()));
+        assert_eq!(calls, ["snapshot"]);
+    }
+    let mut changed = identity();
+    changed.creation_filetime += 1;
+    for observed in [
+        Err(()),
+        Ok(None),
+        Ok(Some((changed, PathBuf::from("owned-browser")))),
+    ] {
+        let (result, calls) =
+            modeled_presence(vec![Ok(vec![browser_entry()])], vec![(11, observed)]);
+        assert_eq!(result, Err(()));
+        assert_eq!(calls, ["snapshot", "browser"]);
+    }
+}
+
+#[test]
+fn modeled_renderer_presence_refuses_ambiguous_absent_or_foreign_renderer() {
+    let browser = process_image();
+    let (result, calls) = modeled_presence(
+        vec![Ok(vec![
+            browser_entry(),
+            renderer_entry(),
+            (13, COREWEBVIEW2_PROCESS_KIND_RENDERER),
+        ])],
+        vec![(11, Ok(Some(browser.clone())))],
+    );
+    assert_eq!(result, Err(()));
+    assert_eq!(calls, ["snapshot", "browser"]);
+    for observed in [
+        Err(()),
+        Ok(None),
+        Ok(Some((renderer_image().0, PathBuf::from("foreign")))),
+    ] {
+        let (result, calls) = modeled_presence(
+            vec![Ok(vec![browser_entry(), renderer_entry()])],
+            vec![(11, Ok(Some(browser.clone()))), (12, observed)],
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(calls, ["snapshot", "browser", "renderer"]);
+    }
+}
+
+#[test]
+fn modeled_renderer_presence_refuses_changed_second_observations() {
+    let browser = process_image();
+    let renderer = renderer_image();
+    let present = vec![browser_entry(), renderer_entry()];
+    for second in [
+        Err(()),
+        Ok(vec![]),
+        Ok(vec![(99, COREWEBVIEW2_PROCESS_KIND_BROWSER)]),
+    ] {
+        let (result, calls) = modeled_presence(
+            vec![Ok(present.clone()), second],
+            vec![
+                (11, Ok(Some(browser.clone()))),
+                (12, Ok(Some(renderer.clone()))),
+            ],
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(calls, ["snapshot", "browser", "renderer", "snapshot"]);
+    }
+    let mut changed = browser.clone();
+    changed.0.creation_filetime += 1;
+    for observed in [
+        Err(()),
+        Ok(None),
+        Ok(Some(changed)),
+        Ok(Some((browser.0, PathBuf::from("changed-browser")))),
+    ] {
+        let (result, calls) = modeled_presence(
+            vec![Ok(present.clone()), Ok(present.clone())],
+            vec![
+                (11, Ok(Some(browser.clone()))),
+                (12, Ok(Some(renderer.clone()))),
+                (11, observed),
+            ],
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(
+            calls,
+            ["snapshot", "browser", "renderer", "snapshot", "browser"]
+        );
+    }
+    for second in [
+        vec![browser_entry()],
+        vec![browser_entry(), (13, COREWEBVIEW2_PROCESS_KIND_RENDERER)],
+        vec![
+            browser_entry(),
+            renderer_entry(),
+            (13, COREWEBVIEW2_PROCESS_KIND_RENDERER),
+        ],
+    ] {
+        let (result, calls) = modeled_presence(
+            vec![Ok(present.clone()), Ok(second)],
+            vec![
+                (11, Ok(Some(browser.clone()))),
+                (12, Ok(Some(renderer.clone()))),
+                (11, Ok(Some(browser.clone()))),
+            ],
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(
+            calls,
+            ["snapshot", "browser", "renderer", "snapshot", "browser"]
+        );
+    }
+    let mut changed_renderer = renderer.clone();
+    changed_renderer.0.creation_filetime += 1;
+    for observed in [
+        Err(()),
+        Ok(None),
+        Ok(Some(changed_renderer)),
+        Ok(Some((renderer.0, PathBuf::from("changed-renderer")))),
+    ] {
+        let (result, calls) = modeled_presence(
+            vec![Ok(present.clone()), Ok(present.clone())],
+            vec![
+                (11, Ok(Some(browser.clone()))),
+                (12, Ok(Some(renderer.clone()))),
+                (11, Ok(Some(browser.clone()))),
+                (12, observed),
+            ],
+        );
+        assert_eq!(result, Err(()));
+        assert_eq!(
+            calls,
+            ["snapshot", "browser", "renderer", "snapshot", "browser", "renderer"]
+        );
+    }
 }
 
 #[test]

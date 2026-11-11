@@ -85,7 +85,7 @@ impl Mapping {
     }
 
     fn initialize(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > self.capacity || !bytes.len().is_multiple_of(8) {
+        if !valid_aligned_offset(self.capacity, bytes.len()) {
             return Err(unavailable());
         }
         for (index, chunk) in bytes.chunks_exact(8).enumerate() {
@@ -110,7 +110,7 @@ impl Mapping {
     }
 
     fn zero_from(&self, start: usize) -> Result<()> {
-        if start > self.capacity || !start.is_multiple_of(8) {
+        if !valid_aligned_offset(self.capacity, start) {
             return Err(unavailable());
         }
         for index in start / 8..self.capacity / 8 {
@@ -403,6 +403,23 @@ mod zero_witness {
 
         pub(crate) fn take_native_zero_observations() -> Vec<NativeZeroObservation> {
             OBSERVATIONS.with(|observations| observations.borrow_mut().take().unwrap_or_default())
+        }
+    }
+}
+
+fn valid_aligned_offset(capacity: usize, offset: usize) -> bool {
+    offset <= capacity && offset.is_multiple_of(8)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn aligned_offsets_include_end_but_reject_unaligned_and_out_of_bounds() {
+        for offset in [0, 8, 56, 64] {
+            assert!(super::valid_aligned_offset(64, offset));
+        }
+        for offset in [1, 63, 65, 72, usize::MAX] {
+            assert!(!super::valid_aligned_offset(64, offset));
         }
     }
 }

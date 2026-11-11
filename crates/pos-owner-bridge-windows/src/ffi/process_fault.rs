@@ -301,18 +301,30 @@ pub(super) fn renderer_presence(
     environment: &ICoreWebView2Environment,
     expected: ProcessIdentity,
 ) -> Result<crate::RendererPresence, ()> {
-    let first = candidates(environment)?;
+    renderer_presence_from_observations(
+        expected,
+        || candidates(environment),
+        super::process::inspect,
+    )
+}
+
+fn renderer_presence_from_observations(
+    expected: ProcessIdentity,
+    mut snapshot: impl FnMut() -> Result<Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>, ()>,
+    mut inspect: impl FnMut(u32) -> Result<Option<(ProcessIdentity, std::path::PathBuf)>, ()>,
+) -> Result<crate::RendererPresence, ()> {
+    let first = snapshot()?;
     if select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != expected.browser_pid {
         return Err(());
     }
-    let (browser, browser_path) = super::process::inspect(expected.browser_pid)?.ok_or(())?;
+    let (browser, browser_path) = inspect(expected.browser_pid)?.ok_or(())?;
     if browser != expected {
         return Err(());
     }
     let renderer = select_optional(&first, COREWEBVIEW2_PROCESS_KIND_RENDERER)?;
     let observed = match renderer {
         Some(pid) => {
-            let (identity, path) = super::process::inspect(pid)?.ok_or(())?;
+            let (identity, path) = inspect(pid)?.ok_or(())?;
             if path != browser_path {
                 return Err(());
             }
@@ -320,16 +332,16 @@ pub(super) fn renderer_presence(
         }
         None => None,
     };
-    let second = candidates(environment)?;
+    let second = snapshot()?;
     if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != expected.browser_pid
-        || super::process::inspect(expected.browser_pid)?.ok_or(())? != (browser, browser_path)
+        || inspect(expected.browser_pid)?.ok_or(())? != (browser, browser_path)
         || select_optional(&second, COREWEBVIEW2_PROCESS_KIND_RENDERER)? != renderer
     {
         return Err(());
     }
     match (renderer, observed) {
         (None, None) => Ok(crate::RendererPresence::Absent),
-        (Some(pid), Some(observed)) if super::process::inspect(pid)?.ok_or(())? == observed => {
+        (Some(pid), Some(observed)) if inspect(pid)?.ok_or(())? == observed => {
             Ok(crate::RendererPresence::Unique)
         }
         _ => Err(()),
