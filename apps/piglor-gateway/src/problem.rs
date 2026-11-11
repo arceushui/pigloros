@@ -11,7 +11,7 @@ use axum::{
         rejection::{JsonRejection, PathRejection},
         FromRequest, FromRequestParts, MatchedPath, Path, Request,
     },
-    http::{header, request::Parts, HeaderValue, StatusCode, Uri},
+    http::{header, request::Parts, uri::PathAndQuery, HeaderValue, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -254,7 +254,13 @@ const SERVED_API_MAJOR: &str = "1";
 /// under another API major (`/v2/...`) fails closed as `unsupported-version`, so a client can
 /// tell an unsupported version from a missing resource and negotiate explicitly.
 pub(crate) async fn not_routed(uri: Uri) -> ProblemV1 {
-    if names_unsupported_api_major(uri.path()) {
+    let target = uri.into_parts().path_and_query;
+    unrouted(target.as_ref().map_or("/", PathAndQuery::path))
+}
+
+/// The problem of an unrouted request `path`.
+fn unrouted(path: &str) -> ProblemV1 {
+    if names_unsupported_api_major(path) {
         ProblemV1::new(
             ProblemCodeV1::UnsupportedVersion,
             StatusCode::BAD_REQUEST,
@@ -377,14 +383,20 @@ mod tests {
         assert_eq!(body["retryable"], true);
     }
 
+    /// The fixture `scripts/test_check_gateway_contract.py` also checks the contract checker
+    /// against, so the fallback and the checker agree on every unrouted answer.
+    const UNROUTED_PATHS: &str = include_str!("../../../scripts/data/gateway_unrouted_paths.json");
+
     #[test]
     fn only_another_numeric_api_major_is_an_unsupported_version() {
-        for path in ["/v2", "/v2/timelines", "/v01/timelines", "/v10/x/y"] {
-            assert!(names_unsupported_api_major(path), "{path}");
-        }
-        let served_or_unversioned = ["/v1", "/v1/no-such-route", "/v/x", "/vault", "/v2x/y", "/"];
-        for path in served_or_unversioned {
-            assert!(!names_unsupported_api_major(path), "{path}");
+        let fixture: serde_json::Value = serde_json::from_str(UNROUTED_PATHS).unwrap_or_default();
+        let cases = fixture["cases"].as_array().cloned().unwrap_or_default();
+        assert!(cases.len() > 4);
+        for case in cases {
+            let path = case["path"].as_str().unwrap_or_default();
+            let problem = unrouted(path);
+            assert_eq!(problem.code().as_str(), case["code"], "{path}");
+            assert_eq!(problem.status().as_u16(), case["status"], "{path}");
         }
     }
 

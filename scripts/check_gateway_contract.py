@@ -29,7 +29,8 @@ fixtures disagree:
 6. every schema a Draft operation reaches is `x-pigloros-maturity: draft` or shared with a
    served operation, and no served operation reaches a Draft schema. Every array, string and
    map of a Draft schema is bounded;
-7. every `x-pigloros-limits` entry has a value, unit, scope, origin and source, and is enforced
+7. every `x-pigloros-limits` entry has a value, unit, scope, origin, source, surface (the
+   surface of the schemas it bounds) and direction, and is enforced
    either by the schema keywords it names (each equal to its value) or by a registered
    problem. Every array bound of a Draft schema is a stated limit unless it is the size of its
    own unique enumeration;
@@ -43,19 +44,27 @@ fixtures disagree:
    everything it accepted (no new required member or parameter, no narrowed type, enumeration
    or bound); a response guarantees everything it guaranteed (no removed or no longer required
    member, no widened type, enumeration or bound); an added member is optional; schema
-   identities and the declared handling of unknown members are unchanged; and every frozen
-   example under `compatibility/examples/` is still valid. Every served operation is frozen.
+   identities and the declared handling of unknown members are unchanged; a frozen response
+   header stays; a frozen security scheme is unchanged; a frozen served limit moves only in its
+   direction; and every frozen example under `compatibility/examples/` is still valid. Every
+   served operation is frozen, and parameters are declared per operation with a `schema`.
+
+`--append-only <git-ref>` also requires `compatibility/` to have only gained entries since the
+merge base of HEAD with `<git-ref>` (CI passes `origin/main`), so a change cannot loosen the
+baseline together with the contract.
 
 Every problem body must use a status its registry entry permits.
 
-`--freeze` appends every served operation, component, problem type and example the baseline
-does not hold yet (a Draft operation promoted to served); it never rewrites a frozen entry.
+`--freeze` first checks the contract against an existing baseline, then appends every served
+operation, optional addition to a frozen one, component, security scheme, served limit, problem
+type and example the baseline does not hold yet; it never rewrites a frozen keyword.
 
 Requires the hash-pinned `jsonschema` of `requirements-pinned-dependencies.txt`.
 
 Usage:
     python3 scripts/check_gateway_contract.py
     python3 scripts/check_gateway_contract.py --freeze
+    python3 scripts/check_gateway_contract.py --append-only origin/main
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ import copy
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -84,6 +94,7 @@ PROBLEM_TYPES = CONTRACT / "problem-types.json"
 EXAMPLES = CONTRACT / "examples"
 FIXTURE_INPUTS = ROOT / "fixtures/conformance/inputs/gateway-client-conformance"
 COMPATIBILITY = CONTRACT / "compatibility"
+APPEND = "--append-only"
 BASELINE = COMPATIBILITY / "baseline.json"
 FROZEN_EXAMPLES = COMPATIBILITY / "examples"
 
@@ -97,7 +108,12 @@ MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
 DRAFT_OWNER = re.compile(r"^#30[2-9]$")
 ENVELOPE_ID = SCHEMA_ID_PREFIX + "resource-envelope"
 ADMISSION_ID = SCHEMA_ID_PREFIX + "admission-receipt"
-LIMIT_MEMBERS = {"value", "unit", "scope", "origin", "source", "enforced_by"}
+LIMIT_MEMBERS = {
+    "value", "unit", "scope", "origin", "source", "surface", "direction", "enforced_by"
+}
+# `request`: bounds what a client sends, may only grow within v1; `response`: bounds what a
+# client receives, may only shrink; `both`: bounds a value that travels both ways, is fixed.
+LIMIT_DIRECTIONS = {"request", "response", "both"}
 LIMIT_SCOPES = {"structural", "per-input", "per-phase", "operation-wide", "per-principal"}
 LIMIT_ORIGINS = {"code", "adr", "new"}
 LIMIT_KEYWORDS = {"maxItems", "maxLength", "maximum", "maxProperties"}
@@ -292,6 +308,7 @@ def check_description(contract: Contract) -> None:
             raise ContractError(f"schema {name} has no unique {SCHEMA_ID_PREFIX} identifier")
         seen_ids.add(schema_id)
     check_references(document, contract, seen_ids)
+    check_parameters(contract)
     operation_ids: set[str] = set()
     for (method, path), operation in contract.operations().items():
         where = f"{method} {path}"
@@ -305,6 +322,26 @@ def check_description(contract: Contract) -> None:
         check_operation_status(contract, method, where, operation)
     check_maturity(contract)
     check_bounded(contract, check_limits(contract))
+
+
+def check_parameters(contract: Contract) -> None:
+    """Parameters are declared per operation, each with a `schema` (never `content`)."""
+    for path, item in contract.document["paths"].items():
+        if "parameters" in item:
+            raise ContractError(f"{path}: declare parameters on each operation, not the path")
+    declared = [
+        (f"{method} {path}", parameter)
+        for (method, path), operation in contract.operations().items()
+        for parameter in operation.get("parameters", [])
+    ]
+    declared += [
+        (f"component {name}", parameter)
+        for name, parameter in contract.document["components"].get("parameters", {}).items()
+    ]
+    for where, parameter in declared:
+        parameter = contract.resolve(parameter)
+        if "schema" not in parameter or "content" in parameter:
+            raise ContractError(f"{where}: a parameter declares a schema, not content")
 
 
 def check_operation_status(contract: Contract, method: str, where: str, operation: dict) -> None:
@@ -396,6 +433,7 @@ def check_limits(contract: Contract) -> set[str]:
     if not isinstance(limits, dict) or not limits:
         raise ContractError("the contract states no x-pigloros-limits")
     pointers: set[str] = set()
+    served_prefixes = served_pointer_prefixes(contract)
     for name, limit in limits.items():
         if not isinstance(limit, dict) or set(limit) != LIMIT_MEMBERS:
             raise ContractError(f"limit {name} does not have exactly {sorted(LIMIT_MEMBERS)}")
@@ -404,6 +442,8 @@ def check_limits(contract: Contract) -> set[str]:
             raise ContractError(f"limit {name} has no positive integer value")
         if limit["scope"] not in LIMIT_SCOPES or limit["origin"] not in LIMIT_ORIGINS:
             raise ContractError(f"limit {name} has an unknown scope or origin")
+        if limit["surface"] not in STATUSES or limit["direction"] not in LIMIT_DIRECTIONS:
+            raise ContractError(f"limit {name} has an unknown surface or direction")
         if not limit["unit"] or not limit["source"]:
             raise ContractError(f"limit {name} has no unit or source")
         enforced = limit["enforced_by"]
@@ -414,6 +454,11 @@ def check_limits(contract: Contract) -> set[str]:
                 if pointer(contract.document, path) != value:
                     raise ContractError(f"limit {name}: {path} does not equal {value}")
                 pointers.add(path)
+            served = any(
+                path.startswith(served_prefixes) for path in enforced["schema"]
+            )
+            if served != (limit["surface"] == "served"):
+                raise ContractError(f"limit {name}: its surface is not the surface it bounds")
         elif set(enforced) == {"runtime"}:
             problem = enforced["runtime"]
             if problem.get("status") not in contract.statuses.get(problem.get("code"), set()):
@@ -421,6 +466,22 @@ def check_limits(contract: Contract) -> set[str]:
         else:
             raise ContractError(f"limit {name} is enforced by neither schema nor runtime")
     return pointers
+
+
+def escape_pointer(part: str) -> str:
+    return part.replace("~", "~0").replace("/", "~1")
+
+
+def served_pointer_prefixes(contract: Contract) -> tuple[str, ...]:
+    """The JSON Pointer prefixes of the served paths and the schemas they reach."""
+    prefixes = []
+    for (method, template), operation in contract.operations().items():
+        if operation["x-pigloros-status"] == "served":
+            prefixes.append(f"/paths/{escape_pointer(template)}/{method.lower()}/")
+            prefixes.extend(
+                f"/components/schemas/{name}/" for name in contract.reachable(operation)
+            )
+    return tuple(prefixes)
 
 
 def check_bounded(contract: Contract, limit_pointers: set[str]) -> None:
@@ -716,12 +777,26 @@ class Compatibility:
         for status, response in base["responses"].items():
             if status not in current["responses"]:
                 raise ContractError(f"{where}: the frozen response {status} was removed")
-            self.content(
-                f"{where} {status}",
-                self.baseline.resolve(response),
-                self.current.resolve(current["responses"][status]),
-                RESPONSE,
-            )
+            before = self.baseline.resolve(response)
+            after = self.current.resolve(current["responses"][status])
+            self.content(f"{where} {status}", before, after, RESPONSE)
+            self.headers(f"{where} {status}", before, after)
+
+    def headers(self, where: str, base: dict, current: dict) -> None:
+        """A frozen response header stays, as guaranteed as it was (names are case-insensitive)."""
+        after = {
+            name.lower(): self.current.resolve(header)
+            for name, header in current.get("headers", {}).items()
+        }
+        for name, header in base.get("headers", {}).items():
+            header = self.baseline.resolve(header)
+            label = f"{where} header {name}"
+            if name.lower() not in after:
+                raise ContractError(f"{label}: a frozen response header was removed")
+            now = after[name.lower()]
+            if header.get("required", False) and not now.get("required", False):
+                raise ContractError(f"{label}: a required response header became optional")
+            self.schema(label, schema_of(label, header), schema_of(label, now), RESPONSE)
 
     def parameters(self, where: str, base: dict, current: dict) -> None:
         def keyed(contract: Contract, operation: dict) -> dict[tuple[str, str], dict]:
@@ -740,7 +815,8 @@ class Compatibility:
                 raise ContractError(f"{label}: a frozen parameter was removed")
             if after[key].get("required", False) and not parameter.get("required", False):
                 raise ContractError(f"{label}: an optional parameter became required")
-            self.schema(label, parameter["schema"], after[key]["schema"], REQUEST)
+            before_schema = schema_of(label, parameter)
+            self.schema(label, before_schema, schema_of(label, after[key]), REQUEST)
         for location, name in sorted(set(after) - set(before)):
             if after[(location, name)].get("required", False):
                 raise ContractError(f"{where} {location} parameter {name}: a new required one")
@@ -846,6 +922,13 @@ class Compatibility:
             raise ContractError(f"{where}: the response member {name} is no longer guaranteed")
 
 
+def schema_of(where: str, declaration: dict) -> object:
+    """The `schema` of a parameter or header; a `content` declaration is not comparable."""
+    if "schema" not in declaration:
+        raise ContractError(f"{where}: declares no schema, so it cannot be compared")
+    return declaration["schema"]
+
+
 def check_window(baseline: dict) -> None:
     if baseline.get("window") != WINDOW:
         raise ContractError(f"the compatibility baseline does not declare the window {WINDOW}")
@@ -855,8 +938,13 @@ def check_compatibility(
     contract: Contract,
     baseline: dict | None = None,
     frozen: list[tuple[str, dict]] | None = None,
+    require_frozen: bool = True,
 ) -> int:
-    """The current contract keeps every frozen v1 promise; returns the frozen examples checked."""
+    """The current contract keeps every frozen v1 promise; returns the frozen examples checked.
+
+    `require_frozen` also requires every served operation to be frozen; `--freeze` checks an
+    existing baseline without it before it appends.
+    """
     if baseline is None:
         if not BASELINE.exists():
             raise ContractError(f"no compatibility baseline {BASELINE.name}; run with --freeze")
@@ -872,6 +960,16 @@ def check_compatibility(
             raise ContractError(f"the frozen problem type {entry['code']} was removed or renamed")
         if not set(entry["statuses"]) <= set(now["statuses"]):
             raise ContractError(f"a frozen status of the problem type {entry['code']} was removed")
+    schemes = contract.document["components"].get("securitySchemes", {})
+    frozen_schemes = baseline["components"].get("securitySchemes", {})  # type: ignore[index]
+    for name, scheme in frozen_schemes.items():
+        if schemes.get(name) != scheme:
+            raise ContractError(f"the frozen security scheme {name} was removed or changed")
+    check_frozen_limits(
+        baseline.get("x-pigloros-limits", {}),  # type: ignore[union-attr]
+        contract.document["x-pigloros-limits"],
+        served_pointer_prefixes(contract),
+    )
     current = contract.operations()
     comparison = Compatibility(base, contract)
     for (method, path), operation in base.operations().items():
@@ -880,7 +978,11 @@ def check_compatibility(
             raise ContractError(f"{where}: a frozen operation was removed")
         comparison.operation(where, operation, current[(method, path)])
     for (method, path), operation in current.items():
-        if operation["x-pigloros-status"] == "served" and (method, path) not in base.operations():
+        if (
+            require_frozen
+            and operation["x-pigloros-status"] == "served"
+            and (method, path) not in base.operations()
+        ):
             raise ContractError(
                 f"{method} {path}: a served operation is not frozen; run with --freeze"
             )
@@ -899,42 +1001,217 @@ def check_compatibility(
     return len(frozen)
 
 
-def freeze(contract: Contract, baseline: dict | None) -> dict:
-    """Append every served operation, component and problem type the baseline lacks.
+def check_frozen_limits(frozen: dict, current: dict, served: tuple[str, ...]) -> None:
+    """A frozen served limit keeps its meaning; its value moves only in its direction.
 
-    A frozen entry is never rewritten: promotion adds to the window, it never moves it.
+    A `request` limit may only grow, a `response` limit only shrink, a `both` limit is fixed.
+    Its schema keywords on served paths and schemas stay; Draft ones may change.
+    """
+    for name, limit in frozen.items():
+        now = current.get(name)
+        if now is None or now["surface"] != "served":
+            raise ContractError(f"the frozen served limit {name} was removed")
+        for member in ("unit", "scope", "surface", "direction"):
+            if now[member] != limit[member]:
+                raise ContractError(f"limit {name}: its frozen {member} changed")
+        before, after = limit["enforced_by"], now["enforced_by"]
+        if set(before) != set(after) or before.get("runtime") != after.get("runtime"):
+            raise ContractError(f"limit {name}: its frozen enforcement changed")
+        kept = {path for path in before.get("schema", []) if path.startswith(served)}
+        if not kept <= set(after.get("schema", [])):
+            raise ContractError(f"limit {name}: a frozen enforcing keyword was dropped")
+        direction, value = limit["direction"], now["value"]
+        if (direction != "request" and value > limit["value"]) or (
+            direction != "response" and value < limit["value"]
+        ):
+            raise ContractError(f"limit {name}: a {direction} limit moved against its direction")
+
+
+# Maps of a baseline that may gain entries, and the keys a frozen node may gain.
+EXTENSIBLE = {
+    "paths", "components", "schemas", "parameters", "responses", "securitySchemes",
+    "properties", "headers", "x-pigloros-limits",
+}
+BASELINE_COMMENT = (
+    "Not a schema: the frozen v1 baseline of the Gateway contract (#1314). Every served "
+    "operation, the components it reaches, its security schemes, the served limits and the "
+    "problem registry as published. scripts/check_gateway_contract.py fails when the current "
+    "contract breaks one of them; --freeze only appends entries, and CI rejects any other edit."
+)
+
+
+def parameter_key(parameter: dict) -> object:
+    if "$ref" in parameter:
+        return parameter["$ref"]
+    folded = parameter["name"].lower() if parameter["in"] == "header" else parameter["name"]
+    return (parameter["in"], folded)
+
+
+def merge(frozen: dict, current: dict) -> None:
+    """Add to a frozen node what `current` added to it: new entries of its extensible maps,
+    new extensible keys and new parameters. Every frozen keyword stays as it is."""
+    for key, value in current.items():
+        if key not in frozen:
+            if key in EXTENSIBLE:
+                frozen[key] = copy.deepcopy(value)
+            continue
+        old = frozen[key]
+        if key in EXTENSIBLE and isinstance(old, dict) and isinstance(value, dict):
+            for name, entry in value.items():
+                if name not in old:
+                    old[name] = copy.deepcopy(entry)
+                elif isinstance(old[name], dict) and isinstance(entry, dict):
+                    merge(old[name], entry)
+        elif key == "parameters" and isinstance(old, list) and isinstance(value, list):
+            known = [parameter_key(parameter) for parameter in old]
+            old.extend(
+                copy.deepcopy(parameter)
+                for parameter in value
+                if parameter_key(parameter) not in known
+            )
+        elif isinstance(old, dict) and isinstance(value, dict):
+            merge(old, value)
+        elif isinstance(old, list) and isinstance(value, list) and len(old) == len(value):
+            for item, other in zip(old, value):
+                if isinstance(item, dict) and isinstance(other, dict):
+                    merge(item, other)
+
+
+def references(value: object) -> set[str]:
+    found: set[str] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+            if isinstance(item.get("$ref"), str):
+                found.add(item["$ref"])
+    return found
+
+
+def freeze(contract: Contract, baseline: dict | None) -> dict:
+    """Append to the baseline every served operation, component, security scheme, served limit
+    and problem type it lacks, and every optional addition to a frozen one.
+
+    A frozen keyword is never rewritten: promotion adds to the window, it never moves it.
     """
     frozen = copy.deepcopy(baseline) if baseline is not None else {
-        "$comment": (
-            "Not a schema: the frozen v1 baseline of the Gateway contract (#1314). Every served "
-            "operation, the components it reaches and the problem registry as published. "
-            "scripts/check_gateway_contract.py fails when the current contract breaks one of "
-            "them; --freeze only appends."
-        ),
+        "$comment": BASELINE_COMMENT,
         "contract": "urn:pigloros:gateway:v1",
         "window": WINDOW,
         "paths": {},
         "components": {"schemas": {}, "parameters": {}, "responses": {}},
         "problem_types": [],
     }
+    components = contract.document["components"]
+    for section, entries in frozen["components"].items():
+        for name, entry in entries.items():
+            if name in components.get(section, {}):
+                merge(entry, components[section][name])
     for (method, path), operation in contract.operations().items():
-        item = frozen["paths"].setdefault(path, {})
-        if operation["x-pigloros-status"] != "served" or method.lower() in item:
-            if not item:
-                del frozen["paths"][path]
+        if operation["x-pigloros-status"] != "served":
             continue
-        item[method.lower()] = copy.deepcopy(operation)
-        for kind, name in sorted(contract.components(operation)):
+        item = frozen["paths"].setdefault(path, {})
+        if method.lower() in item:
+            merge(item[method.lower()], operation)
+        else:
+            item[method.lower()] = copy.deepcopy(operation)
+        for requirement in operation.get("security", []):
+            for name in requirement:
+                schemes = frozen["components"].setdefault("securitySchemes", {})
+                schemes.setdefault(name, copy.deepcopy(components["securitySchemes"][name]))
+    missing = True
+    while missing:
+        missing = False
+        for reference in sorted(references([frozen["paths"], frozen["components"]])):
+            if reference.startswith("#/components/"):
+                kind, name = reference.removeprefix("#/components/").split("/", 1)
+            else:
+                kind, name = "schemas", contract.names[reference]
             section = frozen["components"].setdefault(kind, {})
             if name not in section:
-                section[name] = copy.deepcopy(contract.document["components"][kind][name])
+                section[name] = copy.deepcopy(components[kind][name])
+                missing = True
+    limits = frozen.setdefault("x-pigloros-limits", {})
+    for name, limit in contract.document["x-pigloros-limits"].items():
+        if limit["surface"] == "served" and name not in limits:
+            limits[name] = copy.deepcopy(limit)
     codes = {entry["code"] for entry in frozen["problem_types"]}
     for entry in contract.problem_types["problem_types"]:
         if entry["code"] not in codes:
             frozen["problem_types"].append(
                 {key: copy.deepcopy(entry[key]) for key in ("code", "type", "title", "statuses")}
             )
+    frozen["problem_types"] = frozen.pop("problem_types")
     return frozen
+
+
+def check_appended(old: object, new: object, where: str = "baseline", key: str = "") -> None:
+    """`new` is `old` with entries appended only where `freeze` appends them.
+
+    An extensible map may gain entries, a node may gain extensible keys (and a path item new
+    methods), `parameters` and `problem_types` lists may gain trailing items; everything else,
+    including every frozen value, is unchanged.
+    """
+    if isinstance(old, dict) and isinstance(new, dict):
+        for name, value in old.items():
+            if name not in new:
+                raise ContractError(f"{where}/{name}: a frozen entry was removed")
+            if key == "paths":
+                child = "path-item"
+            elif key in EXTENSIBLE and key != "components":
+                child = ""
+            else:
+                child = name
+            check_appended(value, new[name], f"{where}/{name}", child)
+        added = set(new) - set(old)
+        allowed = EXTENSIBLE | (set(METHODS) if key == "path-item" else set())
+        if added and key not in EXTENSIBLE and not added <= allowed:
+            extra = sorted(added - allowed)[0]
+            raise ContractError(f"{where}: {extra} was added to a frozen entry")
+        return
+    if isinstance(old, list) and isinstance(new, list):
+        appendable = key in ("parameters", "problem_types")
+        if len(new) < len(old) or (len(new) != len(old) and not appendable):
+            raise ContractError(f"{where}: a frozen list was changed")
+        for index, item in enumerate(old):
+            check_appended(item, new[index], f"{where}/{index}")
+        return
+    if old != new:
+        raise ContractError(f"{where}: a frozen value changed")
+
+
+def git(root: Path, *arguments: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(root), *arguments], capture_output=True, check=False
+    )
+    if result.returncode != 0:
+        raise ContractError(f"git {' '.join(arguments)} failed: {result.stderr.decode().strip()}")
+    return result.stdout
+
+
+def check_append_only(reference: str, root: Path = ROOT) -> int:
+    """`compatibility/` only gained entries since the merge base of HEAD with `reference`.
+
+    Returns the number of frozen files compared. A frozen example is byte-for-byte unchanged;
+    the baseline passes `check_appended`.
+    """
+    base = git(root, "merge-base", "HEAD", reference).decode().strip()
+    relative = COMPATIBILITY.relative_to(ROOT).as_posix()
+    listing = git(root, "ls-tree", "-r", "--name-only", base, "--", relative).decode()
+    paths = listing.splitlines()
+    for path in paths:
+        old = git(root, "show", f"{base}:{path}")
+        current = root / path
+        if not current.is_file():
+            raise ContractError(f"{path}: a frozen file was removed")
+        if path.endswith("/baseline.json"):
+            check_appended(json.loads(old), load(current))
+        elif current.read_bytes() != old:
+            raise ContractError(f"{path}: a frozen file was changed")
+    return len(paths)
 
 
 def freeze_examples(contract: Contract, source: Path = EXAMPLES,
@@ -994,8 +1271,13 @@ def check_fixtures(contract: Contract, inputs: Path = FIXTURE_INPUTS) -> int:
 
 
 def write_baseline(contract: Contract, path: Path = BASELINE) -> None:
-    """Append the served contract the baseline at `path` does not hold yet."""
+    """Append the served contract the baseline at `path` does not hold yet.
+
+    An existing baseline must already be kept: freezing never records a breaking change.
+    """
     baseline = load(path) if path.exists() else None
+    if baseline is not None:
+        check_compatibility(contract, baseline, require_frozen=False)  # type: ignore[arg-type]
     frozen = freeze(contract, baseline)  # type: ignore[arg-type]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(frozen, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1003,8 +1285,8 @@ def write_baseline(contract: Contract, path: Path = BASELINE) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if arguments not in ([], ["--freeze"]):
-        print("usage: check_gateway_contract.py [--freeze]", file=sys.stderr)
+    if not (arguments in ([], ["--freeze"]) or (len(arguments) == 2 and arguments[0] == APPEND)):
+        print(f"usage: check_gateway_contract.py [--freeze | {APPEND} <git-ref>]", file=sys.stderr)
         return 2
     try:
         contract = Contract(load(OPENAPI), load(PROBLEM_TYPES))  # type: ignore[arg-type]
@@ -1012,10 +1294,11 @@ def main(argv: list[str] | None = None) -> int:
         check_registry(contract)
         examples = check_examples(contract)
         exchanges = check_fixtures(contract)
-        if arguments:
+        if arguments == ["--freeze"]:
             write_baseline(contract)
             freeze_examples(contract)
         frozen = check_compatibility(contract)
+        compared = check_append_only(arguments[1]) if arguments[:1] == [APPEND] else 0
     except ContractError as error:
         print(f"gateway contract check failed: {error}", file=sys.stderr)
         return 1
@@ -1023,7 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
     limits = len(contract.document["x-pigloros-limits"])
     print(
         f"Gateway v1 contract OK: {examples} examples, {exchanges} served exchanges, "
-        f"{drafts} Draft operations, {limits} limits, {frozen} frozen v1 examples."
+        f"{drafts} Draft operations, {limits} limits, {frozen} frozen v1 examples, "
+        f"{compared} frozen files compared with the merge base."
     )
     return 0
 

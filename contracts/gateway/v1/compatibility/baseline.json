@@ -1,5 +1,5 @@
 {
-  "$comment": "Not a schema: the frozen v1 baseline of the Gateway contract (#1314). Every served operation, the components it reaches and the problem registry as published. scripts/check_gateway_contract.py fails when the current contract breaks one of them; --freeze only appends.",
+  "$comment": "Not a schema: the frozen v1 baseline of the Gateway contract (#1314). Every served operation, the components it reaches, its security schemes, the served limits and the problem registry as published. scripts/check_gateway_contract.py fails when the current contract breaks one of them; --freeze only appends entries, and CI rejects any other edit.",
   "contract": "urn:pigloros:gateway:v1",
   "window": {
     "opens": "Wave 9 acceptance",
@@ -536,231 +536,28 @@
   },
   "components": {
     "schemas": {
-      "HealthOk": {
-        "$id": "urn:pigloros:gateway:v1:schema:health",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "ok"
-        ],
-        "properties": {
-          "ok": {
-            "const": true
-          }
-        }
-      },
-      "Problem": {
-        "$id": "urn:pigloros:gateway:v1:schema:problem",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "type",
-          "title",
-          "status",
-          "detail",
-          "instance",
-          "code",
-          "schema_id",
-          "retryable"
-        ],
-        "description": "An RFC 9457 problem details body. `code` is the stable family of problem-types.json; `type` is its URN. `detail` is safe human-readable text whose wording is not part of the contract.",
-        "properties": {
-          "type": {
-            "type": "string",
-            "pattern": "^urn:pigloros:gateway:v1:problem:[a-z-]+$"
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1
-          },
-          "status": {
-            "type": "integer",
-            "minimum": 400,
-            "maximum": 599
-          },
-          "detail": {
-            "type": "string"
-          },
-          "instance": {
-            "type": "string",
-            "pattern": "^/",
-            "description": "The matched route template of the failed request; the request path only for an unrouted request."
-          },
-          "code": {
-            "enum": [
-              "invalid-request",
-              "unsupported-version",
-              "incompatible-profile",
-              "unauthenticated",
-              "unauthorized",
-              "consent-invalid",
-              "revoked",
-              "deleted",
-              "not-found-or-unavailable",
-              "admission-rejected",
-              "approval-rejected",
-              "append-conflict",
-              "idempotency-conflict",
-              "artifact-missing",
-              "artifact-untrusted",
-              "replay-claim-insufficient",
-              "dependency-graph-incomplete",
-              "mixed-fork-generation",
-              "counterfactual-incomplete",
-              "resource-limit-exceeded",
-              "temporarily-unavailable",
-              "internal-safe-failure"
-            ]
-          },
-          "schema_id": {
-            "const": "urn:pigloros:gateway:v1:schema:problem"
-          },
-          "retryable": {
-            "type": "boolean",
-            "description": "Whether an identical retry may succeed later."
-          }
-        }
-      },
-      "LedgerEntry": {
-        "$id": "urn:pigloros:gateway:v1:schema:ledger-entry",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "title",
-          "statement",
-          "predicted_outcome",
-          "confidence",
-          "status",
-          "made_at",
-          "resolve_by",
-          "osf_link"
-        ],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "statement": {
-            "type": "string"
-          },
-          "predicted_outcome": {
-            "type": "string"
-          },
-          "confidence": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1
-          },
-          "scenario": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string"
-          },
-          "brier_score": {
-            "type": "number"
-          },
-          "made_at": {
-            "type": "string"
-          },
-          "resolve_by": {
-            "type": "string"
-          },
-          "resolved_at": {
-            "type": "string"
-          },
-          "outcome": {
-            "type": "boolean"
-          },
-          "osf_link": {
-            "type": "string"
-          }
-        }
-      },
-      "LedgerView": {
-        "$id": "urn:pigloros:gateway:v1:schema:ledger",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "domain",
-          "path",
-          "ledger"
-        ],
-        "properties": {
-          "domain": {
-            "const": "piglor.com"
-          },
-          "path": {
-            "const": "/ledger"
-          },
-          "ledger": {
-            "type": "array",
-            "items": {
-              "$ref": "urn:pigloros:gateway:v1:schema:ledger-entry"
-            }
-          }
-        }
-      },
-      "NewPrediction": {
-        "$id": "urn:pigloros:gateway:v1:schema:new-prediction",
+      "ActionRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:action-request",
         "type": "object",
         "required": [
-          "title",
-          "statement",
-          "predicted_outcome",
-          "confidence",
-          "made_at",
-          "resolve_by",
-          "osf_link"
+          "entity_id",
+          "capability",
+          "payload"
         ],
+        "description": "One typed simulated action. It affects simulation state only; no route creates a real-world effect.",
         "properties": {
-          "title": {
-            "type": "string"
+          "entity_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
           },
-          "statement": {
-            "type": "string"
+          "event_type": {
+            "const": "world.action.v1",
+            "default": "world.action.v1"
           },
-          "predicted_outcome": {
-            "type": "string"
+          "capability": {
+            "const": "world.action.v1.submit"
           },
-          "confidence": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1
-          },
-          "scenario": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "made_at": {
-            "type": "string",
-            "description": "RFC 3339 UTC date-time."
-          },
-          "resolve_by": {
-            "type": "string",
-            "description": "RFC 3339 date."
-          },
-          "osf_link": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
-      },
-      "PredictionCreated": {
-        "$id": "urn:pigloros:gateway:v1:schema:prediction-created",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "prediction_id"
-        ],
-        "properties": {
-          "prediction_id": {
-            "type": "string"
+          "payload": {
+            "$ref": "urn:pigloros:gateway:v1:schema:world-action-v1"
           }
         }
       },
@@ -775,34 +572,6 @@
             "type": "string"
           }
         }
-      },
-      "TimelineCreated": {
-        "$id": "urn:pigloros:gateway:v1:schema:timeline-created",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "name",
-          "head"
-        ],
-        "properties": {
-          "id": {
-            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
-          },
-          "name": {
-            "type": "string"
-          },
-          "head": {
-            "type": "integer",
-            "minimum": 0
-          }
-        }
-      },
-      "Ulid": {
-        "$id": "urn:pigloros:gateway:v1:schema:ulid",
-        "type": "string",
-        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
-        "description": "A canonical upper-case ULID."
       },
       "EventCursor": {
         "$id": "urn:pigloros:gateway:v1:schema:event-cursor",
@@ -883,30 +652,275 @@
           }
         }
       },
-      "ActionRequest": {
-        "$id": "urn:pigloros:gateway:v1:schema:action-request",
+      "HealthOk": {
+        "$id": "urn:pigloros:gateway:v1:schema:health",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "LedgerView": {
+        "$id": "urn:pigloros:gateway:v1:schema:ledger",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "domain",
+          "path",
+          "ledger"
+        ],
+        "properties": {
+          "domain": {
+            "const": "piglor.com"
+          },
+          "path": {
+            "const": "/ledger"
+          },
+          "ledger": {
+            "type": "array",
+            "items": {
+              "$ref": "urn:pigloros:gateway:v1:schema:ledger-entry"
+            }
+          }
+        }
+      },
+      "NewPrediction": {
+        "$id": "urn:pigloros:gateway:v1:schema:new-prediction",
+        "type": "object",
+        "required": [
+          "title",
+          "statement",
+          "predicted_outcome",
+          "confidence",
+          "made_at",
+          "resolve_by",
+          "osf_link"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "predicted_outcome": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "scenario": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "made_at": {
+            "type": "string",
+            "description": "RFC 3339 UTC date-time."
+          },
+          "resolve_by": {
+            "type": "string",
+            "description": "RFC 3339 date."
+          },
+          "osf_link": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "OwnTracksAccepted": {
+        "$id": "urn:pigloros:gateway:v1:schema:owntracks-accepted",
+        "type": "array",
+        "maxItems": 0
+      },
+      "OwnTracksLocation": {
+        "$id": "urn:pigloros:gateway:v1:schema:owntracks-location",
+        "type": "object",
+        "required": [
+          "_type",
+          "lat",
+          "lon",
+          "tst"
+        ],
+        "description": "An OwnTracks `location` message; every other member is discarded by minimization.",
+        "properties": {
+          "_type": {
+            "const": "location"
+          },
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "lon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "tst": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PredictionCreated": {
+        "$id": "urn:pigloros:gateway:v1:schema:prediction-created",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "prediction_id"
+        ],
+        "properties": {
+          "prediction_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Problem": {
+        "$id": "urn:pigloros:gateway:v1:schema:problem",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "schema_id",
+          "retryable"
+        ],
+        "description": "An RFC 9457 problem details body. `code` is the stable family of problem-types.json; `type` is its URN. `detail` is safe human-readable text whose wording is not part of the contract.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^urn:pigloros:gateway:v1:problem:[a-z-]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "The matched route template of the failed request; the request path only for an unrouted request."
+          },
+          "code": {
+            "enum": [
+              "invalid-request",
+              "unsupported-version",
+              "incompatible-profile",
+              "unauthenticated",
+              "unauthorized",
+              "consent-invalid",
+              "revoked",
+              "deleted",
+              "not-found-or-unavailable",
+              "admission-rejected",
+              "approval-rejected",
+              "append-conflict",
+              "idempotency-conflict",
+              "artifact-missing",
+              "artifact-untrusted",
+              "replay-claim-insufficient",
+              "dependency-graph-incomplete",
+              "mixed-fork-generation",
+              "counterfactual-incomplete",
+              "resource-limit-exceeded",
+              "temporarily-unavailable",
+              "internal-safe-failure"
+            ]
+          },
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:problem"
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether an identical retry may succeed later."
+          }
+        }
+      },
+      "SignalRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:signal-request",
         "type": "object",
         "required": [
           "entity_id",
-          "capability",
-          "payload"
+          "dimension",
+          "value"
         ],
-        "description": "One typed simulated action. It affects simulation state only; no route creates a real-world effect.",
         "properties": {
           "entity_id": {
             "$ref": "urn:pigloros:gateway:v1:schema:ulid"
           },
-          "event_type": {
-            "const": "world.action.v1",
-            "default": "world.action.v1"
+          "dimension": {
+            "enum": [
+              "trust",
+              "opinion",
+              "culture",
+              "economy",
+              "polarization"
+            ]
           },
-          "capability": {
-            "const": "world.action.v1.submit"
+          "value": {
+            "type": "number"
           },
-          "payload": {
-            "$ref": "urn:pigloros:gateway:v1:schema:world-action-v1"
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
+      },
+      "TimelineCreated": {
+        "$id": "urn:pigloros:gateway:v1:schema:timeline-created",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "head"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "head": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "Ulid": {
+        "$id": "urn:pigloros:gateway:v1:schema:ulid",
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+        "description": "A canonical upper-case ULID."
       },
       "IdempotencyKey": {
         "$id": "urn:pigloros:gateway:v1:schema:idempotency-key",
@@ -915,6 +929,65 @@
         "maxLength": 128,
         "pattern": "^[!-~]+$",
         "description": "A caller-generated key of 1 to 128 visible ASCII characters. Repeating the key with the same request bytes returns the original result; reusing it with different bytes is `idempotency-conflict`."
+      },
+      "LedgerEntry": {
+        "$id": "urn:pigloros:gateway:v1:schema:ledger-entry",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "statement",
+          "predicted_outcome",
+          "confidence",
+          "status",
+          "made_at",
+          "resolve_by",
+          "osf_link"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "predicted_outcome": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "scenario": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "brier_score": {
+            "type": "number"
+          },
+          "made_at": {
+            "type": "string"
+          },
+          "resolve_by": {
+            "type": "string"
+          },
+          "resolved_at": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "boolean"
+          },
+          "osf_link": {
+            "type": "string"
+          }
+        }
       },
       "WorldActionV1": {
         "$id": "urn:pigloros:gateway:v1:schema:world-action-v1",
@@ -968,96 +1041,23 @@
             "minimum": 0
           }
         }
-      },
-      "SignalRequest": {
-        "$id": "urn:pigloros:gateway:v1:schema:signal-request",
-        "type": "object",
-        "required": [
-          "entity_id",
-          "dimension",
-          "value"
-        ],
-        "properties": {
-          "entity_id": {
-            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
-          },
-          "dimension": {
-            "enum": [
-              "trust",
-              "opinion",
-              "culture",
-              "economy",
-              "polarization"
-            ]
-          },
-          "value": {
-            "type": "number"
-          },
-          "subject": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "object": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "OwnTracksAccepted": {
-        "$id": "urn:pigloros:gateway:v1:schema:owntracks-accepted",
-        "type": "array",
-        "maxItems": 0
-      },
-      "OwnTracksLocation": {
-        "$id": "urn:pigloros:gateway:v1:schema:owntracks-location",
-        "type": "object",
-        "required": [
-          "_type",
-          "lat",
-          "lon",
-          "tst"
-        ],
-        "description": "An OwnTracks `location` message; every other member is discarded by minimization.",
-        "properties": {
-          "_type": {
-            "const": "location"
-          },
-          "lat": {
-            "type": "number",
-            "minimum": -90,
-            "maximum": 90
-          },
-          "lon": {
-            "type": "number",
-            "minimum": -180,
-            "maximum": 180
-          },
-          "tst": {
-            "type": "integer",
-            "minimum": 0
-          }
-        }
       }
     },
     "parameters": {
-      "TimelineId": {
-        "name": "timeline_id",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "$ref": "#/components/schemas/Ulid"
-        }
-      },
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/IdempotencyKey"
+        }
+      },
+      "TimelineId": {
+        "name": "timeline_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Ulid"
         }
       }
     },
@@ -1070,6 +1070,151 @@
               "$ref": "#/components/schemas/Problem"
             }
           }
+        }
+      }
+    },
+    "securitySchemes": {
+      "ownTracksBasic": {
+        "type": "http",
+        "scheme": "basic"
+      }
+    }
+  },
+  "x-pigloros-limits": {
+    "request_body_bytes": {
+      "value": 1048576,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_HTTP_BODY_BYTES",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "response_body_bytes": {
+      "value": 1048576,
+      "unit": "bytes",
+      "scope": "per-phase",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_RESPONSE_BYTES",
+      "surface": "served",
+      "direction": "response",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "page_items": {
+      "value": 100,
+      "unit": "items",
+      "scope": "per-phase",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_PER_POLL",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "schema": [
+          "/paths/~1v1~1timelines~1{timeline_id}~1events/get/parameters/2/schema/maximum",
+          "/components/schemas/EventPage/properties/events/maxItems",
+          "/paths/~1v1~1timelines~1{timeline_id}~1projection/get/parameters/2/schema/maximum",
+          "/components/schemas/ProjectionView/properties/entries/maxItems",
+          "/components/schemas/Export/properties/members/maxItems"
+        ]
+      }
+    },
+    "event_payload_bytes": {
+      "value": 262144,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENT_PAYLOAD_BYTES",
+      "surface": "served",
+      "direction": "both",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "proposed_action_payload_bytes": {
+      "value": 4096,
+      "unit": "bytes",
+      "scope": "per-input",
+      "origin": "code",
+      "source": "pos-core MAX_PROPOSED_ACTION_PAYLOAD_BYTES (ADR-057 section 1)",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "fork_depth": {
+      "value": 64,
+      "unit": "parent links",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_FORK_DEPTH",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 413
+        }
+      }
+    },
+    "idempotency_key_length": {
+      "value": 128,
+      "unit": "characters",
+      "scope": "structural",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_IDEMPOTENCY_KEY_BYTES",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/IdempotencyKey/maxLength"
+        ]
+      }
+    },
+    "root_timelines": {
+      "value": 64,
+      "unit": "Timelines",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_TIMELINES",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
+    "events_per_timeline": {
+      "value": 10000,
+      "unit": "Events",
+      "scope": "operation-wide",
+      "origin": "code",
+      "source": "apps/piglor-gateway MAX_EVENTS_PER_TIMELINE",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 409
         }
       }
     }

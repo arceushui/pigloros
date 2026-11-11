@@ -1017,6 +1017,43 @@ mod tests {
         }
     }
 
+    /// The contract's unknown-member rule: an open request object (`CreateTimelineRequest`,
+    /// `ActionRequest`) ignores an unknown member, a closed one (`WorldActionV1`) rejects it.
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn unknown_request_members_follow_each_schema_declaration() {
+        let app = action_test_app();
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "unknown-members", "client_label": "later client"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["name"], "unknown-members");
+        assert!(created.get("client_label").is_none());
+        let path = format!("/v1/timelines/{}/actions", created["id"].as_str().test_ok());
+        let actor = test_action_actor().to_string();
+        let body = test_world_body().to_string();
+        let request = json!({
+            "entity_id": actor,
+            "capability": "world.action.v1.submit",
+            "payload": world_action_payload(&actor, &body, 1),
+            "client_label": "later client",
+        });
+        let (status, event) = json_request(app.clone(), "POST", &path, Some(request.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(event["event_type"], "world.action.v1");
+        let mut closed = request;
+        closed["payload"] = world_action_payload(&actor, &body, 2);
+        closed["payload"]["client_label"] = json!("later client");
+        let (status, problem) = json_request(app, "POST", &path, Some(closed)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(problem["code"], "admission-rejected");
+        assert_eq!(problem["instance"], "/v1/timelines/{timeline_id}/actions");
+    }
+
     fn spectator_test_app() -> Router {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,

@@ -13,8 +13,10 @@ crate or database.
 | [`compatibility/examples/`](compatibility/examples/) | The frozen golden examples that stay valid for the whole compatibility window. |
 
 `scripts/check_gateway_contract.py` checks all of them in CI, together with the served responses
-recorded by the gateway-client-conformance fixtures; the routers are executed against those
-fixtures, so the description and the served behavior cannot drift apart.
+recorded by the gateway-client-conformance fixtures. Those fixtures are also executed against the
+served routers by `apps/pos-gateway-conformance-adapter`, so a served response they cover cannot
+drift from the description. The golden examples are validated against the description only; the
+Gateway's own router tests cover the unknown-member and API-major negotiation behavior they show.
 
 ## Operations
 
@@ -37,8 +39,11 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 - A success body is `application/json`; every failure, including unknown paths (`404`), unserved
   methods (`405`) and oversized bodies (`413`), is `application/problem+json`.
 - `x-pigloros-limits` states every normative request and response limit with its value, unit,
-  scope and enforcement: a `schema` limit by the named schema keywords, a `runtime` limit by the
-  named problem.
+  scope, `surface` (`served` or `draft`), `direction` and enforcement: a `schema` limit by the
+  named schema keywords, a `runtime` limit by the named problem. The direction says how a served
+  limit may move within v1: a `request` limit bounds what a client sends and may only grow, a
+  `response` limit bounds what a client receives and may only shrink, and a `both` limit bounds a
+  value that travels both ways and is fixed.
 - Events are ordered by Timeline sequence (`seq`), never by wall time. Draft values that must
   replay deterministically are integers (micro-units where fractional), never JSON numbers.
 
@@ -99,12 +104,16 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    closed so that the contract detects drift, but a client MUST ignore unknown response members:
    a later v1 revision may add optional ones.
 5. **Additive changes only within v1.** Within v1 a change may add an optional member, an
-   optional parameter or an operation, or accept more request values. Removing a member,
-   parameter, response or operation, making a member or parameter required, narrowing what a
-   request accepts, widening what a response returns (a type, an enumeration value or a bound),
-   or changing a schema `$id`, its declared unknown-member handling or any other keyword (such as
-   `pattern`, `format` or `default`) requires a new major that runs in parallel, with an explicit
-   migration and retirement decision.
+   optional parameter, a response, a response header or an operation, or accept more request
+   values. Removing a member, parameter, response, response header, security scheme or
+   operation, making a member, parameter or response header required in a request (or no longer
+   guaranteed in a response), narrowing what a request accepts, widening what a response
+   returns (a type, an enumeration value or a bound), moving a served limit against its
+   direction, or changing a schema `$id`, its declared unknown-member handling or any other
+   keyword requires a new major that runs in parallel, with an explicit migration and retirement
+   decision. The comparison is deliberately conservative: `oneOf`/`anyOf`/`allOf`/`prefixItems`
+   keep their shape and `pattern`, `format` and `default` stay identical even where a change
+   would be harmless.
 6. **Compatibility window.** The served operations frozen in `compatibility/baseline.json` stay
    supported through Wave 10 after Wave 9 acceptance, and every example under
    `compatibility/examples/` stays valid for that window, including the fail-closed ones: a
@@ -114,7 +123,10 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
 `scripts/check_gateway_contract.py` enforces rules 1, 4 (the declaration), 5 and 6: it compares
 the contract with the frozen baseline (requests must keep accepting what they accepted, responses
 must keep guaranteeing what they guaranteed, a schema reached from both keeps its constraints
-exactly) and validates the frozen examples, so a breaking change to a v1 schema fails CI. The
+exactly) and validates the frozen examples, so a breaking change to a v1 schema fails CI. CI
+runs it with `--append-only origin/main`, which also fails when `compatibility/` lost or changed
+anything since the merge base with `main`: a pull request cannot loosen the baseline together
+with the contract. The
 golden examples `unsupported-version-api-major`, `not-found-unrouted-path`,
 `unknown-required-schema-event-type`, `unsupported-version-legacy-event-type`,
 `draft-scenario-room-unsupported-schema-version`, `draft-decision-preview-incompatible-profile`,
@@ -126,10 +138,14 @@ negotiation and unknown-member cases.
 - Run `python3 scripts/check_gateway_contract.py` and
   `python3 scripts/test_check_gateway_contract.py` with the hash-pinned `jsonschema` of
   `requirements-pinned-dependencies.txt`.
-- When an owner ticket turns a Draft operation into a served one, run
-  `python3 scripts/check_gateway_contract.py --freeze`. It appends the newly served operations,
-  the components they reach, any new problem type and the golden examples of served operations
-  to the baseline; it never rewrites a frozen entry. Do not edit `compatibility/` by hand.
+- When an owner ticket turns a Draft operation into a served one, or adds an optional member,
+  parameter, response or header to a served one, run
+  `python3 scripts/check_gateway_contract.py --freeze`. It first checks the contract against the
+  existing baseline, then appends the newly served operations, the optional additions to frozen
+  ones, the components and security schemes they reach, the served limits, any new problem type
+  and the golden examples of served operations. It never rewrites a frozen keyword, and the
+  append-only check accepts exactly those additions. Do not edit `compatibility/` by hand.
+- Parameters are declared on each operation (not on the path item), each with a `schema`.
 - A golden example is `{name, operation_id, request, request_valid, response}`. An example of a
   request no route serves has a null `operation_id` and names its `method` and query-free
   `target`.
