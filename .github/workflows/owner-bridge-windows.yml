@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   diagnostic:
-    name: diagnostic uninstrumented owner apartment
+    name: diagnostic owner apartment without added observers
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -34,7 +34,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: DIAGNOSTIC uninstrumented original fault matrix
+      - name: DIAGNOSTIC original fault matrix without added observers
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -42,7 +42,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
-          Write-Output 'DEBUG-535-STA DIAGNOSTIC_ONLY uninstrumented original G4 matrix'
+          Write-Output 'DEBUG-535-STA DIAGNOSTIC_ONLY original G4 matrix without added observers'
           Write-Output $checkout
           $failed = $false
           foreach ($sample in 1..2) {
