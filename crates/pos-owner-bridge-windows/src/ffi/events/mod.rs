@@ -17,7 +17,11 @@ pub(super) use denial::{track_exit, Recovery};
 pub(super) use navigation::source;
 type Result<T> = NativeResult<T>;
 
-fn observe(sink: &dyn EventSink, kind: EventKind, result: Result<NativeEvent>) -> NativeAction {
+pub(super) fn observe(
+    sink: &dyn EventSink,
+    kind: EventKind,
+    result: Result<NativeEvent>,
+) -> NativeAction {
     match result {
         Ok(event) => sink.event(event),
         Err(error) => sink.failed(kind, error),

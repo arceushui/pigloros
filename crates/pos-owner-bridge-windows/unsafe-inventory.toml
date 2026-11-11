@@ -357,7 +357,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 53
+line = 45
 function = "subscribe"
 operation = "exit.add_BrowserProcessExited(&callback, &raw mut token)"
 invariant = "newly-created retained STA environment and live callback; initialized unique token output, subscription precedes controller creation."
@@ -365,7 +365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 66
+line = 58
 function = "snapshot"
 operation = "self.raw.BrowserVersionString(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -373,7 +373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 71
+line = 63
 function = "snapshot"
 operation = "environment7.UserDataFolder(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -381,7 +381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 90
+line = 82
 function = "unsubscribe"
 operation = "self.exit.remove_BrowserProcessExited(token)"
 invariant = "exact retained environment and registration token on its creating STA; successful removal is recorded before any retry."
@@ -389,7 +389,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 105
+line = 97
 function = "browser_exited"
 operation = "args.BrowserProcessId(&raw mut pid)"
 invariant = "retained invoking-STA arguments and initialized unique PID output."

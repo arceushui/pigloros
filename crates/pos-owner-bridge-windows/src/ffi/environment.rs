@@ -31,20 +31,12 @@ impl Environment {
         let exit: ICoreWebView2Environment5 = raw.cast().map_err(|_| unavailable())?;
         let observed = Rc::clone(sink);
         let callback = BrowserProcessExitedEventHandler::create(Box::new(move |_sender, args| {
-            match browser_exited(args) {
-                Ok(event) => {
-                    #[cfg(test)]
-                    if let NativeEvent::BrowserExited { pid } = &event {
-                        crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(
-                            *pid,
-                        ));
-                    }
-                    observed.event(event);
-                }
-                Err(error) => {
-                    observed.failed(EventKind::BrowserExited, error);
-                }
+            let result = browser_exited(args);
+            #[cfg(test)]
+            if let Ok(NativeEvent::BrowserExited { pid }) = &result {
+                crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(*pid));
             }
+            super::events::observe(observed.as_ref(), EventKind::BrowserExited, result);
             Ok(())
         }));
         let mut token = 0;
@@ -118,16 +110,62 @@ mod tests {
     #![forbid(unsafe_code)]
 
     use super::browser_exited;
-    use crate::{Failure, NativeError, Operation};
+    use crate::{EventKind, EventSink, Failure, NativeAction, NativeError, NativeEvent, Operation};
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct Sink {
+        events: RefCell<Vec<NativeEvent>>,
+        failures: RefCell<Vec<(EventKind, NativeError)>>,
+    }
+
+    impl EventSink for Sink {
+        fn event(&self, event: NativeEvent) -> NativeAction {
+            self.events.borrow_mut().push(event);
+            NativeAction::Handled
+        }
+
+        fn failed(&self, kind: EventKind, error: NativeError) -> NativeAction {
+            self.failures.borrow_mut().push((kind, error));
+            NativeAction::BlockResource
+        }
+    }
 
     #[test]
     fn modeled_missing_browser_exit_arguments_refuse_before_native_access() {
+        let sink = Sink::default();
         assert_eq!(
-            browser_exited(None).err(),
-            Some(NativeError {
-                operation: Operation::Environment,
-                failure: Failure::CallFailed,
-            })
+            super::super::events::observe(&sink, EventKind::BrowserExited, browser_exited(None)),
+            NativeAction::BlockResource
         );
+        assert!(sink.events.borrow().is_empty());
+        assert_eq!(
+            sink.failures.borrow().as_slice(),
+            &[(
+                EventKind::BrowserExited,
+                NativeError {
+                    operation: Operation::Environment,
+                    failure: Failure::CallFailed,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn modeled_browser_exit_delivery_preserves_the_decoded_process_id() {
+        let sink = Sink::default();
+        assert_eq!(
+            super::super::events::observe(
+                &sink,
+                EventKind::BrowserExited,
+                Ok(NativeEvent::BrowserExited { pid: 535 })
+            ),
+            NativeAction::Handled
+        );
+        assert!(matches!(
+            sink.events.borrow().as_slice(),
+            [NativeEvent::BrowserExited { pid: 535 }]
+        ));
+        assert!(sink.failures.borrow().is_empty());
     }
 }

@@ -1222,7 +1222,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     callback_block = root_code[callback_begin:callback_end] if callback_begin >= 0 and callback_end >= 0 else ""
     if hashlib.sha256(re.sub(r"\s+", "", callback_block).encode()).hexdigest() != "671b74e45e73bea3a430fb1c093e4fae333c98f2bed44b18a7867877228563e6":
         found.append(f"{SHIM}/src/lib.rs: callback ordering recorder differs from reviewed test-only code")
-    for relative, digest in (("src/ffi/creation.rs", "fb272314f1c1d0320ea5e25d294ef7b4db16c970aa0b33b7bfb152cf0a32b21f"), ("src/ffi/environment.rs", "32838824ff1870a17796f010794c4a6a846dd6b26e296bd25022c6505d372f32")):
+    for relative, digest in (("src/ffi/creation.rs", "fb272314f1c1d0320ea5e25d294ef7b4db16c970aa0b33b7bfb152cf0a32b21f"), ("src/ffi/environment.rs", "3fcf212e5718bca6a7262b768a7c711e05b76d6a34c1f446beb1acc2e9158bf9")):
         item = scans.get(relative)
         body = item[0].code if item else ""
         if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:
@@ -1593,7 +1593,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '6c5bf1cf82b2d134d6f3ff49e9175d5e947339adbf5141db309fb9d7a1457541',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'c4a5a013ae256b55e30d91387daffc5751eaf7b4b03e3fedab0ce675cab9c7d9',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
-    'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '94a75eca4ec43f91cd6763ff333f73351f87d5e57099801ef4897706ea17ca7c',
+    'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '2b02387cb855dd2ebbf7374ac176b06ae760566045b76316c9ca73d6bc2d8c4c',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
     'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'ace2de26aa2f33320ced974c0016fc1a5ac1aa9b5678b05c4f7b60285daf1774',
     'crates/pos-owner-bridge-windows/src/lib.rs': '0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63',

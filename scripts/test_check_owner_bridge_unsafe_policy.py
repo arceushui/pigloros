@@ -1576,6 +1576,8 @@ def test_owned_process_fault_authority() -> None:
         ("src/ffi/creation.rs", "hr.is_err() && value.is_some()", "false", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/creation.rs", "crate::CreationCallback::NativeFailure", "crate::CreationCallback::Success", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, result);", "let _ignored = result;", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(*pid));", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, Ok(NativeEvent::BrowserExited { pid: *pid })); crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(*pid));", "callback invocation differs from reviewed SDK path"),
         ("src/lib.rs", "if order.len() < 64", "if order.len() < 640", "callback ordering recorder differs from reviewed test-only code"),
     ):
         changed = dict(files)
@@ -2146,6 +2148,7 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert!(!*port.reached.borrow());", "assert!(*port.reached.borrow());"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(port.write_record(&[]), Err(pos_owner_bridge::CleanupError));", ""),
         (f"{SHIM}/src/ffi/events/mod.rs", "assert_eq!(subscriptions.removers.len(), 1);", "assert!(subscriptions.removers.is_empty());"),
+        (f"{SHIM}/src/ffi/events/mod.rs", "Err(error) => sink.failed(kind, error),", "Err(_) => NativeAction::Handled,"),
         (f"{SHIM}/src/ffi/events/control_denial.rs", "assert_eq!(navigation.kind(), EventKind::Navigation);", ""),
         (navigation, "content_loading(None),", ""),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "Box::new(crate::Native::callback_order)", "Box::new(Vec::new)"),
