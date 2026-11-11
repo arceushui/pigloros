@@ -1,0 +1,19 @@
+{
+  "name": "compatible-unknown-optional-member-ignored",
+  "operation_id": "createTimeline",
+  "request": {
+    "body": {
+      "name": "kitchen",
+      "client_label": "added by a later client"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 201,
+    "body": {
+      "id": "01JC0GATEWAYEXAMPTMESH0000",
+      "name": "kitchen",
+      "head": 0
+    }
+  }
+}

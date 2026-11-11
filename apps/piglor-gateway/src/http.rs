@@ -1634,6 +1634,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(problem["code"], "not-found-or-unavailable");
         assert_eq!(problem["instance"], "/v1/no-such-route");
+        let (status, _, problem) =
+            raw_request(app.clone(), "POST", "/v2/timelines", &[], None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["code"], "unsupported-version");
+        assert_eq!(problem["instance"], "/v2/timelines");
         let (status, _, problem) = raw_request(app, "DELETE", "/v1/timelines", &[], None).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(problem["code"], "invalid-request");
