@@ -198,25 +198,28 @@ impl AdmittedInput for CrashInput {
         .map_err(|_| ExecuteError::DirectoryIdentity)
     }
 
-    fn recheck(
+    fn checker(
         &self,
-        _root: &CrashRoot,
-        directory: &PreparedAttemptDirectory,
-    ) -> Result<CheckedRoot, ImageActivationError> {
+    ) -> impl Fn(&CrashRoot, &PreparedAttemptDirectory) -> Result<CheckedRoot, ImageActivationError>
+           + Send
+           + Sync
+           + '_ {
         // As in production, the root's facts are recorded (PAI3) by the
         // recheck immediately before the unit starts.
-        recorded_identity(directory)
-            .map_err(|_| ImageActivationError::EvidenceMismatch)
-            .and_then(|identity| {
-                directory
-                    .record_root(&identity, || Ok(()))
-                    .map_err(|_| ImageActivationError::EvidenceMismatch)
-            })
-            .and_then(|()| {
-                self.attempt(directory)
-                    .map(|attempt| checked_root(&attempt))
-                    .map_err(|_| ImageActivationError::EvidenceMismatch)
-            })
+        move |_root: &CrashRoot, directory: &PreparedAttemptDirectory| {
+            recorded_identity(directory)
+                .map_err(|_| ImageActivationError::EvidenceMismatch)
+                .and_then(|identity| {
+                    directory
+                        .record_root(&identity, || Ok(()))
+                        .map_err(|_| ImageActivationError::EvidenceMismatch)
+                })
+                .and_then(|()| {
+                    self.attempt(directory)
+                        .map(|attempt| checked_root(&attempt))
+                        .map_err(|_| ImageActivationError::EvidenceMismatch)
+                })
+        }
     }
 }
 
@@ -236,20 +239,16 @@ impl AttemptSteps<CrashInput> for CrashSteps<'_> {
     fn execute<'a>(
         &'a self,
         (): (),
-        input: &'a CrashInput,
-        directory: &'a PreparedAttemptDirectory,
-        root: &'a CrashRoot,
+        attempt: AdmittedAttempt,
+        recheck: Recheck<'a>,
         _cancel: CancelSignal,
     ) -> impl Future<Output = Executed<(), BoundAttemptCgroup>> + Send + 'a {
-        let ownership = directory.execution_ownership();
+        let ownership = attempt.execution_for_test();
+        let attempt_id = attempt.attempt_id();
         // As in production: claim, recheck the root, then request the start.
         let submitted = ownership
             .claim()
-            .and_then(|()| {
-                input
-                    .recheck(root, directory)
-                    .map_err(ExecuteError::Recheck)
-            })
+            .and_then(|()| recheck().map_err(ExecuteError::Recheck))
             .and_then(|_checked| ownership.submit())
             .map_err(|error| ExecuteFailure {
                 error,
@@ -257,14 +256,14 @@ impl AttemptSteps<CrashInput> for CrashSteps<'_> {
                 cgroup: None,
             });
         let started = submitted.map(|()| {
-            *lock(&self.world.unit) = Some(input.attempt_id());
+            *lock(&self.world.unit) = Some(attempt_id);
             self.world.reach(Boundary::UnitSubmitted);
             let taken = lock(&self.cgroup).take();
             taken.map(|cgroup| {
                 ownership.bind_cgroup(cgroup.identity());
                 self.world.reach(Boundary::ExecutionEnded);
                 AttemptExecution {
-                    attempt_id: input.attempt_id(),
+                    attempt_id,
                     started: (),
                     cgroup,
                     ending: AttemptEnding::CgroupEmpty,
