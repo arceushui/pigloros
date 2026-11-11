@@ -273,6 +273,29 @@ fn schema_failure_reports_the_first_closure_member_across_phases() -> TestResult
 }
 
 #[test]
+fn earlier_schema_failure_precedes_later_json_node_exhaustion() -> TestResult {
+    let mut fixture = Fixture::new();
+    let mut later = br#"{"examples":["#.to_vec();
+    later.extend(
+        std::iter::repeat_n(b"0,".as_slice(), 262_143)
+            .flatten()
+            .copied(),
+    );
+    later.extend_from_slice(br#"0],"title":"2"}"#);
+    fixture.schemas = vec![
+        br#"{"$vocabulary":{"https://unknown.invalid/vocab":true}}"#.to_vec(),
+        later,
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::UnsupportedFormat {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn spdx_checks_direct_files_snippets_and_declared_external_metadata() -> TestResult {
     let fixture = references_fixture()?;
     assert_eq!(result(&fixture)?, Ok(()));
