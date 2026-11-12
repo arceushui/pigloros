@@ -4767,8 +4767,10 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     let ordered = clean_environment_callback_order(&order, case);
     let creation_order = crate::Native::creation_order();
     let sdk_success = sdk_environment_result(&creation_order, crate::CreationCallback::Success);
-    let no_record = fixture.store.records()?.is_empty();
-    let retained_orphan = fixture.store.folders()?.len() == 1;
+    let EnvironmentRecordEvidence {
+        no_record,
+        retained_orphan,
+    } = environment_record_evidence(&mut fixture.store)?;
     let idle = fixture.surface.idle();
     let evidence = PreEnvironmentEvidence {
         start: PreEnvironmentStart {
@@ -5032,6 +5034,45 @@ struct EnvironmentWipeEvidence {
 struct EnvironmentRecordEvidence {
     no_record: bool,
     retained_orphan: bool,
+}
+
+/// Observe records before folders, releasing listed bytes before the second read.
+fn environment_record_evidence(
+    store: &mut dyn CleanupStore,
+) -> Result<EnvironmentRecordEvidence, pos_owner_bridge::CleanupError> {
+    store.records().and_then(|records| {
+        let no_record = records.is_empty();
+        drop(records);
+        store.folders().map(|folders| EnvironmentRecordEvidence {
+            no_record,
+            retained_orphan: folders.len() == 1,
+        })
+    })
+}
+
+#[test]
+fn modeled_environment_record_evidence_preserves_store_failures() {
+    use pos_owner_bridge::fake::host::{FakeStore, StoreOp};
+    let mut store = FakeStore::default();
+    store.preload_folder("modeled-folder");
+    let observed = environment_record_evidence(&mut store);
+    assert!(observed.is_ok_and(|evidence| evidence.no_record && evidence.retained_orphan));
+    store.preload(vec![1]);
+    let observed = environment_record_evidence(&mut store);
+    assert!(observed.is_ok_and(|evidence| !evidence.no_record && evidence.retained_orphan));
+    store.preload_folder("another-folder");
+    let observed = environment_record_evidence(&mut store);
+    assert!(observed.is_ok_and(|evidence| !evidence.no_record && !evidence.retained_orphan));
+    store.set_failing(&[StoreOp::List]);
+    assert_eq!(
+        environment_record_evidence(&mut store).err(),
+        Some(pos_owner_bridge::CleanupError)
+    );
+    store.set_failing(&[StoreOp::Folders]);
+    assert_eq!(
+        environment_record_evidence(&mut store).err(),
+        Some(pos_owner_bridge::CleanupError)
+    );
 }
 
 impl EnvironmentObstructionEvidence {
@@ -5304,8 +5345,10 @@ fn run_environment_obstruction(
     );
     let order = crate::Native::creation_order();
     let outcome = environment_sdk_outcome(&order);
-    let no_record = fixture.store.records()?.is_empty();
-    let retained_orphan = fixture.store.folders()?.len() == 1;
+    let EnvironmentRecordEvidence {
+        no_record,
+        retained_orphan,
+    } = environment_record_evidence(&mut fixture.store)?;
     let idle = fixture.surface.idle();
     let evidence = EnvironmentObstructionEvidence {
         obstruct,
