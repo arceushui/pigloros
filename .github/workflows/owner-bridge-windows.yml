@@ -33,9 +33,5 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
           git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs
           Write-Output 'Diagnostic-only observations; no full matrix, G3, coverage, or qualification claim'
-          cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- adapter::native_tests::process_fault::diagnostic_882_early_renderer_control_samples --exact --include-ignored --nocapture --test-threads=1
-          $early = $LASTEXITCODE
-          cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- adapter::native_tests::process_fault::diagnostic_882_browser_release_pair --exact --include-ignored --nocapture --test-threads=1
-          $release = $LASTEXITCODE
-          Write-Output "DIAG_882_RESULT early=$early release=$release"
-          if ($early -ne 0 -or $release -ne 0) { throw 'Diagnostic boundary witness failed' }
+          cargo test -p pos-owner-bridge-windows --all-features --locked --lib -- tests::native_verified_owned_process_faults_retire --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Full process fault function failed' }
