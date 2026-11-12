@@ -1558,6 +1558,7 @@ def test_owned_process_fault_authority() -> None:
         ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
         ("result.map_err(|()| query_error)?.ok_or(pending_error)", "Ok(0)"),
         ("nonzero_reply_zeroing_observed(&observations)", "true"),
+        ("environment_record_evidence(&mut fixture.store)?", "EnvironmentRecordEvidence { no_record: true, retained_orphan: true }"),
         ("run_initial_scenarios(runtime, &root.0)", "Ok(())"),
         ("run_later_scenarios(runtime, &root.0)", "Ok(())"),
         ("if !self.failed || !self.wipe.secrets || !self.wipe.plan_if_quarantined || !self.complete", "if false"),
