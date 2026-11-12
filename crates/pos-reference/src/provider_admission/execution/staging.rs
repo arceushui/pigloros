@@ -34,6 +34,12 @@ impl AdmittedEntry<'_> {
         self.execution.policy()
     }
 
+    /// The self-digest of the AGR1 this entry was admitted under.
+    #[must_use]
+    pub fn grant_digest(&self) -> [u8; 32] {
+        self.execution.grant_digest()
+    }
+
     /// Retain the exact admitted context through execution and release.
     #[must_use]
     pub fn retain(&self) -> Arc<AdmittedProviderExecution> {

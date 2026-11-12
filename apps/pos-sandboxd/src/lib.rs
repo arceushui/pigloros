@@ -131,7 +131,12 @@ impl ExecutionOwnership {
 
     /// Whether `identity` is the cgroup this owner's execution bound.
     fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
-        self.0.cgroup.get() == Some(&identity)
+        self.bound_cgroup() == Some(identity)
+    }
+
+    /// The cgroup this owner's execution bound, if it bound one.
+    fn bound_cgroup(&self) -> Option<(u64, u64)> {
+        self.0.cgroup.get().copied()
     }
 
     fn advance(&self, from: u8, to: u8) -> Result<(), ExecuteError> {
@@ -154,15 +159,124 @@ pub(crate) struct LauncherFacts {
 }
 
 #[cfg(target_os = "linux")]
+/// The root facts a PAI3 record retained at activation.
+///
+/// They are decoded for comparison with a fresh kernel readback: claims, not
+/// evidence. The held image's identity is PAI2's, not repeated here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedRoot {
+    /// The attached root's mount ID.
+    pub(crate) mount_id: u64,
+    /// The root inode on the mapper device.
+    pub(crate) inode: u64,
+    /// The mapper's device and disk sequence.
+    pub(crate) mapper: ((u32, u32), u64),
+    /// The mapper's UUID.
+    pub(crate) mapper_uuid: String,
+    /// The loop device's name.
+    pub(crate) loop_name: String,
+    /// The loop device's device and disk sequence.
+    pub(crate) loop_device: ((u32, u32), u64),
+}
+
+#[cfg(target_os = "linux")]
+impl RecordedRoot {
+    /// The attached root's mount ID.
+    #[must_use]
+    pub const fn mount_id(&self) -> u64 {
+        self.mount_id
+    }
+
+    /// The root inode on the mapper device.
+    #[must_use]
+    pub const fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    /// The mapper's device and disk sequence.
+    #[must_use]
+    pub const fn mapper(&self) -> ((u32, u32), u64) {
+        self.mapper
+    }
+
+    /// The mapper's UUID.
+    #[must_use]
+    pub const fn mapper_uuid(&self) -> &str {
+        self.mapper_uuid.as_str()
+    }
+
+    /// The loop device's name.
+    #[must_use]
+    pub const fn loop_name(&self) -> &str {
+        self.loop_name.as_str()
+    }
+
+    /// The loop device's device and disk sequence.
+    #[must_use]
+    pub const fn loop_device(&self) -> ((u32, u32), u64) {
+        self.loop_device
+    }
+}
+
+/// The held image `(device, inode)` the test fixtures record and read back.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const FIXTURE_IMAGE: (u64, u64) = (5, 6);
+/// Other images than the fixture's, built without arithmetic from its
+/// distinct device and inode: another inode on its device, and its inode on
+/// another device.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const OTHER_IMAGES: [(u64, u64); 2] = [
+    (FIXTURE_IMAGE.0, FIXTURE_IMAGE.0),
+    (FIXTURE_IMAGE.1, FIXTURE_IMAGE.1),
+];
+// `OTHER_IMAGES` differs from the fixture only while its device and inode do.
+#[cfg(all(test, target_os = "linux"))]
+const _: () = assert!(FIXTURE_IMAGE.0 != FIXTURE_IMAGE.1);
+
+/// An attempt's `root` is opened only as a directory path, never through a
+/// symlink: the root readback and the restart root inventory share this.
+#[cfg(target_os = "linux")]
+pub(crate) const ATTEMPT_ROOT_OPEN: rustix::fs::OFlags = rustix::fs::OFlags::PATH
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .union(rustix::fs::OFlags::CLOEXEC);
+/// It is resolved beneath the held attempt directory, across a mount but
+/// never through a symlink.
+#[cfg(target_os = "linux")]
+pub(crate) const ATTEMPT_ROOT_RESOLVE: rustix::fs::ResolveFlags =
+    rustix::fs::ResolveFlags::BENEATH.union(rustix::fs::ResolveFlags::NO_SYMLINKS);
+
+#[cfg(target_os = "linux")]
+/// One recorded attempt directory and its `root` entry, held by path only
+/// and opened across a mount.
+///
+/// The root may still carry the previous runtime's root mount. Holding it
+/// grants no detach authority: the mount must still be correlated with fresh
+/// kernel readback, and the directory inventory must later find it unmounted.
+#[derive(Debug)]
+pub(crate) struct RecordedRootEntry {
+    /// The committed intent, which recorded both directory identities.
+    pub(crate) intent: RecoveredAttemptIntent,
+    /// The held attempt directory, with its recorded identity.
+    pub(crate) attempt: std::fs::File,
+    /// `<attempt>/root`, opened as a path beneath the held attempt directory.
+    pub(crate) root: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use execute::{
-    execute, AttemptEnding, AttemptExecution, ExecuteError, ExecuteFailure, ExecuteJob,
-    LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest, UnitCgroup, UnitHost, UnitKiller,
-    UnitState,
+    execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
+    ExecuteFailure, ExecuteJob, LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest,
+    UnitCgroup, UnitHost, UnitKiller, UnitState,
 };
 #[cfg(target_os = "linux")]
-pub use lifecycle::{finish_attempt, AttemptCleanupDeadlines, AttemptCleanupError};
+pub use lifecycle::{
+    finish_attempt, AttemptCleanup, AttemptCleanupDeadlines, AttemptCleanupError, AttemptLaunch,
+    AttemptLifecycle, AttemptLifecycleError, AttemptProgress, CleanupBudget, EndedAttempt,
+    LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt, ReconciledAttempt, SystemdAttemptSteps,
+};
 #[cfg(target_os = "linux")]
 pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
@@ -177,16 +291,17 @@ pub use namespace_network::{
     AttemptNetworkError, EgressControl, EgressProbe, EgressProbeError, EstablishError,
     EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,
     FirewallRule, FirewallTableFamily, FirewallVerdict, ForwardingRecords, HostEgress,
-    HostEgressError, InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceConnector,
-    NamespaceControl, NamespaceName, NamespaceRoute, NamespacedLocalNetwork,
-    NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress,
-    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, OrphanSweepError,
-    ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE, NAMESPACE_TABLE,
+    HostEgressError, InvalidEgressProbe, InvalidLinkName, IpPrefix, LinkKind, LinkName,
+    LocalEgressProbe, NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute,
+    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError,
+    NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
+    OrphanSweepError, ReadbackMismatch, UndecodableRule, FORWARDING_RECORDS, HOST_TABLE,
+    NAMESPACE_TABLE,
 };
 #[cfg(target_os = "linux")]
 pub use restart::{
-    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
-    RootsReleased,
+    reconcile_restart, EgressPropertyProbe, OrphanNetworkCleanup, ReconciledRestart,
+    RestartReconciliationError, RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

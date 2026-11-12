@@ -474,38 +474,38 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
     Ok(())
 }
 
-#[test]
-fn the_probe_target_takes_the_second_address_of_an_aligned_slash_30() {
-    let probe = |network| EgressProbe {
-        network,
-        port: 7000,
-    };
-    assert_eq!(
-        probe(Ipv4Addr::new(198, 18, 0, 4)).addresses(),
-        Some((
-            Ipv4Addr::new(198, 18, 0, 5),
-            std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
-        ))
-    );
-    assert_eq!(
-        probe(Ipv4Addr::new(255, 255, 255, 252))
-            .addresses()
-            .map(|(host, _)| host),
-        Some(Ipv4Addr::new(255, 255, 255, 253))
-    );
-    for misaligned in [Ipv4Addr::new(198, 18, 0, 5), Ipv4Addr::BROADCAST] {
-        assert_eq!(probe(misaligned).addresses(), None);
-    }
+/// The probe of the /30 at `198.18.0.4`, whose target listens on port 7000.
+fn probe_network() -> TestResult<EgressProbe> {
+    Ok(EgressProbe::new(Ipv4Addr::new(198, 18, 0, 4), 7000)?)
 }
 
 #[test]
-fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult {
+fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probed = network.probe_egress(EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 5),
-        port: 7000,
-    });
+    for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
+        let probed = network.probe_egress(EgressProbe::new(inside, 7000)?);
+        assert!(
+            matches!(probed, Err(EgressProbeError::Network)),
+            "{probed:?}"
+        );
+    }
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_reconciliation_probes_the_port_attempts_use() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    // A /30 inside the attempt range is refused before the host is read, so
+    // the probe's outcome reaches reconciliation from the blocking pool
+    // without touching the kernel.
+    let probe = LocalEgressProbe::new(
+        Arc::new(network),
+        EgressProbe::new(Ipv4Addr::new(10, 213, 0, 4), 7000)?,
+    );
+    let probed = crate::EgressPropertyProbe::probe_egress(&probe).await;
     assert!(
         matches!(probed, Err(EgressProbeError::Network)),
         "{probed:?}"
@@ -514,21 +514,113 @@ fn a_misaligned_probe_network_is_refused_before_anything_changes() -> TestResult
     Ok(())
 }
 
+/// A network whose port is quarantined: its one attempt network's egress
+/// could not be removed.
+fn quarantined(
+    directory: &std::path::Path,
+) -> TestResult<NamespacedLocalNetwork<FakeControl, FakeEgress>> {
+    let unremovable = FakeEgress {
+        refuse_removal: true,
+        ..FakeEgress::default()
+    };
+    let (stuck, _) = network_with(directory, pinning(directory), &unremovable, 24)?;
+    drop(stuck.establish([3; 16], &[ENDPOINT])?);
+    Ok(stuck)
+}
+
 #[test]
-fn a_probe_network_inside_the_attempt_range_is_refused_before_anything_changes() -> TestResult {
+fn a_quarantined_port_fails_the_probe_first() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    for inside in [Ipv4Addr::new(10, 213, 0, 0), Ipv4Addr::new(10, 213, 0, 252)] {
-        let probed = network.probe_egress(EgressProbe {
-            network: inside,
-            port: 7000,
-        });
-        assert!(
-            matches!(probed, Err(EgressProbeError::Network)),
-            "{probed:?}"
-        );
-    }
-    assert!(entries(&journal).installed.is_empty());
+    let stuck = quarantined(directory.path())?;
+    // However far the probe gets on this host, the quarantine, which
+    // outlasts every other failure, is what it reports.
+    let probed = stuck.probe_egress_through(
+        || Ok(host_with(&[Ipv4Addr::new(10, 0, 0, 1)])),
+        probe_network()?,
+    );
+    assert!(
+        matches!(
+            &probed,
+            Err(EgressProbeError::Quarantined { slot: 0, reason, probe: Some(_) })
+                if reason == &HostEgressError::Readback.to_string()
+        ),
+        "{probed:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_quarantine_keeps_the_probes_own_failure_as_its_source() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let stuck = quarantined(directory.path())?;
+    // The host cannot be read: the probe fails there on any host, with or
+    // without privileges, before anything is set up.
+    let probed = stuck.probe_egress_through(
+        || -> Result<NetlinkSession<HostReplies>, _> { Err(NetlinkError::Unexpected) },
+        probe_network()?,
+    );
+    assert!(
+        matches!(
+            &probed,
+            Err(EgressProbeError::Quarantined { slot: 0, probe: Some(outcome), .. })
+                if matches!(**outcome, EgressProbeError::Target(NetlinkError::Unexpected))
+        ),
+        "{probed:?}"
+    );
+    // The quarantine's `source()` is the probe's `Target` failure, whose own
+    // `source()` is the host read's failure.
+    let source = probed
+        .as_ref()
+        .err()
+        .and_then(std::error::Error::source)
+        .ok_or("the quarantine has no source")?;
+    // thiserror exposes the `Option<Box<_>>` source as the `Box` itself.
+    let target = source
+        .downcast_ref::<Box<EgressProbeError>>()
+        .map(|boxed| &**boxed)
+        .ok_or("the quarantine's source is not the probe's failure")?;
+    assert!(
+        matches!(target, EgressProbeError::Target(NetlinkError::Unexpected)),
+        "{target:?}"
+    );
+    assert_eq!(
+        source.to_string(),
+        "the egress probe's target could not be set up or removed"
+    );
+    assert_eq!(
+        source.source().map(ToString::to_string),
+        Some(NetlinkError::Unexpected.to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn a_panicking_probe_lets_the_next_one_run() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, _journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probe = probe_network()?;
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        network.probe_egress_through(
+            || -> Result<NetlinkSession<HostReplies>, NetlinkError> {
+                std::panic::resume_unwind(Box::new("the host read panicked"))
+            },
+            probe,
+        )
+    }));
+    assert!(panicked.is_err());
+    // The panic released the claim: the next probe runs, and fails only on
+    // the unreadable host.
+    let next = network.probe_egress_through(
+        || -> Result<NetlinkSession<HostReplies>, _> { Err(NetlinkError::Unexpected) },
+        probe,
+    );
+    assert!(
+        matches!(
+            next,
+            Err(EgressProbeError::Target(NetlinkError::Unexpected))
+        ),
+        "{next:?}"
+    );
     Ok(())
 }
 
@@ -583,10 +675,7 @@ fn host_with(addresses: &[Ipv4Addr]) -> NetlinkSession<HostReplies> {
 fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
+    let probe = probe_network()?;
     let used = Ipv4Addr::new(198, 18, 0, 5);
     let probed = network.probe_egress_through(|| Ok(host_with(&[used])), probe);
     assert!(
@@ -614,10 +703,7 @@ fn a_probe_network_the_host_uses_is_refused_before_anything_changes() -> TestRes
 fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
-    let probe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
+    let probe = probe_network()?;
     // Unsharing a namespace needs `CAP_SYS_ADMIN`; the host has no address
     // in the probe's /30.
     let probed =
@@ -655,7 +741,23 @@ fn probe_errors_say_what_failed() {
         ),
         (
             EgressProbeError::Network,
-            "the egress probe's /30 is misaligned or overlaps the attempt range or a host address or route",
+            "the egress probe's /30 overlaps the attempt range or a host address or route",
+        ),
+        (
+            EgressProbeError::Interrupted,
+            "the egress probe did not run to completion",
+        ),
+        (
+            EgressProbeError::InFlight,
+            "an earlier egress probe is still running",
+        ),
+        (
+            EgressProbeError::Quarantined {
+                slot: 2,
+                reason: "busy".to_owned(),
+                probe: None,
+            },
+            "the attempt network port is quarantined at slot 2 (busy)",
         ),
     ] {
         assert_eq!(error.to_string(), message);
@@ -1100,12 +1202,6 @@ mod privileged {
         Ok(())
     }
 
-    /// The probe's dedicated /30.
-    const PROBE: EgressProbe = EgressProbe {
-        network: Ipv4Addr::new(198, 18, 0, 4),
-        port: 7000,
-    };
-
     /// A network over the real kernel, pinned in `/run/netns`.
     fn real_network() -> TestResult<NamespacedLocalNetwork<NetlinkNamespaceControl>> {
         let namespaces = NetworkNamespaces::system();
@@ -1117,12 +1213,137 @@ mod privileged {
         ))
     }
 
+    /// The kernel adapter, whose every removal removes and then reports a
+    /// failure, as a removal that left something behind would.
+    #[derive(Debug)]
+    struct FailingRemoval(NetlinkNamespaceControl);
+
+    impl NamespaceControl for FailingRemoval {
+        type Error = NetlinkError;
+
+        fn install(&self, expected: &ExpectedNamespace) -> Result<(), NetlinkError> {
+            self.0.install(expected)
+        }
+
+        fn observe(
+            &self,
+            name: &NamespaceName,
+            host_link: &LinkName,
+        ) -> Result<ObservedNamespace, NetlinkError> {
+            self.0.observe(name, host_link)
+        }
+
+        fn remove(&self, name: &NamespaceName, host_link: &LinkName) -> Result<(), NetlinkError> {
+            self.0
+                .remove(name, host_link)
+                .and(Err(NetlinkError::Residual))
+        }
+    }
+
+    #[test]
+    fn a_probe_whose_attempt_network_is_not_removed_fails() -> TestResult {
+        if !isolated("a_probe_whose_attempt_network_is_not_removed_fails")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let network = NamespacedLocalNetwork::new(
+            FailingRemoval(NetlinkNamespaceControl::new(namespaces.clone())),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        );
+        let probed = network.probe_egress(probe_network()?);
+        assert!(
+            matches!(probed, Err(EgressProbeError::Quarantined { slot: 0, .. })),
+            "{probed:?}"
+        );
+        Ok(())
+    }
+
+    /// Probe twice through the adapter on `runtime`: the first probe's
+    /// claim ends with it, so the second runs too, and neither leaves a
+    /// namespace behind.
+    fn probe_twice_on(runtime: &tokio::runtime::Runtime) -> TestResult {
+        let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
+        for _ in 0..2 {
+            let probed = runtime.block_on(crate::EgressPropertyProbe::probe_egress(&probe));
+            assert!(probed.is_ok(), "{probed:?}");
+            let left = NetworkNamespaces::system().attempt_names();
+            assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restart_reconciliation_probes_egress_end_to_end() -> TestResult {
+        if !isolated("restart_reconciliation_probes_egress_end_to_end")? {
+            return Ok(());
+        }
+        probe_twice_on(&tokio::runtime::Builder::new_current_thread().build()?)
+    }
+
+    /// On a multi-threaded runtime, as in production, the probe's teardown
+    /// takes the `block_in_place` path.
+    #[test]
+    fn restart_reconciliation_probes_egress_end_to_end_on_worker_threads() -> TestResult {
+        if !isolated("restart_reconciliation_probes_egress_end_to_end_on_worker_threads")? {
+            return Ok(());
+        }
+        probe_twice_on(
+            &tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()?,
+        )
+    }
+
+    #[test]
+    fn a_probe_past_its_deadline_releases_the_network_when_it_ends() -> TestResult {
+        if !isolated("a_probe_past_its_deadline_releases_the_network_when_it_ends")? {
+            return Ok(());
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()?;
+        let probe = LocalEgressProbe::new(Arc::new(real_network()?), probe_network()?);
+        // No time at all: the probe starts on the blocking pool and is no
+        // longer awaited, as at the reconciliation deadline.
+        // The timer needs the runtime, so it is made inside it.
+        let late = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::ZERO,
+                crate::EgressPropertyProbe::probe_egress(&probe),
+            )
+            .await
+        });
+        assert!(late.is_err(), "{late:?}");
+        // A retry is refused while the earlier probe runs, and runs once it
+        // has ended.
+        let retried = runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let probed = crate::EgressPropertyProbe::probe_egress(&probe).await;
+                if !matches!(probed, Err(EgressProbeError::InFlight))
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    return probed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(retried.is_ok(), "{retried:?}");
+        let left = NetworkNamespaces::system().attempt_names();
+        assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
+        Ok(())
+    }
+
     #[test]
     fn the_egress_probe_passes_and_leaves_nothing() -> TestResult {
         if !isolated("the_egress_probe_passes_and_leaves_nothing")? {
             return Ok(());
         }
-        let probed = real_network()?.probe_egress(PROBE);
+        let probed = real_network()?.probe_egress(probe_network()?);
         assert!(probed.is_ok(), "{probed:?}");
         let left = NetworkNamespaces::system().attempt_names();
         assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
@@ -1151,7 +1372,7 @@ mod privileged {
                     &[foreign],
                 ))
             });
-        let probed = real_network()?.probe_egress(PROBE);
+        let probed = real_network()?.probe_egress(probe_network()?);
         assert!(installed.is_ok(), "{installed:?}");
         assert!(
             matches!(probed, Err(EgressProbeError::Blocked(_))),

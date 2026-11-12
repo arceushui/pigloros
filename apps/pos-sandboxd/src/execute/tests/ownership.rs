@@ -34,7 +34,7 @@ fn authenticated_owner() -> TestResult<AuthenticatedOwner> {
             request.attempt_id,
             request.authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     Ok(AuthenticatedOwner {
         directory,
         _registry: registry,
@@ -50,6 +50,7 @@ fn job(scenario: &Scenario, attempt: &AdmittedAttempt) -> ExecuteJob {
         attempt: attempt.clone(),
         mode: ModePlan::AirGapped,
         capture_store: Arc::clone(&scenario.store),
+        cancel: scenario.cancel.signal(),
     }
 }
 
@@ -352,6 +353,7 @@ async fn authenticated_reconstruction_preserves_a_refused_execution_owner() -> T
                     attempt,
                     mode: mismatched,
                     capture_store: Arc::clone(&scenario.store),
+                    cancel: scenario.cancel.signal(),
                 },
                 || Err(ImageActivationError::EvidenceMismatch),
             )

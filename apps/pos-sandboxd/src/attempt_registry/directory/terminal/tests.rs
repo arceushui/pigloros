@@ -23,7 +23,11 @@ fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() 
     let (runtime, registry) = fixture()?;
     let mut prepared = Vec::new();
     for id in 1..=8 {
-        prepared.push(registry.commit_planned(&intent(id)?)?.prepare_directory()?);
+        prepared.push(
+            registry
+                .commit_planned(&intent(id)?)?
+                .prepare_fixture_directory()?,
+        );
     }
     for (id, directory) in (1..=8).zip(prepared) {
         let planned = intent(id)?;
@@ -47,7 +51,7 @@ fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() 
     // Completed cleanup leaves a clean owner open for the next attempt.
     registry
         .commit_planned(&intent(9)?)?
-        .prepare_directory()?
+        .prepare_fixture_directory()?
         .finish_terminal_cleanup(UNSUBMITTED, None)?;
     drop(registry);
     let parent = File::open(runtime.path())?;
@@ -63,7 +67,9 @@ fn missing_unit_or_root_evidence_removes_nothing_and_closes_commits() -> TestRes
         let (runtime, registry) = fixture()?;
         let planned = intent(1)?;
         let key = planned.unit_name().attempt_component();
-        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let directory = registry
+            .commit_planned(&planned)?
+            .prepare_fixture_directory()?;
         match case {
             // The claimed execution requested its unit start.
             0 => {
@@ -111,7 +117,9 @@ fn an_attempt_whose_unit_start_was_never_requested_is_fenced_and_cleaned() -> Te
         let (runtime, registry) = fixture()?;
         let planned = intent(1)?;
         let key = planned.unit_name().attempt_component();
-        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let directory = registry
+            .commit_planned(&planned)?
+            .prepare_fixture_directory()?;
         let ownership = directory.execution_ownership();
         match case {
             0 => {}
@@ -134,7 +142,9 @@ fn changed_record_or_tree_is_refused_before_intent_deletion() -> TestResult {
         let (runtime, registry) = fixture()?;
         let planned = intent(1)?;
         let key = planned.unit_name().attempt_component();
-        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let directory = registry
+            .commit_planned(&planned)?
+            .prepare_fixture_directory()?;
         let attempt = runtime.path().join("attempts").join(key);
         let record = runtime.path().join("registry").join(key);
         match case {
@@ -169,7 +179,9 @@ fn every_terminal_io_failure_leaves_a_recoverable_frontier() -> TestResult {
     }
     let operation_count = {
         let (_runtime, registry) = fixture()?;
-        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let prepared = registry
+            .commit_planned(&intent(1)?)?
+            .prepare_fixture_directory()?;
         let (result, count) =
             with_io_fault(None, || prepared.finish_terminal_cleanup(UNSUBMITTED, None));
         result?;
@@ -182,7 +194,9 @@ fn every_terminal_io_failure_leaves_a_recoverable_frontier() -> TestResult {
         let (runtime, registry) = fixture()?;
         let planned = intent(1)?;
         let key = planned.unit_name().attempt_component();
-        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let directory = registry
+            .commit_planned(&planned)?
+            .prepare_fixture_directory()?;
         let attempt = runtime.path().join("attempts").join(key);
         let record = runtime.path().join("registry").join(key);
         let bytes = fs::read(&record)?;
@@ -227,7 +241,9 @@ fn quarantine_is_kept_and_poisoned_ownership_never_deletes_intent() -> TestResul
         let (runtime, registry) = fixture()?;
         let planned = intent(1)?;
         let key = planned.unit_name().attempt_component();
-        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let directory = registry
+            .commit_planned(&planned)?
+            .prepare_fixture_directory()?;
         if poisoned {
             assert!(std::panic::catch_unwind(|| {
                 let _guard = registry.state.lock();

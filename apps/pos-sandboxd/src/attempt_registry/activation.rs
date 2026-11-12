@@ -51,8 +51,11 @@ const NO_BOOT: [u8; 16] = [0; 16];
 /// connection was lost at its deadline: the server-side work is not cancelled
 /// with the client, so restart waits this long beyond the activator deadline.
 const SERVER_MARGIN: Duration = Duration::from_secs(10);
-/// How long after it was sent a request can still attach a loop device.
-const REQUEST_BOUND: Duration = MountfsdImageActivator::DEADLINE.saturating_add(SERVER_MARGIN);
+
+impl MountfsdImageActivator {
+    /// How long after it was sent a request can still attach a loop device.
+    pub(crate) const REQUEST_BOUND: Duration = Self::DEADLINE.saturating_add(SERVER_MARGIN);
+}
 
 /// The boot and time at which the last `MountImage` request was about to be
 /// sent, or [`ActivationMarker::UNREQUESTED`].
@@ -113,7 +116,7 @@ impl ActivationMarker {
         }
         now.checked_sub(self.sent)
             .map(|elapsed| {
-                REQUEST_BOUND
+                MountfsdImageActivator::REQUEST_BOUND
                     .checked_sub(elapsed)
                     .filter(|remaining| !remaining.is_zero())
             })

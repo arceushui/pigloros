@@ -399,7 +399,7 @@ impl PreparedProviderExecution {
         self.slot.recheck(authority)?;
         let request = snapshot.request();
         let a = &request.authority;
-        let grant = AdmissionGrant {
+        let (grant, grant_digest) = AdmissionGrant {
             request_id: request.request.request_id,
             attempt_id: request.attempt_id,
             authority: AdmissionAuthority {
@@ -464,7 +464,7 @@ impl PreparedProviderExecution {
                     .and_then(|()| writer.write_all(&grant))
                     .map_err(StagingError::from)
                     .and_then(|()| remaining(self.initial_deadline.min(self.input_deadline)))
-                    .map(|_| self.grant = GrantState::Granted)
+                    .map(|_| self.grant = GrantState::Granted(grant_digest))
             })
     }
 
@@ -478,9 +478,9 @@ impl PreparedProviderExecution {
         stream: &mut UnixStream,
         file: &File,
     ) -> Result<AdmittedProviderExecution, StagingError> {
-        if self.grant != GrantState::Granted {
+        let GrantState::Granted(grant_digest) = self.grant else {
             return Err(StagingError::GrantRequired);
-        }
+        };
         self.check_connection(stream)?;
         let request = self.request();
         let mut validator = PayloadStreamValidator::new(
@@ -534,6 +534,7 @@ impl PreparedProviderExecution {
             root_image,
             proof,
             authority,
+            grant_digest,
             _input: self.input,
             slot: self.slot,
         })
@@ -556,6 +557,13 @@ impl AdmittedProviderExecution {
             proof: self.proof.clone(),
             authority: self.authority,
         }
+    }
+
+    /// The self-digest of the AGR1 this input was admitted under, which every
+    /// later cancel and reconcile request must name.
+    #[must_use]
+    pub const fn grant_digest(&self) -> [u8; 32] {
+        self.grant_digest
     }
 
     /// Recheck current installation and the live provider control floor.
@@ -1244,7 +1252,10 @@ mod tests {
         });
         let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
         send_grant(&mut prepared, &mut provider)?;
-        drop(frame(&mut selector, &ledger)?);
+        let grant = frame(&mut selector, &ledger)?;
+        let sent_grant =
+            crate::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(&grant.bytes)?;
+        drop(grant);
         let temporary = tempfile::tempdir()?;
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
         let held = File::open(temporary.path())?;
@@ -1257,6 +1268,9 @@ mod tests {
         let expected_request = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
         assert_eq!(verified.len(), staged.input().len() as u64);
         assert!(!verified.is_empty());
+        // Cancel and reconcile requests must name exactly the AGR1 sent.
+        assert_eq!(verified.entry().grant_digest(), sent_grant.grant_digest);
+        assert_ne!(sent_grant.grant_digest, [0; 32]);
         assert_eq!(
             verified.entry().policy().request_digest(),
             expected_request.request_digest
