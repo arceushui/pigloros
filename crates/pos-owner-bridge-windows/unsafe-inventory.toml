@@ -1493,7 +1493,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 97
+line = 112
 function = "readback"
 operation = "NewWindow::Handled"
 invariant = "exact retained callback args, same STA; initialized BOOL output, read only after the real Handled setter succeeded. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1501,7 +1501,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 104
+line = 119
 function = "readback"
 operation = "Permission::State"
 invariant = "exact retained callback args on this STA and initialized enum output. No permission state is granted by this observation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1509,7 +1509,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 111
+line = 126
 function = "readback"
 operation = "Download::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output, no download path or operation is read or accepted. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1517,7 +1517,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 117
+line = 132
 function = "readback"
 operation = "External::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no URI is passed to an application launcher. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1525,7 +1525,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 123
+line = 138
 function = "readback"
 operation = "Authentication::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no credential/response object is accessed. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1533,7 +1533,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 137
+line = 152
 function = "navigation"
 operation = "Navigation::Cancel"
 invariant = "Actual invoking-STA navigation args, after Cancel=true succeeded; initialized BOOL output. The observation never authorizes navigation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1541,7 +1541,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 31
+line = 28
 function = "process_failed"
 operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
 invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."

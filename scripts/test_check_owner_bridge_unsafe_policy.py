@@ -1875,8 +1875,10 @@ def test_typed_process_failure_evidence() -> None:
     source = (ROOT / SHIM / relative).read_text()
     message = f"{SHIM}/{relative}: process failure observations differ from reviewed typed callbacks"
     for old, new in (
-        ("_ => NativeProcessFailure::Other", "_ => NativeProcessFailure::BrowserExited"),
-        (".unwrap_or(NativeProcessFailure::Unavailable)", ".unwrap_or(NativeProcessFailure::BrowserExited)"),
+        ("Some(_) => NativeProcessFailure::Other", "Some(_) => NativeProcessFailure::BrowserExited"),
+        ("None => NativeProcessFailure::Unavailable", "None => NativeProcessFailure::BrowserExited"),
+        ("let result = classify_process_kind(kind);", "let result = classify_process_kind(None);"),
+        ("NativeProcessFailure::Unavailable => None", "NativeProcessFailure::Unavailable => Some(false)"),
         ("push_observation(failures, result)", "failures.borrow_mut().clear()"),
         ("PROCESS_FAILURES.with(|failures| failures.borrow().clone())", "Vec::new()"),
     ):
