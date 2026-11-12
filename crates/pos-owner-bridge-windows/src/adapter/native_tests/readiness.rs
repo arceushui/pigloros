@@ -440,68 +440,89 @@ mod tests {
         use pos_owner_bridge::OwnerWebSurface as _;
 
         let _port = crate::Native::fixed_port_fixture();
-        let root = FixtureRoot::new()?;
-        let model = Factory::new(Creation::Pending, FakeClock::start());
-        let scripted = Rc::new(QuitTwiceFactory {
-            native: Rc::clone(&model),
-            pulses: std::cell::Cell::new(0),
-        });
-        let factory: Rc<dyn NativeFactory> = scripted.clone();
-        let mut store = WindowsCleanupStore::open(root.0.clone())?;
-        let mut loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
-        let mut surface = Surface::new(
-            Rc::clone(&factory),
-            Arc::new(Runtime(root.0.clone())),
-            root.0.clone(),
-            Box::new(loopback.clone()),
-            Box::new(store.clone()),
-            Box::new(SystemClock),
-        )
-        .map_err(pos_owner_bridge::SurfaceError::error)?;
-        let started = Instant::now();
-        surface.set_deadline(started + pos_owner_bridge::ceremony::timing::READINESS);
-        let ceremony = CeremonyId::from_bytes([239; 16]);
-        let spec = pos_owner_bridge::SurfaceSpec {
-            ceremony_id: ceremony,
-            folder_name: pos_owner_bridge::folder_name(&ceremony),
-            owner_window: None,
-        };
-        assert!(surface.open(&spec).is_pending());
-        assert!(surface.open(&spec).is_pending());
-        assert!(super::pump(&surface).is_err());
-        super::pump_retaining(&surface);
-        assert_eq!(scripted.pulses.get(), 2);
-        assert!(!surface.idle());
-        assert!(surface.recordless_opening_ready());
-        assert!(store.records()?.is_empty());
-        assert!(!model.calls.borrow().contains(&"unsubscribe_exit"));
-        assert!(!model.calls.borrow().contains(&"drop_environment"));
-        model.creation.set(Creation::CallbackFailure);
-        surface.abandon_opening();
-        assert!(surface
-            .poll_failed_open()
-            .map_err(pos_owner_bridge::SurfaceError::error)?);
-        assert!(surface.idle());
+        let result = FixtureRoot::new().map(|root| {
+            let model = Factory::new(Creation::Pending, FakeClock::start());
+            let scripted = Rc::new(QuitTwiceFactory {
+                native: Rc::clone(&model),
+                pulses: std::cell::Cell::new(0),
+            });
+            let factory: Rc<dyn NativeFactory> = scripted.clone();
+            let result = WindowsCleanupStore::open(root.0.clone()).map(|mut store| {
+                let result =
+                    SharedLoopback::start_fixture(FixtureProfile::Pending).map(|mut loopback| {
+                        let result = Surface::new(
+                            Rc::clone(&factory),
+                            Arc::new(Runtime(root.0.clone())),
+                            root.0.clone(),
+                            Box::new(loopback.clone()),
+                            Box::new(store.clone()),
+                            Box::new(SystemClock),
+                        )
+                        .map_err(pos_owner_bridge::SurfaceError::error)
+                        .map(|mut surface| {
+                            let started = Instant::now();
+                            surface.set_deadline(
+                                started + pos_owner_bridge::ceremony::timing::READINESS,
+                            );
+                            let ceremony = CeremonyId::from_bytes([239; 16]);
+                            let spec = pos_owner_bridge::SurfaceSpec {
+                                ceremony_id: ceremony,
+                                folder_name: pos_owner_bridge::folder_name(&ceremony),
+                                owner_window: None,
+                            };
+                            assert!(surface.open(&spec).is_pending());
+                            assert!(surface.open(&spec).is_pending());
+                            assert!(super::pump(&surface).is_err());
+                            super::pump_retaining(&surface);
+                            assert_eq!(scripted.pulses.get(), 2);
+                            assert!(!surface.idle());
+                            assert!(surface.recordless_opening_ready());
+                            assert!(store.records().is_ok_and(|records| records.is_empty()));
+                            assert!(!model.calls.borrow().contains(&"unsubscribe_exit"));
+                            assert!(!model.calls.borrow().contains(&"drop_environment"));
+                            model.creation.set(Creation::CallbackFailure);
+                            surface.abandon_opening();
+                            assert!(matches!(surface.poll_failed_open(), Ok(true)));
+                            assert!(surface.idle());
 
-        let mut driver = super::new_driver(ceremony, Instant::now())?;
-        for _ in 0..2 {
-            let error =
-                super::cancel_driver(&mut driver, &mut surface, &mut loopback, &mut store).err();
-            assert_eq!(
-                error,
-                Some(pos_owner_bridge::BridgeError::Lifecycle(
-                    pos_owner_bridge::LifecycleCode::ControllerLost
-                ))
-            );
-            assert!(driver.request_clear());
-        }
-        assert!(surface.idle());
-        assert!(store.records()?.is_empty());
-        drop(surface);
-        drop(loopback);
-        drop(store);
-        drop(factory);
-        root.remove()
+                            let result =
+                                super::new_driver(ceremony, Instant::now()).map(|mut driver| {
+                                    for _ in 0..2 {
+                                        let error = super::cancel_driver(
+                                            &mut driver,
+                                            &mut surface,
+                                            &mut loopback,
+                                            &mut store,
+                                        )
+                                        .err();
+                                        assert_eq!(
+                                            error,
+                                            Some(pos_owner_bridge::BridgeError::Lifecycle(
+                                                pos_owner_bridge::LifecycleCode::ControllerLost
+                                            ))
+                                        );
+                                        assert!(driver.request_clear());
+                                    }
+                                    assert!(surface.idle());
+                                    assert!(store
+                                        .records()
+                                        .is_ok_and(|records| records.is_empty()));
+                                });
+                            assert!(result.is_ok(), "driver creation: {result:?}");
+                            drop(surface);
+                        });
+                        assert!(result.is_ok(), "surface creation: {result:?}");
+                        drop(loopback);
+                    });
+                assert!(result.is_ok(), "loopback creation: {result:?}");
+                drop(store);
+            });
+            assert!(result.is_ok(), "store creation: {result:?}");
+            drop(factory);
+            assert!(root.remove().is_ok());
+        });
+        assert!(result.is_ok(), "fixture root: {result:?}");
+        Ok(())
     }
 
     #[test]

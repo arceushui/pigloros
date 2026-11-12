@@ -504,12 +504,14 @@ mod tests {
         ] {
             let model = Factory::new(Creation::Ready, FakeClock::start());
             model.failure.set(failure);
-            let native = model.session().map_err(|error| format!("{error:?}"))?;
-            assert_eq!(
-                super::prepare_control_view(native.as_ref()).is_ok(),
-                success,
-                "{failure:?}"
-            );
+            let result = model.session().map(|native| {
+                assert_eq!(
+                    super::prepare_control_view(native.as_ref()).is_ok(),
+                    success,
+                    "{failure:?}"
+                );
+            });
+            assert!(result.is_ok(), "native session: {result:?}");
             assert_eq!(model.calls.borrow().as_slice(), expected, "{failure:?}");
             assert!(!model.calls.borrow().contains(&"navigate"));
         }
@@ -572,29 +574,31 @@ mod tests {
             factory.environment_creation.set(environment_creation);
             let probe = Rc::new(probe());
             let events = Rc::clone(&probe.events);
-            let mut native = super::session::Session::new(&factory, Rc::clone(&events))
-                .map_err(|error| format!("{error:?}"))?;
-            let result = super::create_control_session(
-                &mut native,
-                &factory,
-                &probe,
-                Path::new("modeled-runtime"),
-                Path::new("modeled-folder"),
+            let session_result =
+                super::session::Session::new(&factory, Rc::clone(&events)).map(|mut native| {
+                    let result = super::create_control_session(
+                        &mut native,
+                        &factory,
+                        &probe,
+                        Path::new("modeled-runtime"),
+                        Path::new("modeled-folder"),
+                    );
+                    let calls_before_retirement = factory.calls.borrow().clone();
+                    if success {
+                        assert!(matches!(native.browser_pid(), Ok(42)));
+                        events.event(NativeEvent::BrowserExited { pid: 42 });
+                    }
+                    factory.failure.set(None);
+                    drop(native);
+                    assert_eq!(result.is_ok(), success);
+                    assert_eq!(calls_before_retirement.as_slice(), expected);
+                    assert!(!calls_before_retirement.contains(&"navigate"));
+                    assert!(factory.calls.borrow().contains(&"drop_environment"));
+                });
+            assert!(
+                session_result.is_ok(),
+                "session creation: {session_result:?}"
             );
-            let calls_before_retirement = factory.calls.borrow().clone();
-            if success {
-                assert_eq!(
-                    native.browser_pid().map_err(|error| format!("{error:?}"))?,
-                    42
-                );
-                events.event(NativeEvent::BrowserExited { pid: 42 });
-            }
-            factory.failure.set(None);
-            drop(native);
-            assert_eq!(result.is_ok(), success);
-            assert_eq!(calls_before_retirement.as_slice(), expected);
-            assert!(!calls_before_retirement.contains(&"navigate"));
-            assert!(factory.calls.borrow().contains(&"drop_environment"));
         }
         Ok(())
     }
@@ -625,30 +629,33 @@ mod tests {
             let factory = Factory::new(Creation::Ready, FakeClock::start());
             let probe = Rc::new(probe());
             let events = Rc::clone(&probe.events);
-            let mut native = super::session::Session::new(&factory, Rc::clone(&events))
-                .map_err(|error| format!("{error:?}"))?;
-            super::create_control_session(
-                &mut native,
-                &factory,
-                &probe,
-                Path::new("modeled-runtime"),
-                Path::new("modeled-folder"),
-            )?;
-            assert_eq!(
-                native.browser_pid().map_err(|error| format!("{error:?}"))?,
-                42
+            let session_result =
+                super::session::Session::new(&factory, Rc::clone(&events)).map(|mut native| {
+                    let setup = super::create_control_session(
+                        &mut native,
+                        &factory,
+                        &probe,
+                        Path::new("modeled-runtime"),
+                        Path::new("modeled-folder"),
+                    );
+                    assert!(setup.is_ok(), "control setup: {setup:?}");
+                    assert!(matches!(native.browser_pid(), Ok(42)));
+                    let before = factory.calls.borrow().len();
+                    factory.failure.set(failure);
+                    let result = super::subscribe_control_view(&mut native, &probe);
+                    let calls = factory.calls.borrow()[before..].to_vec();
+                    factory.failure.set(None);
+                    events.event(NativeEvent::BrowserExited { pid: 42 });
+                    drop(native);
+                    assert_eq!(result.is_ok(), success);
+                    assert_eq!(calls.as_slice(), expected);
+                    assert!(factory.calls.borrow().contains(&"drop_environment"));
+                    assert!(!factory.calls.borrow().contains(&"navigate"));
+                });
+            assert!(
+                session_result.is_ok(),
+                "session creation: {session_result:?}"
             );
-            let before = factory.calls.borrow().len();
-            factory.failure.set(failure);
-            let result = super::subscribe_control_view(&mut native, &probe);
-            let calls = factory.calls.borrow()[before..].to_vec();
-            factory.failure.set(None);
-            events.event(NativeEvent::BrowserExited { pid: 42 });
-            drop(native);
-            assert_eq!(result.is_ok(), success);
-            assert_eq!(calls.as_slice(), expected);
-            assert!(factory.calls.borrow().contains(&"drop_environment"));
-            assert!(!factory.calls.borrow().contains(&"navigate"));
         }
         Ok(())
     }

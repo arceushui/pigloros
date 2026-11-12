@@ -369,76 +369,95 @@ mod model_tests {
             ("panic_pump", "native denial driver panicked"),
             ("already_done", "denial driver finished without result"),
         ] {
-            let root = FixtureRoot::new()?;
-            let model = Factory::new(Creation::Ready, FakeClock::start());
-            model
-                .failure
-                .set((fault != "already_done").then_some(fault));
-            let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
-            let store = WindowsCleanupStore::open(root.0.clone())?;
-            let loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
-            let surface = Surface::new(
-                Rc::clone(&factory),
-                Arc::new(Runtime(root.0.clone())),
-                root.0.clone(),
-                Box::new(loopback.clone()),
-                Box::new(store.clone()),
-                Box::new(SystemClock),
-            )
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
-            let mut fixture = Fixture {
-                surface,
-                loopback,
-                store,
-                factory,
-                trace: Trace::new(240, Instant::now()),
-                lose_after_receipt: false,
-            };
-            let started = Instant::now();
-            fixture
-                .surface
-                .set_deadline(started + pos_owner_bridge::ceremony::timing::READINESS);
-            let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), started)?;
-            if fault == "already_done" {
-                let cancelled = readiness::cancel_driver(
-                    &mut driver,
-                    &mut fixture.surface,
-                    &mut fixture.loopback,
-                    &mut fixture.store,
-                );
-                assert_eq!(
-                    cancelled.err(),
-                    Some(pos_owner_bridge::BridgeError::Lifecycle(
-                        pos_owner_bridge::LifecycleCode::ControllerLost,
-                    ))
-                );
-            }
-            let (result, failure) = fixture.attempt(&mut driver);
-            let error = failure.map(|error| error.to_string());
-            let request_clear = driver.request_clear();
-            let quarantined = fixture.retire(driver, result);
-            assert!(!quarantined, "{fault}");
-            assert!(
-                error
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with(expected)),
-                "{fault}"
-            );
-            assert!(request_clear);
-            assert!(fixture.surface.idle());
-            assert!(fixture.store.records()?.is_empty());
-            let calls = model.calls.borrow();
-            assert!(!calls.contains(&"navigate"));
-            assert!(!calls.contains(&"create_buffers"));
-            assert!(!calls.contains(&"post"));
-            if fault == "already_done" {
-                assert!(!calls.contains(&"create_environment"));
-            } else {
-                assert!(calls.contains(&"drop_environment"));
-            }
-            drop(calls);
-            drop(fixture);
-            root.remove()?;
+            let result = FixtureRoot::new().map(|root| {
+                let model = Factory::new(Creation::Ready, FakeClock::start());
+                model
+                    .failure
+                    .set((fault != "already_done").then_some(fault));
+                let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
+                let result = WindowsCleanupStore::open(root.0.clone()).map(|store| {
+                    let result =
+                        SharedLoopback::start_fixture(FixtureProfile::Pending).map(|loopback| {
+                            let result = Surface::new(
+                                Rc::clone(&factory),
+                                Arc::new(Runtime(root.0.clone())),
+                                root.0.clone(),
+                                Box::new(loopback.clone()),
+                                Box::new(store.clone()),
+                                Box::new(SystemClock),
+                            )
+                            .map_err(pos_owner_bridge::SurfaceError::error)
+                            .map(|surface| {
+                                let mut fixture = Fixture {
+                                    surface,
+                                    loopback,
+                                    store,
+                                    factory,
+                                    trace: Trace::new(240, Instant::now()),
+                                    lose_after_receipt: false,
+                                };
+                                let started = Instant::now();
+                                fixture.surface.set_deadline(
+                                    started + pos_owner_bridge::ceremony::timing::READINESS,
+                                );
+                                let result = readiness::new_driver(
+                                    CeremonyId::from_bytes([240; 16]),
+                                    started,
+                                )
+                                .map(|mut driver| {
+                                    if fault == "already_done" {
+                                        let cancelled = readiness::cancel_driver(
+                                            &mut driver,
+                                            &mut fixture.surface,
+                                            &mut fixture.loopback,
+                                            &mut fixture.store,
+                                        );
+                                        assert_eq!(
+                                            cancelled.err(),
+                                            Some(pos_owner_bridge::BridgeError::Lifecycle(
+                                                pos_owner_bridge::LifecycleCode::ControllerLost,
+                                            ))
+                                        );
+                                    }
+                                    let (result, failure) = fixture.attempt(&mut driver);
+                                    let error = failure.map(|error| error.to_string());
+                                    let request_clear = driver.request_clear();
+                                    let quarantined = fixture.retire(driver, result);
+                                    assert!(!quarantined, "{fault}");
+                                    assert!(
+                                        error
+                                            .as_deref()
+                                            .is_some_and(|value| value.starts_with(expected)),
+                                        "{fault}"
+                                    );
+                                    assert!(request_clear);
+                                    assert!(fixture.surface.idle());
+                                    assert!(fixture
+                                        .store
+                                        .records()
+                                        .is_ok_and(|records| records.is_empty()));
+                                    let calls = model.calls.borrow();
+                                    assert!(!calls.contains(&"navigate"));
+                                    assert!(!calls.contains(&"create_buffers"));
+                                    assert!(!calls.contains(&"post"));
+                                    if fault == "already_done" {
+                                        assert!(!calls.contains(&"create_environment"));
+                                    } else {
+                                        assert!(calls.contains(&"drop_environment"));
+                                    }
+                                    drop(calls);
+                                    drop(fixture);
+                                });
+                                assert!(result.is_ok(), "driver creation: {result:?}");
+                            });
+                            assert!(result.is_ok(), "surface creation: {result:?}");
+                        });
+                    assert!(result.is_ok(), "loopback creation: {result:?}");
+                });
+                assert!(result.is_ok(), "store creation: {result:?}");
+                assert!(root.remove().is_ok());
+            });
+            assert!(result.is_ok(), "fixture root: {result:?}");
         }
         Ok(())
     }
