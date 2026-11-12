@@ -276,8 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_session_retains_unknown_pid_until_its_matching_exit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn raw_session_retains_unknown_pid_until_its_matching_exit() {
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
         let factory = RecoveringFactory {
@@ -285,40 +284,35 @@ mod tests {
             events: Rc::clone(&events),
             pumps: Cell::new(0),
         };
-        let mut session =
-            Session::new(&factory, Rc::clone(&events)).map_err(|e| format!("{e:?}"))?;
-        session.create_controller().map_err(|e| format!("{e:?}"))?;
-        assert!(matches!(session.controller_completion(), Some(Ok(()))));
-        native.creation.set(Creation::MissingView);
-        events.event(NativeEvent::BrowserExited { pid: 99 });
-        drop(session);
-        assert_eq!(factory.pumps.get(), 2);
-        let calls = native.calls.borrow();
-        let close = calls
-            .iter()
-            .position(|call| *call == "close_controller")
-            .ok_or("no close")?;
-        let unsubscribe = calls
-            .iter()
-            .position(|call| *call == "unsubscribe_exit")
-            .ok_or("no exit unsubscribe")?;
-        let drop_environment = calls
-            .iter()
-            .position(|call| *call == "drop_environment")
-            .ok_or("no environment drop")?;
-        assert!(close < unsubscribe && unsubscribe < drop_environment);
-        Ok(())
+        let result = Session::new(&factory, Rc::clone(&events)).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            assert!(matches!(session.controller_completion(), Some(Ok(()))));
+            native.creation.set(Creation::MissingView);
+            events.event(NativeEvent::BrowserExited { pid: 99 });
+            drop(session);
+            assert_eq!(factory.pumps.get(), 2);
+            let calls = native.calls.borrow();
+            let close = calls.iter().position(|call| *call == "close_controller");
+            let unsubscribe = calls.iter().position(|call| *call == "unsubscribe_exit");
+            let drop_environment = calls.iter().position(|call| *call == "drop_environment");
+            assert!(close.is_some(), "no close");
+            assert!(unsubscribe.is_some(), "no exit unsubscribe");
+            assert!(drop_environment.is_some(), "no environment drop");
+            assert!(close < unsubscribe && unsubscribe < drop_environment);
+        });
+        assert!(result.is_ok(), "session creation: {result:?}");
     }
 
     #[test]
-    fn raw_session_without_controller_retires_without_an_exit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn raw_session_without_controller_retires_without_an_exit() {
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
-        let session = Session::new(&native, events).map_err(|e| format!("{e:?}"))?;
+        let session = Session::new(&native, events);
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
         drop(session);
         assert!(native.calls.borrow().contains(&"drop_environment"));
-        Ok(())
     }
 
     #[test]
