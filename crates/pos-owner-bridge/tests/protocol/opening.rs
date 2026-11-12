@@ -21,6 +21,7 @@ struct DelayedOpening<'a> {
     inner: &'a mut dyn OwnerWebSurface,
     clock: FakeClock,
     delay: Duration,
+    read_delay: Duration,
     open_pending: u32,
     navigation_pending: u32,
     navigation: Poll<Result<NavigationId, SurfaceError>>,
@@ -70,7 +71,11 @@ impl OwnerWebSurface for DelayedOpening<'_> {
         self.inner.post(guard)
     }
     fn reply_load_state(&self) -> Result<u32, SurfaceError> {
-        self.inner.reply_load_state()
+        let result = self.inner.reply_load_state();
+        if result.as_ref().is_ok_and(|state| *state != 0) {
+            self.clock.advance(self.read_delay);
+        }
+        result
     }
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool, SurfaceError> {
         self.inner.reply_compare_exchange(current, new)
@@ -159,6 +164,7 @@ fn test_plan_owner_window_reaches_the_surface_open_port() -> TestResult {
             inner: &mut rig.surface,
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
+            read_delay: Duration::ZERO,
             open_pending: 1,
             navigation_pending: 0,
             navigation: Poll::Pending,
@@ -194,6 +200,7 @@ fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestR
         inner: &mut rig.surface,
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
+        read_delay: Duration::ZERO,
         open_pending: 2,
         navigation_pending: 2,
         navigation: Poll::Pending,
@@ -243,6 +250,7 @@ fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
             inner: &mut rig.surface,
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
+            read_delay: Duration::ZERO,
             open_pending: if opening { u32::MAX } else { 0 },
             navigation_pending: if opening { 0 } else { u32::MAX },
             navigation: Poll::Pending,
@@ -285,6 +293,7 @@ fn late_open_results_do_not_resurrect_a_cancelled_or_timed_out_driver() -> TestR
                     inner: &mut rig.surface,
                     clock: rig.clock.clone(),
                     delay: Duration::ZERO,
+                    read_delay: Duration::ZERO,
                     open_pending: u32::MAX,
                     navigation_pending: 0,
                     navigation: Poll::Pending,
@@ -363,6 +372,7 @@ fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() 
         inner: &mut rig.surface,
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
+        read_delay: Duration::ZERO,
         open_pending: 0,
         navigation_pending: 2,
         navigation: Poll::Pending,
@@ -417,6 +427,7 @@ fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() 
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: if opening { delay } else { Duration::ZERO },
+                read_delay: Duration::ZERO,
                 open_pending: 0,
                 navigation_pending: 0,
                 navigation: Poll::Pending,
@@ -469,6 +480,7 @@ fn expiration_during_mapping_or_retry_retirement_prevents_late_posts() -> TestRe
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: Duration::ZERO,
+                read_delay: Duration::ZERO,
                 open_pending: 0,
                 navigation_pending: 0,
                 navigation: Poll::Pending,
@@ -537,6 +549,47 @@ fn expiration_during_mapping_or_retry_retirement_prevents_late_posts() -> TestRe
                     .any(|entry| matches!(entry, LogEntry::ExitObserved)));
             });
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn first_receipt_timestamp_follows_completed_state_read() -> TestResult {
+    for delay in [Duration::ZERO, READINESS] {
+        let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+        let mut driver = new_driver(create_plan(&rig.clock));
+        let mut store = rig.store.clone();
+        let mut loopback = rig.loopback.clone();
+        let mut surface = DelayedOpening {
+            inner: &mut rig.surface,
+            clock: rig.clock.clone(),
+            delay: Duration::ZERO,
+            read_delay: delay,
+            open_pending: 0,
+            navigation_pending: 0,
+            navigation: Poll::Pending,
+            owner_observation: None,
+            mapping_delays: VecDeque::new(),
+            close_delays: VecDeque::new(),
+        };
+        let mut env = StepEnv {
+            surface: &mut surface,
+            clock: &rig.clock,
+            loopback: &mut loopback,
+            store: &mut store,
+        };
+        for _ in 0..1000 {
+            assert!(matches!(driver.step(&mut env), Step::Pending));
+            if let Some(receipt) = driver.first_receipt_at() {
+                assert_eq!(receipt, rig.clock.now());
+                assert_eq!(receipt < driver.t0() + READINESS, delay == Duration::ZERO);
+                rig.clock.advance(Duration::from_secs(1));
+                assert_eq!(driver.first_receipt_at(), Some(receipt));
+                break;
+            }
+            rig.clock.advance(Duration::from_millis(10));
+        }
+        assert!(driver.first_receipt_at().is_some());
     }
     Ok(())
 }

@@ -639,7 +639,9 @@ impl CeremonyDriver {
         if !reachable(self.known, observed) {
             return Err(UNEXPECTED_STATE);
         }
-        self.observe_advance(observed, now);
+        // Receipt is observed only after the state read completes. Keep the
+        // separate timing-mode CAS race on its existing timestamp semantics.
+        self.observe_advance(observed, env.clock.now());
         Ok(())
     }
 

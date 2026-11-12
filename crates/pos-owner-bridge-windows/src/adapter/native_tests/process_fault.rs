@@ -1087,7 +1087,13 @@ impl Fixture {
                     cancelled = true;
                 }
             }
-            if !inject && reached_opening && !cancelled && driver.first_receipt_at().is_some() {
+            if !inject
+                && reached_opening
+                && !cancelled
+                && driver.first_receipt_at().is_some_and(|receipt| {
+                    receipt < driver.t0() + pos_owner_bridge::ceremony::timing::READINESS
+                })
+            {
                 if self.trace.borrow().as_slice()
                     != [ProcessFaultMark::RecordlessOpening {
                         generation: 1,
@@ -2273,7 +2279,13 @@ impl Fixture {
                     cancelled = true;
                 }
             }
-            if !inject && reached && !cancelled && driver.first_receipt_at().is_some() {
+            if !inject
+                && reached
+                && !cancelled
+                && driver.first_receipt_at().is_some_and(|receipt| {
+                    receipt < driver.t0() + pos_owner_bridge::ceremony::timing::READINESS
+                })
+            {
                 self.evidence_complete = true;
                 self.surface.controller_lost();
                 cancelled = true;
