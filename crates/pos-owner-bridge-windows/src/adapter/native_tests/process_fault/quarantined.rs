@@ -18,6 +18,8 @@ use pos_owner_bridge::{
 };
 use pos_owner_bridge_codec::CeremonyId;
 
+use crate::adapter::native_tests::pass;
+
 use super::{
     check_final_process_failures, competing_spec, native_zeroing_observed, readiness, Fixture,
     FixtureProfile, ProcessFaultMark, ProcessFaultTarget, TestResult, ZeroWitness,
@@ -175,38 +177,48 @@ fn observe_case(
         .trace
         .borrow_mut()
         .push(ProcessFaultMark::ReachedQuarantined(state));
-    if !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
-        || fixture.surface.quarantined_fault_state().ok() != Some(state)
-    {
-        return Err("competing admission changed quarantined owners".into());
-    }
+    assert_eq!(
+        fixture
+            .surface
+            .open(&competing_spec())
+            .map(|admission| admission.is_err()),
+        Poll::Ready(true),
+        "competing admission changed quarantined owners"
+    );
+    assert_eq!(
+        fixture.surface.quarantined_fault_state().ok(),
+        Some(state),
+        "competing admission changed quarantined owners"
+    );
     if inject {
         let seal = crate::FaultSeal {
             trace: std::rc::Rc::clone(&fixture.trace),
             deadline: fixture.deadline,
         };
-        fixture.handle = Some(
+        fixture.handle = Some(pass(
             fixture
                 .surface
                 .inject_quarantined_fault(target, seal, std::rc::Rc::clone(keeper_held))
-                .map_err(|()| "quarantined target was not validated")?,
-        );
-        fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state))?;
+                .map_err(|()| "quarantined target was not validated"),
+        ));
+        pass(fixture.observe_fault_from(target, ProcessFaultMark::ReachedQuarantined(state)));
     }
-    blocked(keeper, fixture, folder)?;
+    pass(blocked(keeper, fixture, folder));
     if inject && target == ProcessFaultTarget::Browser {
-        let name = folder
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or("quarantined folder name unavailable")?;
+        let name = pass(
+            folder
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .ok_or("quarantined folder name unavailable"),
+        );
         // Independently observe the real store's folder refusal; unlike
         // delete_record, remove_folder does not change record provenance.
-        if fixture.store.remove_folder(name).is_ok()
-            || !folder.join("quarantine-held").is_file()
-            || fixture.store.records()?.len() != 1
-        {
-            return Err("held owned file did not refuse ordinary folder cleanup".into());
-        }
+        assert!(
+            fixture.store.remove_folder(name).is_err()
+                && folder.join("quarantine-held").is_file()
+                && pass(fixture.store.records()).len() == 1,
+            "held owned file did not refuse ordinary folder cleanup"
+        );
         let _logged = writeln!(
             std::io::stderr(),
             "NATIVE_QUARANTINED case={} second_folder_cleanup=refused record_retained=true",
@@ -226,14 +238,17 @@ fn run_case(
     inject: bool,
 ) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(
+    let mut fixture = pass(Fixture::new(
         runtime,
         root,
         number,
         FixtureProfile::SuccessfulGetReleaseDelay,
-    )?;
+    ));
     let _zero = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let mut refused = false;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         drive_to_quarantine(&mut fixture, &mut driver, &mut refused)
@@ -294,8 +309,7 @@ fn run_case(
             target,
             inject,
         )
-    }))
-    .unwrap_or_else(|_| Err("quarantined fixture panicked".into()));
+    }));
     keeper_held.set(false);
     // Release only the fixture's own file, then perform the ordinary real Close.
     drop(held);
@@ -304,18 +318,20 @@ fn run_case(
     retire_keeper(&mut keeper, &mut fixture);
     drop(fixture.handle.take());
     drop(fixture.surface);
-    std::rc::Rc::get_mut(&mut fixture.factory)
-        .ok_or("quarantined factory still shared")?
-        .stop()?;
-    let state = attempt?;
+    pass(
+        pass(std::rc::Rc::get_mut(&mut fixture.factory).ok_or("quarantined factory still shared"))
+            .stop(),
+    );
+    let state = pass(pass(attempt));
     let _logged = writeln!(
         std::io::stderr(),
         "NATIVE_QUARANTINED_CLOSE case={number} result={closed:?} observation={close_observation:?}"
     );
-    check_final_process_failures(inject.then_some(target))?;
-    if !fixture.store.records()?.is_empty() || folder.exists() {
-        return Err("ordinary quarantine retirement was incomplete".into());
-    }
+    pass(check_final_process_failures(inject.then_some(target)));
+    assert!(
+        pass(fixture.store.records()).is_empty() && !folder.exists(),
+        "ordinary quarantine retirement was incomplete"
+    );
     Ok(state)
 }
 
@@ -324,11 +340,12 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
         (0xe0, ProcessFaultTarget::Renderer),
         (0xe2, ProcessFaultTarget::Browser),
     ] {
-        let control = run_case(runtime, root, number, target, false)?;
-        let fault = run_case(runtime, root, number + 1, target, true)?;
-        if control != fault {
-            return Err("quarantined control and fault reached different states".into());
-        }
+        let control = pass(run_case(runtime, root, number, target, false));
+        let fault = pass(run_case(runtime, root, number + 1, target, true));
+        assert_eq!(
+            control, fault,
+            "quarantined control and fault reached different states"
+        );
     }
     Ok(())
 }
@@ -481,8 +498,8 @@ mod tests {
     #[test]
     fn modeled_quarantine_wipe_refusals_identify_the_failed_observation() -> TestResult {
         let _port = crate::Native::fixed_port_fixture();
-        let root = super::super::FixtureRoot::new()?;
-        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let root = pass(super::super::FixtureRoot::new());
+        let (mut fixture, model) = pass(super::super::model_tests::fixture(&root));
         let observations = [
             crate::NativeZeroObservation {
                 slot: crate::BufferSlot::Request,
@@ -544,7 +561,7 @@ mod tests {
             )
             .err()
             .map(|error| error.to_string());
-            let error = error.ok_or("modeled invalid wipe evidence was accepted")?;
+            let error = pass(error.ok_or("modeled invalid wipe evidence was accepted"));
             assert!(error.starts_with("quarantine mappings or secrets were not wiped: case=240 "));
             assert!(error.contains(expected));
             assert!(error.contains(&format!("observation_count={}", observations.len())));
@@ -574,8 +591,8 @@ mod tests {
     #[test]
     fn modeled_empty_keeper_refuses_retention_without_opening_a_surface() -> TestResult {
         let _port = crate::Native::fixed_port_fixture();
-        let root = super::super::FixtureRoot::new()?;
-        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let root = pass(super::super::FixtureRoot::new());
+        let (mut fixture, model) = pass(super::super::model_tests::fixture(&root));
         let calls = model.calls.borrow().clone();
         let error = blocked(&mut QuarantineKeeper::new(), &mut fixture, &root.0)
             .err()
@@ -593,9 +610,12 @@ mod tests {
     #[test]
     fn modeled_quarantine_driver_done_refuses_without_native_work() -> TestResult {
         let _port = crate::Native::fixed_port_fixture();
-        let root = super::super::FixtureRoot::new()?;
-        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
-        let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now())?;
+        let root = pass(super::super::FixtureRoot::new());
+        let (mut fixture, model) = pass(super::super::model_tests::fixture(&root));
+        let mut driver = pass(readiness::new_driver(
+            CeremonyId::from_bytes([240; 16]),
+            Instant::now(),
+        ));
         let result = readiness::cancel_driver(
             &mut driver,
             &mut fixture.surface,
@@ -614,15 +634,15 @@ mod tests {
         assert!(!refused);
         assert_eq!(*model.calls.borrow(), calls);
         assert!(fixture.surface.idle());
-        fixture.retire(driver, result, None)?;
+        pass(fixture.retire(driver, result, None));
         root.remove()
     }
 
     #[test]
     fn modeled_quarantine_finish_delegates_until_the_matching_exit() -> TestResult {
         let _port = crate::Native::fixed_port_fixture();
-        let root = super::super::FixtureRoot::new()?;
-        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let root = pass(super::super::FixtureRoot::new());
+        let (mut fixture, model) = pass(super::super::model_tests::fixture(&root));
         let selected = super::super::fixed_competing_spec(240);
         assert!(fixture.surface.open(&selected).is_pending());
         assert!(fixture.surface.open(&selected).is_pending());
@@ -641,11 +661,13 @@ mod tests {
         }
         assert!(refused);
         assert!(!fixture.surface.idle());
-        fixture
-            .surface
-            .close_controller()
-            .map_err(SurfaceError::error)?;
-        let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+        pass(
+            fixture
+                .surface
+                .close_controller()
+                .map_err(SurfaceError::error),
+        );
+        let sink = pass(model.sink.borrow().clone().ok_or("missing modeled sink"));
         let _action = sink.event(NativeEvent::BrowserExited { pid: 43 });
         {
             let mut port = RefuseClose {
@@ -654,18 +676,21 @@ mod tests {
             };
             assert!(port.finish().is_err());
             let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
-            port.finish().map_err(SurfaceError::error)?;
+            pass(port.finish().map_err(SurfaceError::error));
         }
         assert!(fixture.surface.idle());
         drop(sink);
-        let driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now())?;
-        fixture.retire(
+        let driver = pass(readiness::new_driver(
+            CeremonyId::from_bytes([240; 16]),
+            Instant::now(),
+        ));
+        pass(fixture.retire(
             driver,
             Err(BridgeError::Unavailable(
                 UnavailableCode::InterfaceUnavailable,
             )),
             None,
-        )?;
+        ));
         root.remove()
     }
 }

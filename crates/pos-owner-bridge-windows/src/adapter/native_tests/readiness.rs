@@ -20,15 +20,16 @@ use pos_owner_bridge_codec::{
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
 use super::trace::{worker_stage, Trace};
-use super::{retirement, TestResult};
+use super::{pass, retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
 const RUNS_PER_WORKER: usize = 250;
 
 pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
-    let loopback =
-        SharedLoopback::start_fixture(pos_owner_bridge::listener::FixtureProfile::Pending)?;
+    let loopback = pass(SharedLoopback::start_fixture(
+        pos_owner_bridge::listener::FixtureProfile::Pending,
+    ));
     let foreground = Arc::new(Foreground::default());
     let mut workers = Vec::new();
     for worker in 0..WORKERS {
@@ -37,25 +38,22 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let loopback = loopback.clone();
         let foreground = Arc::clone(&foreground);
         workers.push(thread::spawn(move || {
-            run_worker(&path, root, loopback, &foreground, worker)
-                .map_err(|error| error.to_string())
+            pass(run_worker(&path, root, loopback, &foreground, worker))
         }));
     }
     // Every creating STA retires its accepted owners before its join completes.
     let results: Vec<_> = workers.into_iter().map(thread::JoinHandle::join).collect();
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
-        let result =
-            result.unwrap_or_else(|_| Err(format!("readiness STA worker {worker} panicked")));
-        writeln!(
+        pass(writeln!(
             std::io::stderr(),
             "NATIVE_READINESS worker={worker} result={result:?}"
-        )?;
+        ));
         reports.push(result);
     }
     let mut completed = 0;
     for result in reports {
-        completed += result?;
+        completed += pass(result);
     }
     assert_eq!(completed, 1_000);
     Ok(())
@@ -68,23 +66,25 @@ fn run_worker(
     foreground: &Foreground,
     worker: usize,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    crate::create_private_directory(&root)?;
-    let runtime = Arc::new(crate::verify_fixed_runtime(runtime_path, &root)?);
-    let factory = Rc::new(crate::Native::owner_factory()?);
+    pass(crate::create_private_directory(&root));
+    let runtime = Arc::new(pass(crate::verify_fixed_runtime(runtime_path, &root)));
+    let factory = Rc::new(pass(crate::Native::owner_factory()));
     let shared_factory: Rc<dyn NativeFactory> = factory.clone();
-    let mut store = WindowsCleanupStore::open(root.clone())?;
-    let mut surface = Surface::new(
-        shared_factory,
-        runtime,
-        root,
-        Box::new(loopback.clone()),
-        Box::new(store.clone()),
-        Box::new(SystemClock),
-    )
-    .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let mut store = pass(WindowsCleanupStore::open(root.clone()));
+    let mut surface = pass(
+        Surface::new(
+            shared_factory,
+            runtime,
+            root,
+            Box::new(loopback.clone()),
+            Box::new(store.clone()),
+            Box::new(SystemClock),
+        )
+        .map_err(pos_owner_bridge::SurfaceError::error),
+    );
     let mut outcome = Ok(RUNS_PER_WORKER);
     for iteration in 0..RUNS_PER_WORKER {
-        let number = u64::try_from(worker * RUNS_PER_WORKER + iteration + 1)?;
+        let number = pass(u64::try_from(worker * RUNS_PER_WORKER + iteration + 1));
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
         let started = Instant::now();
@@ -108,13 +108,13 @@ fn run_worker(
     worker_stage(worker, "dropping-surface");
     drop(surface);
     worker_stage(worker, "surface-dropped");
-    assert!(store.records()?.is_empty());
-    assert!(store.folders()?.is_empty());
+    assert!(pass(store.records()).is_empty());
+    assert!(pass(store.folders()).is_empty());
     worker_stage(worker, "store-checked");
     drop(store);
     worker_stage(worker, "store-dropped");
-    let mut factory = Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared")?;
-    factory.stop()?;
+    let mut factory = pass(Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared"));
+    pass(factory.stop());
     worker_stage(worker, "timer-stopped");
     drop(factory);
     worker_stage(worker, "apartment-released");
@@ -202,13 +202,13 @@ fn run_ceremony(
     // receipt still share the original fifteen-second ceremony deadline.
     // Match product admission: do not start another ceremony while this one's
     // cancellation or browser retirement is unresolved, even after receipt.
-    let _visible = acquire_foreground(surface, foreground, number)?;
+    let _visible = pass(acquire_foreground(surface, foreground, number));
     let started = Instant::now();
     surface.begin_readiness_timing(number, started);
     crate::Native::readiness_navigation_case(Some((number, started)));
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
-    let mut driver = new_driver(id, started)?;
+    let mut driver = pass(new_driver(id, started));
     let mut trace = Trace::new(number, started);
     let mut receipt = None;
     let mut timing = ProgressTiming::default();
@@ -310,8 +310,9 @@ pub(super) fn new_driver(
     let stored = StoredGet::new(
         vec![0x80, 0x81],
         OwnerUserHandle::from_bytes([4; 32]),
-        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY)
-            .map_err(|error| error.to_string())?,
+        pass(CoseEs256PublicKey::from_canonical_encoding(
+            &FIXTURE_COSE_KEY,
+        )),
         false,
         false,
         0,
@@ -362,14 +363,14 @@ fn acquire_foreground<'a>(
     foreground: &'a Foreground,
     number: u64,
 ) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
-    let ticket = foreground.request(number, Instant::now())?;
+    let ticket = pass(foreground.request(number, Instant::now()));
     let mut trace = Trace::new(number, Instant::now());
     loop {
         trace.queued(surface);
-        if ticket.is_next(Instant::now())? {
+        if pass(ticket.is_next(Instant::now())) {
             return Ok(ticket);
         }
-        pump(surface)?;
+        pass(pump(surface));
     }
 }
 

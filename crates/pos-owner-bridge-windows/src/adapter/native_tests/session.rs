@@ -121,6 +121,7 @@ impl Drop for Session<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::native_tests::pass;
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::{EventSink, NativeEvent, StaPump};
     use pos_owner_bridge::fake::clock::FakeClock;
@@ -319,10 +320,10 @@ mod tests {
     fn idle_native_session_refuses_operations_until_their_owners_exist(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let _port = crate::Native::fixed_port_fixture();
-        let mut factory = crate::Native::owner_factory()?;
+        let mut factory = pass(crate::Native::owner_factory());
         let events = Rc::new(Events::default());
         let sink: Rc<dyn EventSink> = events.clone();
-        let mut session = Session::new(&factory, events)?;
+        let mut session = pass(Session::new(&factory, events));
         let closed = crate::NativeError {
             operation: crate::Operation::Controller,
             failure: crate::Failure::Closed,
@@ -393,7 +394,7 @@ mod tests {
         assert!(session.pending_opening_browser_candidate().is_err());
         assert!(session.recordless_browser_candidate().is_err());
         assert!(!session.pending());
-        assert!(!session.has_controller()?);
+        assert!(!pass(session.has_controller()));
         assert!(!session.buffer_close_uncertain());
         assert!(!session.preload_fault_owners_retained());
         assert!(!session.pending_opening_owners_retained());
@@ -401,15 +402,15 @@ mod tests {
         assert!(!session.fault_owners_retained());
         assert!(!session.exit_fault_owners_retained());
         for _ in 0..2 {
-            session.close_buffers()?;
-            session.unsubscribe_view()?;
-            session.close_controller()?;
-            session.unsubscribe_exit()?;
-            session.drop_environment()?;
-            session.destroy_window()?;
+            pass(session.close_buffers());
+            pass(session.unsubscribe_view());
+            pass(session.close_controller());
+            pass(session.unsubscribe_exit());
+            pass(session.drop_environment());
+            pass(session.destroy_window());
         }
         drop(session);
-        factory.stop()?;
+        pass(factory.stop());
         Ok(())
     }
 }

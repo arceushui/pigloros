@@ -9,7 +9,7 @@ use std::rc::Rc;
 use pos_owner_bridge::listener::{FixtureProfile, ListenerConfig, LoopbackListener};
 use pos_owner_bridge::LoopbackPort;
 
-use super::{completion, pump_until, session, Events, TestResult};
+use super::{completion, pass, pump_until, session, Events, TestResult};
 use crate::{
     ControlFault, ControlObservation, EventKind, EventSink, NativeAction, NativeError, NativeEvent,
     StaPump,
@@ -178,18 +178,18 @@ const CASES: [Case; 10] = [
 ];
 
 pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
-    let runtime = crate::verify_fixed_runtime(runtime_path, root)?;
-    let mut factory = crate::Native::owner_factory()?;
+    let runtime = pass(crate::verify_fixed_runtime(runtime_path, root));
+    let mut factory = pass(crate::Native::owner_factory());
     for (index, case) in CASES.into_iter().enumerate() {
         let (profile, kind, mode) = case;
-        log_start(index, case)?;
+        pass(log_start(index, case));
         let _fault = Fault::new(kind, mode);
         let folder = root.join(format!("control-{index}"));
-        crate::create_private_directory(&folder)?;
-        let mut listener = LoopbackListener::start(
+        pass(crate::create_private_directory(&folder));
+        let mut listener = pass(LoopbackListener::start(
             Box::new(crate::WindowsLoopbackBinder::default()),
             ListenerConfig::fixture(profile),
-        )?;
+        ));
         let events = Rc::new(Events::default());
         let probe = Rc::new(Probe {
             events: Rc::clone(&events),
@@ -204,22 +204,24 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             external_navigation_seen: Cell::new(false),
             unexpected_navigation: Cell::new(false),
         });
-        let mut native = session::Session::new(&factory, events)?;
-        create_control_session(&mut native, &factory, &probe, runtime.root(), &folder)?;
-        let identity = runtime.browser_identity(native.browser_pid()?)?;
-        subscribe_control_view(&mut native, &probe)?;
-        prepare_control_view(native.as_ref())?;
+        let mut native = pass(session::Session::new(&factory, events));
+        pass(create_control_session(
+            &mut native,
+            &factory,
+            &probe,
+            runtime.root(),
+            &folder,
+        ));
+        let identity = pass(runtime.browser_identity(pass(native.browser_pid())));
+        pass(subscribe_control_view(&mut native, &probe));
+        pass(prepare_control_view(native.as_ref()));
         listener.begin_navigation();
         probe.events.begin();
-        native.navigate_owner()?;
+        pass(native.navigate_owner());
         let mut armed = false;
         let callback = wait_for_control(&factory, &probe, &listener, &mut armed);
-        log_callback(index, case, &probe, &listener, &callback)?;
-        if let Err(error) = callback {
-            drop(native);
-            log_retired(index, identity.browser_pid, &probe)?;
-            return Err(error);
-        }
+        pass(log_callback(index, case, &probe, &listener, &callback));
+        pass(callback);
         if mode == ControlFault::RetryDenial {
             for attempts in [2, 3] {
                 // Repeated teardown and event-drain calls in one progression
@@ -234,28 +236,28 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
                     assert_eq!(observations[0].completions, 0);
                     assert!(!observations[0].retired);
                 }
-                factory.next()?;
+                pass(factory.next());
             }
         }
-        native.unsubscribe_view()?;
+        pass(native.unsubscribe_view());
         let before_exit = crate::Native::control_observations();
-        native.close_controller()?;
-        pump_until(&factory, "control own browser exit", || {
+        pass(native.close_controller());
+        pass(pump_until(&factory, "control own browser exit", || {
             probe.events.exited() == Some(identity.browser_pid)
-        })?;
+        }));
         let after_exit = crate::Native::control_observations();
         assert_control_retired(&probe, &listener, &before_exit, &after_exit, case, armed);
-        native.unsubscribe_exit()?;
-        native.drop_environment()?;
-        native.destroy_window()?;
+        pass(native.unsubscribe_exit());
+        pass(native.drop_environment());
+        pass(native.destroy_window());
         drop(native);
         listener.shutdown();
     }
-    factory.stop()?;
+    pass(factory.stop());
     drop(factory);
     let composed_root = root.join("composed-control");
-    crate::create_private_directory(&composed_root)?;
-    super::denial::run_control(runtime_path, &composed_root)?;
+    pass(crate::create_private_directory(&composed_root));
+    pass(super::denial::run_control(runtime_path, &composed_root));
     Ok(())
 }
 
@@ -359,10 +361,10 @@ fn prepare_control_view(native: &dyn crate::NativeOperations) -> TestResult {
 }
 
 fn log_start(index: usize, (profile, kind, mode): Case) -> TestResult {
-    writeln!(
+    pass(writeln!(
         std::io::stderr(),
         "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
-    )?;
+    ));
     Ok(())
 }
 
@@ -374,7 +376,7 @@ fn log_callback(
     callback: &TestResult,
 ) -> TestResult {
     let served = listener.served();
-    writeln!(
+    pass(writeln!(
         std::io::stderr(),
         "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} listener_observation={:?} result={:?}",
         probe.delivered.get(),
@@ -387,16 +389,7 @@ fn log_callback(
         probe.events.invalid(),
         listener.observation(),
         callback.as_ref().map_err(ToString::to_string)
-    )?;
-    Ok(())
-}
-
-fn log_retired(index: usize, expected_pid: u32, probe: &Probe) -> TestResult {
-    writeln!(
-        std::io::stderr(),
-        "NATIVE_CONTROL case={index} stage=retired expected_pid={expected_pid} exited={:?}",
-        probe.events.exited()
-    )?;
+    ));
     Ok(())
 }
 
