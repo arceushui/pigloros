@@ -1557,6 +1557,7 @@ def test_owned_process_fault_authority() -> None:
         ("Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
         ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
         ("result.map_err(|()| query_error)?.ok_or(pending_error)", "Ok(0)"),
+        ("if !self.evidence_complete || self.result_error.is_none()", "if false"),
         ("|| !successful_close_observed(self.close)", "|| false"),
         ("|| !native_zeroing_observed(self.zero_observations)", "|| false"),
     ):

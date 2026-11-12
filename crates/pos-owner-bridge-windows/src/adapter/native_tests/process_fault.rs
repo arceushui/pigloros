@@ -1378,6 +1378,69 @@ impl Fixture {
     }
 }
 
+/// Verdict over observations captured before ordinary recordless retirement.
+struct RecordlessVerdict<'a> {
+    inject: bool,
+    evidence_complete: bool,
+    result_error: Option<BridgeError>,
+    slot_wiped: bool,
+    plan_wiped_if_quarantined: bool,
+    failures: &'a [Option<bool>],
+}
+
+impl RecordlessVerdict<'_> {
+    fn validate(&self) -> TestResult {
+        if !self.evidence_complete || self.result_error.is_none() {
+            return Err("recordless evidence incomplete".into());
+        }
+        if !self.slot_wiped || !self.plan_wiped_if_quarantined {
+            return Err(
+                "recordless ceremony secrets were not wiped at their required boundary".into(),
+            );
+        }
+        if !self.inject && !self.failures.is_empty() {
+            return Err("recordless no-fault control observed a process failure".into());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn modeled_recordless_verdict_requires_evidence_wipe_and_control_absence() {
+    let error = BridgeError::Lifecycle(pos_owner_bridge::LifecycleCode::ReadinessTimeout);
+    let mut evidence = RecordlessVerdict {
+        inject: false,
+        evidence_complete: true,
+        result_error: Some(error),
+        slot_wiped: true,
+        plan_wiped_if_quarantined: true,
+        failures: &[],
+    };
+    assert!(evidence.validate().is_ok());
+    evidence.evidence_complete = false;
+    assert_eq!(
+        evidence.validate().err().map(|e| e.to_string()).as_deref(),
+        Some("recordless evidence incomplete")
+    );
+    evidence.evidence_complete = true;
+    evidence.result_error = None;
+    assert!(evidence.validate().is_err());
+    evidence.result_error = Some(error);
+    evidence.slot_wiped = false;
+    assert!(evidence.validate().is_err());
+    evidence.slot_wiped = true;
+    evidence.plan_wiped_if_quarantined = false;
+    assert!(evidence.validate().is_err());
+    evidence.plan_wiped_if_quarantined = true;
+    evidence.failures = &[Some(true)];
+    assert_eq!(
+        evidence.validate().err().map(|e| e.to_string()).as_deref(),
+        Some("recordless no-fault control observed a process failure")
+    );
+    evidence.inject = true;
+    assert!(evidence.validate().is_ok());
+}
+
 fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) -> TestResult {
     let _callback_order = CallbackOrderGuard::arm();
     crate::Native::reset_process_failure_observations();
@@ -1404,16 +1467,15 @@ fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) ->
     if let Some(error) = failure {
         return Err(error);
     }
-    if !evidence_complete || result_error.is_none() {
-        return Err("recordless evidence incomplete".into());
+    RecordlessVerdict {
+        inject,
+        evidence_complete,
+        result_error,
+        slot_wiped,
+        plan_wiped_if_quarantined,
+        failures: &failures,
     }
-    if !slot_wiped || !plan_wiped_if_quarantined {
-        return Err("recordless ceremony secrets were not wiped at their required boundary".into());
-    }
-    if !inject && !failures.is_empty() {
-        return Err("recordless no-fault control observed a process failure".into());
-    }
-    Ok(())
+    .validate()
 }
 
 fn has_synthetic_success_prf(driver: &CeremonyDriver) -> bool {
