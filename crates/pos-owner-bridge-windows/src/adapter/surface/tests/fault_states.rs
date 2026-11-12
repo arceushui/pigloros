@@ -245,3 +245,215 @@ fn modeled_posted_snapshots_require_identity_generation_record_and_post_counts()
     }
     Ok(())
 }
+
+fn posted_fixture(generation: u32) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.ready()?;
+    create_buffers(&mut fixture, generation)?;
+    fixture
+        .surface
+        .post(&pos_owner_bridge::PostGuard {
+            generation,
+            navigation_id: pos_owner_bridge::NavigationId(7),
+            served_count: 1,
+        })
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.store.preload(vec![0x80]);
+    fixture.factory.failure.set(Some("fault_spy"));
+    Ok(fixture)
+}
+
+fn finish_posted(mut fixture: Fixture) -> TestResult {
+    fixture
+        .store
+        .delete_record(&[0x80])
+        .map_err(|_| "restore modeled record")?;
+    fixture.finish()
+}
+
+#[test]
+fn modeled_posted_snapshots_require_their_distinct_reply_states() -> TestResult {
+    type Snapshot = fn(&mut Surface, u8) -> Result<crate::ProcessFaultState, ()>;
+    let cases: [(Snapshot, ControlState, crate::ProcessFaultPhase); 4] = [
+        (
+            Surface::posted_empty_fault_state,
+            ControlState::Empty,
+            crate::ProcessFaultPhase::PostedEmpty,
+        ),
+        (
+            Surface::posted_writing_fault_state,
+            ControlState::Writing,
+            crate::ProcessFaultPhase::PostedWriting,
+        ),
+        (
+            Surface::posted_ready_fault_state,
+            ControlState::Ready,
+            crate::ProcessFaultPhase::PostedReady,
+        ),
+        (
+            Surface::releasing_fault_state,
+            ControlState::ReleaseRequested,
+            crate::ProcessFaultPhase::ReleasingSuccess,
+        ),
+    ];
+    let mut fixture = posted_fixture(1)?;
+    for (snapshot, expected, phase) in cases {
+        for observed in [
+            ControlState::Empty as u32,
+            ControlState::Writing as u32,
+            ControlState::Ready as u32,
+            ControlState::ReleaseRequested as u32,
+            u32::MAX,
+        ] {
+            fixture.factory.state.set(observed);
+            let result = snapshot(&mut fixture.surface, 1);
+            if observed == expected as u32 {
+                let state = result.map_err(|()| "modeled state rejected")?;
+                assert_eq!(state.phase, phase);
+                assert_eq!(state.reply_state, observed);
+                assert_eq!(state.generation, 1);
+                assert_eq!(state.record_count, 1);
+                assert_eq!(state.posts, 1);
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+            assert!(!fixture.surface.idle());
+        }
+        fixture.factory.state.set(expected as u32);
+        fixture.store.preload(vec![0x81]);
+        assert!(snapshot(&mut fixture.surface, 1).is_err());
+        fixture
+            .store
+            .delete_record(&[0x81])
+            .map_err(|_| "restore extra modeled record")?;
+        fixture
+            .store
+            .delete_record(&[0x80])
+            .map_err(|_| "remove modeled record")?;
+        assert!(snapshot(&mut fixture.surface, 1).is_err());
+        fixture.store.preload(vec![0x80]);
+        change_identity(&mut fixture, 0);
+        assert!(snapshot(&mut fixture.surface, 1).is_err());
+        fixture.surface.runtime = Arc::new(Runtime(fixture.root.clone()));
+        assert!(snapshot(&mut fixture.surface, 1).is_ok());
+    }
+    finish_posted(fixture)
+}
+
+#[derive(Clone, Copy)]
+enum PostedInjection {
+    Receipt,
+    Empty,
+    Writing,
+    Ready,
+    Retry,
+    Consuming,
+    Releasing,
+}
+
+impl PostedInjection {
+    fn state(self) -> ControlState {
+        match self {
+            Self::Receipt => ControlState::Received,
+            Self::Empty | Self::Retry => ControlState::Empty,
+            Self::Writing => ControlState::Writing,
+            Self::Ready => ControlState::Ready,
+            Self::Consuming => ControlState::Consuming,
+            Self::Releasing => ControlState::ReleaseRequested,
+        }
+    }
+
+    fn generation(self) -> u32 {
+        if matches!(self, Self::Retry) {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn invoke(
+        self,
+        surface: &Surface,
+        deadline: std::time::Instant,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        let seal = crate::FaultSeal {
+            trace: std::rc::Rc::default(),
+            deadline,
+        };
+        let target = ProcessFaultTarget::Browser;
+        match self {
+            Self::Receipt => surface.inject_posted_fault(target, seal),
+            Self::Empty => surface.inject_posted_empty_fault(target, seal),
+            Self::Writing => surface.inject_posted_writing_fault(target, seal),
+            Self::Ready => surface.inject_posted_ready_fault(target, seal),
+            Self::Retry => surface.inject_posted_retry_fault(target, RetryPoint::Second, seal),
+            Self::Consuming => surface.inject_posted_consuming_fault(target, seal),
+            Self::Releasing => surface.inject_releasing_fault(target, seal),
+        }
+    }
+}
+
+fn spy_calls(fixture: &Fixture) -> Vec<&'static str> {
+    fixture
+        .factory
+        .calls
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|call| matches!(*call, "fault_valid" | "fault_invalid"))
+        .collect()
+}
+
+#[test]
+fn modeled_posted_injections_validate_state_generation_identity_and_seal() -> TestResult {
+    for point in [
+        PostedInjection::Receipt,
+        PostedInjection::Empty,
+        PostedInjection::Writing,
+        PostedInjection::Ready,
+        PostedInjection::Retry,
+        PostedInjection::Consuming,
+        PostedInjection::Releasing,
+    ] {
+        let mut fixture = posted_fixture(point.generation())?;
+        fixture.factory.state.set(point.state() as u32);
+        let future = || std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid"]);
+        assert!(point
+            .invoke(&fixture.surface, std::time::Instant::now())
+            .is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        for wrong in [
+            u32::MAX,
+            if point.state() == ControlState::Ready {
+                ControlState::Empty as u32
+            } else {
+                ControlState::Ready as u32
+            },
+        ] {
+            fixture.factory.state.set(wrong);
+            assert!(point.invoke(&fixture.surface, future()).is_err());
+            assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        }
+        fixture.factory.state.set(point.state() as u32);
+        change_identity(&mut fixture, 0);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+        assert!(!fixture.surface.idle());
+        fixture.surface.runtime = Arc::new(Runtime(fixture.root.clone()));
+        finish_posted(fixture)?;
+
+        let wrong_generation = if point.generation() == 1 { 2 } else { 1 };
+        let fixture = posted_fixture(wrong_generation)?;
+        fixture.factory.state.set(point.state() as u32);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert!(spy_calls(&fixture).is_empty());
+        assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+        assert!(!fixture.surface.idle());
+        finish_posted(fixture)?;
+    }
+    Ok(())
+}

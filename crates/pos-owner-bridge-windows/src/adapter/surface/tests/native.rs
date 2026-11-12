@@ -218,6 +218,35 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn inject_process_fault(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        let mode = self.factory.failure.get();
+        if matches!(
+            mode,
+            Some("fault_spy" | "fault_spy_frame" | "fault_spy_exit")
+        ) {
+            let event = match mode {
+                Some("fault_spy_frame") => Some(crate::NativeEvent::Frame),
+                Some("fault_spy_exit") => Some(crate::NativeEvent::BrowserExited { pid: 42 }),
+                _ => None,
+            };
+            if let Some(event) = event {
+                let sink = self.factory.sink.borrow().clone();
+                if let Some(sink) = sink {
+                    let _action = sink.event(event);
+                }
+            }
+            self.call(if authority.valid() {
+                "fault_valid"
+            } else {
+                "fault_invalid"
+            });
+        }
+        Err(())
+    }
+
     fn preload_fault_owners_retained(&self) -> bool {
         self.controller
             && self.factory.preload_owners.get()
