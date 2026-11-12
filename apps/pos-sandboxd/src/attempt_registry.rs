@@ -4,7 +4,8 @@
 //! The service name and directory component are injectively derived from the
 //! `AttemptId`. Unknown versions/stages fail closed. This local record does not
 //! replace ADR-069 lifecycle evidence or authorize image activation. The PAI2
-//! directory stage adds the held attempt/root device and inode identities.
+//! directory stage adds the held attempt/root device and inode identities,
+//! then the admitted image descriptor's device and inode.
 //! PAI3 records verified root facts before launch; none of these private stages
 //! substitutes for the separate ADR-069 lifecycle binding. Beside the intent
 //! keys, the registry retains one `activation` marker of the last `MountImage`
@@ -35,7 +36,10 @@ pub use recovery::{
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
 #[cfg(test)]
-pub use tests::{in_lock_test_process, root_record_fixture, with_io_fault};
+pub use tests::{
+    crash_io_now, in_lock_test_process, io_count, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
+};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -234,6 +238,15 @@ impl SystemdAttemptRegistry {
         owner: u32,
     ) -> Result<Self, SystemdAttemptRegistryError> {
         Self::from_directory(RegistryDirectory::from_runtime_directory(parent, owner)?)
+    }
+
+    /// Close this owner to further commits, as an uncertain write does.
+    /// Marking a poisoned owner cannot make its lock usable again.
+    pub(crate) fn quarantine(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failed = true;
     }
 
     fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
@@ -554,12 +567,12 @@ mod tests {
     /// One independent byte oracle for the private root stage, not its encoder.
     ///
     /// # Panics
-    /// Panics unless `directory` has 84 bytes and `component` has 32 bytes.
+    /// Panics unless `directory` has 100 bytes and `component` has 32 bytes.
     #[must_use]
     pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
-        assert_eq!(directory.len(), 84);
+        assert_eq!(directory.len(), 100);
         directory[..4].copy_from_slice(b"PAI3");
-        for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
+        for value in [41_u64, 253, 3, 1, 253, 3, 102, 7, 7, 101] {
             directory.extend_from_slice(&value.to_le_bytes());
         }
         directory.extend_from_slice(
@@ -579,16 +592,21 @@ mod tests {
 
     std::thread_local! {
         static IO_FAULT: Cell<(usize, Option<usize>)> = const { Cell::new((0, None)) };
+        // Whether every operation from the injected fault on fails, as after
+        // a crash, instead of that one alone.
+        static IO_CRASH: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn before_io() -> io::Result<()> {
         IO_FAULT.with(|state| {
             let (count, fail_at) = state.get();
             state.set((count + 1, fail_at));
-            if fail_at == Some(count) {
-                Err(io::Error::other("injected registry I/O failure"))
-            } else {
-                Ok(())
+            let crashed = IO_CRASH.with(Cell::get);
+            match fail_at {
+                Some(at) if count == at || (crashed && count > at) => {
+                    Err(io::Error::other("injected registry I/O failure"))
+                }
+                _ => Ok(()),
             }
         })
     }
@@ -605,6 +623,54 @@ mod tests {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))
+    }
+
+    struct RestoreIoCrash(bool);
+
+    impl Drop for RestoreIoCrash {
+        fn drop(&mut self) {
+            IO_CRASH.with(|state| state.set(self.0));
+        }
+    }
+
+    /// Run `operation`, crashing its registry I/O at operation `crash_at`.
+    ///
+    /// That operation and every later one fail before they start, so the
+    /// registry and the attempt directories keep exactly what a process crash
+    /// there leaves, while the operation itself returns normally without
+    /// unwinding. [`crash_io_now`] crashes at the next operation instead.
+    /// Returns the number of operations started.
+    ///
+    /// A crash loses no completed write: the registry lives on the tmpfs
+    /// `/run`, where a write survives a daemon crash whether or not it was
+    /// fsynced, and a reboot empties the registry. Lost or torn fsynced data
+    /// is therefore not modelled; a torn temporary write is, by truncating it.
+    pub fn with_io_crash<T>(crash_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
+        let _restore = RestoreIoCrash(IO_CRASH.with(|state| state.replace(true)));
+        with_io_fault(crash_at, operation)
+    }
+
+    /// Crash the registry I/O of the enclosing [`with_io_crash`] at its next
+    /// operation, unless it already crashed.
+    pub fn crash_io_now() {
+        IO_FAULT.with(|state| {
+            let (count, fail_at) = state.get();
+            state.set((count, fail_at.or(Some(count))));
+        });
+    }
+
+    /// The registry I/O operations started so far in the enclosing
+    /// [`with_io_fault`] or [`with_io_crash`].
+    #[must_use]
+    pub fn io_count() -> usize {
+        IO_FAULT.with(Cell::get).0
+    }
+
+    /// Whether the registry I/O of the enclosing [`with_io_crash`] crashed.
+    #[must_use]
+    pub fn io_crashed() -> bool {
+        let (count, fail_at) = IO_FAULT.with(Cell::get);
+        IO_CRASH.with(Cell::get) && fail_at.is_some_and(|at| count > at)
     }
 
     // A concurrent test's fork can retain an O_CLOEXEC flock descriptor until

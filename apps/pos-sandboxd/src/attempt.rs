@@ -344,6 +344,14 @@ impl AdmittedAttempt {
         self.execution.clone()
     }
 
+    /// The same facts, sharing `execution` like an attempt built from its
+    /// prepared directory.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_execution(mut self, execution: ExecutionOwnership) -> Self {
+        self.execution = execution;
+        self
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn with_limits(mut self, limits: Vec<SandboxLimit>) -> Self {
         Arc::make_mut(&mut self.policy).limits = limits;

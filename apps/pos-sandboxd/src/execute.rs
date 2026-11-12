@@ -17,6 +17,12 @@
 //!    watchdog expires, which kills the unit; a proxy protocol failure kills
 //!    the unit at once and keeps the evidence.
 //!
+//! Cancellation ([`AttemptCancel`]) is observed from step 5 on: before the
+//! release it kills the unit and fails with [`ExecuteError::Cancelled`]; after
+//! it, a stop of the unit is requested and the attempt ends
+//! [`AttemptEnding::Cancelled`], keeping its cgroup and network evidence for
+//! the terminal cleanup's bounded grace and escalation.
+//!
 //! Any failure after the unit was started terminates it. The result carries
 //! the evidence the later signed records need: the ordered NXT1 transcript
 //! digests for SPR1 and the proxy termination for the SAU1 terminal
@@ -33,12 +39,14 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::future::{select, Either};
 use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
     ReplayedNetworkExchange, SandboxExecutionMode,
 };
+use tokio::sync::watch;
 use zbus::OwnedFd;
 
 use crate::{
@@ -207,6 +215,64 @@ impl ModePlan {
     }
 }
 
+/// The owner's side of one attempt's cancellation (ADR-069 §4 `cancel`).
+///
+/// A request is sticky: every [`CancelSignal`] subscribed from this handle
+/// observes it, whenever it subscribed. Dropping the handle without a request
+/// never cancels.
+#[derive(Debug)]
+pub struct AttemptCancel(watch::Sender<bool>);
+
+impl AttemptCancel {
+    /// A handle on which no cancellation was requested yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(watch::Sender::new(false))
+    }
+
+    /// Request cancellation; repeating the request changes nothing.
+    pub fn cancel(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Whether cancellation was requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// A signal an execution observes.
+    #[must_use]
+    pub fn signal(&self) -> CancelSignal {
+        CancelSignal(self.0.subscribe())
+    }
+}
+
+impl Default for AttemptCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One execution's view of its attempt's cancellation.
+#[derive(Clone, Debug)]
+pub struct CancelSignal(watch::Receiver<bool>);
+
+impl CancelSignal {
+    /// Whether cancellation was requested.
+    pub(crate) fn is_requested(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// Finish once cancellation is requested; never, if its handle was
+    /// dropped without a request.
+    pub(crate) async fn requested(mut self) {
+        if self.0.wait_for(|requested| *requested).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Everything one execution needs beyond the ports.
 pub struct ExecuteJob {
     /// The facts of the reserved, admitted attempt.
@@ -215,6 +281,8 @@ pub struct ExecuteJob {
     pub mode: ModePlan,
     /// The durable capture store, opened over a root-owned directory.
     pub capture_store: Arc<NetworkCaptureStore>,
+    /// The attempt's cancellation, observed from the launcher release on.
+    pub cancel: CancelSignal,
 }
 
 /// Why an execution could not start or continue.
@@ -251,6 +319,9 @@ pub enum ExecuteError {
     /// The barrier did not release the adapter before the attempt deadline.
     #[error("the launcher barrier did not release before the attempt deadline")]
     ReleaseTimeout,
+    /// Cancellation was requested before the barrier released the adapter.
+    #[error("the attempt was cancelled before its release")]
+    Cancelled,
     /// The verified root could not be rechecked.
     #[error("the verified root could not be rechecked")]
     Recheck(#[source] ImageActivationError),
@@ -325,6 +396,15 @@ pub enum AttemptEnding {
     /// The proxy session ended in a protocol failure and the kill could not be
     /// issued.
     ProtocolFailureKillFailed,
+    /// Cancellation was requested after the release. A stop of the unit was
+    /// requested (not proven): the terminal cleanup's bounded grace,
+    /// escalation and emptiness proof follow through the retained cgroup.
+    /// Cancellation outranks every other ending (ADR-069 §8).
+    Cancelled {
+        /// `Some` when the watchdog also expired while the Local proxy was
+        /// being joined: whether its SIGKILL was acknowledged.
+        watchdog: Option<bool>,
+    },
 }
 
 /// The network evidence of one attempt, for SPR1 and SAU1.
@@ -408,6 +488,7 @@ struct Prepared<C> {
     planned: Planned<C>,
     watchdog: Duration,
     store: Arc<NetworkCaptureStore>,
+    cancel: CancelSignal,
 }
 
 /// Run one reserved, admitted attempt from its rechecked root to its end.
@@ -525,6 +606,7 @@ where
         planned,
         watchdog,
         store,
+        cancel,
     } = prepared;
     let unit = attempt.unit_name().clone();
     let bounds = Bounds {
@@ -537,12 +619,9 @@ where
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = bind_planned(planned);
     // Release must arrive before the attempt deadline (ADR-069), whatever the
-    // port does.
-    let refused = match until(deadline, barrier.release(&active)).await {
-        Some(Ok(())) => None,
-        Some(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
-        None => Some(ExecuteError::ReleaseTimeout),
-    };
+    // port does, and is abandoned once cancellation is requested.
+    let released = until(deadline, unless(cancel.clone(), barrier.release(&active))).await;
+    let refused = released.map_or(Some(ExecuteError::ReleaseTimeout), refusal);
     if let Some(error) = refused {
         let aborted = abort(
             host,
@@ -554,7 +633,7 @@ where
         );
         return Err(aborted.await);
     }
-    let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds).await;
+    let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
     let (network, finish) = match supervised {
         Ok(supervised) => supervised,
         Err(error) => {
@@ -651,6 +730,28 @@ async fn until<T>(deadline: Instant, future: impl Future<Output = T>) -> Option<
         .ok()
 }
 
+/// Why a release that ended before the deadline was refused: the barrier
+/// failed, or cancellation came first (`None`); `None` when it released.
+fn refusal<E>(released: Option<Result<(), E>>) -> Option<ExecuteError>
+where
+    E: Error + Send + Sync + 'static,
+{
+    match released {
+        Some(Ok(())) => None,
+        Some(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
+        None => Some(ExecuteError::Cancelled),
+    }
+}
+
+/// Await `future` unless cancellation is requested first; `None` then. A
+/// request already made wins over a ready `future`.
+async fn unless<T>(cancel: CancelSignal, future: impl Future<Output = T>) -> Option<T> {
+    match select(std::pin::pin!(cancel.requested()), std::pin::pin!(future)).await {
+        Either::Left(((), _)) => None,
+        Either::Right((output, _)) => Some(output),
+    }
+}
+
 /// Await `future` for at most `limit`; `None` if it did not finish in time.
 async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Option<T> {
     tokio::time::timeout(limit, future).await.ok()
@@ -730,6 +831,7 @@ where
         attempt,
         mode,
         capture_store,
+        cancel,
     } = job;
     let service_limits = attempt.service_limits().map_err(ExecuteError::Limits)?;
     if mode.execution_mode() != attempt.mode() {
@@ -784,6 +886,7 @@ where
         attempt,
         planned,
         store: capture_store,
+        cancel,
     })
 }
 
@@ -832,9 +935,29 @@ impl Finish {
     }
 }
 
+/// How a supervision ended: on its own, or by cancellation.
+#[derive(Clone, Copy)]
+enum Supervised {
+    /// The supervision finished without a cancellation.
+    Finished(Finish),
+    /// Cancellation was requested and a stop of the unit was requested;
+    /// whether a watchdog SIGKILL was acknowledged, if the watchdog expired.
+    Cancelled { watchdog: Option<bool> },
+}
+
+impl Supervised {
+    const fn ending(self) -> AttemptEnding {
+        match self {
+            Self::Finished(finish) => finish.ending(),
+            Self::Cancelled { watchdog } => AttemptEnding::Cancelled { watchdog },
+        }
+    }
+}
+
 /// Serve the Local proxy, if any, then observe the cgroup until it is empty or
 /// the watchdog expires. A watchdog expiry or a proxy protocol failure kills
-/// the unit; the network evidence is kept either way.
+/// the unit; the network evidence is kept either way. Cancellation requests a
+/// stop of the unit and ends the supervision.
 async fn supervise<H, C>(
     host: &H,
     unit: &TransientServiceUnitName,
@@ -842,7 +965,8 @@ async fn supervise<H, C>(
     bound: Bound<C>,
     store: Arc<NetworkCaptureStore>,
     bounds: Bounds,
-) -> Result<(NetworkEvidence, Finish), ExecuteError>
+    cancel: CancelSignal,
+) -> Result<(NetworkEvidence, Supervised), ExecuteError>
 where
     H: UnitHost + Sync,
     C: NetworkEndpointConnector + Send + 'static,
@@ -851,15 +975,19 @@ where
         Bound::None => NetworkEvidence::None,
         Bound::Replay(replayed) => NetworkEvidence::Replay(replayed),
         Bound::Local(binding, connector) => {
-            return serve_local(host, unit, cgroup, (*binding, connector), store, bounds).await;
+            let local = (*binding, connector);
+            return serve_local(host, unit, cgroup, local, store, bounds, cancel).await;
         }
     };
-    let finish = observe(host, unit, cgroup, bounds).await?;
+    let finish = observe_unless_cancelled(host, unit, cgroup, bounds, cancel).await?;
     Ok((evidence, finish))
 }
 
 /// Serve the Local proxy. At the watchdog the unit is killed while the proxy
 /// thread is still being joined, so a slow connector cannot delay the kill.
+/// Cancellation requests a stop of the unit, which closes the adapter's end
+/// of the channel, while the join continues until the session ends or the
+/// watchdog closes it; the session's evidence is kept.
 async fn serve_local<H, C>(
     host: &H,
     unit: &TransientServiceUnitName,
@@ -867,23 +995,65 @@ async fn serve_local<H, C>(
     (binding, connector): (BoundLocalProxy, C),
     store: Arc<NetworkCaptureStore>,
     bounds: Bounds,
-) -> Result<(NetworkEvidence, Finish), ExecuteError>
+    cancel: CancelSignal,
+) -> Result<(NetworkEvidence, Supervised), ExecuteError>
 where
     H: UnitHost + Sync,
     C: NetworkEndpointConnector + Send + 'static,
 {
-    let (served, expired) = binding
-        .serve_until_or(
-            connector,
-            store,
-            bounds.deadline,
-            sigkill(host, unit, bounds.call),
-        )
-        .await;
+    let serving = binding.serve_until_or(
+        connector,
+        store,
+        bounds.deadline,
+        sigkill(host, unit, bounds.call),
+    );
+    let ((served, expired), cancelled) =
+        stop_on_cancel(host, unit, bounds, cancel.clone(), serving).await;
     let served = served.map_err(ExecuteError::from)?;
-    let protocol_failure =
-        served.session.termination() == Some(LocalNetworkTermination::ProtocolFailure);
+    let ended = (served.session.termination(), expired, cancelled);
+    let finish = finish_local(host, unit, cgroup, ended, bounds, cancel).await?;
+    Ok((NetworkEvidence::Local(served), finish))
+}
+
+/// Await `serving` to its end; once cancellation is requested meanwhile,
+/// request a stop of the unit first. `true` when it was requested.
+async fn stop_on_cancel<H, T>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    bounds: Bounds,
+    cancel: CancelSignal,
+    serving: impl Future<Output = T>,
+) -> (T, bool)
+where
+    H: UnitHost + Sync,
+{
+    let stopping = async move {
+        cancel.requested().await;
+        request_stop(host, unit, bounds.call).await;
+    };
+    match select(std::pin::pin!(stopping), std::pin::pin!(serving)).await {
+        Either::Left(((), serving)) => (serving.await, true),
+        Either::Right((output, _)) => (output, false),
+    }
+}
+
+/// How a Local session's supervision ends, from how the session ended,
+/// whether the watchdog expired during the join and whether cancellation was
+/// requested; cancellation outranks every other ending.
+async fn finish_local<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: &mut H::Cgroup,
+    (termination, expired, cancelled): (Option<LocalNetworkTermination>, Option<bool>, bool),
+    bounds: Bounds,
+    cancel: CancelSignal,
+) -> Result<Supervised, ExecuteError>
+where
+    H: UnitHost + Sync,
+{
+    let protocol_failure = termination == Some(LocalNetworkTermination::ProtocolFailure);
     let finish = match expired {
+        watchdog if cancelled => return Ok(Supervised::Cancelled { watchdog }),
         Some(killed) => {
             // SIGKILL ran during the join; the rest follows in the usual order.
             finish_kill(host, unit, Some(cgroup), bounds.call).await;
@@ -892,27 +1062,61 @@ where
         None if protocol_failure => Finish::ProtocolFailure {
             killed: kill_everything(host, unit, Some(cgroup), bounds.call).await,
         },
-        None => observe(host, unit, cgroup, bounds).await?,
+        None => return observe_unless_cancelled(host, unit, cgroup, bounds, cancel).await,
     };
-    Ok((NetworkEvidence::Local(served), finish))
+    Ok(Supervised::Finished(finish))
 }
 
-/// Observe the cgroup until it is empty; kill the unit at the watchdog.
+/// Observe the cgroup until it is empty or the watchdog expires, unless
+/// cancellation is requested first: then request a stop of the unit instead.
+async fn observe_unless_cancelled<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: &mut H::Cgroup,
+    bounds: Bounds,
+    cancel: CancelSignal,
+) -> Result<Supervised, ExecuteError>
+where
+    H: UnitHost + Sync,
+{
+    match unless(cancel, wait_empty(cgroup, bounds.deadline)).await {
+        None => {
+            request_stop(host, unit, bounds.call).await;
+            Ok(Supervised::Cancelled { watchdog: None })
+        }
+        Some(empty) => Ok(Supervised::Finished(
+            observe(host, unit, cgroup, bounds, empty?).await,
+        )),
+    }
+}
+
+/// An empty cgroup ends the attempt; at the watchdog the unit is killed.
 async fn observe<H>(
     host: &H,
     unit: &TransientServiceUnitName,
     cgroup: &mut H::Cgroup,
     bounds: Bounds,
-) -> Result<Finish, ExecuteError>
+    empty: bool,
+) -> Finish
 where
     H: UnitHost + Sync,
 {
-    if wait_empty(cgroup, bounds.deadline).await? {
-        return Ok(Finish::Empty);
+    if empty {
+        return Finish::Empty;
     }
-    Ok(Finish::Watchdog {
+    Finish::Watchdog {
         killed: kill_everything(host, unit, Some(cgroup), bounds.call).await,
-    })
+    }
+}
+
+/// Request a stop of the unit, bounded by `call`. The request proves nothing;
+/// the terminal cleanup stops the unit with grace and escalation and proves
+/// its cgroup empty.
+async fn request_stop<H>(host: &H, unit: &TransientServiceUnitName, call: Duration)
+where
+    H: UnitHost + Sync,
+{
+    within(call, async { host.stop(unit.clone()).await.ok() }).await;
 }
 
 /// Poll until the cgroup is empty (`true`) or `deadline` passes (`false`).
@@ -980,7 +1184,7 @@ async fn finish_kill<H>(
     if let Some(cgroup) = cgroup {
         cgroup.kill_all().ok();
     }
-    within(call, async { host.stop(unit.clone()).await.ok() }).await;
+    request_stop(host, unit, call).await;
 }
 
 /// SIGKILL the unit, kill its cgroup when bound, then stop its job, each host

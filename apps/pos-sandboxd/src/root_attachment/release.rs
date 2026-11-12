@@ -7,7 +7,7 @@ use tokio::time::{sleep, timeout_at, Instant};
 use super::{AttachmentKernel, HostKernel, ImageActivationError, VerifiedRootMount};
 use crate::{ExecutionOwnership, PreparedAttemptDirectory};
 
-const DEVICE_POLL: Duration = Duration::from_millis(10);
+pub(super) const DEVICE_POLL: Duration = Duration::from_millis(10);
 
 /// Evidence that one tree's activated root was detached and its original
 /// loop/dm generations were observed absent within the cleanup deadline.
@@ -156,7 +156,10 @@ impl Drop for CleanupGuard<'_> {
     }
 }
 
-fn before(kernel: &impl AttachmentKernel, deadline: Instant) -> Result<(), ImageActivationError> {
+pub(super) fn before(
+    kernel: &impl AttachmentKernel,
+    deadline: Instant,
+) -> Result<(), ImageActivationError> {
     (kernel.now() < deadline)
         .then_some(())
         .ok_or(ImageActivationError::ResourceAbsenceUnverified)

@@ -2,14 +2,17 @@
 
 use tokio::time::{timeout_at, Instant};
 
+use zbus::{proxy::CacheProperties, OwnedObjectPath};
+use zbus_systemd::systemd1::{ServiceProxy, UnitProxy};
+
 use super::{
     unit_absence::{wait_with_proxy, NO_SUCH_UNIT},
-    ManagerProxy, SystemdAttemptUnitAbsenceObservation, SystemdTransientUnitTransport,
-    SystemdTransientUnitTransportError, TransientServiceUnitName,
+    ManagerProxy, SystemdAttemptUnitAbsenceObservation, SystemdAttemptUnitObservation,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
 };
 use crate::{
-    AttemptCgroupEmptyObservation, AttemptShutdownDeadlines, AttemptShutdownError,
-    BoundAttemptCgroup,
+    AttemptCgroupEmptyObservation, AttemptCgroupError, AttemptShutdownDeadlines,
+    AttemptShutdownError, BoundAttemptCgroup, CgroupRoot,
 };
 
 /// Fresh observations of an unloaded unit and its retained process-empty cgroup.
@@ -118,6 +121,151 @@ impl SystemdTransientUnitTransport {
             return Err(SystemdAttemptUnitTeardownError::DeadlineElapsed);
         }
         observed
+    }
+}
+
+impl SystemdTransientUnitTransport {
+    /// Stop a listed attempt unit that no start of this runtime bound.
+    ///
+    /// Restart reconciliation calls this for a previous runtime's unit whose
+    /// name and `AttemptId` match a committed intent. Its cgroup is bound from
+    /// the listed object path exactly as for a verified start: the manager's
+    /// unit-to-cgroup mapping is checked in both directions around the kernel
+    /// open. The unit is then stopped, emptied and removed as by
+    /// [`Self::stop_attempt_unit`] with the same deadlines.
+    ///
+    /// A unit whose `ControlGroup` is empty has no cgroup to bind. By the
+    /// owner's reading of ADR-087 §3 (owner decision A, 2026-11-10), such a
+    /// unit is proven empty when its `ActiveState` is `inactive` or `failed`:
+    /// systemd removes a unit's cgroup only once it is empty. A failed unit's
+    /// state is then cleared with `ResetFailedUnit`, and a fresh `GetUnit`
+    /// must observe the unit absent. The unit must still be the listed object,
+    /// and its `ControlGroup` is read again after its state.
+    ///
+    /// # Errors
+    /// A unit, cgroup or binding that cannot be verified, including a unit
+    /// without a cgroup in any other state, is a
+    /// [`SystemdAttemptUnitTeardownError::Transport`] failure; nothing is
+    /// stopped. Teardown failures are returned as they occur.
+    pub(crate) async fn stop_listed_unit(
+        &self,
+        unit: &SystemdAttemptUnitObservation,
+        shutdown: AttemptShutdownDeadlines,
+        deadline: Instant,
+    ) -> Result<(), SystemdAttemptUnitTeardownError> {
+        let stopped = self
+            .stop_listed_with_root(
+                unit.unit_name(),
+                unit.unit_object_path(),
+                CgroupRoot::system(),
+                (shutdown, deadline),
+            )
+            .await;
+        stopped
+    }
+
+    async fn stop_listed_with_root(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        root: Result<CgroupRoot, AttemptCgroupError>,
+        (shutdown, deadline): (AttemptShutdownDeadlines, Instant),
+    ) -> Result<(), SystemdAttemptUnitTeardownError> {
+        let listed = self.listed_control_group(unit_path).await;
+        match listed {
+            Ok(cgroup) if cgroup.is_empty() => {
+                return self.remove_cgroupless(unit_name, unit_path, deadline).await;
+            }
+            Ok(_) => {}
+            Err(error) => return Err(SystemdAttemptUnitTeardownError::Transport(error)),
+        }
+        let bound = match root {
+            Ok(root) => self.bind_unit_cgroup(unit_name, unit_path, root).await,
+            Err(error) => Err(error.into()),
+        };
+        let mut cgroup = match bound {
+            Ok(cgroup) => cgroup,
+            Err(error) => return Err(SystemdAttemptUnitTeardownError::Transport(error)),
+        };
+        let stopped = self
+            .stop_attempt_unit(&mut cgroup, shutdown, deadline)
+            .await
+            .map(drop);
+        stopped
+    }
+}
+
+impl SystemdTransientUnitTransport {
+    /// The listed object's `ControlGroup`, read fresh from the manager.
+    async fn listed_control_group(
+        &self,
+        unit_path: &OwnedObjectPath,
+    ) -> Result<String, SystemdTransientUnitTransportError> {
+        let service = ServiceProxy::builder(&self.connection)
+            .path(unit_path.clone())
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+        let cgroup = service.control_group().await;
+        cgroup.map_err(SystemdTransientUnitTransportError::CgroupReadback)
+    }
+
+    /// Remove a listed unit without a cgroup when it is inactive or failed
+    /// (owner decision A): reset a failed unit, then observe it absent.
+    async fn remove_cgroupless(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        deadline: Instant,
+    ) -> Result<(), SystemdAttemptUnitTeardownError> {
+        let failed = self.cgroupless_failed(unit_name, unit_path).await;
+        let proxy = ManagerProxy::new(&self.connection).await;
+        let removed = match failed {
+            Ok(true) => remove_with_proxy(proxy, unit_name.clone(), deadline).await,
+            Ok(false) => wait_with_proxy(proxy, unit_name.clone())
+                .await
+                .map_err(SystemdAttemptUnitTeardownError::Transport),
+            Err(error) => Err(SystemdAttemptUnitTeardownError::Transport(error)),
+        };
+        removed.map(drop)
+    }
+
+    /// Whether the listed unit without a cgroup is failed (`true`) or
+    /// inactive (`false`); any other state, another object or a cgroup that
+    /// appeared is refused.
+    async fn cgroupless_failed(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+    ) -> Result<bool, SystemdTransientUnitTransportError> {
+        let current = self.unit_path_of(unit_name).await?;
+        if current != *unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        let unit = UnitProxy::builder(&self.connection)
+            .path(unit_path.clone())
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+        let state = unit.active_state().await.map_err(|source| {
+            SystemdTransientUnitTransportError::PropertyReadback {
+                property: "ActiveState",
+                source: Box::new(source),
+            }
+        })?;
+        let failed = match state.as_str() {
+            "failed" => true,
+            "inactive" => false,
+            _ => return Err(SystemdTransientUnitTransportError::CgrouplessUnitActive),
+        };
+        // A unit that started meanwhile has a cgroup again.
+        let cgroup = self.listed_control_group(unit_path).await?;
+        cgroup
+            .is_empty()
+            .then_some(failed)
+            .ok_or(SystemdTransientUnitTransportError::CgroupUnitMismatch)
     }
 }
 

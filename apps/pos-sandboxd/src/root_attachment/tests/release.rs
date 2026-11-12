@@ -14,7 +14,7 @@ mod cases {
             directories.push(
                 tree.registry
                     .commit_planned(&PlannedAttemptIntent::new([id; 16], [9; 32])?)?
-                    .prepare_directory()?,
+                    .prepare_fixture_directory()?,
             );
         }
         for (index, directory) in directories.into_iter().enumerate() {
@@ -26,7 +26,7 @@ mod cases {
             let retained = identity.clone();
             assert_eq!(identity.mount_id(), 41);
             assert_eq!(identity.root_identity(), ((253, 3), 1));
-            assert_eq!(identity.image_identity(), (5, 6));
+            assert_eq!(identity.image_identity(), crate::FIXTURE_IMAGE);
             assert_eq!(identity.mapper_uuid(), "CRYPT-VERITY-5f0e5a1c-root");
             assert_eq!(identity.mapper_generation(), ((253, 3), 102));
             assert_eq!(identity.loop_name(), "loop7");
@@ -167,7 +167,7 @@ mod cases {
             );
             assert_eq!(kernel.detached(), usize::from(fault == 8));
             assert_eq!(retained.mount_id(), 41);
-            assert_eq!(retained.image_identity(), (5, 6));
+            assert_eq!(retained.image_identity(), crate::FIXTURE_IMAGE);
             assert_eq!(fs::read(record)?, bytes);
             tree.prepared.verify_directory()?;
             assert!(tree
@@ -305,7 +305,7 @@ mod cases {
         let foreign = tree
             .registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
-            .prepare_directory()?;
+            .prepare_fixture_directory()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
         assert_eq!(
             detach_owned(root, &kernel, &foreign).await,
@@ -356,7 +356,7 @@ mod cases {
             let other = tree
                 .registry
                 .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
-                .prepare_directory()?;
+                .prepare_fixture_directory()?;
             let (kernel, root) = attached_root(&other)?;
             let foreign = release_owned(root, &kernel, &other).await?;
             let (kernel, root) = attached_root(&tree.prepared)?;
