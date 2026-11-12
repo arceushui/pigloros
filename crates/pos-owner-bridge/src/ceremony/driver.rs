@@ -14,9 +14,9 @@
 //! | releasing                 | `RELEASING` observed, or `RELEASE_WINDOW`                      |
 //! | awaiting exit             | the browser exit, or `EXIT_WINDOW` (`CleanupTimeout`)          |
 //!
-//! The 300 s enrollment budget is enforced while a ceremony is opening, loading or posted; it
-//! ends at E4 verification, so it is not checked while the driver releases and waits for exit,
-//! and `next_wake` ignores it from then on.
+//! The 300 s enrollment budget is checked at the start of each opening, loading or posted step.
+//! A consuming step that starts within budget is not interrupted by its expiry (ADR-110 E5).
+//! The budget is not checked while releasing or awaiting exit, and `next_wake` ignores it then.
 
 use std::task::Poll;
 use std::time::Instant;
