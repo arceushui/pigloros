@@ -1542,6 +1542,21 @@ def test_owned_process_fault_authority() -> None:
         if expected not in found:
             raise SystemExit(f"final process failure classifier bypass was accepted: {function}: {found}")
     finish = fixture_source[fixture_source.find("fn finish_failed_case("):]
+    model = (ROOT / SHIM / "src/adapter/native_tests/process_fault/model_tests.rs").read_text()
+    for escaped in (
+        "fn escaped(model: &Factory) { model.set_modeled_exit_code(Some(0)); }",
+        "use crate::set_modeled_exit_code as escaped;",
+    ):
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault/model_tests.rs"] = model + "\n" + escaped
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_capabilities(scans, found)
+        if not any("modeled exit status belongs only in its reviewed model" in item for item in found):
+            raise SystemExit("modeled exit status escaped its reviewed model")
     if not 0 <= finish.find("self.retire(") < finish.find("check_final_process_failures("):
         raise SystemExit("shared failed-case classification must follow retirement")
     for old, new in (

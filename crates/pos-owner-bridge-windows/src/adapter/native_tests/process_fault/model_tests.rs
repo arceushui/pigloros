@@ -1125,3 +1125,110 @@ fn modeled_exit_cutpoint_refuses_unprepared_surface_before_authority() -> TestRe
     }
     Ok(())
 }
+
+/// Scripted fake Surface state; none of these events is native qualification evidence.
+fn modeled_closed_exit_fixture(
+    root: &FixtureRoot,
+) -> Result<(Fixture, Rc<Factory>, Instant), Box<dyn std::error::Error>> {
+    use pos_owner_bridge::{CleanupStore, RequestImage};
+    use pos_owner_bridge_codec::{CeremonyKind, CleanupRecordV1, OwnerBridgeControlV1};
+
+    let (mut fixture, model) = fixture(root)?;
+    model.navigation_succeeds.set(true);
+    let selected = fixed_competing_spec(MODEL_CASE);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    let Poll::Ready(Ok(browser)) = fixture.surface.open(&selected) else {
+        return Err("modeled browser unavailable".into());
+    };
+    assert!(fixture.surface.navigate().is_pending());
+    let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+    assert_eq!(
+        sink.event(NativeEvent::Navigation {
+            uri: crate::NativeText::fixture(crate::OWNER_URL),
+            id: 7,
+            redirected: false,
+        }),
+        crate::NativeAction::Allow
+    );
+    sink.event(NativeEvent::DomLoaded {
+        id: 7,
+        uri: crate::NativeText::fixture(crate::OWNER_URL),
+    });
+    assert!(matches!(fixture.surface.navigate(), Poll::Ready(Ok(_))));
+    let record = CleanupRecordV1::new(
+        selected.ceremony_id,
+        &selected.folder_name,
+        browser.browser_pid,
+        browser.creation_filetime,
+        browser.image_path_sha256,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut bytes = [0; 4096];
+    let len = pos_owner_bridge_codec::encode_cleanup_record(&record, &mut bytes)
+        .map_err(|error| error.to_string())?;
+    fixture
+        .store
+        .write_record(&bytes[..len])
+        .map_err(|_| "modeled record")?;
+    let request_header =
+        OwnerBridgeControlV1::new_request(CeremonyKind::Create, 1, selected.ceremony_id, 1)
+            .map_err(|error| error.to_string())?
+            .encode();
+    let reply_header =
+        OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, selected.ceremony_id)
+            .map_err(|error| error.to_string())?
+            .encode();
+    let mut request = RequestImage::zeroed();
+    request.as_mut_bytes()[..64].copy_from_slice(&request_header);
+    fixture
+        .surface
+        .create_and_write(&request, &reply_header)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture
+        .surface
+        .zero_close_buffers()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    fixture
+        .surface
+        .arm_exit_capture(selected.ceremony_id, Rc::clone(&fixture.trace), deadline)
+        .map_err(|()| "modeled capture")?;
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok((fixture, model, deadline))
+}
+
+#[test]
+fn modeled_already_exited_cutpoint_retains_owner_without_termination() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for inject in [false, true] {
+        crate::Native::reset_process_failure_observations();
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, deadline) = modeled_closed_exit_fixture(&root)?;
+        model.set_modeled_exit_code(Some(0));
+        let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+        sink.event(NativeEvent::BrowserExited { pid: 42 });
+        assert!(fixture.surface.exit_fault_owners_retained());
+        fixture.at_success_exit(inject, deadline)?;
+        assert!(matches!(
+            fixture.exit_reached,
+            Some(crate::adapter::surface::ExitBoundary::AlreadyExited(_))
+        ));
+        assert!(fixture.evidence_complete);
+        assert!(fixture.handle.is_some());
+        assert!(!model.calls.borrow().contains(&"terminate_exit"));
+        assert!(fixture.surface.exit_fault_owners_retained());
+        fixture
+            .surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let driver =
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        fixture.retire(driver, Err(ERROR), None)?;
+        root.remove()?;
+    }
+    Ok(())
+}

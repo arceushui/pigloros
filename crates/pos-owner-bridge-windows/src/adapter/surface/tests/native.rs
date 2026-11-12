@@ -65,6 +65,11 @@ pub(in crate::adapter) struct Factory {
 }
 
 impl Factory {
+    /// Set a scripted retained-handle result for model tests only.
+    pub(in crate::adapter) fn set_modeled_exit_code(&self, code: Option<u32>) {
+        self.exit_code.set(code);
+    }
+
     pub(in crate::adapter) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
         Rc::new(Self {
             creation: Cell::new(creation),
