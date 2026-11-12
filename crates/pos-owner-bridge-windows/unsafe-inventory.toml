@@ -180,7 +180,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 37
+line = 36
 function = "inspect"
 operation = "CloseHandle"
 invariant = "Exactly one close after all queries, including every query error path."
@@ -188,7 +188,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 48
+line = 55
 function = "read_identity"
 operation = "GetProcessTimes"
 invariant = "Live query-only handle and four distinct initialized output FILETIME values."
@@ -196,7 +196,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 79
+line = 86
 function = "image_digest"
 operation = "QueryFullProcessImageNameW"
 invariant = "Live handle; owned32768code-unit writable buffer with an initialized in-out bound."

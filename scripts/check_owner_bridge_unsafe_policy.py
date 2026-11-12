@@ -1079,7 +1079,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     # query-only implementation. Bind its callees as well as the fault caller.
     shared = scans.get("src/ffi/process.rs")
     shared_code = shared[0].code if shared else ""
-    if hashlib.sha256(re.sub(r"\s+", "", shared_code).encode()).hexdigest() != "fd3d6f7a3900e52ebbaf8818104f7436aeba899fc783a31824d7bb162497dab0":
+    if hashlib.sha256(re.sub(r"\s+", "", shared_code).encode()).hexdigest() != "7c6a97e8cd00e8cdcdae58abc3809187cd2f0314605e9e924cf744ce3a2f0c15":
         found.append(f"{SHIM}/src/ffi/process.rs: shared process identity differs from the reviewed read-only observer")
     _check_fault_assets(root, found)
     callbacks = scans.get("src/ffi/events/control_fixture.rs")
