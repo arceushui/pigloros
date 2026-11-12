@@ -384,3 +384,95 @@ fn modeled_recordless_observer_enforces_deadline_before_event_and_after_query() 
     }
     Ok(())
 }
+
+#[test]
+fn modeled_recordless_observer_refuses_untrusted_exit_evidence() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let other_browser = ProcessIdentity {
+        creation_filetime: BROWSER.creation_filetime + 1,
+        ..BROWSER
+    };
+    for (label, code, expected_browser, ordered, expected_error) in [
+        (
+            "missing handle",
+            None,
+            BROWSER,
+            true,
+            "recordless handle disappeared",
+        ),
+        (
+            "query failure",
+            Some(Err(())),
+            BROWSER,
+            true,
+            "recordless exit query failed",
+        ),
+        (
+            "pending exit",
+            Some(Ok(None)),
+            BROWSER,
+            true,
+            "recordless process exit pending",
+        ),
+        (
+            "wrong exit code",
+            Some(Ok(Some(0))),
+            BROWSER,
+            true,
+            "recordless fault evidence is incomplete",
+        ),
+        (
+            "wrong browser identity",
+            Some(Ok(Some(0x535))),
+            other_browser,
+            true,
+            "recordless fault evidence is incomplete",
+        ),
+        (
+            "wrong trace order",
+            Some(Ok(Some(0x535))),
+            BROWSER,
+            false,
+            "recordless fault evidence is incomplete",
+        ),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, clock) = pending(&root)?;
+        exit(&model)?;
+        fixture.trace.borrow_mut().clear();
+        let opening = ProcessFaultMark::RecordlessOpening {
+            generation: 1,
+            record_count: 0,
+        };
+        if ordered {
+            fixture.trace.borrow_mut().extend([
+                opening,
+                ProcessFaultMark::Selected(BROWSER),
+                ProcessFaultMark::TerminationCall,
+            ]);
+        } else {
+            fixture.trace.borrow_mut().extend([
+                opening,
+                ProcessFaultMark::TerminationCall,
+                ProcessFaultMark::Selected(BROWSER),
+            ]);
+        }
+        fixture.handle = code.map(|code| {
+            Box::new(Handle {
+                code,
+                clock: clock.0.clone(),
+                advance: Duration::ZERO,
+            }) as Box<dyn ProcessFaultHandle>
+        });
+        let result = fixture.observe_recordless_with_clock(expected_browser, &clock);
+        assert_eq!(
+            result.err().map(|error| error.to_string()).as_deref(),
+            Some(expected_error),
+            "{label}"
+        );
+        assert!(!fixture.evidence_complete, "{label}");
+        assert!(fixture.surface.pending_opening_owners_retained(), "{label}");
+        retire(root, fixture, &model)?;
+    }
+    Ok(())
+}
