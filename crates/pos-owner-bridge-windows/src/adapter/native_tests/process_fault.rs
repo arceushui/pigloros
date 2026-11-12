@@ -5079,6 +5079,141 @@ fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
     ));
 }
 
+fn successful_close_observed(close: Option<crate::adapter::surface::CloseObservation>) -> bool {
+    close.is_some_and(|observation| {
+        observation.removed.is_ok()
+            && observation.closed.is_ok()
+            && observation.buffers_closed
+            && !observation.buffers_uncertain
+            && observation.had_controller
+    })
+}
+
+/// Captured fresh-success evidence; it never creates an SDK observation.
+#[derive(Clone, Copy)]
+struct FreshSuccessEvidence<'a> {
+    verified: bool,
+    close: Option<crate::adapter::surface::CloseObservation>,
+    own_exit: bool,
+    zero_observations: &'a [NativeZeroObservation],
+    provenance: Option<pos_owner_bridge::ProcessIdentity>,
+}
+
+impl FreshSuccessEvidence<'_> {
+    fn validate(&self) -> TestResult {
+        if !self.verified
+            || !successful_close_observed(self.close)
+            || !self.own_exit
+            || !native_zeroing_observed(self.zero_observations)
+            || self.provenance.is_none()
+        {
+            return Err(
+                "fresh verified success or its native retirement evidence was not established"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn modeled_fresh_success_requires_complete_retirement_evidence() {
+    use crate::adapter::surface::CloseObservation;
+    let close = CloseObservation {
+        removed: Ok(()),
+        closed: Ok(()),
+        buffers_closed: true,
+        buffers_uncertain: false,
+        had_controller: true,
+    };
+    let request = NativeZeroObservation {
+        slot: BufferSlot::Request,
+        before_nonzero: Some(true),
+        zeroed: Some(true),
+        header_present: None,
+        header_unchanged: None,
+    };
+    let reply = NativeZeroObservation {
+        slot: BufferSlot::Reply,
+        before_nonzero: Some(false),
+        zeroed: Some(true),
+        header_present: Some(true),
+        header_unchanged: Some(true),
+    };
+    let observations = [request, reply];
+    let browser = pos_owner_bridge::ProcessIdentity {
+        browser_pid: 42,
+        creation_filetime: 1,
+        image_path_sha256: pos_owner_bridge_codec::ImagePathSha256::from_bytes([7; 32]),
+    };
+    let evidence = FreshSuccessEvidence {
+        verified: true,
+        close: Some(close),
+        own_exit: true,
+        zero_observations: &observations,
+        provenance: Some(browser),
+    };
+    assert!(evidence.validate().is_ok());
+    let native_error = crate::NativeError {
+        operation: crate::Operation::Subscription,
+        failure: crate::Failure::CallFailed,
+    };
+    let invalid_closes = [
+        None,
+        Some(CloseObservation {
+            removed: Err(native_error),
+            ..close
+        }),
+        Some(CloseObservation {
+            closed: Err(native_error),
+            ..close
+        }),
+        Some(CloseObservation {
+            buffers_closed: false,
+            ..close
+        }),
+        Some(CloseObservation {
+            buffers_uncertain: true,
+            ..close
+        }),
+        Some(CloseObservation {
+            had_controller: false,
+            ..close
+        }),
+    ];
+    for close in invalid_closes {
+        let invalid = FreshSuccessEvidence { close, ..evidence };
+        assert!(invalid.validate().is_err());
+    }
+    for invalid in [
+        FreshSuccessEvidence {
+            verified: false,
+            ..evidence
+        },
+        FreshSuccessEvidence {
+            own_exit: false,
+            ..evidence
+        },
+        FreshSuccessEvidence {
+            provenance: None,
+            ..evidence
+        },
+        FreshSuccessEvidence {
+            zero_observations: &observations[..1],
+            ..evidence
+        },
+    ] {
+        assert_eq!(
+            invalid
+                .validate()
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+            Some("fresh verified success or its native retirement evidence was not established")
+        );
+    }
+}
+
 fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> TestResult {
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::SuccessfulGet)?;
@@ -5105,17 +5240,18 @@ fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> Te
         && driver.request_clear()
         && receipt_on_time;
     let close = fixture.surface.initial_close_observation();
-    let closed = close.is_some_and(|observation| {
-        observation.removed.is_ok()
-            && observation.closed.is_ok()
-            && observation.buffers_closed
-            && !observation.buffers_uncertain
-            && observation.had_controller
-    });
+    let closed = successful_close_observed(close);
     let own_exit =
         provenance.is_some_and(|browser| fixture.surface.fresh_success_own_exit(browser));
     let observations = crate::Native::take_native_zero_observations();
     let native_zeroed = native_zeroing_observed(&observations);
+    let evidence = FreshSuccessEvidence {
+        verified,
+        close,
+        own_exit,
+        zero_observations: &observations,
+        provenance,
+    };
     let _logged = writeln!(std::io::stderr(), "NATIVE_FRESH_SUCCESS case={number} verified={verified} receipt_on_time={receipt_on_time} closed={closed} own_exit={own_exit} native_zeroed={native_zeroed} driver_error={:?}", result.as_ref().err());
     fixture.retire(driver, result, None)?;
     let classification = check_final_process_failures(None);
@@ -5123,12 +5259,7 @@ fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> Te
         return Err(error);
     }
     classification?;
-    if !verified || !closed || !own_exit || !native_zeroed || provenance.is_none() {
-        return Err(
-            "fresh verified success or its native retirement evidence was not established".into(),
-        );
-    }
-    Ok(())
+    evidence.validate()
 }
 
 impl Fixture {
