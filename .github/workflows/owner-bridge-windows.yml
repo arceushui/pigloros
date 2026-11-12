@@ -36,7 +36,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Surface model tests failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --output-path "$env:RUNNER_TEMP/environment-verdict.lcov"
           if ($LASTEXITCODE -ne 0) { throw 'LCOV export failed' }
+          cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --output-path "$env:RUNNER_TEMP/environment-verdict.json"
+          if ($LASTEXITCODE -ne 0) { throw 'JSON export failed' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: environment-verdict-lcov
-          path: ${{ runner.temp }}/environment-verdict.lcov
+          path: |
+            ${{ runner.temp }}/environment-verdict.lcov
+            ${{ runner.temp }}/environment-verdict.json
