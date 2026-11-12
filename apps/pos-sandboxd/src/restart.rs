@@ -390,10 +390,9 @@ fn committed(recovery: &SystemdAttemptRecovery, attempt_id: [u8; 16]) -> bool {
         .any(|entry| !entry.is_temporary() && entry.attempt_id() == attempt_id)
 }
 
-/// Detach every still-mounted root by the cleanup's release deadline, then
-/// remove orphaned network state and prove the egress property by the
-/// overall deadline. Each step has its own bound, so a slow network cleanup
-/// cannot use up the detach budget.
+/// Release every surviving resource, then prove the egress property by the
+/// overall deadline. The probe runs only once the orphan network state is
+/// gone, so it cannot observe a previous runtime's rules.
 async fn release_survivors<N, E, S>(
     recovery: &SystemdAttemptRecovery,
     (network, egress): (&N, &E),
@@ -406,13 +405,24 @@ where
     E: EgressPropertyProbe + Sync,
     S: Survivors,
 {
-    let detached = detach_roots(recovery, survivors, cleanup.released().min(deadline)).await;
-    let removed = match detached {
-        Ok(()) => remove_network(network, deadline).await,
-        Err(error) => Err(error),
-    };
-    match removed {
+    match release_resources(recovery, network, survivors, cleanup, deadline).await {
         Ok(()) => prove_egress(egress, deadline).await,
+        Err(error) => Err(error),
+    }
+}
+
+/// Detach every still-mounted root by the cleanup's release deadline, then
+/// remove orphaned network state by the overall deadline. Each step has its
+/// own bound, so a slow network cleanup cannot use up the detach budget.
+async fn release_resources<N: OrphanNetworkCleanup + Sync, S: Survivors>(
+    recovery: &SystemdAttemptRecovery,
+    network: &N,
+    survivors: &S,
+    cleanup: AttemptCleanupDeadlines,
+    deadline: Instant,
+) -> Reconciled<()> {
+    match detach_roots(recovery, survivors, cleanup.released().min(deadline)).await {
+        Ok(()) => remove_network(network, deadline).await,
         Err(error) => Err(error),
     }
 }
