@@ -1837,6 +1837,9 @@ def test_recordless_and_release_authority() -> None:
         ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
         ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),
         ("src/adapter/surface/mod.rs", "inject_view_fault", "std::time::Instant::now() < deadline", "true"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", "self.loopback.served().count != 1", "false"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", "self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser", "false"),
+        ("src/adapter/surface/mod.rs", "posted_fault_state", "state.posts != 1", "false"),
     )
     for relative, name, old, new in cases:
         source = (ROOT / SHIM / relative).read_text()
