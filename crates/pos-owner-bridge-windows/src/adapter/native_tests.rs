@@ -512,11 +512,7 @@ impl crate::Native {
         exercise_packaged_get_receipt(&factory, native.as_mut())?;
         native.unsubscribe_view()?;
         native.unsubscribe_view()?;
-        if std::env::var_os("PIGLOR_FFI_CLOSE_OBSERVE").is_some() {
-            native.observe_closed_wrappers()?;
-        } else {
-            native.close_controller()?;
-        }
+        observe_or_close(native.as_mut())?;
         native.close_controller()?;
         pump_until(&factory, "browser exit", || {
             events.exited() == Some(identity.browser_pid)
@@ -532,12 +528,25 @@ impl crate::Native {
         factory.stop()?;
         listener.shutdown();
         drop(listener);
-        if std::env::var_os("PIGLOR_FFI_CLOSE_OBSERVE").is_none() {
-            readiness::run(&runtime_path, &root.0)?;
-        }
+        run_readiness_unless_observing(&runtime_path, &root.0)?;
         root.remove()?;
         Ok(())
     }
+}
+
+fn observe_or_close(native: &mut dyn NativeOperations) -> NativeResult<()> {
+    if std::env::var_os("PIGLOR_FFI_CLOSE_OBSERVE").is_some() {
+        native.observe_closed_wrappers()
+    } else {
+        native.close_controller()
+    }
+}
+
+fn run_readiness_unless_observing(runtime: &std::path::Path, root: &std::path::Path) -> TestResult {
+    if std::env::var_os("PIGLOR_FFI_CLOSE_OBSERVE").is_none() {
+        readiness::run(runtime, root)?;
+    }
+    Ok(())
 }
 
 fn exercise_packaged_get_receipt(
