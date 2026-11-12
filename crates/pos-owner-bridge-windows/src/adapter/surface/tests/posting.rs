@@ -430,6 +430,44 @@ fn failed_native_preparation_returns_identity_before_refusing_navigation() -> Te
 }
 
 #[test]
+fn foreground_activation_waits_for_navigation_after_slow_record_work() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    let identity = fixture
+        .open(&super::spec(126))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    for forbidden in [
+        "show_window",
+        "focus_controller",
+        "navigate",
+        "create_buffers",
+        "post_request",
+        "post_reply",
+    ] {
+        assert!(
+            !fixture.factory.calls.borrow().contains(&forbidden),
+            "{forbidden}"
+        );
+    }
+    fixture
+        .clock
+        .advance(std::time::Duration::from_millis(1_400));
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let positions: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(positions, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
 fn foreground_deadline_refuses_navigation_and_preserves_ownership() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.foreground.set(false);
