@@ -1036,7 +1036,36 @@ fn modeled_pre_record_control_rejects_query_crossing_deadline() -> TestResult {
 #[test]
 fn modeled_control_observation_refuses_a_snapshot_after_the_deadline() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
-    for presence in [None, Some(crate::RendererPresence::Absent)] {
+    for (mark, presence) in [
+        (
+            ProcessFaultMark::Navigating {
+                generation: 1,
+                record_count: 1,
+            },
+            None,
+        ),
+        (
+            ProcessFaultMark::AwaitingLoad {
+                generation: 1,
+                record_count: 1,
+            },
+            None,
+        ),
+        (
+            ProcessFaultMark::Navigating {
+                generation: 1,
+                record_count: 1,
+            },
+            Some(crate::RendererPresence::Absent),
+        ),
+        (
+            ProcessFaultMark::AwaitingLoad {
+                generation: 1,
+                record_count: 1,
+            },
+            Some(crate::RendererPresence::Absent),
+        ),
+    ] {
         for (elapsed, accepted) in [
             (Duration::from_millis(999), true),
             (Duration::from_secs(1), false),
@@ -1048,10 +1077,6 @@ fn modeled_control_observation_refuses_a_snapshot_after_the_deadline() -> TestRe
             fixture.deadline = clock.now() + Duration::from_secs(1);
             // Model a state/identity or renderer-discovery query completing here.
             clock.advance(elapsed);
-            let mark = ProcessFaultMark::BeforeRecord {
-                generation: 1,
-                record_count: 0,
-            };
             let result = fixture.record_control_observation(mark, presence, &clock);
             assert_eq!(result.is_ok(), accepted);
             assert_eq!(
