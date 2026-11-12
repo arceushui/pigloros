@@ -523,8 +523,9 @@ mod tests {
         use std::path::Path;
 
         // Fake responses model setup failure; they are not native SDK results.
-        for (creation, failure, expected, success) in [
+        for (creation, environment_creation, failure, expected, success) in [
             (
+                Creation::Ready,
                 Creation::Ready,
                 None,
                 &["create_window", "create_environment", "create_controller"][..],
@@ -532,24 +533,35 @@ mod tests {
             ),
             (
                 Creation::Ready,
+                Creation::Ready,
                 Some("create_window"),
                 &["create_window"][..],
                 false,
             ),
             (
                 Creation::Ready,
+                Creation::Ready,
                 Some("create_environment"),
                 &["create_window", "create_environment"][..],
                 false,
             ),
             (
+                Creation::Ready,
+                Creation::CallbackFailure,
+                None,
+                &["create_window", "create_environment"][..],
+                false,
+            ),
+            (
                 Creation::SynchronousFailure,
+                Creation::Ready,
                 None,
                 &["create_window", "create_environment", "create_controller"][..],
                 false,
             ),
             (
                 Creation::CallbackFailure,
+                Creation::Ready,
                 None,
                 &["create_window", "create_environment", "create_controller"][..],
                 false,
@@ -557,6 +569,7 @@ mod tests {
         ] {
             let factory = Factory::new(creation, FakeClock::start());
             factory.failure.set(failure);
+            factory.environment_creation.set(environment_creation);
             let probe = Rc::new(probe());
             let events = Rc::clone(&probe.events);
             let mut native = super::session::Session::new(&factory, Rc::clone(&events))
