@@ -4,7 +4,8 @@
 //! The service name and directory component are injectively derived from the
 //! `AttemptId`. Unknown versions/stages fail closed. This local record does not
 //! replace ADR-069 lifecycle evidence or authorize image activation. The PAI2
-//! directory stage adds the held attempt/root device and inode identities.
+//! directory stage adds the held attempt/root device and inode identities,
+//! then the admitted image descriptor's device and inode.
 //! PAI3 records verified root facts before launch; none of these private stages
 //! substitutes for the separate ADR-069 lifecycle binding. Beside the intent
 //! keys, the registry retains one `activation` marker of the last `MountImage`
@@ -554,12 +555,12 @@ mod tests {
     /// One independent byte oracle for the private root stage, not its encoder.
     ///
     /// # Panics
-    /// Panics unless `directory` has 84 bytes and `component` has 32 bytes.
+    /// Panics unless `directory` has 100 bytes and `component` has 32 bytes.
     #[must_use]
     pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
-        assert_eq!(directory.len(), 84);
+        assert_eq!(directory.len(), 100);
         directory[..4].copy_from_slice(b"PAI3");
-        for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
+        for value in [41_u64, 253, 3, 1, 253, 3, 102, 7, 7, 101] {
             directory.extend_from_slice(&value.to_le_bytes());
         }
         directory.extend_from_slice(

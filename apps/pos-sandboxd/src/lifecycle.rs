@@ -60,6 +60,21 @@ impl AttemptCleanupDeadlines {
             released,
         })
     }
+
+    /// The process shutdown phases.
+    pub(crate) const fn shutdown(self) -> AttemptShutdownDeadlines {
+        self.shutdown
+    }
+
+    /// When the unit must have been observed unloaded.
+    pub(crate) const fn unit_absent(self) -> Instant {
+        self.unit_absent
+    }
+
+    /// When the root must have been released.
+    pub(crate) const fn released(self) -> Instant {
+        self.released
+    }
 }
 
 /// Why an attempt's terminal cleanup did not complete.

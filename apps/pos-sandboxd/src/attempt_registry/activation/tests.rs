@@ -215,7 +215,9 @@ mod cases {
     }
 
     fn prepared(registry: &SystemdAttemptRegistry) -> TestResult<PreparedAttemptDirectory> {
-        Ok(registry.commit_planned(&intent(1)?)?.prepare_directory()?)
+        Ok(registry
+            .commit_planned(&intent(1)?)?
+            .prepare_fixture_directory()?)
     }
 
     fn write_marker(runtime: &Path, bytes: &[u8]) -> TestResult {

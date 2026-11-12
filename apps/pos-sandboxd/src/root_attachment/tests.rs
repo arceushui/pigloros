@@ -32,20 +32,26 @@ use super::{
     cmdline::vetoes_userspace_verity,
     observe::{
         has_mount_id, loop_of, mount_entry, BlockIdentity, ExecutableObservation, LoopDevice,
-        Mapper, MountEntry, Node, Slave, ATTACH_BY_DESCRIPTOR, ATTEMPT_ROOT_OPEN,
-        ATTEMPT_ROOT_RESOLVE, BACKING_OPEN, STATX_REQUEST,
+        Mapper, MountEntry, Node, Slave, ATTACH_BY_DESCRIPTOR, BACKING_OPEN, STATX_REQUEST,
     },
     verify::Extent,
 };
-use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry};
+use crate::{
+    PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry, ATTEMPT_ROOT_OPEN,
+    ATTEMPT_ROOT_RESOLVE,
+};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
 type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
 
+/// The image directory the fake kernel's provider loops are backed from.
+const FIXTURE_IMAGES: &str = "/fixture/images";
+
 mod absence;
 mod generations;
 mod intent;
+mod recovered;
 mod release;
 
 /// Retained value facts for the registry owner's impossible-state fault tests.
@@ -139,6 +145,78 @@ pub fn attached_fixture_root(
     attached_root(directory)
         .map(|(_kernel, root)| root)
         .map_err(|error| error.to_string())
+}
+
+/// Restart detachment of recorded roots over fake kernels.
+///
+/// Each kernel reads back the fixture provider root of its entry's attempt.
+/// That root is mounted only on the one `mounted` attempt; every other root
+/// is unmounted.
+pub struct FakeRecoveredRoots {
+    mounted: [u8; 16],
+    detached: Mutex<Vec<([u8; 16], usize)>>,
+}
+
+impl FakeRecoveredRoots {
+    /// Fake kernels with the fixture provider root mounted on `attempt_id`.
+    #[must_use]
+    pub const fn mounted_on(attempt_id: [u8; 16]) -> Self {
+        Self {
+            mounted: attempt_id,
+            detached: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Detach `entry`'s root through restart detachment over a fake kernel,
+    /// recording how many detaches that kernel saw.
+    ///
+    /// # Errors
+    /// Returns the detachment's error, or a fixture failure as
+    /// [`ImageActivationError::Transport`].
+    pub(crate) async fn detach(
+        &self,
+        entry: crate::RecordedRootEntry,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ImageActivationError> {
+        let attempt_id = entry.intent.planned().attempt_id();
+        let mut observed = matching(&expected(
+            entry.intent.planned().unit_name().attempt_component(),
+        ));
+        if attempt_id != self.mounted {
+            // An unmounted root is on the attempt directory's own mount.
+            observed.parent_mount_id = observed.mount.map(|mount| mount.mount_id);
+        }
+        let mount_path = tempfile::NamedTempFile::new()
+            .map_err(|_| ImageActivationError::Transport)?
+            .into_temp_path();
+        let kernel = FakeKernel {
+            mount_path: Some(mount_path),
+            ..FakeKernel::accepting(observed)
+        };
+        let detached =
+            super::recovered::detach_with(&kernel, entry, Path::new(FIXTURE_IMAGES), deadline)
+                .await;
+        self.detached
+            .lock()
+            .map_err(|_| ImageActivationError::Transport)?
+            .push((attempt_id, kernel.detached()));
+        detached
+    }
+
+    /// Each detached entry's attempt and its kernel's detach count, in
+    /// attempt order.
+    ///
+    /// # Errors
+    /// Returns a poisoned fixture lock.
+    pub fn detached(&self) -> Result<Vec<([u8; 16], usize)>, String> {
+        let mut detached = self
+            .detached
+            .lock()
+            .map_err(|_| "poisoned fixture".to_owned())?
+            .clone();
+        detached.sort_unstable();
+        Ok(detached)
+    }
 }
 
 #[tokio::test]
@@ -393,7 +471,7 @@ fn expected(component: &str) -> Expected {
             start: 10_485_760,
             length: 16_384,
         },
-        held: (5, 6),
+        held: crate::FIXTURE_IMAGE,
         executable_path: "/usr/bin/adapter".to_owned(),
         executable_digest: [11; 32],
     }
@@ -516,7 +594,7 @@ fn prepared_tree() -> Result<PreparedTree, BoxError> {
     let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
     let prepared = registry
         .commit_planned(&PlannedAttemptIntent::new([7; 16], [9; 32])?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     Ok(PreparedTree {
         runtime,
         prepared,
@@ -541,6 +619,8 @@ struct FakeKernel {
     attach: Result<(), ImageActivationError>,
     private: Result<(), ImageActivationError>,
     observations: Observations,
+    provider_image: bool,
+    submounts: Option<bool>,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
     readbacks: AtomicUsize,
@@ -561,6 +641,8 @@ impl FakeKernel {
             attach: Ok(()),
             private: Ok(()),
             observations,
+            provider_image: true,
+            submounts: Some(false),
             detach: Ok(()),
             detached: AtomicUsize::new(0),
             readbacks: AtomicUsize::new(0),
@@ -605,6 +687,28 @@ impl AttachmentKernel for FakeKernel {
     fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File, _: &str) -> Observations {
         self.readbacks.fetch_add(1, Ordering::SeqCst);
         self.observations.clone()
+    }
+
+    /// Only the read-back loop over the fixture image directory can be a
+    /// provider loop.
+    fn provider_image(&self, loop_name: &str, images: &Path) -> bool {
+        let read_back = self
+            .observations
+            .mapper
+            .as_ref()
+            .and_then(|mapper| mapper.slaves.as_ref())
+            .and_then(|slaves| slaves.first())
+            .and_then(|slave| slave.loop_name.as_deref());
+        self.provider_image && read_back == Some(loop_name) && images == Path::new(FIXTURE_IMAGES)
+    }
+
+    /// Any mount other than the read-back one counts as having submounts.
+    fn has_submounts(&self, mount_id: u64) -> Option<bool> {
+        if self.observations.mount.map(|mount| mount.mount_id) == Some(mount_id) {
+            self.submounts
+        } else {
+            Some(true)
+        }
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
@@ -927,7 +1031,7 @@ fn device_mutations() -> Vec<Mutation> {
             edit_slaves(o, |s| s[0].loop_device = None);
         }),
         ("substituted image", |o| {
-            edit_loop(o, |d| d.backing = Some((5, 7)));
+            edit_loop(o, |d| d.backing = Some(crate::OTHER_IMAGES[0]));
         }),
         ("unknown backing", |o| edit_loop(o, |d| d.backing = None)),
         ("offset", |o| edit_loop(o, |d| d.offset = Some(512))),
@@ -1189,6 +1293,29 @@ fn symlinks_never_lead_to_the_backing_image_or_the_attempt_root() -> TestResult 
     let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     assert!(observed.mount.is_some());
     assert_eq!(observed.path, None);
+    Ok(())
+}
+
+#[test]
+fn an_unlinked_backing_image_has_no_readable_identity() -> TestResult {
+    // The kernel prints an unlinked backing file with " (deleted)" appended.
+    // No path then names the image, so its identity is unreadable and a
+    // restart refuses to detach the root (fail closed); reading it from the
+    // loop device itself would need an ioctl, which needs `unsafe`.
+    let sys = tempfile::tempdir()?;
+    let image = sys.path().join("held");
+    fs::write(&image, b"image")?;
+    let identity = fs::metadata(&image)?;
+    let backing_file = sys.path().join("class/block/loop9/loop/backing_file");
+    write(&backing_file, &format!("{}\n", image.display()))?;
+    let kernel = HostKernel::at(sys.path(), sys.path());
+    assert_eq!(
+        kernel.loop_device("loop9").backing,
+        Some((identity.dev(), identity.ino()))
+    );
+    fs::remove_file(&image)?;
+    write(&backing_file, &format!("{} (deleted)\n", image.display()))?;
+    assert_eq!(kernel.loop_device("loop9").backing, None);
     Ok(())
 }
 
@@ -1627,6 +1754,60 @@ async fn retry_and_clean(
     Ok(())
 }
 
+/// Prepare `planned` for `admission` after an admission of another SIM1
+/// prepared nothing, and check that PAI2 records the held image's device and
+/// inode after the directories'.
+fn prepare_for_admission(
+    registry: &SystemdAttemptRegistry,
+    admission: &HeldImageAdmission<'_>,
+    planned: &PlannedAttemptIntent,
+) -> Result<PreparedAttemptDirectory, BoxError> {
+    let other_image = PlannedAttemptIntent::new([0x45; 16], [0x78; 32])?;
+    assert!(matches!(
+        registry
+            .commit_planned(&other_image)?
+            .prepare_directory(admission),
+        Err(crate::SystemdAttemptRegistryError::InvalidIntent)
+    ));
+    assert!(!Path::new("/run/pigloros/sandbox/attempts")
+        .join(other_image.unit_name().attempt_component())
+        .exists());
+    let prepared = registry
+        .commit_planned(planned)?
+        .prepare_directory(admission)?;
+    let held = rustix::fs::fstat(admission)?;
+    let record = fs::read(Path::new("/run/pigloros/sandbox/registry").join(component(&prepared)))?;
+    assert_eq!(record.len(), 100);
+    assert_eq!(&record[..4], b"PAI2");
+    assert_eq!(
+        record[84..].to_vec(),
+        [held.st_dev.to_le_bytes(), held.st_ino.to_le_bytes()].concat()
+    );
+    Ok(prepared)
+}
+
+/// A directory whose PAI2 record names another image is never activated.
+async fn another_recorded_image_is_never_activated(
+    kernel: &FakeKernel,
+    registry: &SystemdAttemptRegistry,
+    admission: &HeldImageAdmission<'_>,
+    snapshot: &ProviderImageSnapshot,
+) -> TestResult {
+    let fixture = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x46; 16],
+            snapshot.request().authority.sim1_digest,
+        )?)?
+        .prepare_fixture_directory()?;
+    assert_eq!(
+        activate(kernel, admission, &fixture, MountfsdImageActivator::connect)
+            .await
+            .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> TestResult {
     if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
@@ -1643,7 +1824,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         snapshot.request().attempt_id,
         snapshot.request().authority.sim1_digest,
     )?;
-    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+    let prepared = prepare_for_admission(&registry, &admission, &planned)?;
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
     let expected = Expected::for_admission(&admission, root_directory.clone())
         .ok_or("the held image identity")?;
@@ -1685,7 +1866,10 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // the released root alone lets terminal cleanup delete intent last.
     retry_and_clean(&kernel, &admission, prepared).await?;
     assert_request_recorded()?;
-    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+    another_recorded_image_is_never_activated(&kernel, &registry, &admission, &snapshot).await?;
+    let prepared = registry
+        .commit_planned(&planned)?
+        .prepare_directory(&admission)?;
 
     // Every gate passes: the verified root names the attempt path.
     let verified = activate(
@@ -1745,6 +1929,21 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, None),
         Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
     ));
+    Ok(())
+}
+
+#[test]
+fn only_the_image_pai2_recorded_is_activated() -> TestResult {
+    let tree = prepared_tree()?;
+    let mut expected = expected(&component(&tree.prepared));
+    assert_eq!(recorded_image_is_held(&tree.prepared, &expected), Ok(()));
+    for held in crate::OTHER_IMAGES {
+        expected.held = held;
+        assert_eq!(
+            recorded_image_is_held(&tree.prepared, &expected),
+            Err(ImageActivationError::AttachFailure)
+        );
+    }
     Ok(())
 }
 
@@ -1818,7 +2017,7 @@ fn check_admitted_recheck(
             [0x44; 16],
             snapshot.request().authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     assert_eq!(
         verified.recheck_with(kernel, &foreign, &entry).err(),
         Some(ImageActivationError::EvidenceMismatch)

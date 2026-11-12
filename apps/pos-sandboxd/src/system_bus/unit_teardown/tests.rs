@@ -3,6 +3,7 @@
 #[cfg(test)]
 pub(super) mod cases {
     use std::{
+        collections::VecDeque,
         error::Error,
         fs::{self, File},
         num::NonZeroU32,
@@ -55,6 +56,8 @@ pub(super) mod cases {
         Repopulate,
         Replace,
         Denied,
+        /// The manager collects the unit after this lookup.
+        Collect,
     }
 
     #[derive(Debug, PartialEq)]
@@ -63,6 +66,7 @@ pub(super) mod cases {
         Kill(String, String, i32),
         Reset(String, Option<Vec<u8>>),
         Get(String),
+        ByCgroup(String),
     }
 
     struct State {
@@ -72,6 +76,10 @@ pub(super) mod cases {
         calls: Vec<Call>,
         reset_serial: Option<NonZeroU32>,
         get_serial: Option<NonZeroU32>,
+        /// Successive `ControlGroup` reads; the last one repeats.
+        control_groups: VecDeque<String>,
+        /// The unit's `ActiveState`, or a read failure.
+        activity: Option<String>,
     }
 
     struct Manager {
@@ -186,6 +194,7 @@ pub(super) mod cases {
                 Lookup::Denied => {
                     return Err(fdo::Error::AccessDenied("query denied".to_owned()).into());
                 }
+                Lookup::Collect => self.state.lock().map_err(failed)?.loaded = false,
                 Lookup::Unchanged => {}
             }
             if loaded {
@@ -194,6 +203,16 @@ pub(super) mod cases {
             } else {
                 Err(Box::new(ManagerError::NoSuchUnit("not loaded".to_owned())))
             }
+        }
+
+        #[zbus(name = "GetUnitByControlGroup")]
+        fn get_unit_by_control_group(&self, cgroup: String) -> fdo::Result<OwnedObjectPath> {
+            self.state
+                .lock()
+                .map_err(failed)?
+                .calls
+                .push(Call::ByCgroup(cgroup));
+            OwnedObjectPath::try_from(UNIT_PATH).map_err(failed)
         }
 
         #[zbus(signal)]
@@ -206,13 +225,51 @@ pub(super) mod cases {
         ) -> zbus::Result<()>;
     }
 
+    const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/attempt";
+
+    /// A listed object that is not the manager's current attempt unit.
+    const OTHER_PATH: &str = "/org/freedesktop/systemd1/unit/other";
+
+    /// An attempt unit's service object, reporting the fixture's cgroups.
+    struct Service(Arc<Mutex<State>>);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Service", spawn = false)]
+    impl Service {
+        #[zbus(property, name = "ControlGroup")]
+        fn control_group(&self) -> fdo::Result<String> {
+            let mut state = self.0.lock().map_err(failed)?;
+            let read = if state.control_groups.len() > 1 {
+                state.control_groups.pop_front()
+            } else {
+                state.control_groups.front().cloned()
+            };
+            read.ok_or_else(|| fdo::Error::Failed("no ControlGroup".to_owned()))
+        }
+    }
+
+    /// An attempt unit's unit object, reporting the fixture's state.
+    struct Unit(Arc<Mutex<State>>);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit", spawn = false)]
+    impl Unit {
+        #[zbus(property, name = "ActiveState")]
+        fn active_state(&self) -> fdo::Result<String> {
+            self.0
+                .lock()
+                .map_err(failed)?
+                .activity
+                .clone()
+                .ok_or_else(|| fdo::Error::AccessDenied("ActiveState denied".to_owned()))
+        }
+    }
+
     fn failed(error: impl std::fmt::Display) -> fdo::Error {
         fdo::Error::Failed(error.to_string())
     }
 
     /// A fake systemd manager peer and one retained attempt cgroup.
     pub struct Fixture {
-        _root: tempfile::TempDir,
+        cgroups: tempfile::TempDir,
         _server: zbus::Connection,
         directory: PathBuf,
         unit: TransientServiceUnitName,
@@ -270,6 +327,8 @@ pub(super) mod cases {
                 calls: Vec::new(),
                 reset_serial: None,
                 get_serial: None,
+                control_groups: VecDeque::from(["/attempt".to_owned()]),
+                activity: Some("active".to_owned()),
             }));
             let manager = Manager {
                 state: Arc::clone(&state),
@@ -277,13 +336,19 @@ pub(super) mod cases {
                 stop,
                 reset,
             };
-            let (server, client) =
-                peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager))
-                    .await?;
+            let (server, client) = peer_connections(|server| {
+                server
+                    .serve_at("/org/freedesktop/systemd1", manager)
+                    .serve_at(UNIT_PATH, Service(Arc::clone(&state)))
+                    .serve_at(UNIT_PATH, Unit(Arc::clone(&state)))
+                    .serve_at(OTHER_PATH, Service(Arc::clone(&state)))
+                    .serve_at(OTHER_PATH, Unit(Arc::clone(&state)))
+            })
+            .await?;
             let transport = SystemdTransientUnitTransport::from_connection(client).await?;
             assert!(state.lock().map_err(|_| "poisoned fixture")?.subscribed);
             Ok(Self {
-                _root: root,
+                cgroups: root,
                 _server: server,
                 directory,
                 unit,
@@ -738,7 +803,7 @@ pub(super) mod cases {
         )?;
         let prepared = registry
             .commit_planned(&crate::PlannedAttemptIntent::new([id; 16], [9; 32])?)?
-            .prepare_directory()?;
+            .prepare_fixture_directory()?;
         Ok((runtime, registry, prepared))
     }
 
@@ -818,6 +883,213 @@ pub(super) mod cases {
                     .is_ok(),
                 exact
             );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_listed_unit_is_bound_through_its_listing_before_it_is_stopped() -> TestResult {
+        let fixture = Fixture::new(5, Stop::Empty, Reset::Unload).await?;
+        let (shutdown, deadline) = budgets()?;
+        let listed = OwnedObjectPath::try_from(UNIT_PATH)?;
+        let root = CgroupRoot::for_test(File::open(fixture.cgroups.path())?);
+        fixture
+            .transport
+            .stop_listed_with_root(&fixture.unit, &listed, Ok(root), (shutdown, deadline))
+            .await?;
+        let name = fixture.unit.as_str().to_owned();
+        let cgroup = "/attempt".to_owned();
+        assert_eq!(
+            fixture.state.lock().map_err(|_| "poisoned fixture")?.calls,
+            vec![
+                Call::Get(name.clone()),
+                Call::ByCgroup(cgroup.clone()),
+                Call::ByCgroup(cgroup),
+                Call::Get(name.clone()),
+                Call::Stop(name.clone(), "replace".to_owned()),
+                Call::Reset(name.clone(), Some(b"populated 0\n".to_vec())),
+                Call::Get(name),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unbindable_listed_unit_is_never_stopped() -> TestResult {
+        // The cgroup hierarchy cannot be opened, or the listed object is not
+        // the manager's current unit.
+        for substituted in [false, true] {
+            let fixture = Fixture::new(6, Stop::Empty, Reset::Unload).await?;
+            let (shutdown, deadline) = budgets()?;
+            let (listed, root) = if substituted {
+                (
+                    OwnedObjectPath::try_from(OTHER_PATH)?,
+                    Ok(CgroupRoot::for_test(File::open(fixture.cgroups.path())?)),
+                )
+            } else {
+                (
+                    OwnedObjectPath::try_from(UNIT_PATH)?,
+                    Err(crate::AttemptCgroupError::WrongFilesystem),
+                )
+            };
+            let result = fixture
+                .transport
+                .stop_listed_with_root(&fixture.unit, &listed, root, (shutdown, deadline))
+                .await;
+            let refused = matches!(
+                (substituted, &result),
+                (
+                    true,
+                    Err(SystemdAttemptUnitTeardownError::Transport(
+                        SystemdTransientUnitTransportError::CgroupUnitMismatch
+                    ))
+                ) | (
+                    false,
+                    Err(SystemdAttemptUnitTeardownError::Transport(
+                        SystemdTransientUnitTransportError::CgroupKernel(_)
+                    ))
+                )
+            );
+            assert!(refused, "{result:?}");
+            let calls = fixture.state.lock().map_err(|_| "poisoned fixture")?;
+            assert!(!calls
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Stop(..) | Call::Kill(..) | Call::Reset(..))));
+            drop(calls);
+            assert_eq!(
+                fs::read(fixture.directory.join("cgroup.events"))?,
+                b"populated 1\n"
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether a refused stop failed as expected.
+    type Refusal = fn(&Result<(), SystemdAttemptUnitTeardownError>) -> bool;
+    /// A cgroupless unit's state, its successive cgroups, its listed path and
+    /// the expected refusal.
+    type CgrouplessCase = (
+        Option<&'static str>,
+        Vec<&'static str>,
+        &'static str,
+        Refusal,
+    );
+
+    /// A listed unit without a cgroup in `state`.
+    async fn cgroupless(
+        id: u8,
+        state: Option<&str>,
+        control_groups: &[&str],
+        lookup: Lookup,
+    ) -> TestResult<Fixture> {
+        let fixture = Fixture::new(id, Stop::Empty, Reset::Unload).await?;
+        {
+            let mut fake = fixture.state.lock().map_err(|_| "poisoned fixture")?;
+            fake.activity = state.map(str::to_owned);
+            fake.control_groups = control_groups
+                .iter()
+                .map(|&cgroup| cgroup.to_owned())
+                .collect();
+            fake.lookup = lookup;
+        }
+        Ok(fixture)
+    }
+
+    async fn stop_listed(
+        fixture: &Fixture,
+        path: &str,
+    ) -> TestResult<Result<(), SystemdAttemptUnitTeardownError>> {
+        let (shutdown, deadline) = budgets()?;
+        let listed = OwnedObjectPath::try_from(path)?;
+        let root = CgroupRoot::for_test(File::open(fixture.cgroups.path())?);
+        Ok(fixture
+            .transport
+            .stop_listed_with_root(&fixture.unit, &listed, Ok(root), (shutdown, deadline))
+            .await)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_inactive_or_failed_unit_without_a_cgroup_is_removed() -> TestResult {
+        // Owner decision A: no cgroup and inactive or failed proves emptiness.
+        for (state, lookup) in [("failed", Lookup::Unchanged), ("inactive", Lookup::Collect)] {
+            let fixture = cgroupless(7, Some(state), &[""], lookup).await?;
+            stop_listed(&fixture, UNIT_PATH).await??;
+            let name = fixture.unit.as_str().to_owned();
+            let expected = if state == "failed" {
+                vec![
+                    Call::Get(name.clone()),
+                    Call::Reset(name.clone(), Some(b"populated 1\n".to_vec())),
+                    Call::Get(name),
+                ]
+            } else {
+                vec![Call::Get(name.clone()), Call::Get(name)]
+            };
+            assert_eq!(
+                fixture.state.lock().map_err(|_| "poisoned fixture")?.calls,
+                expected,
+                "{state}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn any_other_unit_without_a_cgroup_is_never_removed() -> TestResult {
+        let mismatch = |result: &Result<(), SystemdAttemptUnitTeardownError>| {
+            matches!(
+                result,
+                Err(SystemdAttemptUnitTeardownError::Transport(
+                    SystemdTransientUnitTransportError::CgroupUnitMismatch
+                ))
+            )
+        };
+        let active = |result: &Result<(), SystemdAttemptUnitTeardownError>| {
+            matches!(
+                result,
+                Err(SystemdAttemptUnitTeardownError::Transport(
+                    SystemdTransientUnitTransportError::CgrouplessUnitActive
+                ))
+            )
+        };
+        let unread = |result: &Result<(), SystemdAttemptUnitTeardownError>| {
+            matches!(
+                result,
+                Err(SystemdAttemptUnitTeardownError::Transport(
+                    SystemdTransientUnitTransportError::PropertyReadback {
+                        property: "ActiveState",
+                        ..
+                    }
+                ))
+            )
+        };
+        let mut cases: Vec<CgrouplessCase> = ["active", "activating", "deactivating", "reloading"]
+            .into_iter()
+            .map(|state| (Some(state), vec![""], UNIT_PATH, active as Refusal))
+            .collect();
+        cases.extend([
+            // The state cannot be read.
+            (None, vec![""], UNIT_PATH, unread as Refusal),
+            // A cgroup appeared after the state was read.
+            (
+                Some("failed"),
+                vec!["", "/attempt"],
+                UNIT_PATH,
+                mismatch as Refusal,
+            ),
+            // The listed object is not the manager's current unit.
+            (Some("failed"), vec![""], OTHER_PATH, mismatch as Refusal),
+        ]);
+        for (state, cgroups, path, refused) in cases {
+            let fixture = cgroupless(8, state, &cgroups, Lookup::Unchanged).await?;
+            let result = stop_listed(&fixture, path).await?;
+            assert!(refused(&result), "{state:?} {cgroups:?} {path}: {result:?}");
+            let calls = fixture.state.lock().map_err(|_| "poisoned fixture")?;
+            assert!(!calls
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Stop(..) | Call::Kill(..) | Call::Reset(..))));
+            drop(calls);
         }
         Ok(())
     }

@@ -34,7 +34,7 @@ fn authenticated_owner() -> TestResult<AuthenticatedOwner> {
             request.attempt_id,
             request.authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     Ok(AuthenticatedOwner {
         directory,
         _registry: registry,

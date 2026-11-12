@@ -1,6 +1,6 @@
 //! The bounded private activation-intent stage committed before unit start.
 //!
-//! PAI3 extends PAI2 with twelve little-endian u64 facts, the exact 68-byte
+//! PAI3 extends PAI2 with ten little-endian u64 facts, the exact 68-byte
 //! attempt root path, a 129-byte mapper UUID slot and a 16-byte loop-name slot.
 //! Text slots are NUL-terminated and zero-padded. These are retained claims,
 //! never fresh kernel evidence or ADR-069's separate lifecycle binding.
@@ -9,9 +9,9 @@ use super::{
     directory::{PreparedAttemptDirectory, DIRECTORY_RECORD_SIZE},
     PlannedAttemptIntent, SystemdAttemptRegistryError,
 };
-use crate::{ActivatedRootDirectory, RootResourceIdentity};
+use crate::{ActivatedRootDirectory, RecordedRoot, RootResourceIdentity};
 
-const VALUES_END: usize = DIRECTORY_RECORD_SIZE + 12 * 8;
+const VALUES_END: usize = DIRECTORY_RECORD_SIZE + 10 * 8;
 const PATH_END: usize = VALUES_END + 68;
 const UUID_END: usize = PATH_END + 129;
 pub(super) const ROOT_RECORD_SIZE: usize = UUID_END + 16;
@@ -19,13 +19,13 @@ pub(super) const ROOT_RECORD_SIZE: usize = UUID_END + 16;
 /// The recorded loop/dm generations of one root, mapper first.
 pub(super) type Generations = [((u32, u32), u64); 2];
 
-/// Exact PAI3 bytes and the generations decoded from them. Every value is
-/// built by [`RootRecord::decode`], so each device component fits `u32` and
-/// each sequence is above zero by construction.
+/// Exact PAI3 bytes and the facts decoded from them. Every value is built by
+/// [`RootRecord::decode`], so each device component fits `u32` and each
+/// sequence is above zero by construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RootRecord {
     bytes: [u8; ROOT_RECORD_SIZE],
-    generations: Generations,
+    recorded: RecordedRoot,
 }
 
 impl RootRecord {
@@ -37,7 +37,6 @@ impl RootRecord {
         bytes[..DIRECTORY_RECORD_SIZE].copy_from_slice(&directory.directory_bytes());
         bytes[..4].copy_from_slice(b"PAI3");
         let (root_device, root_inode) = identity.root_identity();
-        let (image_device, image_inode) = identity.image_identity();
         let (mapper, mapper_sequence) = identity.mapper_generation();
         let (loop_device, loop_sequence) = identity.loop_generation();
         for (slot, value) in bytes[DIRECTORY_RECORD_SIZE..VALUES_END]
@@ -47,8 +46,6 @@ impl RootRecord {
                 u64::from(root_device.0),
                 u64::from(root_device.1),
                 root_inode,
-                image_device,
-                image_inode,
                 u64::from(mapper.0),
                 u64::from(mapper.1),
                 mapper_sequence,
@@ -85,7 +82,7 @@ impl RootRecord {
         bytes: &[u8; ROOT_RECORD_SIZE],
         intent: &PlannedAttemptIntent,
     ) -> Result<Self, SystemdAttemptRegistryError> {
-        let mut values = [0; 12];
+        let mut values = [0; 10];
         for (value, chunk) in values
             .iter_mut()
             .zip(bytes[DIRECTORY_RECORD_SIZE..VALUES_END].chunks_exact(8))
@@ -94,28 +91,28 @@ impl RootRecord {
             word.copy_from_slice(chunk);
             *value = u64::from_le_bytes(word);
         }
-        let [mount_id, root_major, root_minor, root_inode, _, image_inode, mapper_major, mapper_minor, mapper_sequence, loop_major, loop_minor, loop_sequence] =
+        let [mount_id, root_major, root_minor, root_inode, mapper_major, mapper_minor, mapper_sequence, loop_major, loop_minor, loop_sequence] =
             values;
         let root = ActivatedRootDirectory::path_for_attempt(intent.unit_name().attempt_component());
-        let consistent = ![
-            mount_id,
-            root_inode,
-            image_inode,
-            mapper_sequence,
-            loop_sequence,
-        ]
-        .contains(&0)
+        let consistent = ![mount_id, root_inode, mapper_sequence, loop_sequence].contains(&0)
             // The root device is the mapper, so the mapper's bound covers it.
             && (root_major, root_minor) == (mapper_major, mapper_minor)
-            && bytes[VALUES_END..PATH_END] == *root.as_bytes()
-            && read_text(&bytes[PATH_END..UUID_END]).is_some()
-            && read_text(&bytes[UUID_END..]).is_some();
+            && bytes[VALUES_END..PATH_END] == *root.as_bytes();
         device(mapper_major, mapper_minor)
             .zip(device(loop_major, loop_minor))
+            .zip(read_text(&bytes[PATH_END..UUID_END]))
+            .zip(read_text(&bytes[UUID_END..]))
             .filter(|_| consistent)
-            .map(|(mapper, loop_device)| Self {
+            .map(|(((mapper, loop_device), mapper_uuid), loop_name)| Self {
                 bytes: *bytes,
-                generations: [(mapper, mapper_sequence), (loop_device, loop_sequence)],
+                recorded: RecordedRoot {
+                    mount_id,
+                    inode: root_inode,
+                    mapper: (mapper, mapper_sequence),
+                    mapper_uuid: mapper_uuid.to_owned(),
+                    loop_name: loop_name.to_owned(),
+                    loop_device: (loop_device, loop_sequence),
+                },
             })
             .ok_or(SystemdAttemptRegistryError::InvalidIntent)
     }
@@ -126,7 +123,12 @@ impl RootRecord {
 
     /// The recorded mapper and loop generations, in that order.
     pub(super) const fn generations(&self) -> Generations {
-        self.generations
+        [self.recorded.mapper, self.recorded.loop_device]
+    }
+
+    /// The decoded root facts.
+    pub(super) const fn recorded(&self) -> &RecordedRoot {
+        &self.recorded
     }
 }
 
