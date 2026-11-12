@@ -3,8 +3,8 @@
 
 use pos_owner_bridge::fake::host::StoreOp;
 use pos_owner_bridge::{
-    BridgeError, CleanupStore, LifecycleCode, NavigationId, OwnerWebSurface, PostGuard,
-    ProtocolCode, ReplyImage, RequestImage, SurfaceEvent, UnavailableCode,
+    BridgeError, LifecycleCode, NavigationId, OwnerWebSurface, PostGuard, ProtocolCode, ReplyImage,
+    RequestImage, SurfaceEvent, UnavailableCode,
 };
 use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, OwnerBridgeControlV1};
 
@@ -587,7 +587,10 @@ fn run_driver_activation_case(case: &'static str, expected: &[&str]) -> TestResu
         if progressed {
             break;
         }
-        fixture.surface.pump().map_err(super::super::unavailable)?;
+        fixture
+            .surface
+            .pump()
+            .map_err(|error| format!("pump: {error:?}"))?;
     }
     let calls = fixture.factory.calls.borrow();
     let activation: Vec<_> = calls
