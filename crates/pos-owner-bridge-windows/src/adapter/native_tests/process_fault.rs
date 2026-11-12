@@ -499,7 +499,7 @@ fn modeled_target_pair_preserves_order_and_short_circuits_errors() {
 }
 
 #[test]
-fn modeled_target_pair_preserves_mismatch_panic() -> TestResult {
+fn modeled_target_pair_preserves_mismatch_panic() {
     let state = ProcessFaultState {
         phase: ProcessFaultPhase::PostedReceipt,
         topology: ProcessFaultTopology::SealedSingleViewFrameFree,
@@ -515,7 +515,7 @@ fn modeled_target_pair_preserves_mismatch_panic() -> TestResult {
         }
         Ok(observed)
     };
-    let panic = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_unwind(AssertUnwindSafe(|| {
         let _result = run_target_pair(
             Path::new("."),
             Path::new("."),
@@ -524,15 +524,13 @@ fn modeled_target_pair_preserves_mismatch_panic() -> TestResult {
             &mut case,
             "modeled mismatch",
         );
-    }))
-    .err()
-    .ok_or("different states must panic")?;
-    let message = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied());
-    assert!(message.is_some_and(|text| text.contains("modeled mismatch")));
-    Ok(())
+    }));
+    assert!(
+        result.is_err_and(|payload| payload
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("modeled mismatch"))),
+        "different states must panic with the modeled mismatch message"
+    );
 }
 
 fn run_target_pairs(
