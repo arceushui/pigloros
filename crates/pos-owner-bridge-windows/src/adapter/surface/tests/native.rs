@@ -28,7 +28,7 @@ pub(in crate::adapter) enum Creation {
 
 pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) creation: Cell<Creation>,
-    pub(super) environment_creation: Cell<Creation>,
+    pub(in crate::adapter) environment_creation: Cell<Creation>,
     pub(super) environment_completions: Cell<u32>,
     pub(super) controller_completions: Cell<u32>,
     pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
