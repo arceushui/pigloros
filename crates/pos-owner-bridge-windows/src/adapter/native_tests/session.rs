@@ -209,8 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_pending_controller_and_quit_retain_owners_until_completion(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn modeled_pending_controller_and_quit_retain_owners_until_completion() {
         let native = Factory::new(Creation::Pending, FakeClock::start());
         let factory = PendingOrBlockedFactory {
             native: Rc::clone(&native),
@@ -239,12 +238,10 @@ mod tests {
         assert!(!calls.contains(&"close_controller"));
         assert!(calls.contains(&"drop_environment"));
         assert!(calls.contains(&"destroy_window"));
-        Ok(())
     }
 
     #[test]
-    fn modeled_teardown_failure_retains_later_owners_until_retry(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn modeled_teardown_failure_retains_later_owners_until_retry() {
         for (failing, forbidden) in [
             (
                 "unsubscribe_view",
@@ -282,7 +279,6 @@ mod tests {
             assert!(calls.contains(&"destroy_window"));
             assert!(!calls.contains(&"close_controller"));
         }
-        Ok(())
     }
 
     #[test]

@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_quit_retains_pending_owners_and_cancel_done_is_stable() -> TestResult {
+    fn modeled_quit_retains_pending_owners_and_cancel_done_is_stable() {
         use pos_owner_bridge::OwnerWebSurface as _;
 
         let _port = crate::Native::fixed_port_fixture();
@@ -525,7 +525,6 @@ mod tests {
         });
         assert!(result.is_ok(), "fixture root: {result:?}");
         drop(retained_driver);
-        Ok(())
     }
 
     #[test]
