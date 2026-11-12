@@ -22,6 +22,30 @@ use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, 
 
 pub(in crate::adapter) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Returns a native fixture step's value, or fails the calling test with its error.
+///
+/// Fixture steps that cannot fail on a qualified runner assert through this
+/// seam instead of carrying an error branch that no hosted run can execute.
+/// Never call it inside a native callback: an unwind must not cross the SDK.
+#[track_caller]
+pub(in crate::adapter) fn pass<T, E: std::fmt::Debug>(step: Result<T, E>) -> T {
+    match step {
+        Ok(value) => value,
+        Err(error) => std::panic::panic_any(format!("native fixture step failed: {error:?}")),
+    }
+}
+
+#[test]
+fn passing_fixture_step_yields_its_value() {
+    assert_eq!(pass::<_, ()>(Ok(7)), 7);
+}
+
+#[test]
+#[should_panic(expected = "native fixture step failed: \"refused\"")]
+fn failed_fixture_step_fails_its_test() {
+    pass::<(), _>(Err("refused"));
+}
+
 mod controls;
 mod denial;
 mod foreground;
