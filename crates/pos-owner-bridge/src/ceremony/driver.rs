@@ -694,7 +694,7 @@ impl CeremonyDriver {
                 };
                 Step::Pending
             }
-            Ok(Some(advanced)) => self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => self.fail_unexpected(error, now),
         }
     }
@@ -711,7 +711,7 @@ impl CeremonyDriver {
         navigation: NavigationId,
     ) -> Step {
         match release_loop(env.surface, ControlState::Empty, ReleaseMode::Timing) {
-            Ok(Some(advanced)) => return self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => return self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => return self.fail_unexpected(error, now),
             Ok(None) => {}
         }
