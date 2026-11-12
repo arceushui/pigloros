@@ -230,6 +230,9 @@ pub(super) fn respond<W: Write>(
         }
         Some(LoopbackRequestDisposition::OwnerDocument) => {
             let result = write_owner_response(writer, &context.expected_digest, context.response);
+            if let OwnerWrite::Complete { digest_ok } = result {
+                context.ledger.complete(digest_ok);
+            }
             #[cfg(feature = "test-support")]
             context.diagnostic.record(
                 connection,
@@ -240,9 +243,6 @@ pub(super) fn respond<W: Write>(
                 },
                 0,
             );
-            if let OwnerWrite::Complete { digest_ok } = result {
-                context.ledger.complete(digest_ok);
-            }
         }
     }
 }
@@ -263,16 +263,22 @@ pub(super) fn serve_connection(
         &SystemClock,
         || {
             #[cfg(feature = "test-support")]
-            context.diagnostic.record(connection, "first-byte", 0);
-            #[cfg(feature = "test-support")]
             context
                 .received
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(feature = "test-support")]
+            context.diagnostic.record(connection, "first-byte", 0);
         },
         #[cfg(feature = "test-support")]
         |reason| {
             use std::sync::atomic::Ordering;
             let observations = &context.observations;
+            let counter = match reason {
+                SilentReason::Eof => &observations.silent_eof,
+                SilentReason::Timeout => &observations.silent_timeout,
+                SilentReason::Other => &observations.silent_error,
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
             context.diagnostic.record(
                 connection,
                 match reason {
@@ -282,12 +288,6 @@ pub(super) fn serve_connection(
                 },
                 0,
             );
-            let counter = match reason {
-                SilentReason::Eof => &observations.silent_eof,
-                SilentReason::Timeout => &observations.silent_timeout,
-                SilentReason::Other => &observations.silent_error,
-            };
-            counter.fetch_add(1, Ordering::SeqCst);
         },
     );
     #[cfg(feature = "test-support")]

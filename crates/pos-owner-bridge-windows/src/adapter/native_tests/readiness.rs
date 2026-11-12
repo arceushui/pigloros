@@ -261,13 +261,8 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
-    if receipt.is_none() || failure.is_some() {
-        let _logged = writeln!(
-            std::io::stderr(),
-            "NATIVE_LISTENER_DIAGNOSTIC case={number} stage=before-retirement {}",
-            loopback.diagnostic_snapshot(started)
-        );
-    }
+    let before_retirement =
+        (receipt.is_none() || failure.is_some()).then(|| loopback.diagnostic_snapshot(started));
     retirement::retire(
         surface,
         loopback,
@@ -279,6 +274,12 @@ fn run_ceremony(
         },
     );
     surface.report_readiness_timing();
+    if let Some(snapshot) = before_retirement {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_LISTENER_DIAGNOSTIC case={number} stage=before-retirement {snapshot}"
+        );
+    }
     if receipt.is_none() || failure.is_some() {
         let _logged = writeln!(
             std::io::stderr(),

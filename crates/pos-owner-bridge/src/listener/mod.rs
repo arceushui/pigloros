@@ -425,6 +425,8 @@ fn accept_loop(
             #[cfg(feature = "test-support")]
             {
                 slot.accepted = true;
+                shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
+                shared.observations.handling.fetch_add(1, Ordering::SeqCst);
                 slot.connection = shared
                     .diagnostic
                     .next_connection
@@ -434,8 +436,6 @@ fn accept_loop(
                     "accepted",
                     shared.active.load(Ordering::SeqCst),
                 );
-                shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
-                shared.observations.handling.fetch_add(1, Ordering::SeqCst);
             }
             dispatch(stream, accepted_at, slot, context, spawn_thread);
         } else {
