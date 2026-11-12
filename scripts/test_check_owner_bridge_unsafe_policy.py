@@ -2234,6 +2234,15 @@ def test_external_qualification_is_sealed() -> None:
         raise SystemExit("missing resource callback diagnostic source was accepted")
     if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
         raise SystemExit("External allowance escaped into product source")
+    pending_model = f"{SHIM}/src/adapter/surface/tests/pending_creation.rs"
+    for escaped in (
+        "fn escaped() { let call = Surface::lose_pending_controller_parent; }",
+        "type Escaped = crate::ControllerParentLossSeal;",
+    ):
+        changed = dict(sources, **{pending_model: sources[pending_model] + "\n" + escaped})
+        if not any("controller parent loss capability outside sealed test fixture" in item
+                   for item in errors(changed)):
+            raise SystemExit("Controller parent-loss authority escaped the modeled test")
     for escaped in (
         "type Escaped = crate::ControllerParentLossSeal;",
         "fn escaped() { let call = crate::NativeOperations::lose_controller_parent; }",

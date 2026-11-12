@@ -1586,15 +1586,16 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '683d6dca23ae30b4b11d7eaec43558f93336af93ea746936bb2469fabaa58314',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '2c7c0746507415c1f25c8eeb631ab3609a5c0fb51f1dc45682f31f4c7b7f0107',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '1fc463501f4590c17e1e6f50bea051cabe5cdfa3e90e1585c6d70275718b78a5',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'a510a6cfa3b90c208ba32d8941a3a0deb0379b7c0d08b4230237dfe84442cf32',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/pending_creation.rs': 'd7f8754a41ff1f90d47de9934b629f01792dc1a5330c197ba2f5b59916b762c2',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'e8fe541efe44f7eda4565a6086fbdcf1900889af1299abc3bed72e9112b5ba92',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
     'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': 'f987aa8a99b0e5d55e476f1b8db2e4665942dd934997269b54639f7e63030236',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '0da0294f55210051a2df1785070022021aebe445365a5530e45a432030564b88',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': '9570125bc1ae53bd8ca100db668b1ca7d4718c5145dbe88f7bb9f7836f678662',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_admission.rs': 'd46cb485049f2d2828503f38a13b2e97a38d43e5ec0d43b8e1422f2e9912394e',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'c022b324b61d2d3c309fb4b3ad59f0c84b12d86d2018baa930211555d5e5e6cf',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'f1e47cf115c76f68b48bda7d30b9f61ac08f0da60301999a3c9af79483a2cde4',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': '75ab4125d3d73408247b96d86724aaf1afa9e1163ff67efe3f962c4c779e61dc',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': 'd3ed9bb46c533d14826719bb42e9c26d62fb65c027748dc4f191f950d8e53891',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '7dfceda3452f06994b553bbdccee0de538bb5f4832697f73d732fa8be1a7eb1b',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '250b1334b5d681c9da45c3265d12eb46737411415b79aa380dc86d16ad40c49e',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '93b9252dd497dde9d16dd85eccffa8cef508d637046e5d352e23666de9370b15',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '0669c03257c31be00fa41c224b3031eeaeccaab4936cbbb7eec4006ad5742fd8',
@@ -1609,7 +1610,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '71f6f8d17899bb398948fada325cb478cd7e71e532c38ac305f83dc686a0ddf9',
     'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'ace2de26aa2f33320ced974c0016fc1a5ac1aa9b5678b05c4f7b60285daf1774',
     'crates/pos-owner-bridge-windows/src/lib.rs': '0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '5bf74624414a7d6967155f49506aca4dfced94ebdae3eb8149afc85ff297df2d',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '7a7f3b29b9a83169cfb25e7ca3c3cb590800d185de0c8d22576f92db49fa1e33',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '1514271d14a58ab895a46b71e60daf5a5a54bb751f305c99531aab20caacb8d5',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
@@ -1643,10 +1644,20 @@ def _check_external_fixture(sources: dict[str, str], found: list[str]) -> None:
         code = scan(source).code
         if path != controls and re.search(r"\b(?:ExternalAllowance|EXTERNAL_URI)\b", code):
             found.append(f"{path}: External allowance capability outside private fixture")
-        if path not in parent_loss_sources and re.search(
+        parent_references = list(re.finditer(
             r"\b(?:ControllerParentLossSeal|lose_controller_parent|"
             r"lose_pending_controller_parent|lost_controller_parent_retention)\b", code
-        ):
+        ))
+        pending_model = f"{SHIM}/src/adapter/surface/tests/pending_creation.rs"
+        if path == pending_model:
+            spans = [(start, end) for name, start, end in _function_spans(code)
+                     if name == "modeled_controller_qualification_retains_pending_owners_on_refusal"]
+            if (len(spans) != 1 or len(parent_references) != 2
+                    or any(ref.group() != "lose_pending_controller_parent"
+                           or not spans[0][0] <= ref.start() < spans[0][1]
+                           for ref in parent_references)):
+                found.append(f"{path}: controller parent loss capability outside sealed test fixture")
+        elif path not in parent_loss_sources and parent_references:
             found.append(f"{path}: controller parent loss capability outside sealed test fixture")
 
 
