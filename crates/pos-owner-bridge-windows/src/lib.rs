@@ -712,6 +712,14 @@ impl FaultAuthority {
 /// buffer offset, or caller-provided COM callback crosses this interface.
 pub(crate) trait NativeOperations {
     #[cfg(test)]
+    fn observe_closed_wrappers(&mut self) -> NativeResult<()> {
+        Err(NativeError {
+            operation: Operation::Controller,
+            failure: Failure::Closed,
+        })
+    }
+
+    #[cfg(test)]
     fn retain_exit_browser(
         &self,
         _authority: &FaultAuthority,

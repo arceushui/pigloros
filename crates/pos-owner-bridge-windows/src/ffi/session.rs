@@ -117,6 +117,61 @@ impl Session {
 
 impl NativeOperations for Session {
     #[cfg(test)]
+    fn observe_closed_wrappers(&mut self) -> NativeResult<()> {
+        let controller = self.controller_ref()?.clone();
+        let view = self.view_ref()?.clone();
+        let properties = [
+            BoolProperty::Script,
+            BoolProperty::WebMessage,
+            BoolProperty::ScriptDialogs,
+            BoolProperty::StatusBar,
+            BoolProperty::DevTools,
+            BoolProperty::ContextMenus,
+            BoolProperty::HostObjects,
+            BoolProperty::Zoom,
+            BoolProperty::BuiltInErrorPage,
+            BoolProperty::BrowserAccelerators,
+            BoolProperty::PasswordAutosave,
+            BoolProperty::Autofill,
+            BoolProperty::PinchZoom,
+            BoolProperty::SwipeNavigation,
+            BoolProperty::ReputationChecking,
+            BoolProperty::ExternalDrop,
+        ];
+        let mut observed = Vec::new();
+        for property in properties {
+            let value = settings::get_bool(&view, &controller, property)?;
+            settings::set_bool(&view, &controller, property, value)?;
+            observed.push((property, value));
+        }
+        events::source(&view)?;
+        self.focus_controller()?;
+        let _logged = writeln!(std::io::stderr(), "CLOSED_WRAPPER live_controls=ok");
+        self.close_controller()?;
+        for (property, value) in observed {
+            let get = settings::get_bool(&view, &controller, property);
+            let set = settings::set_bool(&view, &controller, property, value);
+            let _logged = writeln!(
+                std::io::stderr(),
+                "CLOSED_WRAPPER property={property:?} get={get:?} set={set:?}"
+            );
+        }
+        let _logged = writeln!(
+            std::io::stderr(),
+            "CLOSED_WRAPPER source={:?}",
+            events::source(&view).map(|_| ())
+        );
+        let _logged = writeln!(
+            std::io::stderr(),
+            "CLOSED_WRAPPER session_focus={:?}",
+            self.focus_controller()
+        );
+        drop(view);
+        drop(controller);
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn retain_exit_browser(
         &self,
         authority: &crate::FaultAuthority,

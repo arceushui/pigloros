@@ -1531,9 +1531,9 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63",
+        lib: "2fa08ce4fff547c732464fda76257fa9a35f4709342ebf82d4dd73ee95e88274",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
-        prefix + "adapter/native_tests.rs": "1514271d14a58ab895a46b71e60daf5a5a54bb751f305c99531aab20caacb8d5",
+        prefix + "adapter/native_tests.rs": "f7fd425a9bbc571f297eeee7771aa630f1339205d737ea80558c8e96cde0c2f9",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "bb0cbe0ced177ac33833c89cffaa68f2e30ddd4af0e07e875c67283b6e9cb3e6",
     }
     for path, digest in complete_sources.items():
@@ -1606,10 +1606,10 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '2b02387cb855dd2ebbf7374ac176b06ae760566045b76316c9ca73d6bc2d8c4c',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'ace2de26aa2f33320ced974c0016fc1a5ac1aa9b5678b05c4f7b60285daf1774',
-    'crates/pos-owner-bridge-windows/src/lib.rs': '0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': '9047cf31f8bfda85bcb0ec8ce9b99c52d48cd359a937f936a80cc19a04f896d1',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '2fa08ce4fff547c732464fda76257fa9a35f4709342ebf82d4dd73ee95e88274',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '5bf74624414a7d6967155f49506aca4dfced94ebdae3eb8149afc85ff297df2d',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '1514271d14a58ab895a46b71e60daf5a5a54bb751f305c99531aab20caacb8d5',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': 'f7fd425a9bbc571f297eeee7771aa630f1339205d737ea80558c8e96cde0c2f9',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',
