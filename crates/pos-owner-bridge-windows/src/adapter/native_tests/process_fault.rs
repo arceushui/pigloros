@@ -3549,6 +3549,33 @@ fn diagnostic_882_early_renderer_control_samples() -> TestResult {
 }
 
 #[test]
+fn diagnostic_882_early_renderer_pairs() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    for (offset, phase) in [
+        EarlyRendererPhase::Navigating,
+        EarlyRendererPhase::AwaitingLoad,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for sample in 0_u8..4 {
+            let number = 0xb0 + u8::try_from(offset)? * 8 + sample * 2;
+            let control = run_early_renderer(Path::new(&runtime), &root.0, number, phase, false)?;
+            let fault = run_early_renderer(Path::new(&runtime), &root.0, number + 1, phase, true)?;
+            writeln!(
+                std::io::stderr(),
+                "DIAG_882_PAIR sample={sample} phase={phase:?} control={control:?} fault={fault:?}"
+            )?;
+            assert_eq!(control, fault, "early renderer control and fault mismatch");
+        }
+    }
+    root.remove()
+}
+
+#[test]
 fn diagnostic_882_browser_release_pair() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
@@ -3626,10 +3653,11 @@ impl Fixture {
             ));
             if reached.is_none() && matches!(&step, Step::Pending) {
                 if let Some(mark) = self.early_renderer_state(driver, phase)? {
-                    let presence = self
-                        .surface
-                        .early_renderer_presence()
-                        .map_err(|()| "renderer snapshot unavailable or ambiguous")?;
+                    let snapshot_started = Instant::now();
+                    let presence = self.surface.early_renderer_presence();
+                    let _logged = writeln!(std::io::stderr(), "DIAG_882_SNAPSHOT case={} phase={phase:?} elapsed={:?} duration={:?} result={presence:?}", self.number, snapshot_started.saturating_duration_since(driver.t0()), snapshot_started.elapsed());
+                    let presence =
+                        presence.map_err(|()| "renderer snapshot unavailable or ambiguous")?;
                     // Recheck the phase after the complete pair of snapshots.
                     if self.early_renderer_state(driver, phase)? != Some(mark) {
                         return Err("renderer phase advanced during discovery".into());
