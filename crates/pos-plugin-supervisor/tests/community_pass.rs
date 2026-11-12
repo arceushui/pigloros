@@ -226,7 +226,13 @@ fn commit_one_pass(kind: StoreKind) -> Committed {
     // draft batch digest covers only the draft fields, no Timeline, Event or store data.
     Committed {
         events,
-        states: vec![alpha.committed_state().bytes, beta.committed_state().bytes],
+        states: [&alpha, &beta]
+            .into_iter()
+            .map(|handle| {
+                let mut state = handle.committed_state();
+                std::mem::take(&mut state.bytes)
+            })
+            .collect(),
         attempt: receipt.attempt_id(),
         digest: receipt.draft_batch_digest(),
         receipt_seqs,

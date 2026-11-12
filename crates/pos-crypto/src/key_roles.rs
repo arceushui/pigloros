@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::dsse::DsseEnvelopeV1;
 
-const KEY_MATERIAL_DOMAIN: &[u8] = b"pigloros/key-material/v1";
+const KEY_MATERIAL_DOMAIN: &[u8; 24] = b"pigloros/key-material/v1";
 const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
 
 /// An application-owned Ed25519 signing key and its immutable registry facts.
@@ -274,10 +274,15 @@ pub fn destroy_registered_encryption_key<P: KeyDestructionPersistence>(
 /// registry identity and by [`sign_for_registered_role`].
 #[must_use]
 pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Zeroizing::new(blake3::Hasher::new());
     hasher.update(KEY_MATERIAL_DOMAIN);
     hasher.update(private_material);
-    Hash::from_bytes(*hasher.finalize().as_bytes())
+    // The fixed 24-byte domain and 32-byte key fit one BLAKE3 block. Keep
+    // its final Output in a wiping reader instead of finalize's temporary.
+    let mut output = Zeroizing::new(hasher.finalize_xof());
+    let mut fingerprint = [0; 32];
+    output.fill(&mut fingerprint);
+    Hash::from_bytes(fingerprint)
 }
 
 fn sign_for_role_unchecked(

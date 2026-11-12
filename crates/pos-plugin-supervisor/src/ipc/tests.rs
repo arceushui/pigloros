@@ -7,6 +7,37 @@ use crate::test_support::{descriptor, invocation, log, negotiated, ok, output, M
 
 type Error = CommunityPluginHostErrorV1;
 
+thread_local! {
+    static CALL_ERASURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+// Observe the still-live value at the actual destructor boundary. No test
+// reads freed memory or treats this logical observation as physical wipe proof.
+pub(super) fn observe_call_erasure(call: &WorkerCallV1) {
+    let erased = match call {
+        WorkerCallV1::Describe => true,
+        WorkerCallV1::Reduce(input) | WorkerCallV1::Drive(input) => {
+            input.observation_bytes.is_empty()
+                && input.prior_state_bytes.is_empty()
+                && input.deterministic_budget_id.is_empty()
+        }
+    };
+    CALL_ERASURE.set(Some(erased));
+}
+
+#[test]
+fn dropping_each_owned_worker_call_reaches_erasure_before_releasing_its_payloads() {
+    for call in [
+        WorkerCallV1::Describe,
+        WorkerCallV1::Reduce(invocation(b"private observation")),
+        WorkerCallV1::Drive(invocation(b"private observation")),
+    ] {
+        CALL_ERASURE.set(None);
+        drop(call);
+        assert_eq!(CALL_ERASURE.get(), Some(true));
+    }
+}
+
 /// An invocation whose numbers need every CBOR head width.
 fn wide_invocation() -> PluginInvocationV1 {
     let mut wide = invocation(b"observation");
@@ -21,7 +52,7 @@ fn wide_invocation() -> PluginInvocationV1 {
 
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
     WorkerRequestV1 {
-        component: b"component".to_vec(),
+        component: b"component".to_vec().into(),
         negotiation: negotiated().to_transport(),
         watchdog_millis: 60_000,
         host_inputs: HostInputs {
@@ -50,6 +81,54 @@ fn requests_round_trip_every_call_and_mode() {
     air_gapped.negotiation.required_features = vec!["alpha".to_owned(), "beta".to_owned()];
     air_gapped.negotiation.declared_minors = (3, 300);
     assert_eq!(round_trip_request(&air_gapped).as_ref(), Ok(&air_gapped));
+}
+
+#[test]
+fn private_request_inputs_have_explicit_erasure_after_a_wire_round_trip() {
+    for call in [
+        WorkerCallV1::Describe,
+        WorkerCallV1::Reduce(invocation(b"private observation")),
+        WorkerCallV1::Drive(invocation(b"private observation")),
+    ] {
+        let original = request(call);
+        let mut decoded = ok(round_trip_request(&original));
+        decoded.component.zeroize();
+        decoded.call.zeroize();
+        assert!(decoded.component.is_empty());
+        match &decoded.call {
+            WorkerCallV1::Describe => assert_eq!(original.call, WorkerCallV1::Describe),
+            WorkerCallV1::Reduce(input) | WorkerCallV1::Drive(input) => {
+                assert!(input.observation_bytes.is_empty());
+                assert!(input.prior_state_bytes.is_empty());
+                assert_eq!(input.validate(), Err(Error::InvalidInvocation));
+                assert_ne!(original.call, decoded.call);
+            }
+        }
+        assert_eq!(original.component.as_slice(), b"component");
+    }
+}
+
+#[test]
+fn partial_private_invocations_and_trailing_requests_are_refused() {
+    for call in [
+        WorkerCallV1::Reduce(wide_invocation()),
+        WorkerCallV1::Drive(wide_invocation()),
+    ] {
+        let original = request(call);
+        let encoded = ok(encode_worker_request_v1(&original));
+        for end in 0..encoded.len() {
+            assert_eq!(
+                decode_worker_request_v1(&encoded[..end]),
+                Err(WorkerEnvelopeErrorV1)
+            );
+        }
+        let trailing = [encoded.as_slice(), &[0]].concat();
+        assert_eq!(
+            decode_worker_request_v1(&trailing),
+            Err(WorkerEnvelopeErrorV1)
+        );
+        assert_eq!(decode_worker_request_v1(&encoded).as_ref(), Ok(&original));
+    }
 }
 
 #[test]
@@ -96,6 +175,24 @@ fn every_head_width_is_written_in_shortest_form() {
 }
 
 #[test]
+fn complete_envelope_bounds_are_checked_before_frame_allocation() {
+    let mut oversized = request(WorkerCallV1::Describe);
+    oversized.negotiation.world = "w".repeat(crate::frame::WorkerFrameLimitsV1::REQUEST_BYTES);
+    assert_eq!(
+        encode_worker_request_v1(&oversized),
+        Err(WorkerEnvelopeErrorV1)
+    );
+    let response_limit =
+        crate::frame::WorkerFrameLimitsV1::for_limits(&DeterministicBudgetV1::MAXIMA);
+    let mut oversized = output(&invocation(b"observation"));
+    oversized.next_state_bytes = vec![7; response_limit.response_bytes()];
+    assert_eq!(
+        encode_worker_response_v1(&Ok(produced(Ok(oversized)))),
+        Err(WorkerEnvelopeErrorV1)
+    );
+}
+
+#[test]
 fn the_describe_request_has_its_golden_prefix_and_suffix() {
     let bytes = ok(encode_worker_request_v1(&request(WorkerCallV1::Describe)));
     let mut prefix = vec![0x87, 0x64];
@@ -119,7 +216,7 @@ fn the_describe_request_has_its_golden_prefix_and_suffix() {
 #[test]
 fn only_an_oversize_component_stops_the_encoder() {
     let mut largest = request(WorkerCallV1::Describe);
-    largest.component = vec![0; MAX_WORKER_COMPONENT_BYTES_V1];
+    largest.component = vec![0; MAX_WORKER_COMPONENT_BYTES_V1].into();
     assert_eq!(round_trip_request(&largest).as_ref(), Ok(&largest));
     let mut oversized = largest;
     oversized.component.push(0);
@@ -214,8 +311,8 @@ fn malformed_requests_are_envelope_faults() {
         wrong_version,
         wrong_count,
         unknown_mode,
-        [valid.as_slice(), &[0]].concat(),
-        valid[..valid.len() - 1].to_vec(),
+        zeroize::Zeroizing::new([valid.as_slice(), &[0]].concat()),
+        zeroize::Zeroizing::new(valid[..valid.len() - 1].to_vec()),
     ]
     .iter()
     .enumerate()
@@ -278,6 +375,29 @@ fn round_trip_response(outcome: &WorkerOutcomeV1) -> Decoded<WorkerOutcomeV1> {
 }
 
 #[test]
+fn partial_private_output_lists_and_trailing_responses_are_refused() {
+    let mut value = output(&invocation(b"observation"));
+    value.event_drafts.push(value.event_drafts[0].clone());
+    value
+        .trace_annotations
+        .push(value.trace_annotations[0].clone());
+    let outcome = Ok(produced(Ok(value)));
+    let encoded = ok(encode_worker_response_v1(&outcome));
+    for end in 0..encoded.len() {
+        assert_eq!(
+            decode_worker_response_v1(&encoded[..end]),
+            Err(WorkerEnvelopeErrorV1)
+        );
+    }
+    let trailing = [encoded.as_slice(), &[0]].concat();
+    assert_eq!(
+        decode_worker_response_v1(&trailing),
+        Err(WorkerEnvelopeErrorV1)
+    );
+    assert_eq!(decode_worker_response_v1(&encoded).as_ref(), Ok(&outcome));
+}
+
+#[test]
 fn responses_round_trip_every_outcome() {
     let mut outcomes: Vec<WorkerOutcomeV1> = vec![
         Ok(described(Ok(descriptor(&negotiated())))),
@@ -308,7 +428,12 @@ fn response_wire_codes_follow_their_lists() {
     let prefix = [0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x82];
     for (code, failure) in (0_u8..).zip(WORKER_FAILURES_V1) {
         let bytes = encode_worker_response_v1(&Err(failure));
-        assert_eq!(bytes, Ok([&prefix[..], &[0x02, code]].concat()));
+        assert_eq!(
+            bytes,
+            Ok(zeroize::Zeroizing::new(
+                [&prefix[..], &[0x02, code]].concat()
+            ))
+        );
     }
     for (code, class) in (0_u8..).zip(WORKER_TRAP_CLASSES_V1) {
         let trap = Err(Error::ComponentTrap {
@@ -316,7 +441,12 @@ fn response_wire_codes_follow_their_lists() {
             reproduction: TrapReproductionV1::Unverified,
         });
         let bytes = encode_worker_response_v1(&trap);
-        assert_eq!(bytes, Ok([&prefix[..], &[0x03, code]].concat()));
+        assert_eq!(
+            bytes,
+            Ok(zeroize::Zeroizing::new(
+                [&prefix[..], &[0x03, code]].concat()
+            ))
+        );
     }
     let metering = MeteringV1 {
         startup_fuel: 1,
@@ -338,7 +468,12 @@ fn response_wire_codes_follow_their_lists() {
         0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x04, 0xf6,
         0xf6, 0x84, 0x01, 0x02, 0x03, 0x04, 0x80,
     ];
-    assert_eq!(encode_worker_response_v1(&declared), Ok(expected.to_vec()));
+    assert_eq!(
+        encode_worker_response_v1(&declared)
+            .as_ref()
+            .map(|bytes| bytes.as_slice()),
+        Ok(expected.as_slice())
+    );
 }
 
 #[test]

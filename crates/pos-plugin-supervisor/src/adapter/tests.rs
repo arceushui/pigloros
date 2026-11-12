@@ -13,6 +13,7 @@ use pos_runtime::community_plugin_host::{
     TrapReproductionV1, TrustDenialBasisV1,
 };
 use ulid::Ulid;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::output::{map_draft, mapped_drafts, mapped_output};
 use super::*;
@@ -107,6 +108,40 @@ fn initial() -> CommunityStateV1 {
         schema: [9; 32],
         bytes: b"initial".to_vec(),
     }
+}
+
+#[test]
+fn selecting_prior_state_moves_its_allocation_and_clears_the_replaced_slot() {
+    let selected = initial();
+    let allocation = selected.bytes.as_ptr();
+    let mut invocation = test_support::invocation(b"observation");
+    invocation.prior_state_schema = [7; 32];
+    invocation.prior_state_bytes = b"replaced private State".to_vec();
+    state::tests::reset_observation();
+    let mut invocation: Zeroizing<PluginInvocationV1> = with_prior_state(invocation, selected);
+    assert_eq!(invocation.prior_state_schema, [9; 32]);
+    assert_eq!(invocation.prior_state_bytes, b"initial");
+    assert_eq!(invocation.prior_state_bytes.as_ptr(), allocation);
+    assert_eq!(state::tests::observation(), (1, true, true));
+    invocation.zeroize();
+    assert_eq!(invocation.prior_state_schema, [0; 32]);
+    assert!(invocation.prior_state_bytes.is_empty());
+}
+
+#[test]
+fn abort_clears_pending_state_and_preserves_the_committed_value() {
+    let (mut driver, handle, _) = fixture(None);
+    driver.staged = Some(CommunityStateV1 {
+        schema: [5; 32],
+        bytes: b"discarded candidate".to_vec(),
+    });
+    state::tests::reset_observation();
+    driver.abort_step();
+    assert_eq!(state::tests::observation(), (1, true, true));
+    let committed = handle.committed_state();
+    assert_eq!(committed.schema, [9; 32]);
+    assert_eq!(committed.bytes, b"initial");
+    assert!(driver.staged.is_none());
 }
 
 fn fixture(

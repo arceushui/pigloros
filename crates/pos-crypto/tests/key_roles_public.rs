@@ -16,6 +16,23 @@ use pos_crypto::signing::public_key_from_verifying_key;
 struct FailingDestruction(&'static str);
 
 #[test]
+fn public_key_fingerprint_preserves_ordinary_blake3_identity() {
+    // Public synthetic inputs: this oracle checks identity, not erasure.
+    for material in (u8::MIN..=u8::MAX).map(|value| [value; 32]).chain([
+        *b"0123456789abcdefghijklmnopqrstuv",
+        *b"vutsrqponmlkjihgfedcba9876543210",
+    ]) {
+        let mut preimage = b"pigloros/key-material/v1".to_vec();
+        preimage.extend_from_slice(&material);
+        let expected = blake3::hash(&preimage);
+        assert_eq!(
+            key_material_digest(&material).as_bytes(),
+            expected.as_bytes()
+        );
+    }
+}
+
+#[test]
 fn public_role_verification_preserves_independent_contiguous_framing(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[71; 32]);
@@ -179,15 +196,20 @@ fn public_role_bound_signing_covers_authorization_edges() -> Result<(), Box<dyn 
         ),
         Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
     );
-    assert_eq!(
-        sign_for_registered_role(
-            &mut registry,
-            &signing_material,
-            encryption_identity,
-            &payload,
-        ),
-        Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
-    );
+    for role in [
+        KeyRoleV1::SubjectDataEncryption,
+        KeyRoleV1::ExportRecipientEncryption,
+        KeyRoleV1::CommunityArtifactEncryption,
+    ] {
+        let identity = KeyIdentityV1::new("ledger-owner", role, 1);
+        assert_eq!(
+            sign_for_registered_role(&mut registry, &signing_material, identity, &payload),
+            Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
+        );
+        assert!(
+            verify_for_role(&signing_key.verifying_key(), identity, &payload, &signature).is_err()
+        );
+    }
 
     Ok(())
 }

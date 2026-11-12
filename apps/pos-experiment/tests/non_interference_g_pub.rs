@@ -10,7 +10,8 @@
 //! - Local spawns `pos-ni-g-pub-subject` as a fresh process.
 //! - Replay and Fork drive the subject through the Experiment host.
 //! - Air-Gapped stays the typed non-executed `Unavailable`.
-//! - `NI-ARCHIVE-009` stays non-executed `Missing` until slice N1b (#1284).
+//! - `NI-ARCHIVE-009` shares the subject; its RVA1 capture is exercised by
+//!   `non_interference_g_archive.rs` (slice N1b, #1284).
 //!
 //! Every executed case must:
 //! - be equal at every surface;
@@ -45,12 +46,11 @@ use pos_core::{
 };
 use pos_experiment::non_interference_harness::fixture_evidence::non_interference_fixture_executor_key_v1;
 use pos_experiment::non_interference_harness::g_pub::{
-    execute_g_pub_case_v1, g_pub_capture_v1, g_pub_experiment_v1, g_pub_fixture_v1,
-    g_pub_permitted_input_v1, g_pub_signals_v1, serve_g_pub_local_subject_v1, GPubRunV1,
-    GPubSessionSubjectV1, G_PUB_ARCHIVE_FIXTURE_ID_V1, G_PUB_CANARY_UNAUTHORIZED_V1,
-    G_PUB_CONTROL_UNAUTHORIZED_V1, G_PUB_EVALUATOR_SCHEMA_V1, G_PUB_EVAL_FIXTURE_ID_V1,
-    G_PUB_FIXTURE_IDS_V1, G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_STORE_FILE_V1,
-    G_PUB_SUBJECT_TIMELINE_V1,
+    g_pub_capture_v1, g_pub_experiment_v1, g_pub_fixture_v1, g_pub_permitted_input_v1,
+    g_pub_signals_v1, serve_g_pub_local_subject_v1, GPubRunV1, GPubSessionSubjectV1,
+    G_PUB_CANARY_UNAUTHORIZED_V1, G_PUB_CONTROL_UNAUTHORIZED_V1, G_PUB_EVALUATOR_SCHEMA_V1,
+    G_PUB_EVAL_FIXTURE_ID_V1, G_PUB_FIXTURE_IDS_V1, G_PUB_PUBLIC_FIXTURE_ID_V1,
+    G_PUB_STORE_FILE_V1, G_PUB_SUBJECT_TIMELINE_V1,
 };
 use pos_experiment::non_interference_harness::{
     NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
@@ -80,8 +80,9 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Fork,
 ];
 const EXECUTED_ROWS: [&str; 2] = [G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_EVAL_FIXTURE_ID_V1];
-/// The closed body of the Gateway's page-bound error.
-const PAGE_LIMIT_ERROR: &[u8] = b"{\"error\":\"event poll limit must be between 1 and 100\"}";
+/// The Gateway v1 problem body of the over-limit page request: sorted keys and the matched
+/// route template as `instance`, so it carries no run-local identity.
+const PAGE_LIMIT_ERROR: &[u8] = b"{\"code\":\"invalid-request\",\"detail\":\"event poll limit must be between 1 and 100\",\"instance\":\"/v1/timelines/{timeline_id}/events\",\"retryable\":false,\"schema_id\":\"urn:pigloros:gateway:v1:schema:problem\",\"status\":400,\"title\":\"Invalid request\",\"type\":\"urn:pigloros:gateway:v1:problem:invalid-request\"}";
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -232,21 +233,14 @@ fn execute_every_coordinate(
 ) -> TestResult<BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>> {
     let mut harness = g_pub_harness(work)?;
     let mut executed = BTreeMap::new();
-    for fixture_id in G_PUB_FIXTURE_IDS_V1 {
+    for fixture_id in EXECUTED_ROWS {
         for variant in VARIANTS {
             for mode in MODES {
                 let fixture = g_pub_fixture_v1(fixture_id, variant, mode)?;
-                let outcome = execute_g_pub_case_v1(&mut harness, &fixture);
+                let outcome = harness.execute_case(&fixture);
                 assert_no_unauthorized_bytes(format!("{outcome:?}").as_bytes(), "an outcome");
                 let id = case_id(fixture_id, variant, mode);
-                if fixture_id == G_PUB_ARCHIVE_FIXTURE_ID_V1 {
-                    assert_eq!(
-                        outcome.non_executed_cause(),
-                        Some(NonInterferenceNonExecutedCauseV1::Missing),
-                        "{id}"
-                    );
-                    assert_eq!(outcome.claim(), None, "{id}");
-                } else if mode == ExecutionModeV1::AirGapped {
+                if mode == ExecutionModeV1::AirGapped {
                     assert_eq!(
                         outcome.non_executed_cause(),
                         Some(NonInterferenceNonExecutedCauseV1::Unavailable),
@@ -597,14 +591,17 @@ fn the_evaluator_capture_binds_the_exact_eai1_attempt_over_the_export() -> TestR
 fn a_capture_without_an_adapter_or_a_seam_is_typed_non_executed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let store = directory.path().join(G_PUB_STORE_FILE_V1);
-    for fixture_id in [G_PUB_ARCHIVE_FIXTURE_ID_V1, "NI-TOOL-001"] {
-        assert_eq!(
-            capture(fixture_id, NonInterferenceVariantV1::Success, b"x", &store)
-                .err()
-                .map(|error| error.to_string()),
-            Some(NonInterferenceNonExecutedCauseV1::Missing.to_string())
-        );
-    }
+    assert_eq!(
+        capture(
+            "NI-TOOL-001",
+            NonInterferenceVariantV1::Success,
+            b"x",
+            &store
+        )
+        .err()
+        .map(|error| error.to_string()),
+        Some(NonInterferenceNonExecutedCauseV1::Missing.to_string())
+    );
     let unreachable = directory.path().join("absent").join(G_PUB_STORE_FILE_V1);
     for fixture_id in EXECUTED_ROWS {
         assert_eq!(

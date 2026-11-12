@@ -209,6 +209,205 @@ fn references_fixture() -> TestResult<Fixture> {
     Ok(fixture)
 }
 
+fn set_external_document(value: &mut Value, document: &str) {
+    value["externalDocumentRefs"][0]["externalDocumentId"] = json!(document);
+    let element = format!("{document}:SPDXRef-external");
+    value["documentDescribes"][3] = json!(element);
+    value["packages"][0]["hasFiles"][3] = json!(element);
+    value["relationships"][0]["spdxElementId"] = json!(element);
+    value["packages"][0]["licenseDeclared"] = json!(format!(
+        "{document}:LicenseRef-external AND LicenseRef-local"
+    ));
+}
+
+#[test]
+fn spdx_external_identifiers_follow_the_declared_syntax() -> TestResult {
+    for document in ["bad", "DocumentRef-", "DocumentRef-bad@"] {
+        let mut fixture = references_fixture()?;
+        fixture.sbom(|value| set_external_document(value, document))?;
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::Malformed {
+                artifact: Artifact::Sbom
+            })
+        );
+    }
+    let mut fixture = references_fixture()?;
+    fixture.sbom(|value| {
+        value["relationships"][0]["spdxElementId"] = json!("DocumentRef-other:SPDXRef-bad@");
+    })?;
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Sbom
+        })
+    );
+
+    let mut fixture = references_fixture()?;
+    fixture.sbom(|value| set_external_document(value, "DocumentRef-a+b.1"))?;
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn schema_failure_reports_the_first_closure_member_across_phases() -> TestResult {
+    for (first, expected) in [
+        (
+            br#"{"$vocabulary":{"https://unknown.invalid/vocab":true}}"#.as_slice(),
+            Error::UnsupportedFormat {
+                artifact: Artifact::Schema { index: 0 },
+            },
+        ),
+        (
+            br#"{"$ref":"urn:missing"}"#.as_slice(),
+            Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 },
+            },
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![first.to_vec(), b"null".to_vec()];
+        assert_eq!(result(&fixture)?, Err(expected));
+    }
+    Ok(())
+}
+
+#[test]
+fn earlier_schema_failure_precedes_later_json_node_exhaustion() -> TestResult {
+    let mut fixture = Fixture::new();
+    let mut later = br#"{"examples":["#.to_vec();
+    later.extend(
+        std::iter::repeat_n(b"0,".as_slice(), 262_143)
+            .flatten()
+            .copied(),
+    );
+    later.extend_from_slice(br#"0],"title":"2"}"#);
+    fixture.schemas = vec![
+        br#"{"$vocabulary":{"https://unknown.invalid/vocab":true}}"#.to_vec(),
+        later,
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::UnsupportedFormat {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_schema_reference_precedes_later_json_node_exhaustion() -> TestResult {
+    let mut fixture = Fixture::new();
+    let mut later = br#"{"examples":["#.to_vec();
+    later.extend(
+        std::iter::repeat_n(b"0,".as_slice(), 262_143)
+            .flatten()
+            .copied(),
+    );
+    later.extend_from_slice(br#"0],"title":"17"}"#);
+    fixture.schemas = vec![br#"{"$ref":"https://example.invalid/%zz"}"#.to_vec(), later];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn known_local_reference_is_checked_before_later_json_node_exhaustion() -> TestResult {
+    let mut fixture = Fixture::new();
+    let mut later = br#"{"examples":["#.to_vec();
+    later.extend(
+        std::iter::repeat_n(b"0,".as_slice(), 262_143)
+            .flatten()
+            .copied(),
+    );
+    later.extend_from_slice(br#"0],"title":"17"}"#);
+    fixture.schemas = vec![br##"{"$ref":"#/missing"}"##.to_vec(), later.clone()];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+
+    fixture.schemas = vec![
+        br##"{"$ref":"#/examples/0","examples":[{}]}"##.to_vec(),
+        later.clone(),
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 0 }
+        })
+    );
+
+    fixture.schemas = vec![
+        br#"{"$ref":"urn:later"}"#.to_vec(),
+        later,
+        br#"{"$id":"urn:later","title":"15"}"#.to_vec(),
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::BoundsExceeded {
+            artifact: Artifact::Schema { index: 1 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_pointer_fragments_use_rfc6901_and_indexed_resource_roots() -> TestResult {
+    for schema in [
+        json!({"$defs":{"a/b":true},"$ref":"#/$defs/a~1b"}),
+        json!({"$defs":{"a b":true},"$ref":"#/$defs/a%20b"}),
+        json!({"$defs":{"nested":{"$id":"urn:nested", "$defs":{"x":true}, "$ref":"#/$defs/x"}}}),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(&schema)];
+        assert_eq!(result(&fixture)?, Ok(()));
+    }
+    for reference in ["#/$defs/a~2b", "#/$defs/a~", "#/allOf/01", "#/%FF"] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(
+            &json!({"$defs":{"a~2b":true},"allOf":[true,true],"$ref":reference}),
+        )];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::ReferenceMismatch {
+                artifact: Artifact::Schema { index: 0 }
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn each_json_node_kind_obeys_the_node_limit() -> TestResult {
+    for last in [
+        json!(true),
+        json!(-1),
+        json!(1),
+        json!(1.5),
+        json!([]),
+        json!({}),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut examples = vec![json!(0); 262_142];
+        examples.push(last);
+        fixture.schemas = vec![bytes(&json!({"examples": examples}))];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::BoundsExceeded {
+                artifact: Artifact::Schema { index: 0 }
+            })
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn spdx_checks_direct_files_snippets_and_declared_external_metadata() -> TestResult {
     let fixture = references_fixture()?;
@@ -425,6 +624,66 @@ fn schema_vocabularies_and_global_index_budgets_are_explicit() -> TestResult {
 }
 
 #[test]
+fn next_schema_root_refuses_an_exhausted_identifier_budget() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas = [20_000, 20_000, 20_000, 5_532]
+        .into_iter()
+        .enumerate()
+        .map(|(resource, count)| {
+            let definitions: serde_json::Map<_, _> = (0..count)
+                .map(|number| {
+                    (
+                        format!("a{number}"),
+                        json!({"$anchor":format!("a{number}")}),
+                    )
+                })
+                .collect();
+            bytes(&json!({"$id":format!("urn:pigloros:boundary:{resource}"), "$defs":definitions}))
+        })
+        .collect();
+    // Its digest sorts after all four earlier schema members.
+    fixture.schemas.push(bytes(&json!({"title":"20"})));
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::BoundsExceeded {
+            artifact: Artifact::Schema { index: 4 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_reference_budget_is_shared_across_documents() -> TestResult {
+    for extra in [0, 1] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![
+            bytes(&json!({"title":"a", "allOf":vec![json!({"$ref":"#"}); 32_768]})),
+            bytes(&json!({"title":"b", "allOf":vec![json!({"$ref":"#"}); 32_768 + extra]})),
+        ];
+        let expected = if extra == 0 {
+            Ok(())
+        } else {
+            Err(Error::BoundsExceeded {
+                artifact: Artifact::Schema { index: 1 },
+            })
+        };
+        assert_eq!(result(&fixture)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn resolves_a_resource_nested_inside_a_schema_array() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas = vec![bytes(&json!({
+        "$ref":"urn:pigloros:nested#node",
+        "allOf":[{"$id":"urn:pigloros:nested", "$anchor":"node"}]
+    }))];
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
 fn explicit_schema_id_cannot_collide_with_a_later_implicit_base() -> TestResult {
     use sha2::{Digest as _, Sha256};
     let second = b"true".to_vec();
@@ -482,30 +741,6 @@ fn null_values_count_toward_the_json_node_limit() -> TestResult {
         examples.push(Value::Null);
         fixture.schemas = vec![bytes(&json!({"examples": examples}))];
         assert_eq!(result(&fixture)?, expected);
-    }
-    Ok(())
-}
-
-#[test]
-fn each_json_node_kind_obeys_the_node_limit() -> TestResult {
-    for last in [
-        json!(true),
-        json!(-1),
-        json!(1),
-        json!(1.5),
-        json!([]),
-        json!({}),
-    ] {
-        let mut fixture = Fixture::new();
-        let mut examples = vec![json!(0); 262_142];
-        examples.push(last);
-        fixture.schemas = vec![bytes(&json!({"examples": examples}))];
-        assert_eq!(
-            result(&fixture)?,
-            Err(Error::BoundsExceeded {
-                artifact: Artifact::Schema { index: 0 },
-            })
-        );
     }
     Ok(())
 }

@@ -200,8 +200,12 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     ///
     /// One trusted UTC second is sampled for the whole pass. A failed sample refuses every
     /// member; a gate refusal or a failed offer refuses the whole pass before anything is
-    /// staged. The pass is closed on every exit, a panic that unwinds out of a member included;
-    /// the registry is synced with every member after each pass that returns.
+    /// staged. Once a pass opens, it is closed on every exit, a panic that unwinds out of a
+    /// member included; the registry is synced with every member after each opened pass returns.
+    ///
+    /// An unfinished pass or poisoned Driver rejects the request before a pass opens: no clock
+    /// sample, member access, authorization, cleanup or sync occurs. The outcome has no UTC
+    /// sample or gate entries and preserves the registry's error and existing pass.
     pub fn run_pass(
         &mut self,
         registry: &mut PluginRegistry,
@@ -210,21 +214,31 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
-        let utc = TrustedUtcSecondV1::from_source(wall).ok();
-        let guard = PassGuard::open(&self.members, utc, tick);
-        let (verdicts, result) = guard.pass().map_or_else(
-            || (refuse_all(&self.members), PassResultV1::Refused),
-            |pass| self.run_open(registry, trust, pass, request),
-        );
-        let mut entries = report(&self.members, verdicts);
-        drop(guard);
-        sync_all(&self.members, registry, &mut entries);
-        CommunityPassOutcomeV1 {
-            tick,
-            utc: utc.map(TrustedUtcSecondV1::as_i64),
-            gates: entries,
-            result,
-        }
+        registry.ensure_no_pending_step().map_or_else(
+            |error| CommunityPassOutcomeV1 {
+                tick,
+                utc: None,
+                gates: Vec::new(),
+                result: failed(error),
+            },
+            |()| {
+                let utc = TrustedUtcSecondV1::from_source(wall).ok();
+                let guard = PassGuard::open(&self.members, utc, tick);
+                let (verdicts, result) = guard.pass().map_or_else(
+                    || (refuse_all(&self.members), PassResultV1::Refused),
+                    |pass| self.run_open(registry, trust, pass, request),
+                );
+                let mut entries = report(&self.members, verdicts);
+                drop(guard);
+                sync_all(&self.members, registry, &mut entries);
+                CommunityPassOutcomeV1 {
+                    tick,
+                    utc: utc.map(TrustedUtcSecondV1::as_i64),
+                    gates: entries,
+                    result,
+                }
+            },
+        )
     }
 
     /// Adopt newer policy: close the pass of every member, then record `material` through the

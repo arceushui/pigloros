@@ -33,9 +33,7 @@ pub(super) fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
     let mut index = 0_u16;
     for (member, bytes) in bundle.members().iter().zip(bundle.member_bytes()) {
         if member.member().starts_with("schema/") {
-            let document = super::schema::Document::read(index, &member.digest()[7..], bytes)
-                .map_err(|error| error.at(Artifact::Schema { index }))?;
-            documents.push(document);
+            documents.push((index, &member.digest()[7..], bytes));
             index += 1;
         }
     }

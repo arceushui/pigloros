@@ -1,28 +1,57 @@
 //! Read-only, exclusively owned inventory for unfinished registry transitions.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
+use std::time::Duration;
 
 use rustix::fs::{openat2, Dir, Mode, OFlags, ResolveFlags};
 
+use super::activation::{self, ActivationMarker};
+use super::directory::DIRECTORY_RECORD_SIZE;
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
     registry_io, validate_directory, PlannedAttemptIntent, RegistryDirectory,
     SystemdAttemptRegistryError, TransientServiceUnitName,
 };
+use crate::BootInstant;
 
 type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
 const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
+mod removal;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
+
+impl super::SystemdAttemptRegistry {
+    /// The committed record of `unit`'s attempt, read back under this live
+    /// owner: `None` before its planned intent was committed, after it was
+    /// deleted, or while only an interrupted write exists.
+    ///
+    /// # Errors
+    /// An unsafe, unreadable or malformed record.
+    pub(crate) fn recorded(
+        &self,
+        unit: &TransientServiceUnitName,
+    ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
+        match read_entry(&self.directory, unit.attempt_component()) {
+            Ok(entry) => Ok(entry.observation.intent),
+            Err(SystemdAttemptRegistryError::Io(error))
+                if error.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
 
 /// A complete recorded intent observed during recovery, not activation authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveredAttemptIntent {
     planned: PlannedAttemptIntent,
     directory_identities: Option<[(u64, u64); 2]>,
+    image: Option<(u64, u64)>,
     root: Option<RootRecord>,
 }
 
@@ -42,34 +71,67 @@ impl RecoveredAttemptIntent {
         self.directory_identities
     }
 
+    /// The admitted image descriptor's `(device, inode)` recorded by a PAI2
+    /// or later stage: a retained claim for correlation with a still-mounted
+    /// root's loop backing file, not evidence.
+    pub(crate) const fn recorded_image(&self) -> Option<(u64, u64)> {
+        self.image
+    }
+
+    /// The recorded mapper and loop generations of a PAI3 stage, if any.
+    ///
+    /// These are retained claims for a fresh absence probe, not evidence.
+    pub(crate) fn recorded_generations(&self) -> Option<[((u32, u32), u64); 2]> {
+        self.root.as_ref().map(RootRecord::generations)
+    }
+
+    /// The root facts of a PAI3 stage, if any: retained claims for
+    /// correlation with a still-mounted root, not evidence.
+    pub(crate) fn recorded_root(&self) -> Option<&crate::RecordedRoot> {
+        self.root.as_ref().map(RootRecord::recorded)
+    }
+
     fn decode(bytes: &[u8]) -> RegistryResult<Self> {
         let mut planned_bytes = [0; 52];
         planned_bytes.copy_from_slice(&bytes[..52]);
         planned_bytes[..4].copy_from_slice(b"PAI1");
         let planned = PlannedAttemptIntent::decode(&planned_bytes)?;
-        let directory_identities = if bytes.len() >= 84 {
-            let mut identities = [0; 4];
-            for (slot, chunk) in identities.iter_mut().zip(bytes[52..84].chunks_exact(8)) {
-                let mut word = [0; 8];
-                word.copy_from_slice(chunk);
-                *slot = u64::from_le_bytes(word);
-            }
-            if identities[0] != identities[2] || identities[1] == identities[3] {
-                return Err(SystemdAttemptRegistryError::InvalidIntent);
-            }
-            Some([
-                (identities[0], identities[1]),
-                (identities[2], identities[3]),
-            ])
-        } else {
-            None
-        };
+        let (directory_identities, image) = bytes
+            .get(52..DIRECTORY_RECORD_SIZE)
+            .map(directory_stage)
+            .transpose()?
+            .unzip();
         RootRecord::decode_extension(bytes, &planned).map(|root| Self {
             planned,
             directory_identities,
+            image,
             root,
         })
     }
+}
+
+/// The PAI2 stage's attempt and root `(device, inode)` pairs, which share a
+/// device and differ in inode, and its nonzero admitted image identity.
+type DirectoryStage = ([(u64, u64); 2], (u64, u64));
+
+fn directory_stage(words: &[u8]) -> RegistryResult<DirectoryStage> {
+    let mut identities = [0; 6];
+    for (slot, chunk) in identities.iter_mut().zip(words.chunks_exact(8)) {
+        let mut word = [0; 8];
+        word.copy_from_slice(chunk);
+        *slot = u64::from_le_bytes(word);
+    }
+    let [attempt_device, attempt_inode, root_device, root_inode, image_device, image_inode] =
+        identities;
+    (attempt_device == root_device
+        && attempt_inode != root_inode
+        && image_device != 0
+        && image_inode != 0)
+        .then_some((
+            [(attempt_device, attempt_inode), (root_device, root_inode)],
+            (image_device, image_inode),
+        ))
+        .ok_or(SystemdAttemptRegistryError::InvalidIntent)
 }
 
 /// One retained observation of a committed key or recognizable interrupted write.
@@ -84,6 +146,7 @@ pub struct RegistryRecoveryEntry {
 struct RegistryEntryObservation {
     name: String,
     attempt_id: [u8; 16],
+    unit_name: TransientServiceUnitName,
     temporary: bool,
     intent: Option<RecoveredAttemptIntent>,
     device: u64,
@@ -104,6 +167,12 @@ impl RegistryRecoveryEntry {
         self.observation.attempt_id
     }
 
+    /// The deterministic unit name derived from the canonical filename.
+    #[must_use]
+    pub const fn unit_name(&self) -> &TransientServiceUnitName {
+        &self.observation.unit_name
+    }
+
     /// Whether this is an unpublished temporary write.
     #[must_use]
     pub const fn is_temporary(&self) -> bool {
@@ -117,6 +186,35 @@ impl RegistryRecoveryEntry {
     }
 }
 
+/// One retained activation marker file: the committed marker or a
+/// recognizable interrupted write of it.
+#[derive(Debug)]
+struct MarkerEntry {
+    // Retain the original inode so replacement cannot reuse its identity.
+    _file: File,
+    observation: MarkerObservation,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct MarkerObservation {
+    name: String,
+    // Only the committed marker records a request; a temporary one was never
+    // followed by its request.
+    marker: Option<ActivationMarker>,
+    device: u64,
+    inode: u64,
+    bytes: Vec<u8>,
+}
+
+impl MarkerEntry {
+    fn is_temporary(&self) -> bool {
+        self.observation.name != activation::MARKER_NAME
+    }
+}
+
+/// Every registry file, by kind.
+type Inventory = (Vec<RegistryRecoveryEntry>, Vec<MarkerEntry>);
+
 /// Exclusive startup inventory which cannot commit, delete, or reopen admission.
 ///
 /// Holding this object keeps the registry lock. It inventories registry files
@@ -126,6 +224,7 @@ impl RegistryRecoveryEntry {
 pub struct SystemdAttemptRecovery {
     directory: RegistryDirectory,
     entries: Vec<RegistryRecoveryEntry>,
+    markers: Vec<MarkerEntry>,
 }
 
 impl SystemdAttemptRecovery {
@@ -145,7 +244,11 @@ impl SystemdAttemptRecovery {
     }
 
     pub(super) fn from_directory(directory: RegistryDirectory) -> RegistryResult<Self> {
-        inventory(&directory).map(|entries| Self { directory, entries })
+        inventory(&directory).map(|(entries, markers)| Self {
+            directory,
+            entries,
+            markers,
+        })
     }
 
     /// Sorted observations; none is proof that associated resources are absent.
@@ -160,11 +263,8 @@ impl SystemdAttemptRecovery {
     /// Rejects additions, removals, inode substitution, metadata changes or
     /// changed contents. Recovery must stop on any contradiction.
     pub fn verify_unchanged(&self) -> Result<(), SystemdAttemptRegistryError> {
-        if inventory(&self.directory)?
-            .iter()
-            .map(|entry| &entry.observation)
-            .eq(self.entries.iter().map(|entry| &entry.observation))
-        {
+        let (entries, markers) = inventory(&self.directory)?;
+        if observations(&entries, &markers) == observations(&self.entries, &self.markers) {
             Ok(())
         } else {
             Err(SystemdAttemptRegistryError::ReconciliationRequired)
@@ -172,26 +272,151 @@ impl SystemdAttemptRecovery {
     }
 }
 
-fn inventory(directory: &RegistryDirectory) -> RegistryResult<Vec<RegistryRecoveryEntry>> {
+/// The comparable observations of one inventory.
+fn observations<'a>(
+    entries: &'a [RegistryRecoveryEntry],
+    markers: &'a [MarkerEntry],
+) -> (
+    Vec<&'a RegistryEntryObservation>,
+    Vec<&'a MarkerObservation>,
+) {
+    (
+        entries.iter().map(|entry| &entry.observation).collect(),
+        markers.iter().map(|marker| &marker.observation).collect(),
+    )
+}
+
+impl SystemdAttemptRecovery {
+    /// How long admission must stay closed for the previous runtime's last
+    /// `MountImage` request, before the provider loops are swept (owner
+    /// decision D2), given the current boot and time `now`.
+    ///
+    /// `None` for an explicit "no request yet" marker, when no request of
+    /// this boot is younger than the activator deadline plus the server
+    /// margin, or when no marker exists and no directory stage does either.
+    ///
+    /// # Errors
+    /// [`SystemdAttemptRegistryError::ActivationMarker`] when a committed
+    /// directory stage exists but no marker does, or the marker lies in this
+    /// boot's future. Every owner creates the marker before its first commit,
+    /// so a missing one means the registry was altered.
+    pub(crate) fn activation_wait(&self, now: BootInstant) -> RegistryResult<Option<Duration>> {
+        let recorded = self
+            .markers
+            .iter()
+            .filter(|marker| !marker.is_temporary())
+            .find_map(|marker| marker.observation.marker);
+        let directory_stage = self.entries.iter().any(|entry| {
+            !entry.is_temporary()
+                && entry
+                    .intent()
+                    .is_some_and(|intent| intent.directory_identities().is_some())
+        });
+        match recorded {
+            Some(marker) => marker.remaining(now),
+            None if directory_stage => Err(SystemdAttemptRegistryError::ActivationMarker),
+            None => Ok(None),
+        }
+    }
+
+    /// The host's current boot ID and `CLOCK_MONOTONIC` time.
+    ///
+    /// # Errors
+    /// Returns a boot ID read failure, or `InvalidData` for a malformed one.
+    pub(crate) fn boot_instant() -> io::Result<BootInstant> {
+        activation::boot_instant()
+    }
+
+    /// Unlink every interrupted marker write, synchronizing the registry
+    /// after each. The committed marker is kept for the rest of this boot.
+    fn remove_temporary_markers(&self) -> RegistryResult<()> {
+        self.markers
+            .iter()
+            .filter(|marker| marker.is_temporary())
+            .try_for_each(|marker| super::delete_record(&self.directory, &marker.observation.name))
+    }
+}
+
+fn inventory(directory: &RegistryDirectory) -> RegistryResult<Inventory> {
     validate_directory(&directory.runtime, directory.owner, true)?;
     validate_directory(&directory.file, directory.owner, true)?;
     let mut entries = Vec::new();
+    let mut markers = Vec::new();
     for item in registry_io(|| Dir::read_from(&directory.file).map_err(std::io::Error::from))? {
         let item = registry_io(|| item.map_err(std::io::Error::from))?;
         let name = item
             .file_name()
             .to_str()
             .map_err(|_| SystemdAttemptRegistryError::InvalidIntent)?;
-        if name != "." && name != ".." {
-            entries.push(read_entry(directory, name)?);
+        match parse_marker_name(name) {
+            Some(temporary) => markers.push(read_marker(directory, name, temporary)?),
+            None if name != "." && name != ".." => entries.push(read_entry(directory, name)?),
+            None => {}
         }
     }
     entries.sort_unstable_by(|a, b| a.component().cmp(b.component()));
-    Ok(entries)
+    markers.sort_unstable_by(|a, b| a.observation.name.cmp(&b.observation.name));
+    Ok((entries, markers))
+}
+
+/// `Some(temporary)` for the committed marker or a canonical temporary write
+/// of it.
+fn parse_marker_name(name: &str) -> Option<bool> {
+    if name == activation::MARKER_NAME {
+        return Some(false);
+    }
+    name.strip_prefix(activation::TEMPORARY_PREFIX)
+        .and_then(|suffix| suffix.split_once('-'))
+        .filter(|(process, sequence)| {
+            canonical_positive::<u32>(process) && canonical_positive::<u64>(sequence)
+        })
+        .map(|_| true)
+}
+
+fn read_marker(
+    directory: &RegistryDirectory,
+    name: &str,
+    temporary: bool,
+) -> RegistryResult<MarkerEntry> {
+    let (file, device, inode, bytes) = read_file(directory, name)?;
+    let marker = activation::parse_content(&bytes, temporary)?;
+    Ok(MarkerEntry {
+        _file: file,
+        observation: MarkerObservation {
+            name: name.to_owned(),
+            marker,
+            device,
+            inode,
+            bytes,
+        },
+    })
 }
 
 fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<RegistryRecoveryEntry> {
-    let (attempt_id, temporary) = parse_name(name)?;
+    let (attempt_id, unit_name, temporary) = parse_name(name)?;
+    let (file, device, inode, bytes) = read_file(directory, name)?;
+    let intent = parse_content(&bytes, attempt_id, temporary)?;
+    Ok(RegistryRecoveryEntry {
+        _file: file,
+        observation: RegistryEntryObservation {
+            name: name.to_owned(),
+            attempt_id,
+            unit_name,
+            temporary,
+            intent,
+            device,
+            inode,
+            bytes,
+        },
+    })
+}
+
+/// Open one private, singly linked registry file and read its bounded
+/// content, with its device and inode.
+fn read_file(
+    directory: &RegistryDirectory,
+    name: &str,
+) -> RegistryResult<(File, u64, u64, Vec<u8>)> {
     let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
@@ -212,19 +437,7 @@ fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<Regis
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
     let bytes = read_record_content(&file, metadata.len())?;
-    let intent = parse_content(&bytes, attempt_id, temporary)?;
-    Ok(RegistryRecoveryEntry {
-        _file: file,
-        observation: RegistryEntryObservation {
-            name: name.to_owned(),
-            attempt_id,
-            temporary,
-            intent,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            bytes,
-        },
-    })
+    Ok((file, metadata.dev(), metadata.ino(), bytes))
 }
 
 // Each inventory entry was independently opened at offset zero. Read at most
@@ -242,7 +455,7 @@ fn read_record_content(file: &File, expected_length: u64) -> RegistryResult<Vec<
     Ok(bytes)
 }
 
-fn parse_name(name: &str) -> RegistryResult<([u8; 16], bool)> {
+fn parse_name(name: &str) -> RegistryResult<([u8; 16], TransientServiceUnitName, bool)> {
     let (component, temporary) = if let Some(rest) = name.strip_prefix(".planned-") {
         let (component, suffix) = rest
             .split_once('-')
@@ -270,7 +483,7 @@ fn parse_name(name: &str) -> RegistryResult<([u8; 16], bool)> {
     if unit.attempt_component() != component {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
-    Ok((attempt_id, temporary))
+    Ok((attempt_id, unit, temporary))
 }
 
 fn canonical_positive<T: std::str::FromStr + std::fmt::Display>(text: &str) -> bool {
@@ -286,10 +499,14 @@ fn parse_content(
     temporary: bool,
 ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
     let header = &bytes[..bytes.len().min(4)];
-    let size = [(b"PAI1", 52), (b"PAI2", 84), (b"PAI3", ROOT_RECORD_SIZE)]
-        .into_iter()
-        .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
-        .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
+    let size = [
+        (b"PAI1", 52),
+        (b"PAI2", DIRECTORY_RECORD_SIZE),
+        (b"PAI3", ROOT_RECORD_SIZE),
+    ]
+    .into_iter()
+    .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
+    .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
     if bytes.len() > size || !temporary && bytes.len() != size {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
@@ -344,10 +561,52 @@ mod tests {
     fn directory_record() -> TestResult<Vec<u8>> {
         let mut bytes = planned()?;
         bytes[..4].copy_from_slice(b"PAI2");
-        for value in [7_u64, 11, 7, 13] {
+        for value in [
+            7_u64,
+            11,
+            7,
+            13,
+            crate::FIXTURE_IMAGE.0,
+            crate::FIXTURE_IMAGE.1,
+        ] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         Ok(bytes)
+    }
+
+    #[test]
+    fn a_directory_stage_round_trips_its_identities_and_image() -> TestResult {
+        let (runtime, held) = fixture()?;
+        let bytes = directory_record()?;
+        assert_eq!(bytes.len(), 100);
+        write_record(runtime.path(), KEY, &bytes)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let intent = recovery.entries()[0]
+            .intent()
+            .ok_or("a complete directory stage")?;
+        assert_eq!(intent.planned().attempt_id(), [1; 16]);
+        assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
+        assert_eq!(intent.recorded_image(), Some(crate::FIXTURE_IMAGE));
+        assert!(intent.recorded_root().is_none());
+        // A zero image device or inode is refused.
+        for start in [84, 92] {
+            let (runtime, held) = fixture()?;
+            let mut zero = bytes.clone();
+            zero[start..start + 8].fill(0);
+            write_record(runtime.path(), KEY, &zero)?;
+            assert!(matches!(
+                SystemdAttemptRecovery::from_directory(held),
+                Err(SystemdAttemptRegistryError::InvalidIntent)
+            ));
+        }
+        // A planned-only stage records neither.
+        let (runtime, held) = fixture()?;
+        write_record(runtime.path(), KEY, &planned()?)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let intent = recovery.entries()[0].intent().ok_or("a planned stage")?;
+        assert_eq!(intent.recorded_image(), None);
+        assert_eq!(intent.directory_identities(), None);
+        Ok(())
     }
 
     fn root_record() -> TestResult<Vec<u8>> {
@@ -376,6 +635,7 @@ mod tests {
             .ok_or("complete root claims")?;
         assert_eq!(intent.planned().attempt_id(), [1; 16]);
         assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
+        assert_eq!(intent.recorded_image(), Some(crate::FIXTURE_IMAGE));
         assert_eq!(
             intent
                 .root
@@ -387,7 +647,7 @@ mod tests {
         );
         recovery.verify_unchanged()?;
         let mut changed = bytes;
-        changed[84] ^= 1;
+        changed[100] ^= 1;
         write_record(runtime.path(), KEY, &changed)?;
         assert!(recovery.verify_unchanged().is_err());
         Ok(())
@@ -397,36 +657,45 @@ mod tests {
     fn malformed_complete_root_claims_never_enter_recovery_inventory() -> TestResult {
         let (runtime, held) = fixture()?;
         let valid = root_record()?;
-        for value in [0, u64::from(u32::MAX)] {
+        // Device components at either end of `u32` decode to exactly that
+        // value, so the recorded generations carry the bound as a type fact.
+        for (value, component) in [(0, 0), (u64::from(u32::MAX), u32::MAX)] {
             let mut bytes = valid.clone();
-            for index in [1, 2, 6, 7, 9, 10] {
-                bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
+            for index in [1, 2, 4, 5, 7, 8] {
+                bytes[100 + index * 8..100 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
-            assert!(
-                read_entry(&held, KEY)?.intent().is_some(),
+            let devices = read_entry(&held, KEY)?
+                .intent()
+                .and_then(RecoveredAttemptIntent::recorded_generations)
+                .map(|[(mapper, _), (loop_device, _)]| [mapper, loop_device]);
+            assert_eq!(
+                devices,
+                Some([(component, component); 2]),
                 "device limit {value}"
             );
         }
-        for index in [0, 3, 5, 8, 11] {
+        // A zero mount ID, root inode or generation of PAI3, or a zero
+        // image device or inode of its PAI2 prefix (bytes 84 and 92).
+        for start in [100, 124, 148, 172, 84, 92] {
             let mut bytes = valid.clone();
-            bytes[84 + index * 8..84 + (index + 1) * 8].fill(0);
+            bytes[start..start + 8].fill(0);
             write_record(runtime.path(), KEY, &bytes)?;
-            assert!(read_entry(&held, KEY).is_err(), "zero word {index}");
+            assert!(read_entry(&held, KEY).is_err(), "zero word at {start}");
         }
         // Keep matching pairs coherent so device correlation cannot mask width.
-        for indices in [&[1, 6][..], &[2, 7], &[9], &[10]] {
+        for indices in [&[1, 4][..], &[2, 5], &[7], &[8]] {
             let mut bytes = valid.clone();
             for &index in indices {
-                bytes[84 + index * 8..84 + (index + 1) * 8]
+                bytes[100 + index * 8..100 + (index + 1) * 8]
                     .copy_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
             assert!(read_entry(&held, KEY).is_err(), "device words {indices:?}");
         }
-        for index in [6, 7] {
+        for index in [4, 5] {
             let mut wrong_mapper = valid.clone();
-            wrong_mapper[84 + index * 8..84 + (index + 1) * 8]
+            wrong_mapper[100 + index * 8..100 + (index + 1) * 8]
                 .copy_from_slice(&254_u64.to_le_bytes());
             write_record(runtime.path(), KEY, &wrong_mapper)?;
             assert!(read_entry(&held, KEY).is_err(), "mapper word {index}");
@@ -524,7 +793,7 @@ mod tests {
         drop(
             registry
                 .commit_planned(&PlannedAttemptIntent::new([2; 16], [2; 32])?)?
-                .prepare_directory()?,
+                .prepare_fixture_directory()?,
         );
         assert!(SystemdAttemptRecovery::open().is_err());
         drop(registry);
@@ -535,7 +804,7 @@ mod tests {
             let (result, observed) = with_io_fault(Some(fail_at), SystemdAttemptRecovery::open);
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 2);
+            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 3);
         }
         let recovery = SystemdAttemptRecovery::open()?;
         assert_eq!(recovery.entries().len(), 2);
@@ -618,7 +887,7 @@ mod tests {
             write_record(directory.path(), &name, &bytes[..length])?;
             assert!(SystemdAttemptRecovery::from_directory(held).is_err());
         }
-        for length in 52..84 {
+        for length in 52..100 {
             let (directory, held) = fixture()?;
             let mut bytes = directory_record()?;
             bytes[20..52].fill(0);
@@ -707,7 +976,7 @@ mod tests {
                 "accepted {name}"
             );
         }
-        for fault in 0..8 {
+        for fault in 0..9 {
             let (directory, held) = fixture()?;
             let mut bytes = directory_record()?;
             match fault {
@@ -717,7 +986,9 @@ mod tests {
                 3 => bytes[20..52].fill(0),
                 4 => bytes[68..76].copy_from_slice(&8_u64.to_le_bytes()),
                 5 => bytes[76..84].copy_from_slice(&11_u64.to_le_bytes()),
+                // Oversized, or truncated to a stage without the image.
                 6 => bytes.push(0),
+                7 => bytes.truncate(84),
                 _ => bytes[..4].copy_from_slice(b"PAI1"),
             }
             write_record(directory.path(), KEY, &bytes)?;
@@ -778,6 +1049,133 @@ mod tests {
         let recovery = SystemdAttemptRecovery::from_directory(held)?;
         assert!(recovery.entries().is_empty());
         recovery.verify_unchanged()?;
+        Ok(())
+    }
+
+    /// An independent PAA1 byte oracle: a request sent on `boot`, `seconds`
+    /// after it started.
+    fn marker(boot: u8, seconds: u64) -> Vec<u8> {
+        [
+            b"PAA1".as_slice(),
+            &[boot; 16],
+            &seconds.to_le_bytes(),
+            &0_u64.to_le_bytes(),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn the_recovery_clock_is_the_host_boot_instant() -> TestResult {
+        let (boot, now) = SystemdAttemptRecovery::boot_instant()?;
+        let (host, later) = activation::boot_instant()?;
+        assert_eq!(boot, host);
+        assert!(Duration::ZERO < now && now <= later);
+        Ok(())
+    }
+
+    #[test]
+    fn only_canonical_marker_names_are_activation_markers() {
+        assert_eq!(parse_marker_name("activation"), Some(false));
+        assert_eq!(parse_marker_name(".activation-1-2"), Some(true));
+        for name in [
+            ".activation-0-1",
+            ".activation-1-01",
+            ".activation-1",
+            ".activation-1-x",
+            ".activation-1-2-3",
+            ".activation-4294967296-1",
+            "activation2",
+            ".planned-activation-1-1",
+        ] {
+            assert_eq!(parse_marker_name(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn markers_are_inventoried_apart_from_attempts_and_their_change_is_detected() -> TestResult {
+        let (directory, held) = fixture()?;
+        write_record(directory.path(), "activation", &marker(7, 5))?;
+        write_record(directory.path(), ".activation-1-2", b"PA")?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        assert!(recovery.entries().is_empty());
+        let temporary = recovery
+            .markers
+            .iter()
+            .map(MarkerEntry::is_temporary)
+            .collect::<Vec<_>>();
+        assert_eq!(temporary, [true, false]);
+        recovery.verify_unchanged()?;
+        write_record(directory.path(), "activation", &marker(7, 6))?;
+        assert!(matches!(
+            recovery.verify_unchanged(),
+            Err(SystemdAttemptRegistryError::ReconciliationRequired)
+        ));
+        // A malformed marker or a noncanonical marker name is refused.
+        for (name, bytes) in [
+            ("activation", &marker(7, 5)[..35]),
+            (".activation-01-2", b"PA".as_slice()),
+        ] {
+            let (directory, held) = fixture()?;
+            write_record(directory.path(), name, bytes)?;
+            assert!(matches!(
+                SystemdAttemptRecovery::from_directory(held),
+                Err(SystemdAttemptRegistryError::InvalidIntent)
+            ));
+        }
+        // So is a marker with unsafe metadata.
+        let (directory, held) = fixture()?;
+        write_record(directory.path(), "activation", &marker(7, 5))?;
+        fs::set_permissions(
+            directory.path().join("registry/activation"),
+            fs::Permissions::from_mode(0o644),
+        )?;
+        assert!(matches!(
+            SystemdAttemptRecovery::from_directory(held),
+            Err(SystemdAttemptRegistryError::UnsafeRegistry)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_directory_stage_without_a_committed_marker_fails_closed() -> TestResult {
+        let temporary_key = format!(".planned-{KEY}-1-1");
+        // The intent record, the marker file, and the wait, `None` when the
+        // marker is missing or contradictory.
+        let cases = [
+            (KEY, directory_record()?, None, None),
+            (KEY, planned()?, None, Some(None)),
+            (
+                temporary_key.as_str(),
+                directory_record()?,
+                None,
+                Some(None),
+            ),
+            (KEY, directory_record()?, Some(".activation-1-1"), None),
+            (
+                KEY,
+                directory_record()?,
+                Some("activation"),
+                Some(Some(Duration::from_mins(1))),
+            ),
+        ];
+        for (name, record, marker_name, expected) in cases {
+            let (directory, held) = fixture()?;
+            write_record(directory.path(), name, &record)?;
+            if let Some(marker_name) = marker_name {
+                write_record(directory.path(), marker_name, &marker(7, 90))?;
+            }
+            let wait = SystemdAttemptRecovery::from_directory(held)?
+                .activation_wait(([7; 16], Duration::from_secs(100)));
+            assert_eq!(
+                wait.as_ref().ok().copied(),
+                expected,
+                "{name} {marker_name:?}"
+            );
+            assert!(
+                expected.is_some()
+                    || matches!(wait, Err(SystemdAttemptRegistryError::ActivationMarker))
+            );
+        }
         Ok(())
     }
 }

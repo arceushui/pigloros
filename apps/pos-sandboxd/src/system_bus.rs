@@ -39,6 +39,8 @@ pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
 mod unit_teardown;
 #[cfg(target_os = "linux")]
 pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
+#[cfg(all(test, target_os = "linux"))]
+pub use unit_teardown::{TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop};
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,6 +305,10 @@ pub enum SystemdTransientUnitTransportError {
     /// The exact attempt unit could not be identified at cgroup binding time.
     #[error("systemd attempt-unit identity changed before cgroup binding")]
     CgroupUnitMismatch,
+    /// A unit without a cgroup is not inactive or failed, so its processes
+    /// cannot be proved absent.
+    #[error("a systemd attempt unit without a cgroup is not inactive or failed")]
+    CgrouplessUnitActive,
     /// The typed service `ControlGroup` property could not be read.
     #[error("failed to read the exact systemd attempt ControlGroup")]
     CgroupReadback(#[source] zbus::Error),
@@ -357,7 +363,7 @@ impl SystemdTransientUnitTransport {
         Self::from_connection(connection).await
     }
 
-    async fn from_connection(
+    pub(crate) async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {
         let subscription = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
@@ -458,18 +464,30 @@ impl SystemdTransientUnitTransport {
         verified: &SystemdVerifiedStart,
         root: CgroupRoot,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        self.bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
+            .await
+    }
+
+    /// Bind the cgroup of the unit `unit_name` loaded at `unit_path`, checking
+    /// the manager-to-cgroup mapping in both directions around the kernel open.
+    async fn bind_unit_cgroup(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        root: CgroupRoot,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let manager = ManagerProxy::new(&self.connection)
             .await
             .map_err(SystemdTransientUnitTransportError::Proxy)?;
         let current_unit = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit != verified.unit_path {
+        if current_unit != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let service = ServiceProxy::builder(&self.connection)
-            .path(verified.unit_path.clone())
+            .path(unit_path.clone())
             // The second ControlGroup read must reach systemd, not a proxy cache.
             .cache_properties(CacheProperties::No)
             .build()
@@ -483,15 +501,11 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(path.clone())
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse != verified.unit_path {
+        if reverse != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
-        let bound = BoundAttemptCgroup::open(
-            root,
-            verified.unit_name.clone(),
-            verified.unit_path.clone(),
-            path.clone(),
-        )?;
+        let bound =
+            BoundAttemptCgroup::open(root, unit_name.clone(), unit_path.clone(), path.clone())?;
         let reread = service
             .control_group()
             .await
@@ -503,14 +517,14 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(reread)
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse_again != verified.unit_path {
+        if reverse_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let current_unit_again = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit_again != verified.unit_path {
+        if current_unit_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         Ok(bound)
@@ -1135,6 +1149,9 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 mod tests;
 
 #[cfg(test)]
+pub use test_support::peer_connections;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test_support {
     use zbus::{
@@ -1143,7 +1160,10 @@ mod test_support {
     };
 
     /// Connect authenticated peers after registering the fixture's interfaces.
-    pub(super) async fn peer_connections(
+    ///
+    /// # Errors
+    /// Returns a connection setup failure.
+    pub async fn peer_connections(
         configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
     ) -> zbus::Result<(Connection, Connection)> {
         let guid = Guid::generate();

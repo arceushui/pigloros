@@ -66,7 +66,7 @@ mod cases {
         assert_eq!(fs::read(&path)?, expected);
         assert_eq!(
             fs::read_dir(tree.runtime.path().join("registry"))?.count(),
-            1
+            2
         );
 
         detach_owned(root, &kernel, &tree.prepared).await?;

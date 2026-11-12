@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use zeroize::Zeroize;
 
 use pos_core::PluginId;
 use pos_plugin_release::ContentValidationV1;
@@ -23,12 +24,29 @@ pub const MAX_RETAINED_RECEIPTS_V1: usize = 256;
 ///
 /// Non-durable: the adapter holds it in memory and commits it only after the
 /// whole scheduled batch commits. It is lost on restart.
+/// Each owned copy clears its schema and bytes on drop. Consumers moving
+/// individual fields must transfer ownership without retaining a private copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityStateV1 {
     /// The state schema digest.
     pub schema: [u8; 32],
     /// The canonical state bytes, at most 1 MiB.
     pub bytes: Vec<u8>,
+}
+
+impl Zeroize for CommunityStateV1 {
+    fn zeroize(&mut self) {
+        self.schema.zeroize();
+        self.bytes.zeroize();
+    }
+}
+
+impl Drop for CommunityStateV1 {
+    fn drop(&mut self) {
+        self.zeroize();
+        #[cfg(test)]
+        tests::observe_state_erasure(self);
+    }
 }
 
 /// The host-measured output usage of one staged invocation (ADR-068 R4 4.1).
@@ -422,3 +440,6 @@ impl CommunityPluginHandleV1 {
             .map(|()| self.shared.clear())
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests;

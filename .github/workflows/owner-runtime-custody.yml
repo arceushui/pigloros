@@ -1,0 +1,57 @@
+name: owner-runtime-custody
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/owner-runtime-custody.yml
+      - scripts/check_owner_runtime_custody_policy.py
+      - scripts/test_check_owner_runtime_custody_policy.py
+      - scripts/test_ci_workflow_policy.py
+      - scripts/owner_bridge_runtime.py
+      - scripts/test_owner_bridge_runtime.py
+      - scripts/prepare-owner-runtime.ps1
+      - crates/pos-owner-bridge-windows/runtime-manifest.v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce retained runtime workflow policy
+        run: python scripts/check_owner_runtime_custody_policy.py
+      - name: Test retained runtime workflow policy
+        run: python scripts/test_check_owner_runtime_custody_policy.py
+      - name: Test retained runtime manifest contract
+        run: python scripts/test_owner_bridge_runtime.py
+
+  verify-runtime:
+    needs: manifest-contract
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify CAB, signer, timestamp, layout and every extracted file
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-runtime-evidence"
+      - name: Retain the verified custody candidate and public provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-runtime-custody-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/owner-runtime-evidence/*.cab
+            ${{ runner.temp }}/owner-runtime-evidence/*.json
+            ${{ runner.temp }}/owner-runtime-evidence/*.signature.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

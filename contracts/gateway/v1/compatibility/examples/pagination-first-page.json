@@ -1,0 +1,39 @@
+{
+  "name": "pagination-first-page",
+  "operation_id": "listEvents",
+  "request": {
+    "query": {
+      "from_seq": 0,
+      "limit": 1
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "events": [
+        {
+          "id": "01JC0GATEWAYEXAMPEVENT0001",
+          "entity": "01JC0GATEWAYF1XTVREACT0R00",
+          "event_type": "world.action.v1",
+          "seq": 1,
+          "payload": [
+            "01JC0GATEWAYF1XTVREACT0R00",
+            "01JC0GATEWAYF1XTVREB0DY000",
+            1,
+            1,
+            "impulse",
+            [
+              0.5,
+              0.25
+            ],
+            0
+          ],
+          "payload_hex": "87"
+        }
+      ],
+      "next_from_seq": 2,
+      "next_cursor": "v1.abababababababababababababababababababababababababababababababab.01JC0GATEWAYEXAMPTMESH0000.2"
+    }
+  }
+}

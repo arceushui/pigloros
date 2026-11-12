@@ -4,7 +4,7 @@ A simulation world you join to preview your decisions.
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/arceushui/pigloros)
 
-> **Current stage:** Pre-product. The product MVP is not shipped yet. Wave 9 is the acceptance target: an independently built third-party client — with the first reference acceptance client being a real 3D client — must operate PiglorOS through documented Gateway contracts, using its own preferences/options and Timeline/Scenario Room inputs, receiving a decision preview, submitting actions, reading committed Events, and exercising Replay/Fork. The current Gateway is only a local-first foundation; its default process has create/poll routes but no host-bound authority adapter, and the public decision-preview, Replay/Fork, and live 3D contracts remain planned. The old hard-coded `pos-mvp` decision demo was removed and is not counted as an MVP. **Prediction Ledger** is already delivered (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
+> **Current stage:** Pre-product. The product MVP is not shipped yet. Wave 9 is the acceptance target: an independently built third-party client — with the first reference acceptance client being a real 3D client — must operate PiglorOS through documented Gateway contracts, using its own preferences/options and Timeline/Scenario Room inputs, receiving a decision preview, submitting actions, reading committed Events, and exercising Replay/Fork. The current Gateway is only a local-first foundation; its default process has create/poll routes but no host-bound authority adapter. Its language-neutral [Gateway v1 contract](contracts/gateway/v1/README.md) describes the served routes and, as Draft operations not yet served, the decision-preview and Replay/Fork resource families; the live 3D client connection remains planned. The old hard-coded `pos-mvp` decision demo was removed and is not counted as an MVP. **Prediction Ledger** is already delivered (#58: public page, TOML curated tier + EventStore live tier, CLI, gateway write route, Docker/CI/CD).
 
 ## Getting started
 
@@ -19,10 +19,24 @@ timeline_id="$(curl -sS -X POST http://127.0.0.1:8080/v1/timelines \
   -H 'content-type: application/json' \
   -d '{"name":"client-owned-room"}' | jq -r '.id')"
 test -n "$timeline_id" && test "$timeline_id" != "null"
-curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?from_seq=0&limit=100"
+page="$(curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?from_seq=0&limit=100")"
+# Continue with the opaque cursor until next_from_seq is null (Timeline Order, never wall time).
+cursor="$(jq -r '.next_cursor // empty' <<<"$page")"
+if [ -n "$cursor" ]; then
+  curl -sS "http://127.0.0.1:8080/v1/timelines/$timeline_id/events?cursor=$cursor"
+fi
 
-# The action route requires an authenticated principal and capability; the
-# default local process intentionally fails closed. This smoke test is not the product client.
+# The action route requires an Idempotency-Key and an authenticated principal and
+# capability; the default local process intentionally fails closed with an RFC 9457
+# problem (`"code": "unauthenticated"`). Branch on `code`, never on `detail`.
+jq '.request.body' contracts/gateway/v1/examples/positive-submit-action.json |
+  curl -sS -X POST "http://127.0.0.1:8080/v1/timelines/$timeline_id/actions" \
+    -H 'content-type: application/json' -H 'Idempotency-Key: device-1-1' -d @-
+
+# An unsupported API major fails closed: 400 application/problem+json, code unsupported-version.
+curl -sS -X POST http://127.0.0.1:8080/v2/timelines \
+  -H 'content-type: application/json' -d '{"name":"x"}'
+# This smoke test is not the product client.
 
 # Optional: durable store + experiment via the CLI (`pos` binary)
 cargo run -p pos-cli --locked -- store init --path /tmp/piglor.db
@@ -94,7 +108,7 @@ pigloros/
   apps/
     pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, Fork, library backtest
     pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge (timeline replay/snapshot/compare currently unavailable)
-    piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69)
+    piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69); v1 contract in contracts/gateway/v1
     piglor-ledger/         # Wave 4 ✅ — Prediction Ledger CLI + static renderer (ADR-017 / #58)
     piglor-world-client/  # Engineering-only 3D fixture shell; not Gateway-backed MVP evidence
   plugins/

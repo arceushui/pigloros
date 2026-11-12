@@ -52,6 +52,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import generate_pmf1_golden_vectors as golden  # noqa: E402
+import ustar  # noqa: E402
 
 FIXTURES = ROOT / "fixtures/conformance"
 COMPONENTS = ROOT / "plugins/community/examples/compatibility-prototype/fixtures"
@@ -581,24 +582,6 @@ ROOMY_LOG_CALLS = 24
 ROOMY_LOG_BYTES = 256
 
 
-def tar_archive(name: str, data: bytes) -> bytes:
-    """A deterministic one-member ustar archive (the media type of the WIT layer is a tar)."""
-    header = bytearray(512)
-    header[0 : len(name)] = name.encode("ascii")
-    header[100:108] = b"0000644\0"
-    header[108:116] = b"0000000\0"
-    header[116:124] = b"0000000\0"
-    header[124:136] = f"{len(data):011o}".encode("ascii") + b"\0"
-    header[136:148] = b"00000000000\0"
-    header[148:156] = b"        "
-    header[156:157] = b"0"
-    header[257:263] = b"ustar\0"
-    header[263:265] = b"00"
-    header[148:156] = f"{sum(header):06o}".encode("ascii") + b"\0 "
-    padding = (-len(data)) % 512
-    return bytes(header) + data + bytes(padding) + bytes(1024)
-
-
 @lru_cache(maxsize=None)
 def component(name: str) -> bytes:
     data = (COMPONENTS / name).read_bytes()
@@ -613,7 +596,7 @@ def component(name: str) -> bytes:
 
 @lru_cache(maxsize=None)
 def wit_archive() -> bytes:
-    return tar_archive("pigloros-plugin.wit", WIT_PATH.read_bytes())
+    return ustar.archive([("pigloros-plugin.wit", WIT_PATH.read_bytes())])
 
 
 def default_capability(required: bool) -> tuple:

@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     num::NonZeroU64,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -22,20 +23,12 @@ use rustix::{
 };
 
 use super::{cmdline, AttachmentKernel};
-use crate::ImageActivationError;
+use crate::{ImageActivationError, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE};
 
 mod absence;
 
 /// The loop backing path is opened only as a path, never through a symlink.
 pub(super) const BACKING_OPEN: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
-/// The attempt root is reopened only as a directory path, beneath the held
-/// attempt directory and never through a symlink.
-pub(super) const ATTEMPT_ROOT_OPEN: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-pub(super) const ATTEMPT_ROOT_RESOLVE: ResolveFlags =
-    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 /// The admitted executable is opened read-only (`O_RDONLY` is zero) and
 /// non-blocking, so a FIFO cannot stall the open before the regular-file check.
 pub(super) const EXECUTABLE_OPEN: OFlags = OFlags::CLOEXEC.union(OFlags::NONBLOCK);
@@ -230,6 +223,87 @@ impl HostKernel {
     }
 }
 
+impl HostKernel {
+    /// Whether no bound loop device is backed by a file in the `images`
+    /// directory.
+    ///
+    /// Every `loop<N>` whole device under `/sys/block` is read from sysfs; no
+    /// block device is opened. An unbound device has no `loop` directory and
+    /// is skipped. `None` when `images` cannot be resolved, the block class
+    /// cannot be listed or a bound device's backing file is unreadable or
+    /// empty. See `provider_backed` for how a backing file is matched.
+    pub(super) fn provider_loops_absent(&self, images: &Path) -> Option<bool> {
+        image_directory(images).zip(self.loop_backings()).map(
+            |((canonical, identity), backings)| {
+                let prefixes = [images, canonical.as_path()];
+                backings
+                    .iter()
+                    .all(|printed| !provider_backed(printed, prefixes, identity))
+            },
+        )
+    }
+
+    /// The printed backing file of every bound `loop<N>` whole device.
+    fn loop_backings(&self) -> Option<Vec<String>> {
+        let block = self.sys.join("block");
+        fs::read_dir(&block)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.ok().map(|entry| entry.file_name()))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .and_then(|names| {
+                names
+                    .iter()
+                    // A name that is not UTF-8 is not `loop<N>`.
+                    .filter_map(|name| name.to_str())
+                    .filter(|name| name.strip_prefix("loop").is_some_and(all_digits))
+                    .map(|name| block.join(name).join("loop"))
+                    // Skip unbound devices; an unobservable `loop` entry is
+                    // kept as an error and refuses below.
+                    .filter_map(|bound| {
+                        fs::exists(&bound)
+                            .map(|is_bound| is_bound.then_some(bound))
+                            .transpose()
+                    })
+                    .map(|bound| {
+                        bound.ok().and_then(|bound| {
+                            read_text(&bound.join("backing_file")).filter(|path| !path.is_empty())
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+    }
+}
+
+/// The canonical image directory and its device and inode.
+fn image_directory(images: &Path) -> Option<(PathBuf, (u64, u64))> {
+    fs::canonicalize(images).ok().and_then(|canonical| {
+        fs::metadata(&canonical)
+            .ok()
+            .map(|metadata| (canonical, (metadata.dev(), metadata.ino())))
+    })
+}
+
+/// Whether a loop's printed backing file is a provider image.
+///
+/// The kernel prints the backing file's path as seen from this namespace. It
+/// is a provider image when it lies beneath either the fixed or the canonical
+/// image directory, component by component, or when its parent directory is
+/// the image directory itself by device and inode, as through a bind mount.
+/// The ` (deleted)` the kernel appends to an unlinked file changes only the
+/// final component, so every rule still holds for a deleted image. Only
+/// `stat` is used; nothing is opened.
+fn provider_backed(printed: &str, prefixes: [&Path; 2], directory: (u64, u64)) -> bool {
+    let path = Path::new(printed);
+    prefixes.iter().any(|prefix| path.starts_with(prefix))
+        || path
+            .parent()
+            .and_then(|parent| fs::metadata(parent).ok())
+            .is_some_and(|parent| (parent.dev(), parent.ino()) == directory)
+}
+
 impl AttachmentKernel for HostKernel {
     fn vetoes_userspace_verity(&self) -> bool {
         fs::read(self.proc.join("cmdline"))
@@ -279,6 +353,33 @@ impl AttachmentKernel for HostKernel {
             mapper: attached.map(|node| self.mapper(node.device)),
             executable: executable_of(mount, executable),
         }
+    }
+
+    fn provider_image(&self, loop_name: &str, images: &Path) -> bool {
+        image_directory(images)
+            .zip(
+                read_text(
+                    &self
+                        .sys
+                        .join("block")
+                        .join(loop_name)
+                        .join("loop/backing_file"),
+                )
+                .filter(|printed| !printed.is_empty()),
+            )
+            .is_some_and(|((canonical, identity), printed)| {
+                provider_backed(&printed, [images, canonical.as_path()], identity)
+            })
+    }
+
+    fn has_submounts(&self, mount_id: u64) -> Option<bool> {
+        read_text(&self.proc.join("self/mountinfo")).and_then(|mountinfo| {
+            mountinfo
+                .lines()
+                .map(parse_entry)
+                .collect::<Option<Vec<_>>>()
+                .map(|entries| entries.iter().any(|entry| entry.parent_id == mount_id))
+        })
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {

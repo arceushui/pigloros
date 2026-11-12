@@ -1,0 +1,25 @@
+{
+  "name": "draft-option-spec-not-found",
+  "operation_id": "getOptionSpecRevision",
+  "request": {
+    "path": {
+      "option_spec_id": "01JC0GATEWAYW9QPT10N00001A",
+      "revision": 2
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "not found or unavailable",
+      "instance": "/v1/option-specs/{option_spec_id}/revisions/{revision}",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

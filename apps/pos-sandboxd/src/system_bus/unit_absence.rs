@@ -33,6 +33,12 @@ impl SystemdAttemptUnitAbsenceObservation {
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
         &self.unit_name
     }
+
+    /// An observation for registry tests that have no manager to query.
+    #[cfg(test)]
+    pub(crate) const fn for_test(unit_name: TransientServiceUnitName) -> Self {
+        Self { unit_name }
+    }
 }
 
 impl SystemdTransientUnitTransport {

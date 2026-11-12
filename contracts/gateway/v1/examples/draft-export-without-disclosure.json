@@ -1,0 +1,33 @@
+{
+  "name": "draft-export-without-disclosure",
+  "operation_id": "createExport",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-16",
+      "content-type": "application/json"
+    },
+    "body": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "include": [
+        "repro-manifest",
+        "events",
+        "trace"
+      ],
+      "external_copy_acknowledged": false
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "the external-copy disclosure is not acknowledged",
+      "instance": "/v1/exports",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

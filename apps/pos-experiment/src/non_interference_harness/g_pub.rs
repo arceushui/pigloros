@@ -10,9 +10,9 @@
 //!   Timeline export ([`export_timeline_own`]) and the EAI1 attempt the
 //!   evaluator streams to a public subject adapter.
 //!
-//! `NI-ARCHIVE-009` moved to slice N1b (#1284): it has no capture adapter
-//! here, so [`execute_g_pub_case_v1`] reports its cases as non-executed
-//! `Missing` and never runs them.
+//! `NI-ARCHIVE-009` (slice N1b, #1284) uses the same subject, seam and
+//! denied sibling; its RVA1 run-evidence archive capture (ADR-127) is in
+//! [`super::g_archive`].
 //!
 //! # Subject
 //!
@@ -105,8 +105,8 @@ use tower::ServiceExt;
 
 use super::capture::{digest, encode, event_stream, ordinal, text, uint, variant_name, SurfacesV1};
 use super::{
-    hex, serve_non_interference_local_subject_v1, session::recorded, NonInterferenceHarnessV1,
-    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceRunOutcomeV1,
+    hex, serve_non_interference_local_subject_v1, session::recorded,
+    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
     NonInterferenceSessionObservationV1, NonInterferenceSessionSubjectV1,
 };
 use crate::{Experiment, ExperimentConfig, StopCondition};
@@ -115,7 +115,8 @@ use crate::{Experiment, ExperimentConfig, StopCondition};
 pub const G_PUB_PUBLIC_FIXTURE_ID_V1: &str = "NI-PUBLIC-006";
 /// The evaluator-input row.
 pub const G_PUB_EVAL_FIXTURE_ID_V1: &str = "NI-EVAL-007";
-/// The archive row, deferred to slice N1b (#1284).
+/// The run-evidence archive row (slice N1b, #1284; ADR-127), captured by
+/// [`super::g_archive`].
 pub const G_PUB_ARCHIVE_FIXTURE_ID_V1: &str = "NI-ARCHIVE-009";
 /// The G-PUB rows in matrix order.
 pub const G_PUB_FIXTURE_IDS_V1: [&str; 3] = [
@@ -183,25 +184,6 @@ pub fn g_pub_fixture_v1(
     )
 }
 
-/// Run one G-PUB case. An `NI-ARCHIVE-009` case is not run: it is
-/// non-executed `Missing` until slice N1b (#1284).
-#[must_use]
-pub fn execute_g_pub_case_v1(
-    harness: &mut NonInterferenceHarnessV1,
-    fixture: &NonInterferenceFixturePairV1,
-) -> NonInterferenceRunOutcomeV1 {
-    if fixture.fixture_id == G_PUB_ARCHIVE_FIXTURE_ID_V1 {
-        NonInterferenceRunOutcomeV1::NonExecuted {
-            fixture_id: fixture.fixture_id.clone(),
-            variant: fixture.variant,
-            mode: fixture.mode,
-            cause: NonInterferenceNonExecutedCauseV1::Missing,
-        }
-    } else {
-        harness.execute_case(fixture)
-    }
-}
-
 /// The Society Signals the Driver emits on every Tick, derived from the
 /// permitted input alone.
 #[must_use]
@@ -263,13 +245,29 @@ pub fn g_pub_capture_v1(
     events: &[Event],
     store: &Path,
 ) -> Result<NonInterferenceRawCaptureV1, NonInterferenceNonExecutedCauseV1> {
-    match run.fixture_id {
-        G_PUB_PUBLIC_FIXTURE_ID_V1 => public_surfaces(run, events, store),
-        G_PUB_EVAL_FIXTURE_ID_V1 => evaluator_surfaces(run, events, store),
-        _ => Err(NonInterferenceNonExecutedCauseV1::Missing),
-    }
-    .map(|surfaces| surfaces.into_capture(run.fixture_id))
+    SURFACE_ADAPTERS
+        .iter()
+        .find(|(fixture_id, _)| *fixture_id == run.fixture_id)
+        .map_or(
+            Err(NonInterferenceNonExecutedCauseV1::Missing),
+            |(_, adapter)| adapter(run, events, store),
+        )
+        .map(|surfaces| surfaces.into_capture(run.fixture_id))
 }
+
+/// One G-PUB row's capture adapter.
+type SurfaceAdapterV1 =
+    fn(&GPubRunV1<'_>, &[Event], &Path) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1>;
+
+/// The capture adapter of each G-PUB row.
+const SURFACE_ADAPTERS: [(&str, SurfaceAdapterV1); 3] = [
+    (G_PUB_PUBLIC_FIXTURE_ID_V1, public_surfaces),
+    (G_PUB_EVAL_FIXTURE_ID_V1, evaluator_surfaces),
+    (
+        G_PUB_ARCHIVE_FIXTURE_ID_V1,
+        super::g_archive::archive_surfaces,
+    ),
+];
 
 /// Serve one Local run of the G-PUB subject in a fresh host process whose
 /// working directory is `directory`.
@@ -514,6 +512,22 @@ fn evaluator_surfaces(
     events: &[Event],
     store: &Path,
 ) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1> {
+    seam_export(run, events, store)
+        .and_then(|export| {
+            export_record(&export)
+                .and_then(|(stream, exported)| evaluator_records(run, &stream, &encode(&exported)))
+        })
+        .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
+}
+
+/// Import the mode's Events into the seam store at `store`, beside the
+/// denied sibling, and export the subject Timeline with
+/// [`export_timeline_own`].
+pub(super) fn seam_export(
+    run: &GPubRunV1<'_>,
+    events: &[Event],
+    store: &Path,
+) -> Option<TimelineExport> {
     pos_store::sqlite::SqliteStore::open(&store.to_string_lossy())
         .ok()
         .and_then(|mut store| {
@@ -527,11 +541,6 @@ fn evaluator_surfaces(
                     })
                 })
         })
-        .and_then(|export| {
-            export_record(&export)
-                .and_then(|(stream, exported)| evaluator_records(run, &stream, &encode(&exported)))
-        })
-        .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
 }
 
 /// Write the denied sibling and the subject Timeline in the seam order and
