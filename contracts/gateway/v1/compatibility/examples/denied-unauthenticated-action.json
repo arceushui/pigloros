@@ -1,0 +1,40 @@
+{
+  "name": "denied-unauthenticated-action",
+  "operation_id": "submitAction",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "device-1-42",
+      "content-type": "application/json"
+    },
+    "body": {
+      "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "capability": "world.action.v1.submit",
+      "payload": {
+        "actor_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+        "body_entity_id": "01JC0GATEWAYF1XTVREB0DY000",
+        "action_kind": "impulse",
+        "params": [
+          0.5,
+          0.25
+        ],
+        "action_scope": 0,
+        "catalogue_version": 1,
+        "tick": 1
+      }
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 401,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unauthenticated",
+      "title": "Unauthenticated",
+      "status": 401,
+      "detail": "human action authorization is unavailable",
+      "instance": "/v1/timelines/{timeline_id}/actions",
+      "code": "unauthenticated",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

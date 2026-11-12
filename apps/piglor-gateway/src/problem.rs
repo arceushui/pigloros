@@ -11,7 +11,7 @@ use axum::{
         rejection::{JsonRejection, PathRejection},
         FromRequest, FromRequestParts, MatchedPath, Path, Request,
     },
-    http::{header, request::Parts, HeaderValue, StatusCode},
+    http::{header, request::Parts, uri::PathAndQuery, HeaderValue, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -247,13 +247,43 @@ pub(crate) async fn problem_instance(request: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(problem.body(&instance).to_string()))
 }
 
-/// The answer to a path no route serves; it does not reveal whether a resource exists.
-pub(crate) async fn not_routed() -> ProblemV1 {
-    ProblemV1::new(
-        ProblemCodeV1::NotFoundOrUnavailable,
-        StatusCode::NOT_FOUND,
-        "resource not found",
-    )
+/// The only API major this Gateway serves; it is the first path segment of every v1 route.
+const SERVED_API_MAJOR: &str = "1";
+
+/// The answer to a path no route serves; it does not reveal whether a resource exists. A path
+/// under another API major (`/v2/...`) fails closed as `unsupported-version`, so a client can
+/// tell an unsupported version from a missing resource and negotiate explicitly.
+pub(crate) async fn not_routed(uri: Uri) -> ProblemV1 {
+    let target = uri.into_parts().path_and_query;
+    unrouted(target.as_ref().map_or("/", PathAndQuery::path))
+}
+
+/// The problem of an unrouted request `path`.
+fn unrouted(path: &str) -> ProblemV1 {
+    if names_unsupported_api_major(path) {
+        ProblemV1::new(
+            ProblemCodeV1::UnsupportedVersion,
+            StatusCode::BAD_REQUEST,
+            "unsupported API major version",
+        )
+    } else {
+        ProblemV1::new(
+            ProblemCodeV1::NotFoundOrUnavailable,
+            StatusCode::NOT_FOUND,
+            "resource not found",
+        )
+    }
+}
+
+/// Whether the first path segment is `v<digits>` naming a major other than the served one.
+fn names_unsupported_api_major(path: &str) -> bool {
+    path.strip_prefix("/v")
+        .map(|rest| rest.split_once('/').map_or(rest, |(major, _)| major))
+        .is_some_and(|major| {
+            !major.is_empty()
+                && major.bytes().all(|byte| byte.is_ascii_digit())
+                && major != SERVED_API_MAJOR
+        })
 }
 
 /// The answer to a served path called with a method it does not serve.
@@ -351,6 +381,23 @@ mod tests {
         assert_eq!(body["code"], "internal-safe-failure");
         assert_eq!(body["schema_id"], PROBLEM_SCHEMA_ID);
         assert_eq!(body["retryable"], true);
+    }
+
+    /// The fixture `scripts/test_check_gateway_contract.py` also checks the contract checker
+    /// against, so the fallback and the checker agree on every unrouted answer.
+    const UNROUTED_PATHS: &str = include_str!("../../../scripts/data/gateway_unrouted_paths.json");
+
+    #[test]
+    fn only_another_numeric_api_major_is_an_unsupported_version() {
+        let fixture: serde_json::Value = serde_json::from_str(UNROUTED_PATHS).unwrap_or_default();
+        let cases = fixture["cases"].as_array().cloned().unwrap_or_default();
+        assert!(cases.len() > 4);
+        for case in cases {
+            let path = case["path"].as_str().unwrap_or_default();
+            let problem = unrouted(path);
+            assert_eq!(problem.code().as_str(), case["code"], "{path}");
+            assert_eq!(problem.status().as_u16(), case["status"], "{path}");
+        }
     }
 
     #[test]
