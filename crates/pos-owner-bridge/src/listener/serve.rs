@@ -119,9 +119,17 @@ pub(super) fn read_request<S: TimedRead>(
             }
             Ok(received) => received,
         };
+        let observed_at = clock.now();
         if filled == 0 {
             first_byte();
-            deadline = clock.now() + timeouts.header;
+        }
+        if observed_at >= deadline {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Timeout);
+            return ReadOutcome::Silent;
+        }
+        if filled == 0 {
+            deadline = observed_at + timeouts.header;
         }
         filled += received;
         if buffer.get(..filled).is_some_and(header_end) {
