@@ -472,7 +472,7 @@ impl NativeOperations for Session {
         })
     }
     fn has_controller(&self) -> NativeResult<bool> {
-        Ok(self.controller)
+        self.check("has_controller").map(|()| self.controller)
     }
     fn browser_pid(&self) -> NativeResult<u32> {
         if self.factory.creation.get() == Creation::MissingView {
