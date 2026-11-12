@@ -120,6 +120,11 @@ impl SystemdServiceLimits {
         self.requested[property.index()]
     }
 
+    /// The requested ELM1 `WorkBytes` ceiling for the `/work` tmpfs.
+    pub(crate) const fn work_bytes(&self) -> u64 {
+        self.work_bytes
+    }
+
     /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
     /// systemd enforces as `RuntimeMaxUSec`.
     pub(crate) const fn watchdog(&self) -> Duration {
