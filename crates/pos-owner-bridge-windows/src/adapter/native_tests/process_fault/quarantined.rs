@@ -338,6 +338,67 @@ mod tests {
     use super::*;
     use crate::NativeEvent;
 
+    fn require<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(Box::new(error.to_string())),
+        }
+    }
+
+    #[test]
+    fn modeled_keeper_requires_marker_record_and_blocked_admission_until_cleanup() {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = require(super::super::FixtureRoot::new());
+        let (mut fixture, model) = require(super::super::model_tests::fixture(&root));
+        let ceremony = CeremonyId::from_bytes([240; 16]);
+        let mut driver = require(readiness::new_driver(ceremony, Instant::now()));
+        let mut refused = false;
+        let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
+        assert_eq!(
+            result,
+            Err(BridgeError::Quarantine(
+                QuarantineCode::ControllerCloseFailed
+            ))
+        );
+        assert!(refused);
+        let mut keeper = QuarantineKeeper::new();
+        let reply = keeper.finish(driver, result);
+        assert!(reply.driver.is_none());
+        let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
+        let marker = folder.join("quarantine-held");
+        require(std::fs::write(&marker, []));
+        require(blocked(&mut keeper, &mut fixture, &folder));
+
+        require(std::fs::remove_file(&marker));
+        assert!(blocked(&mut keeper, &mut fixture, &folder).is_err());
+        require(std::fs::write(&marker, []));
+        let records = require(fixture.store.records());
+        assert_eq!(records.len(), 1);
+        require(fixture.store.delete_record(&records[0]));
+        assert!(blocked(&mut keeper, &mut fixture, &folder).is_err());
+        require(fixture.store.write_record(&records[0]));
+        require(blocked(&mut keeper, &mut fixture, &folder));
+        assert!(!fixture.surface.idle());
+
+        require(std::fs::remove_file(&marker));
+        require(
+            fixture
+                .surface
+                .close_controller()
+                .map_err(SurfaceError::error),
+        );
+        let Some(sink) = model.sink.borrow().clone() else {
+            std::panic::resume_unwind(Box::new("missing modeled sink"));
+        };
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        retire_keeper(&mut keeper, &mut fixture);
+        assert!(fixture.surface.idle());
+        assert!(require(fixture.store.records()).is_empty());
+        drop(sink);
+        drop(fixture);
+        require(root.remove());
+    }
+
     #[test]
     fn modeled_quarantine_wipe_refusals_identify_the_failed_observation() -> TestResult {
         let _port = crate::Native::fixed_port_fixture();
