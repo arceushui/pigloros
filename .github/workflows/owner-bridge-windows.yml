@@ -4,7 +4,7 @@ on:
 permissions:
   contents: read
 jobs:
-  previously-unrun-native:
+  lifecycle-g3:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -26,7 +26,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: Original native lifecycle including buffer mismatch and G3
+      - name: Full original lifecycle and G3
         shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
@@ -34,6 +34,77 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $checkout = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
-          Write-Output "CHECKOUT=$checkout; original lifecycle and G3; not full native or coverage qualification"
+          Write-Output "CHECKOUT=$checkout; full original lifecycle and G3 only; not full native or coverage qualification"
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_window_environment_and_buffers_lifecycle --exact --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Original native lifecycle or G3 failed' }
+  fault-g4:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29
+        with:
+          tool: cargo-llvm-cov
+      - name: Prepare retained runtime
+        id: runtime
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
+      - name: Full fault matrix and named native controls
+        shell: pwsh
+        env:
+          OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkout = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
+          Write-Output "CHECKOUT=$checkout; named full fault matrix, early renderer and controls; not full native or coverage qualification"
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_verified_owned_process_faults_retire --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Full process fault matrix failed' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::native_early_renderer_classification_and_faults --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Early renderer native case failed' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_control_callbacks_deny_and_retain_through_own_exit --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Native control callback cases failed' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- tests::native_resource_denial_callback_failure_does_not_contact_listener --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Native resource-denial case failed' }
+  early-renderer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29
+        with:
+          tool: cargo-llvm-cov
+      - name: Prepare retained runtime
+        id: runtime
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
+      - name: Early renderer classification and faults
+        shell: pwsh
+        env:
+          OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkout = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Diagnostic checkout mismatch' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::native_early_renderer_classification_and_faults --exact --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Early renderer case failed' }
