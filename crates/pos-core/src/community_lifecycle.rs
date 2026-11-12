@@ -9,6 +9,7 @@ mod classification;
 mod envelope;
 mod error;
 mod failure;
+mod generation_admission;
 mod guest_claim;
 mod guest_error;
 mod host_error;
@@ -46,6 +47,9 @@ pub use error::CommunityLifecycleErrorV1;
 pub use failure::{
     CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
     CommunityPassFailureV1,
+};
+pub use generation_admission::{
+    CommunityGenerationAdmissionInputV1, CommunityGenerationAdmissionV1,
 };
 pub use guest_claim::{
     CommunityClaimArtifactV1, CommunityGuestClaimContextV1, CommunityGuestClaimKindV1,
