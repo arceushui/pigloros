@@ -423,6 +423,75 @@ fn immediate_precontroller_failure_blocks_admission_until_recordless_retirement(
 }
 
 #[test]
+fn modeled_failed_open_retains_its_folder_and_retries_each_cleanup_refusal() {
+    let operations = [
+        "unsubscribe_view",
+        "unsubscribe_exit",
+        "drop_environment",
+        "destroy_window",
+    ];
+    for (creation, observes_exit) in [
+        (Creation::SynchronousFailure, false),
+        (Creation::MissingView, true),
+    ] {
+        for (index, failure) in operations.iter().enumerate() {
+            let result = Fixture::new(creation).map(|mut fixture| {
+                let selected = spec(126);
+                let competing = spec(127);
+                assert!(fixture.open(&selected).is_err());
+                if observes_exit {
+                    assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+                    fixture.exit();
+                }
+                let before = fixture.factory.calls.borrow().len();
+                fixture.factory.failure.set(Some(failure));
+                assert_eq!(
+                    fixture.surface.poll_failed_open(),
+                    Err(pos_owner_bridge::SurfaceError::new(
+                        pos_owner_bridge::BridgeError::Unavailable(
+                            pos_owner_bridge::UnavailableCode::InterfaceUnavailable,
+                        ),
+                    )),
+                );
+                assert_eq!(
+                    &fixture.factory.calls.borrow()[before..],
+                    &operations[..=index],
+                );
+                assert!(!fixture.surface.idle());
+                assert!(fixture.root.join(&selected.folder_name).is_dir());
+                assert!(fixture.store.removed_folders().is_empty());
+                competing_open_is_refused(&mut fixture, &competing);
+                fixture.assert_no_ceremony_data();
+                assert_eq!(
+                    &fixture.factory.calls.borrow()[before..],
+                    &operations[..=index],
+                );
+
+                fixture.factory.failure.set(None);
+                let retry = fixture.factory.calls.borrow().len();
+                assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+                assert_eq!(&fixture.factory.calls.borrow()[retry..], &operations,);
+                assert!(fixture.surface.idle());
+                if observes_exit {
+                    assert_eq!(fixture.store.removed_folders(), [selected.folder_name]);
+                } else {
+                    assert!(fixture.store.removed_folders().is_empty());
+                    assert!(fixture.root.join(&selected.folder_name).is_dir());
+                }
+                fixture.assert_no_ceremony_data();
+                fixture.factory.creation.set(Creation::Ready);
+                let opened = fixture.open(&competing);
+                assert!(opened.is_ok(), "fresh modeled open: {opened:?}");
+                fixture.assert_no_ceremony_data();
+                let finished = fixture.finish();
+                assert!(finished.is_ok(), "fresh modeled retirement: {finished:?}");
+            });
+            assert!(result.is_ok(), "modeled fixture: {result:?}");
+        }
+    }
+}
+
+#[test]
 fn insecure_environment_readback_refuses_controller_and_retires_recordless() -> TestResult {
     let required = super::super::super::settings::OPTIONS;
     for (case, arguments, options) in [
