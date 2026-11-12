@@ -453,6 +453,7 @@ fn read_scripted(
         &mut buffer,
         Instant::now(),
         timeouts,
+        &crate::SystemClock,
         || {},
         |_| {},
     );
@@ -471,6 +472,7 @@ fn first_request_byte_is_observed_once_even_without_complete_headers() {
             &mut buffer,
             Instant::now(),
             ADR_TIMEOUTS,
+            &crate::SystemClock,
             || received += 1,
             |_| {},
         );
@@ -482,6 +484,109 @@ fn first_request_byte_is_observed_once_even_without_complete_headers() {
         };
         assert_eq!(outcome, expected_outcome);
     }
+}
+
+struct AdvancingReader {
+    clock: crate::fake::clock::FakeClock,
+    chunks: VecDeque<(Duration, Vec<u8>)>,
+}
+
+impl Read for AdvancingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let Some((delay, chunk)) = self.chunks.pop_front() else {
+            return Ok(0);
+        };
+        self.clock.advance(delay);
+        let count = chunk.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&chunk[..count]);
+        Ok(count)
+    }
+}
+
+impl TimedRead for AdvancingReader {
+    fn limit_next_read(&mut self, _limit: Duration) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn read_advancing(
+    chunks: Vec<(Duration, Vec<u8>)>,
+    callback_delay: Duration,
+) -> (ReadOutcome, usize, Vec<SilentReason>) {
+    use crate::MonotonicClock as _;
+
+    let clock = crate::fake::clock::FakeClock::start();
+    let accepted = clock.now();
+    let mut reader = AdvancingReader {
+        clock: clock.clone(),
+        chunks: chunks.into(),
+    };
+    let mut buffer = [0; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    let outcome = read_request(
+        &mut reader,
+        &mut buffer,
+        accepted,
+        ADR_TIMEOUTS,
+        &clock,
+        || {
+            first_bytes += 1;
+            clock.advance(callback_delay);
+        },
+        |reason| silent.push(reason),
+    );
+    (outcome, first_bytes, silent)
+}
+
+#[test]
+fn first_byte_completing_at_deadline_is_silent_but_observed() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(ADR_TIMEOUTS.first_byte, OWNER_REQUEST.to_vec())],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn header_completing_at_deadline_is_silent() {
+    let (outcome, count, silent) = read_advancing(
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (ADR_TIMEOUTS.header, OWNER_REQUEST[4..].to_vec()),
+        ],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn callback_latency_does_not_restart_header_deadline() {
+    let (outcome, count, silent) = read_advancing(
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (Duration::ZERO, OWNER_REQUEST[4..].to_vec()),
+        ],
+        ADR_TIMEOUTS.header,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn timely_complete_header_survives_callback_latency() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(Duration::ZERO, OWNER_REQUEST.to_vec())],
+        ADR_TIMEOUTS.header,
+    );
+    assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
+    assert_eq!(count, 1);
+    assert!(silent.is_empty());
 }
 
 #[test]
@@ -540,6 +645,7 @@ fn silent_read_diagnostics_preserve_the_silent_outcome() {
             &mut buffer,
             Instant::now(),
             ADR_TIMEOUTS,
+            &crate::SystemClock,
             || {},
             |reason| observed.push(reason),
         );
@@ -584,6 +690,7 @@ fn the_first_byte_deadline_begins_at_accept_before_a_worker_runs() -> TestResult
             &mut buffer,
             accepted_at,
             ADR_TIMEOUTS,
+            &crate::SystemClock,
             || first_bytes += 1,
             |reason| silent.push(reason),
         ),
@@ -615,6 +722,7 @@ fn an_expired_header_deadline_refuses_the_remaining_queued_bytes() {
             &mut buffer,
             Instant::now(),
             timeouts,
+            &crate::SystemClock,
             || first_bytes += 1,
             |reason| silent.push(reason),
         ),
