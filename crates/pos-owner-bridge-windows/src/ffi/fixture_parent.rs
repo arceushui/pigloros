@@ -23,10 +23,7 @@ impl OwnedParent {
 
     fn spawn_child(&self) -> Result<Child, Box<dyn std::error::Error>> {
         self.pump.token.check()?;
-        let owner = u64::try_from(self.window.handle().0 as usize)?;
-        if owner == 0 {
-            return Err("parent fixture window is unavailable".into());
-        }
+        let owner = require_parent_owner(u64::try_from(self.window.handle().0 as usize)?)?;
         Ok(Command::new(std::env::current_exe()?)
             .args(["--exact", "tests::native_host_fixture_child", "--nocapture"])
             .env("PIGLOR_HOST_LIFECYCLE_CHILD", "1")
@@ -51,7 +48,14 @@ impl OwnedParent {
 }
 
 fn child_owner() -> Result<u64, Box<dyn std::error::Error>> {
-    let owner = std::env::var("PIGLOR_HOST_FIXTURE_PARENT")?.parse::<u64>()?;
+    parse_parent_owner(&std::env::var("PIGLOR_HOST_FIXTURE_PARENT")?)
+}
+
+fn parse_parent_owner(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    require_parent_owner(value.parse::<u64>()?)
+}
+
+fn require_parent_owner(owner: u64) -> Result<u64, Box<dyn std::error::Error>> {
     if owner == 0 {
         return Err("parent fixture window is unavailable".into());
     }
@@ -95,12 +99,7 @@ impl crate::Native {
                     parent.foreground()?
                 )?;
                 parent.finish()?;
-                if observation_failed {
-                    return Err("native host fixture parent observation failed".into());
-                }
-                if late {
-                    return Err("native host fixture exceeded its independent wall deadline".into());
-                }
+                validate_parent_result(observation_failed, late)?;
                 assert!(status.success());
                 return Ok(());
             }
@@ -113,4 +112,47 @@ impl crate::Native {
             }
         }
     }
+}
+
+fn validate_parent_result(
+    observation_failed: bool,
+    late: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if observation_failed {
+        return Err("native host fixture parent observation failed".into());
+    }
+    if late {
+        return Err("native host fixture exceeded its independent wall deadline".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_parent_input_and_retirement_verdict_preserve_refusals() {
+    assert_eq!(parse_parent_owner("42").ok(), Some(42));
+    for value in ["0", "-1", "bad", "18446744073709551616"] {
+        assert!(parse_parent_owner(value).is_err());
+    }
+    assert!(validate_parent_result(false, false).is_ok());
+    assert_eq!(
+        validate_parent_result(true, false)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref(),
+        Some("native host fixture parent observation failed")
+    );
+    assert_eq!(
+        validate_parent_result(true, true)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref(),
+        Some("native host fixture parent observation failed")
+    );
+    assert_eq!(
+        validate_parent_result(false, true)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref(),
+        Some("native host fixture exceeded its independent wall deadline")
+    );
 }

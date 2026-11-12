@@ -1084,7 +1084,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     _check_fault_assets(root, found)
     callbacks = scans.get("src/ffi/events/control_fixture.rs")
     callback_code = callbacks[0].code if callbacks else ""
-    if hashlib.sha256(re.sub(r"\s+", "", callback_code).encode()).hexdigest() != "0b258f4809421f08a94c4cc4cbabc8cddf07736d804107c2b36901d400a30f5f":
+    if hashlib.sha256(re.sub(r"\s+", "", callback_code).encode()).hexdigest() != "d290c4ee530b4440b21330260619630d477d890ebebe9700388cb2836e314271":
         found.append(f"{SHIM}/src/ffi/events/control_fixture.rs: process failure observations differ from reviewed typed callbacks")
     ffi_parent = scans.get("src/ffi/mod.rs")
     ffi_code = ffi_parent[0].code if ffi_parent else ""
@@ -1541,7 +1541,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
-    expected = "aa2098efe6ef130d6f083e355ecf748c684b80acc9b9dc2f9cebc606198b9646"
+    expected = "c1c027e0bfe94959430e05a5827c7251d5aa6ccb0cb1fe124116d236fb0f2a1d"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
         found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
     module = sources.get(prefix + "ffi/mod.rs", "")
@@ -1614,7 +1614,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',
-    'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': 'c94e9fe0f864aeb6a0b154222663e70992416eb878de2a04098441b50c4f48ba',
+    'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '51b58464af2d31dea677c4955d6da8033d03f442df059cbd770e330625ae2d9e',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '3fee8a9ea7609019c88fce323b9e5ecd8cadc372e69c14d477d1c4c66d235157',
     'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
     'crates/pos-owner-bridge/assets/qualification/external.html': '45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4',
