@@ -532,7 +532,7 @@ fn modeled_late_controller_close_refusal_retains_owners_until_retry_and_exit() {
             assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
             assert_eq!(
                 &fixture.factory.calls.borrow()[before..],
-                &["unsubscribe_view", "close_controller"],
+                &["close_buffers", "unsubscribe_view", "close_controller"],
             );
             assert!(!fixture.surface.idle());
             assert!(fixture.root.join(&selected.folder_name).is_dir());
