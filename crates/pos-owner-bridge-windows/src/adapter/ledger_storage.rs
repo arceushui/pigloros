@@ -441,6 +441,45 @@ mod native_tests {
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
         refuse_changed_ledger(&guard, ledger, base)?;
+        refuse_directory_swap_after_rename(&guard, base)?;
+        Ok(())
+    }
+
+    fn refuse_directory_swap_after_rename(
+        guard: &WindowsSubjectEncryptorLock,
+        base: &Path,
+    ) -> TestResult {
+        let ledger = guard.open_nonce_ledger()?;
+        ledger.replace_nonce_ledger_bytes(b"original directory")?;
+        let path = base.join("PiglorOS");
+        let moved = base.join("moved-after-rename");
+        let mut swap_failure = None;
+        let mut saw_stage = false;
+        let result = ledger.replace_observing(b"committed candidate", |stage| {
+            if stage == CommitStage::Renamed {
+                saw_stage = true;
+                if let Err(error) = fs::rename(&path, &moved) {
+                    swap_failure = Some(format!("rename directory: {error}"));
+                    return Err(());
+                }
+                if let Err(error) = crate::create_private_directory(&path) {
+                    swap_failure = Some(format!("create replacement directory: {error:?}"));
+                    return Err(());
+                }
+            }
+            Ok(())
+        });
+        assert!(saw_stage, "replacement failed before directory swap");
+        assert!(swap_failure.is_none(), "{swap_failure:?}");
+        assert_eq!(result, Err(()));
+        assert_eq!(fs::read(moved.join(LEDGER))?, b"committed candidate");
+        assert_eq!(fs::read_dir(&path)?.count(), 0);
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        drop(ledger);
+        fs::remove_dir(&path)?;
+        fs::rename(&moved, &path)?;
+        let recovered = guard.open_nonce_ledger()?;
+        assert_eq!(recovered.read_nonce_ledger_bytes()?, b"committed candidate");
         Ok(())
     }
 
