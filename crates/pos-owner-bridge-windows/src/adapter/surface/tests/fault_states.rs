@@ -570,7 +570,7 @@ fn modeled_posted_snapshots_fail_closed_on_unavailable_inputs() -> TestResult {
                 "missing generation" => fixture.surface.generation = None,
                 "load state" => fixture.factory.failure.set(Some("load_state")),
                 "list records" => fixture.store.set_failing(&[StoreOp::List]),
-                _ => unreachable!(),
+                _ => return Err("unknown modeled failure".into()),
             }
             assert!(snapshot(&mut fixture.surface).is_err(), "{failure}");
             let expected_reads = usize::from(matches!(
