@@ -494,6 +494,117 @@ pub(super) fn finish_posted(mut fixture: Fixture) -> TestResult {
     fixture.finish()
 }
 
+struct ProbedIdentity {
+    root: PathBuf,
+    reads: AtomicUsize,
+    unavailable: bool,
+}
+
+impl RuntimeAdmission for ProbedIdentity {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn identity(&self, pid: u32) -> Result<ProcessIdentity, BridgeError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if self.unavailable {
+            return Err(BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::RuntimeIntegrity,
+            ));
+        }
+        Runtime(self.root.clone()).identity(pid)
+    }
+}
+
+#[test]
+fn modeled_posted_snapshots_fail_closed_on_unavailable_inputs() -> TestResult {
+    for generation in [1, 2] {
+        for failure in [
+            "missing folder",
+            "invalid folder",
+            "environment",
+            "missing identity",
+            "unavailable identity",
+            "missing generation",
+            "load state",
+            "list records",
+        ] {
+            let mut fixture = posted_fixture(generation)?;
+            let snapshot = |surface: &mut Surface| {
+                if generation == 1 {
+                    surface.posted_fault_state(1)
+                } else {
+                    surface.posted_retry_fault_state(2, RetryPoint::Second)
+                }
+            };
+            let valid = snapshot(&mut fixture.surface).map_err(|()| "valid snapshot rejected")?;
+            assert_eq!(valid.generation, generation);
+            assert_eq!(valid.record_count, 1);
+            assert_eq!(valid.posts, if generation == 1 { 1 } else { 2 });
+
+            let original_runtime = Arc::clone(&fixture.surface.runtime);
+            let probe = Arc::new(ProbedIdentity {
+                root: fixture.root.clone(),
+                reads: AtomicUsize::new(0),
+                unavailable: failure == "unavailable identity",
+            });
+            fixture.surface.runtime = probe.clone();
+            let folder = fixture.surface.folder.clone();
+            let identity = fixture.surface.identity;
+            let saved_generation = fixture.surface.generation;
+            let folder_path = fixture
+                .root
+                .join(folder.as_ref().ok_or("missing fixture folder")?);
+            let displaced = fixture.root.join("displaced-posted-folder");
+            let calls = fixture.factory.calls.borrow().clone();
+            let state = fixture.factory.state.get();
+
+            // Missing metadata deliberately models contradictory internal state; restore it
+            // before ordinary cleanup so this does not claim such a state is reachable.
+            match failure {
+                "missing folder" => fixture.surface.folder = None,
+                "invalid folder" => std::fs::rename(&folder_path, &displaced)?,
+                "environment" => fixture.factory.failure.set(Some("environment")),
+                "missing identity" => fixture.surface.identity = None,
+                "unavailable identity" => (),
+                "missing generation" => fixture.surface.generation = None,
+                "load state" => fixture.factory.failure.set(Some("load_state")),
+                "list records" => fixture.store.set_failing(&[StoreOp::List]),
+                _ => unreachable!(),
+            }
+            assert!(snapshot(&mut fixture.surface).is_err(), "{failure}");
+            let expected_reads = usize::from(matches!(
+                failure,
+                "unavailable identity" | "missing generation" | "load state" | "list records"
+            ));
+            assert_eq!(
+                probe.reads.load(Ordering::Relaxed),
+                expected_reads,
+                "{failure}"
+            );
+            assert_eq!(fixture.store.records_now(), [vec![0x80]], "{failure}");
+            assert!(!fixture.surface.idle(), "{failure}");
+            assert!(fixture.surface.buffers, "{failure}");
+            assert_eq!(fixture.factory.state.get(), state, "{failure}");
+            assert_eq!(*fixture.factory.calls.borrow(), calls, "{failure}");
+
+            if failure == "invalid folder" {
+                std::fs::rename(&displaced, &folder_path)?;
+            }
+            fixture.surface.folder = folder;
+            fixture.surface.identity = identity;
+            fixture.surface.generation = saved_generation;
+            fixture.surface.runtime = original_runtime;
+            fixture.factory.failure.set(Some("fault_spy"));
+            fixture.store.set_failing(&[]);
+            assert!(snapshot(&mut fixture.surface).is_ok(), "{failure}");
+            assert_eq!(*fixture.factory.calls.borrow(), calls, "{failure}");
+            finish_posted(fixture)?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn modeled_posted_snapshots_require_their_distinct_reply_states() -> TestResult {
     type Snapshot = fn(&mut Surface, u8) -> Result<crate::ProcessFaultState, ()>;
