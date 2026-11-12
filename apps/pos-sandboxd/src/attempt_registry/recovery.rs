@@ -23,6 +23,29 @@ mod directories;
 mod removal;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 
+impl super::SystemdAttemptRegistry {
+    /// The committed record of `unit`'s attempt, read back under this live
+    /// owner: `None` before its planned intent was committed, after it was
+    /// deleted, or while only an interrupted write exists.
+    ///
+    /// # Errors
+    /// An unsafe, unreadable or malformed record.
+    pub(crate) fn recorded(
+        &self,
+        unit: &TransientServiceUnitName,
+    ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
+        match read_entry(&self.directory, unit.attempt_component()) {
+            Ok(entry) => Ok(entry.observation.intent),
+            Err(SystemdAttemptRegistryError::Io(error))
+                if error.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
 /// A complete recorded intent observed during recovery, not activation authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveredAttemptIntent {

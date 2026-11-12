@@ -237,6 +237,15 @@ impl SystemdAttemptRegistry {
         Self::from_directory(RegistryDirectory::from_runtime_directory(parent, owner)?)
     }
 
+    /// Close this owner to further commits, as an uncertain write does.
+    /// Marking a poisoned owner cannot make its lock usable again.
+    pub(crate) fn quarantine(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failed = true;
+    }
+
     fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
         let state = RegistryState::opened(&directory)?;
         Ok(Self {

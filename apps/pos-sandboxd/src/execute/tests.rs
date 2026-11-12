@@ -31,6 +31,7 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod cancellation;
 mod ownership;
 
 const HOST_SERVICE: &str = "piglor-host-service-v1";
@@ -394,6 +395,8 @@ struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     fault: BarrierFault,
+    /// Requested as the release completes, so supervision sees it first.
+    cancel_on_release: Option<Arc<AttemptCancel>>,
 }
 
 impl FakeBarrier {
@@ -402,6 +405,7 @@ impl FakeBarrier {
             log: Arc::clone(log),
             released: Arc::default(),
             fault: BarrierFault::None,
+            cancel_on_release: None,
         }
     }
 }
@@ -440,13 +444,24 @@ impl LaunchBarrier for FakeBarrier {
             Ok(())
         };
         let hang = self.fault == BarrierFault::Hang;
-        async move {
-            if hang {
-                std::future::pending::<()>().await;
-            }
-            outcome
-        }
+        released(hang, self.cancel_on_release.clone(), outcome)
     }
+}
+
+/// A release that never ends when `hang`, and otherwise requests `cancel`
+/// as it completes.
+async fn released(
+    hang: bool,
+    cancel: Option<Arc<AttemptCancel>>,
+    outcome: Result<(), Injected>,
+) -> Result<(), Injected> {
+    if hang {
+        std::future::pending::<()>().await;
+    }
+    if let Some(cancel) = cancel {
+        cancel.cancel();
+    }
+    outcome
 }
 
 struct LoopbackNetwork;
@@ -581,6 +596,7 @@ struct Scenario {
     host: FakeHost,
     barrier: FakeBarrier,
     store: Arc<NetworkCaptureStore>,
+    cancel: AttemptCancel,
     _root: Option<tempfile::TempDir>,
 }
 
@@ -601,6 +617,7 @@ impl Scenario {
             barrier: FakeBarrier::new(&log),
             log,
             store: Arc::clone(store),
+            cancel: AttemptCancel::new(),
             _root: root,
         }
     }
@@ -622,6 +639,7 @@ impl Scenario {
                 .with_limits(crate::test_fixtures::execution_limits(watchdog_ms)),
             mode: plan,
             capture_store: Arc::clone(&self.store),
+            cancel: self.cancel.signal(),
         })
     }
 

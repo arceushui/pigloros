@@ -80,6 +80,8 @@ pub(super) mod cases {
         control_groups: VecDeque<String>,
         /// The unit's `ActiveState`, or a read failure.
         activity: Option<String>,
+        /// The service's reported `MainPID`.
+        main_pid: u32,
     }
 
     struct Manager {
@@ -245,6 +247,11 @@ pub(super) mod cases {
             };
             read.ok_or_else(|| fdo::Error::Failed("no ControlGroup".to_owned()))
         }
+
+        #[zbus(property, name = "MainPID")]
+        fn main_pid(&self) -> fdo::Result<u32> {
+            Ok(self.0.lock().map_err(failed)?.main_pid)
+        }
     }
 
     /// An attempt unit's unit object, reporting the fixture's state.
@@ -294,6 +301,22 @@ pub(super) mod cases {
     }
 
     impl Fixture {
+        /// Make the service report `pid` as its `MainPID`, such as a
+        /// recycled PID that now names another process.
+        ///
+        /// # Errors
+        /// Returns a poisoned fixture lock.
+        pub fn report_main_pid(&self, pid: u32) -> TestResult {
+            self.state.lock().map_err(|_| "poisoned fixture")?.main_pid = pid;
+            Ok(())
+        }
+
+        /// The bound attempt cgroup's directory.
+        #[must_use]
+        pub fn cgroup_directory(&self) -> &std::path::Path {
+            &self.directory
+        }
+
         /// A counter of this fixture's manager calls.
         #[must_use]
         pub fn calls(&self) -> ManagerCalls {
@@ -329,6 +352,7 @@ pub(super) mod cases {
                 get_serial: None,
                 control_groups: VecDeque::from(["/attempt".to_owned()]),
                 activity: Some("active".to_owned()),
+                main_pid: 0,
             }));
             let manager = Manager {
                 state: Arc::clone(&state),
