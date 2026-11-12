@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.97.1
@@ -26,7 +26,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'Checkout mismatch' }
-          $sourceHead = '6b8fd066aeca2b8b6b0c2d2ff78fe1ad6360b50e'
+          $sourceHead = 'f4755449f4e9101239a2deff8f5e679593ff8a87'
           $changed = @(git diff --name-only $sourceHead HEAD)
           if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/owner-bridge-windows.yml') { throw 'Unexpected diagnostic source differences' }
           git rev-parse HEAD:crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs
