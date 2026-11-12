@@ -440,6 +440,7 @@ mod tests {
         use pos_owner_bridge::OwnerWebSurface as _;
 
         let _port = crate::Native::fixed_port_fixture();
+        let retained_driver = std::cell::RefCell::new(None);
         let result = FixtureRoot::new().map(|root| {
             let model = Factory::new(Creation::Pending, FakeClock::start());
             let scripted = Rc::new(QuitTwiceFactory {
@@ -507,6 +508,7 @@ mod tests {
                                     assert!(store
                                         .records()
                                         .is_ok_and(|records| records.is_empty()));
+                                    retained_driver.replace(Some(driver));
                                 });
                             assert!(result.is_ok(), "driver creation: {result:?}");
                             drop(surface);
@@ -522,6 +524,7 @@ mod tests {
             assert!(root.remove().is_ok());
         });
         assert!(result.is_ok(), "fixture root: {result:?}");
+        drop(retained_driver);
         Ok(())
     }
 
