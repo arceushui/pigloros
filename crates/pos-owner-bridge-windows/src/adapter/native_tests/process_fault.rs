@@ -1228,12 +1228,13 @@ fn native_interaction_cutpoints_outlive_fixture_readiness_ceiling() -> TestResul
             failures.push(format!("case {number}: interaction evidence missing"));
         }
     }
-    root.remove()?;
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; ").into())
-    }
+    root.remove().and_then(|()| {
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; ").into())
+        }
+    })
 }
 
 impl Fixture {
@@ -1867,13 +1868,14 @@ fn native_release_cutpoint_uses_release_window_after_fixture_readiness_ceiling()
     let complete = fixture.evidence_complete;
     let verified = result.is_ok() && has_synthetic_success_prf(&driver);
     fixture.retire(driver, result, None)?;
-    root.remove()?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    assert!(verified && complete);
-    assert!(reached.is_some());
-    Ok(())
+    root.remove().and_then(|()| {
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        assert!(verified && complete);
+        assert!(reached.is_some());
+        Ok(())
+    })
 }
 
 impl Fixture {
@@ -2162,13 +2164,14 @@ fn native_exit_cutpoint_uses_exit_window_after_fixture_readiness_ceiling() -> Te
     let observations = crate::Native::take_native_zero_observations();
     let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     fixture.retire(driver, result, None)?;
-    root.remove()?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    assert!(verified && complete && native_zeroed);
-    assert!(reached.is_some());
-    Ok(())
+    root.remove().and_then(|()| {
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        assert!(verified && complete && native_zeroed);
+        assert!(reached.is_some());
+        Ok(())
+    })
 }
 
 fn restart_recordless_orphans(store: &mut WindowsCleanupStore) -> TestResult {
@@ -6011,8 +6014,14 @@ fn native_outstanding_controller_callback_survives_abandonment() -> TestResult {
     let order = crate::Native::creation_order();
     let callbacks = crate::Native::callback_order();
     let idle = fixture.surface.idle();
-    let no_record = fixture.store.records()?.is_empty();
-    let no_orphan = fixture.store.folders()?.is_empty();
+    let (no_record, no_orphan) = fixture.store.records().and_then(|records| {
+        let no_record = records.is_empty();
+        drop(records);
+        fixture
+            .store
+            .folders()
+            .map(|folders| (no_record, folders.is_empty()))
+    })?;
     let matched = evidence
         .as_ref()
         .and_then(|proof| proof.browser)
@@ -6028,8 +6037,9 @@ fn native_outstanding_controller_callback_survives_abandonment() -> TestResult {
     let _logged = writeln!(std::io::stderr(), "NATIVE_OUTSTANDING_CONTROLLER evidence={} matched={matched} failed={failed} wiped={wiped} idle={idle} no_record={no_record} no_orphan={no_orphan} order={order:?} callbacks={callbacks:?}", evidence.is_some());
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
-        .ok_or("late-controller factory still shared")?
-        .stop()?;
+        .ok_or("late-controller factory still shared")
+        .map_err(Box::<dyn std::error::Error>::from)
+        .and_then(|factory| factory.stop().map_err(Box::<dyn std::error::Error>::from))?;
     drop(fixture.loopback);
     // The retired fixture still owns the records directory handle; release it
     // before the later fresh ceremony and final root removal on Windows.
