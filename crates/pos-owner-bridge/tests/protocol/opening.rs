@@ -677,19 +677,25 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
 
 #[test]
 fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult {
-    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION};
     use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
     use pos_owner_bridge_codec::ControlState;
 
-    for (stage, challenge) in [
-        ("read", false),
-        ("cas", false),
-        ("read", true),
-        ("cas", true),
+    for (stage, challenge, budget) in [
+        ("read", false, false),
+        ("cas", false, false),
+        ("read", true, false),
+        ("cas", true, false),
+        ("read", false, true),
+        ("cas", false, true),
     ] {
         for offset_ms in [-1_i64, 0, 1] {
             let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
-            let mut driver = new_driver(create_plan(&rig.clock));
+            let mut plan = create_plan(&rig.clock);
+            if budget {
+                plan =
+                    plan.with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(3)));
+            }
+            let mut driver = new_driver(plan);
             let ready_target = Rc::new(Cell::new(None));
             let consume_target = Rc::new(Cell::new(None));
             let mut store = rig.store.clone();
@@ -731,16 +737,8 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 }
                 if !armed {
                     if let Some(receipt) = driver.first_receipt_at() {
-                        let boundary = if challenge {
-                            driver.t0() + CHALLENGE_TTL
-                        } else {
-                            receipt + INTERACTION
-                        };
-                        let target = if offset_ms < 0 {
-                            boundary - Duration::from_millis(1)
-                        } else {
-                            boundary + Duration::from_millis(u64::try_from(offset_ms)?)
-                        };
+                        let target =
+                            consumption_target(&driver, receipt, challenge, budget, offset_ms)?;
                         if stage == "read" {
                             ready_target.set(Some(target));
                         } else {
@@ -755,7 +753,9 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
             if offset_ms < 0 {
                 assert!(outcome.is_ok(), "{stage} {challenge}: {outcome:?}");
             } else {
-                let expected = if challenge {
+                let expected = if budget {
+                    LifecycleCode::EnrollmentBudgetExceeded
+                } else if challenge {
                     LifecycleCode::ChallengeExpired
                 } else {
                     LifecycleCode::InteractionTimeout
@@ -784,4 +784,28 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
         }
     }
     Ok(())
+}
+
+fn consumption_target(
+    driver: &pos_owner_bridge::ceremony::driver::CeremonyDriver,
+    receipt: Instant,
+    challenge: bool,
+    budget: bool,
+    offset_ms: i64,
+) -> Result<Instant, Box<dyn std::error::Error>> {
+    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION};
+    let boundary = if budget {
+        driver.t0() + Duration::from_secs(3)
+    } else if challenge {
+        driver.t0() + CHALLENGE_TTL
+    } else {
+        receipt + INTERACTION
+    };
+    if offset_ms < 0 {
+        boundary
+            .checked_sub(Duration::from_millis(1))
+            .ok_or_else(|| "test deadline underflow".into())
+    } else {
+        Ok(boundary + Duration::from_millis(u64::try_from(offset_ms)?))
+    }
 }
