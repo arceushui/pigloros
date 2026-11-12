@@ -400,9 +400,7 @@ mod tests {
     use pos_owner_bridge::{CleanupStore, SystemClock};
     use pos_owner_bridge_codec::CeremonyId;
 
-    use super::{
-        run_ceremony, Foreground, SharedLoopback, Surface, TestResult, WindowsCleanupStore,
-    };
+    use super::{run_ceremony, Foreground, SharedLoopback, Surface, WindowsCleanupStore};
     use crate::adapter::native_tests::FixtureRoot;
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::adapter::surface::tests::Runtime;
