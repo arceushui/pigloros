@@ -735,38 +735,7 @@ impl Surface {
         &mut self,
         posts: u8,
     ) -> std::result::Result<crate::ProcessFaultState, ()> {
-        if self.ownership != Ownership::Controller
-            || self.close != CloseState::Idle
-            || self.failed_open
-            || self.events.invalid()
-            || self.events.exited().is_some()
-            || !self.buffers
-            || !self.navigation_issued
-            || self.events.loaded().is_none()
-            || self.loopback.served().count != 1
-            || !self.loopback.served().integrity_ok
-            || !crate::Native::process_failure_observations().is_empty()
-        {
-            return Err(());
-        }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        // The caller is the sealed single-view fixture; subscriptions were
-        // installed before its only navigation, and every frame/popup callback
-        // invalidates these events. The policy binds the fixture asset bytes.
-        let state = crate::ProcessFaultState {
-            phase: crate::ProcessFaultPhase::PostedReceipt,
-            topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
-            generation: self.generation.ok_or(())?,
-            reply_state: self.native.load_state().map_err(|_| ())?,
-            record_count: self.store.records().map_err(|_| ())?.len(),
-            posts,
-        };
+        let state = self.posted_fault_snapshot(posts, crate::ProcessFaultPhase::PostedReceipt)?;
         if state.generation != 1 || state.record_count != 1 || state.posts != 1 {
             return Err(());
         }
@@ -774,10 +743,10 @@ impl Surface {
     }
 
     #[cfg(test)]
-    pub(in crate::adapter) fn posted_retry_fault_state(
+    fn posted_fault_snapshot(
         &mut self,
         posts: u8,
-        point: crate::RetryPoint,
+        phase: crate::ProcessFaultPhase,
     ) -> std::result::Result<crate::ProcessFaultState, ()> {
         if self.ownership != Ownership::Controller
             || self.close != CloseState::Idle
@@ -803,14 +772,23 @@ impl Surface {
         // The caller is the sealed single-view fixture; subscriptions were
         // installed before its only navigation, and every frame/popup callback
         // invalidates these events. The policy binds the fixture asset bytes.
-        let state = crate::ProcessFaultState {
-            phase: crate::ProcessFaultPhase::PostedRetry,
+        Ok(crate::ProcessFaultState {
+            phase,
             topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
             generation: self.generation.ok_or(())?,
             reply_state: self.native.load_state().map_err(|_| ())?,
             record_count: self.store.records().map_err(|_| ())?.len(),
             posts,
-        };
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn posted_retry_fault_state(
+        &mut self,
+        posts: u8,
+        point: crate::RetryPoint,
+    ) -> std::result::Result<crate::ProcessFaultState, ()> {
+        let state = self.posted_fault_snapshot(posts, crate::ProcessFaultPhase::PostedRetry)?;
         if state.generation != u32::from(point.post())
             || state.record_count != 1
             || state.posts != point.post()
