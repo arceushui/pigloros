@@ -761,7 +761,9 @@ impl CeremonyDriver {
     }
 
     fn consume_deadline_error(&self, now: Instant) -> Option<BridgeError> {
-        if self.interaction_over(now) {
+        if let Some(error) = self.budget_failure(now) {
+            Some(error)
+        } else if self.interaction_over(now) {
             Some(lifecycle(LifecycleCode::InteractionTimeout))
         } else if expired(now, self.plan.t0, CHALLENGE_TTL) {
             Some(lifecycle(LifecycleCode::ChallengeExpired))
