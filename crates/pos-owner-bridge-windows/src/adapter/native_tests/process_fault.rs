@@ -2717,6 +2717,77 @@ impl Fixture {
     }
 }
 
+struct OpeningWipe {
+    secrets: bool,
+    plan_if_quarantined: bool,
+}
+
+/// Verdict over the captured first-opening failure and custody evidence.
+struct FirstOpeningVerdict {
+    failed: bool,
+    wipe: OpeningWipe,
+    complete: bool,
+    first: Option<ProcessFaultMark>,
+}
+
+impl FirstOpeningVerdict {
+    fn validate(&self) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
+        if !self.failed || !self.wipe.secrets || !self.wipe.plan_if_quarantined || !self.complete {
+            return Err("opening failure, wipe, or evidence was not established".into());
+        }
+        self.first
+            .ok_or_else(|| "opening cutpoint was not reached".into())
+    }
+}
+
+#[test]
+fn modeled_first_opening_verdict_requires_failure_wipe_and_cutpoint() {
+    let first = ProcessFaultMark::PendingOpening {
+        generation: 1,
+        record_count: 0,
+    };
+    let mut verdict = FirstOpeningVerdict {
+        failed: true,
+        wipe: OpeningWipe {
+            secrets: true,
+            plan_if_quarantined: true,
+        },
+        complete: true,
+        first: Some(first),
+    };
+    assert_eq!(verdict.validate().ok(), Some(first));
+    verdict.failed = false;
+    assert!(verdict.validate().is_err());
+    verdict.failed = true;
+    verdict.wipe.secrets = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.secrets = true;
+    verdict.wipe.plan_if_quarantined = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.plan_if_quarantined = true;
+    verdict.complete = false;
+    assert!(verdict.validate().is_err());
+    verdict.complete = true;
+    verdict.first = None;
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("opening cutpoint was not reached")
+    );
+    verdict.failed = false;
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("opening failure, wipe, or evidence was not established")
+    );
+}
+
 fn run_first_opening_browser(
     runtime: &Path,
     root: &Path,
@@ -2747,10 +2818,16 @@ fn run_first_opening_browser(
     if let Some(error) = failure {
         return Err(error);
     }
-    if !failed || !wiped || !plan_wiped || !complete {
-        return Err("opening failure, wipe, or evidence was not established".into());
+    FirstOpeningVerdict {
+        failed,
+        wipe: OpeningWipe {
+            secrets: wiped,
+            plan_if_quarantined: plan_wiped,
+        },
+        complete,
+        first,
     }
-    first.ok_or_else(|| "opening cutpoint was not reached".into())
+    .validate()
 }
 
 impl Fixture {
