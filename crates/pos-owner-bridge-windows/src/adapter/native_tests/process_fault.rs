@@ -1230,7 +1230,23 @@ impl Fixture {
         target: ProcessFaultTarget,
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
+        let mut next_diagnostic = Instant::now();
         loop {
+            if Instant::now() >= next_diagnostic {
+                let _logged = writeln!(
+                    std::io::stderr(),
+                    "DIAG_882_RELEASE case={} elapsed={:?} posts={} receipt={:?} {} listener={:?}",
+                    self.number,
+                    driver.t0().elapsed(),
+                    driver.posts(),
+                    driver
+                        .first_receipt_at()
+                        .map(|time| time.saturating_duration_since(driver.t0())),
+                    self.surface.fixture_progress(),
+                    self.loopback.observation(),
+                );
+                next_diagnostic = Instant::now() + Duration::from_secs(1);
+            }
             // The release transition occurs inside this step. Its start is a
             // conservative lower bound for the driver's real release deadline.
             let step_started = Instant::now();
@@ -3506,6 +3522,56 @@ fn native_early_renderer_classification_and_faults() -> TestResult {
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
     run_early_renderer_cases(Path::new(&runtime), &root.0)?;
+    root.remove()
+}
+
+#[test]
+fn diagnostic_882_early_renderer_control_samples() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    for (offset, phase) in [
+        EarlyRendererPhase::Navigating,
+        EarlyRendererPhase::AwaitingLoad,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for sample in 0_u8..8 {
+            let number = 0xa0 + u8::try_from(offset)? * 8 + sample;
+            let (mark, presence) =
+                run_early_renderer(Path::new(&runtime), &root.0, number, phase, false)?;
+            writeln!(std::io::stderr(), "DIAG_882_CONTROL sample={sample} phase={phase:?} mark={mark:?} presence={presence:?}")?;
+        }
+    }
+    root.remove()
+}
+
+#[test]
+fn diagnostic_882_browser_release_pair() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let control = run_success_releasing(
+        Path::new(&runtime),
+        &root.0,
+        0x39,
+        ProcessFaultTarget::Browser,
+        false,
+    )?;
+    let fault = run_success_releasing(
+        Path::new(&runtime),
+        &root.0,
+        0x3a,
+        ProcessFaultTarget::Browser,
+        true,
+    )?;
+    assert_eq!(
+        control, fault,
+        "release control and fault reached different states"
+    );
     root.remove()
 }
 
