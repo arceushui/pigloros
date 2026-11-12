@@ -53,7 +53,7 @@ impl VaultKeyV1 {
         schema: CommunityMetadataSchemaV1,
         plaintext: &[u8],
     ) -> Result<SealedMetadataV1, Error> {
-        self.credits.next().and_then(|credits| {
+        self.credits.next_credit().and_then(|credits| {
             self.credits = credits;
             seal_metadata(&mut self.cipher, scope, schema, plaintext)
         })

@@ -268,7 +268,7 @@ impl CommunityKeyUseV1 {
     ///
     /// # Errors
     /// Returns `CapacityExhausted` once the key budget is spent.
-    pub const fn next(&self) -> Result<Self> {
+    pub const fn next_credit(&self) -> Result<Self> {
         if self.highest_encryption_ordinal >= MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1 {
             Err(Error::CapacityExhausted)
         } else {

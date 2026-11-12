@@ -57,7 +57,7 @@ fn oracle(domain: &[u8], canonical: &[u8]) -> Hash {
     Hash::from_bytes(*blake3::hash(&input).as_bytes())
 }
 
-fn input() -> Input {
+const fn input() -> Input {
     Input {
         protection_operation_id: [1; 16],
         parent_operation: Operation::Control([2; 16]),
@@ -291,14 +291,14 @@ fn credits_burn_monotonically_up_to_the_key_budget() -> TestResult {
     let intent = intent()?;
     let zero = KeyUse::new(&intent, 0)?;
     assert_eq!(zero.highest_encryption_ordinal(), 0);
-    let one = zero.next()?;
+    let one = zero.next_credit()?;
     assert_eq!(one.highest_encryption_ordinal(), 1);
-    assert_eq!(one.next()?.highest_encryption_ordinal(), 2);
+    assert_eq!(one.next_credit()?.highest_encryption_ordinal(), 2);
     let last = KeyUse::new(&intent, MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1)?;
-    assert_eq!(last.next().err(), Some(Error::CapacityExhausted));
+    assert_eq!(last.next_credit().err(), Some(Error::CapacityExhausted));
     assert_eq!(
         KeyUse::new(&intent, MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1 - 1)?
-            .next()?
+            .next_credit()?
             .highest_encryption_ordinal(),
         MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1
     );

@@ -185,13 +185,27 @@ impl MemoryCommunityDomainV1 {
         decision: &AuthorizationDecisionV1,
     ) -> Result<CommunityDomainOpenedV1, Error> {
         self.admit(binding.metadata_policy, decision)
-            .and_then(|()| match &self.bootstrap {
-                Some(record) => self
-                    .verify(binding, record)
-                    .and_then(|()| record.classify(request)),
-                None => self
-                    .create(binding, request, decision.request_digest())
-                    .map(|()| CommunityDomainOpenedV1::Bootstrapped),
+            .and_then(|()| {
+                if self.is_bootstrapped() {
+                    self.reopen(binding, request)
+                } else {
+                    self.create(binding, request, decision.request_digest())
+                        .map(|()| CommunityDomainOpenedV1::Bootstrapped)
+                }
+            })
+    }
+
+    fn reopen(
+        &self,
+        binding: CommunityDomainBindingV1<'_>,
+        request: CommunityBootstrapRequestV1,
+    ) -> Result<CommunityDomainOpenedV1, Error> {
+        self.bootstrap
+            .as_ref()
+            .ok_or(Error::EvidenceUnavailable)
+            .and_then(|record| {
+                self.verify(binding, record)
+                    .and_then(|()| record.classify(request))
             })
     }
 
@@ -436,4 +450,5 @@ fn verify_copy(plaintext: &[u8], record: &BootstrapRecordV1) -> Result<(), Error
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

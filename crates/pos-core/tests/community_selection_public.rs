@@ -82,7 +82,7 @@ fn row_value(
         bytes(&[timeline; 16]),
         uint(ordinal),
         active.map_or(Value::Null, |id| bytes(&id)),
-        Value::Array(closed.iter().map(|id| bytes(id)).collect()),
+        Value::Array(closed.iter().map(|id| bytes(id.as_slice())).collect()),
         head.map_or(Value::Null, |byte| bytes(&[byte; 32])),
         Value::Bool(is_closed),
     ])
