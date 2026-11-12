@@ -453,13 +453,24 @@ mod native_tests {
         ledger.replace_nonce_ledger_bytes(b"original directory")?;
         let path = base.join("PiglorOS");
         let moved = base.join("moved-during-commit");
+        let mut swap_failure = None;
+        let mut saw_stage = false;
         let result = ledger.replace_observing(b"staged candidate", |stage| {
             if stage == CommitStage::FileSynced {
-                fs::rename(&path, &moved).map_err(|_| ())?;
-                crate::create_private_directory(&path).map_err(|_| ())?;
+                saw_stage = true;
+                if let Err(error) = fs::rename(&path, &moved) {
+                    swap_failure = Some(format!("rename directory: {error}"));
+                    return Err(());
+                }
+                if let Err(error) = crate::create_private_directory(&path) {
+                    swap_failure = Some(format!("create replacement directory: {error:?}"));
+                    return Err(());
+                }
             }
             Ok(())
         });
+        assert!(saw_stage, "replacement failed before directory swap");
+        assert!(swap_failure.is_none(), "{swap_failure:?}");
         assert_eq!(result, Err(()));
         assert_eq!(fs::read(moved.join(LEDGER))?, b"original directory");
         assert_eq!(fs::read(moved.join(TEMPORARY))?, b"staged candidate");
