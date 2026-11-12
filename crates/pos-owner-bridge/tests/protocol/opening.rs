@@ -23,7 +23,7 @@ struct DelayedOpening<'a> {
     inner: &'a mut dyn OwnerWebSurface,
     clock: FakeClock,
     delay: Duration,
-    read_delay: Duration,
+    read_delay: Cell<Duration>,
     ready_target: Rc<Cell<Option<Instant>>>,
     consume_target: Rc<Cell<Option<Instant>>>,
     open_pending: u32,
@@ -77,7 +77,7 @@ impl OwnerWebSurface for DelayedOpening<'_> {
     fn reply_load_state(&self) -> Result<u32, SurfaceError> {
         let result = self.inner.reply_load_state();
         if result.as_ref().is_ok_and(|state| *state != 0) {
-            self.clock.advance(self.read_delay);
+            self.clock.advance(self.read_delay.replace(Duration::ZERO));
         }
         if result
             .as_ref()
@@ -186,7 +186,7 @@ fn test_plan_owner_window_reaches_the_surface_open_port() -> TestResult {
             inner: &mut rig.surface,
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
-            read_delay: Duration::ZERO,
+            read_delay: Cell::new(Duration::ZERO),
             ready_target: Rc::default(),
             consume_target: Rc::default(),
             open_pending: 1,
@@ -224,7 +224,7 @@ fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestR
         inner: &mut rig.surface,
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
-        read_delay: Duration::ZERO,
+        read_delay: Cell::new(Duration::ZERO),
         ready_target: Rc::default(),
         consume_target: Rc::default(),
         open_pending: 2,
@@ -276,7 +276,7 @@ fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
             inner: &mut rig.surface,
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
-            read_delay: Duration::ZERO,
+            read_delay: Cell::new(Duration::ZERO),
             ready_target: Rc::default(),
             consume_target: Rc::default(),
             open_pending: if opening { u32::MAX } else { 0 },
@@ -321,7 +321,7 @@ fn late_open_results_do_not_resurrect_a_cancelled_or_timed_out_driver() -> TestR
                     inner: &mut rig.surface,
                     clock: rig.clock.clone(),
                     delay: Duration::ZERO,
-                    read_delay: Duration::ZERO,
+                    read_delay: Cell::new(Duration::ZERO),
                     ready_target: Rc::default(),
                     consume_target: Rc::default(),
                     open_pending: u32::MAX,
@@ -402,7 +402,7 @@ fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() 
         inner: &mut rig.surface,
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
-        read_delay: Duration::ZERO,
+        read_delay: Cell::new(Duration::ZERO),
         ready_target: Rc::default(),
         consume_target: Rc::default(),
         open_pending: 0,
@@ -459,7 +459,7 @@ fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() 
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: if opening { delay } else { Duration::ZERO },
-                read_delay: Duration::ZERO,
+                read_delay: Cell::new(Duration::ZERO),
                 ready_target: Rc::default(),
                 consume_target: Rc::default(),
                 open_pending: 0,
@@ -514,7 +514,7 @@ fn expiration_during_mapping_or_retry_retirement_prevents_late_posts() -> TestRe
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: Duration::ZERO,
-                read_delay: Duration::ZERO,
+                read_delay: Cell::new(Duration::ZERO),
                 ready_target: Rc::default(),
                 consume_target: Rc::default(),
                 open_pending: 0,
@@ -600,7 +600,7 @@ fn first_receipt_timestamp_follows_completed_state_read() -> TestResult {
             inner: &mut rig.surface,
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
-            read_delay: delay,
+            read_delay: Cell::new(delay),
             ready_target: Rc::default(),
             consume_target: Rc::default(),
             open_pending: 0,
@@ -646,7 +646,7 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
         inner: &mut rig.surface,
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
-        read_delay: READINESS,
+        read_delay: Cell::new(READINESS),
         ready_target: Rc::default(),
         consume_target: Rc::default(),
         open_pending: 0,
@@ -698,11 +698,11 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: Duration::ZERO,
-                read_delay: if challenge {
+                read_delay: Cell::new(if challenge {
                     Duration::from_secs(35)
                 } else {
                     Duration::ZERO
-                },
+                }),
                 ready_target: Rc::clone(&ready_target),
                 consume_target: Rc::clone(&consume_target),
                 open_pending: 0,
@@ -753,7 +753,7 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
             }
             let outcome = outcome.ok_or("driver did not finish")?;
             if offset_ms < 0 {
-                assert!(outcome.is_ok(), "{stage}");
+                assert!(outcome.is_ok(), "{stage} {challenge}: {outcome:?}");
             } else {
                 let expected = if challenge {
                     LifecycleCode::ChallengeExpired
