@@ -1851,6 +1851,25 @@ fn restart_recordless_orphans(store: &mut WindowsCleanupStore) -> TestResult {
 }
 
 impl Fixture {
+    fn record_control_observation(
+        &mut self,
+        mark: ProcessFaultMark,
+        presence: Option<crate::RendererPresence>,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
+        if clock.now() >= self.deadline {
+            return Err("control observation expired".into());
+        }
+        self.trace.borrow_mut().push(mark);
+        if let Some(presence) = presence {
+            self.early_presence = Some(presence);
+            self.trace
+                .borrow_mut()
+                .push(ProcessFaultMark::RendererPresence(presence));
+        }
+        Ok(())
+    }
+
     fn drive_awaiting_load(
         &mut self,
         driver: &mut CeremonyDriver,
@@ -1871,7 +1890,7 @@ impl Fixture {
                     .surface
                     .awaiting_load_fault_state(driver.generation(), driver.posts())
                     .map_err(|()| "awaiting-load fault state could not be established")?;
-                self.trace.borrow_mut().push(mark);
+                self.record_control_observation(mark, None, &SystemClock)?;
                 if inject {
                     let seal = crate::FaultSeal {
                         trace: Rc::clone(&self.trace),
@@ -1969,7 +1988,7 @@ impl Fixture {
                     .surface
                     .navigating_fault_state(driver.generation(), driver.posts())
                     .map_err(|()| "navigating fault state could not be established")?;
-                self.trace.borrow_mut().push(mark);
+                self.record_control_observation(mark, None, &SystemClock)?;
                 if inject {
                     let seal = crate::FaultSeal {
                         trace: Rc::clone(&self.trace),
@@ -2817,8 +2836,15 @@ struct ConsumingPort<'a> {
 
 impl ConsumingPort<'_> {
     fn on_consuming(&self) -> TestResult {
+        self.on_consuming_with_clock(&SystemClock)
+    }
+
+    fn on_consuming_with_clock(&self, clock: &dyn pos_owner_bridge::MonotonicClock) -> TestResult {
         if *self.reached.borrow() {
             return Err("consuming CAS was observed twice".into());
+        }
+        if clock.now() >= self.deadline {
+            return Err("consuming fault point expired".into());
         }
         let mut state = self.state;
         state.phase = crate::ProcessFaultPhase::PostedConsuming;
@@ -3209,10 +3235,18 @@ struct BeforeRecordStore<'a, 's> {
 
 impl BeforeRecordStore<'_, '_> {
     fn on_write(&mut self, record: &[u8]) -> TestResult {
+        self.on_write_with_clock(record, &SystemClock)
+    }
+
+    fn on_write_with_clock(
+        &mut self,
+        record: &[u8],
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> TestResult {
         if self.reached {
             return Err("record write observed twice".into());
         }
-        if Instant::now() >= self.deadline {
+        if clock.now() >= self.deadline {
             return Err("pre-record point expired".into());
         }
         let browser = self
@@ -3248,6 +3282,9 @@ impl BeforeRecordStore<'_, '_> {
                 return Err("pre-record browser changed during renderer discovery".into());
             }
             self.presence = Some(presence);
+        }
+        if clock.now() >= self.deadline {
+            return Err("pre-record point expired".into());
         }
         let mark = ProcessFaultMark::BeforeRecord {
             generation: 1,
@@ -3614,10 +3651,7 @@ impl Fixture {
                     if self.early_renderer_state(driver, phase)? != Some(mark) {
                         return Err("renderer phase advanced during discovery".into());
                     }
-                    self.early_presence = Some(presence);
-                    self.trace
-                        .borrow_mut()
-                        .extend([mark, ProcessFaultMark::RendererPresence(presence)]);
+                    self.record_control_observation(mark, Some(presence), &SystemClock)?;
                     if inject && presence == crate::RendererPresence::Unique {
                         let seal = crate::FaultSeal {
                             trace: Rc::clone(&self.trace),

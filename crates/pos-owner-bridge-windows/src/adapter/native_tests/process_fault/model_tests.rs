@@ -916,3 +916,162 @@ fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn modeled_consuming_control_requires_timely_completed_cas() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for (elapsed, accepted) in [
+        (Duration::from_millis(999), true),
+        (Duration::from_secs(1), false),
+        (Duration::from_secs(2), false),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, _model) = fixture(&root)?;
+        let clock = FakeClock::start();
+        let deadline = clock.now() + Duration::from_secs(1);
+        clock.advance(elapsed);
+        let state = ProcessFaultState {
+            phase: ProcessFaultPhase::PostedReady,
+            topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+            generation: 1,
+            reply_state: ControlState::Ready as u32,
+            record_count: 1,
+            posts: 1,
+        };
+        {
+            let port = super::ConsumingPort {
+                inner: RefCell::new(&mut fixture.surface),
+                target: ProcessFaultTarget::Browser,
+                inject: false,
+                deadline,
+                trace: Rc::clone(&fixture.trace),
+                state,
+                handle: RefCell::new(None),
+                failure: RefCell::new(None),
+                reached: RefCell::new(false),
+            };
+            let result = port.on_consuming_with_clock(&clock);
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(*port.reached.borrow(), accepted);
+        }
+        assert_eq!(fixture.trace.borrow().len(), usize::from(accepted));
+        let driver =
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        fixture.retire(driver, Err(ERROR), None)?;
+        root.remove()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_pre_record_control_rejects_query_crossing_deadline() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for (seconds, accepted) in [(0, false), (1, false), (3, true)] {
+        crate::Native::reset_process_failure_observations();
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model) = fixture(&root)?;
+        model.preload_owners.set(true);
+        let selected = fixed_competing_spec(MODEL_CASE);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        let Poll::Ready(Ok(browser)) = fixture.surface.open(&selected) else {
+            return Err("missing browser".into());
+        };
+        let record = pos_owner_bridge_codec::CleanupRecordV1::new(
+            selected.ceremony_id,
+            &selected.folder_name,
+            browser.browser_pid,
+            browser.creation_filetime,
+            browser.image_path_sha256,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut bytes = [0; 4096];
+        let size = pos_owner_bridge_codec::encode_cleanup_record(&record, &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let clock = TickingClock(FakeClock::start());
+        let deadline = clock.0.now() + Duration::from_secs(seconds);
+        let shared = RefCell::new(&mut fixture.surface);
+        let mut store = super::BeforeRecordStore {
+            inner: &mut fixture.store,
+            surface: &shared,
+            inject: false,
+            target: ProcessFaultTarget::Browser,
+            presence: None,
+            deadline,
+            trace: Rc::clone(&fixture.trace),
+            handle: None,
+            failure: None,
+            reached: false,
+            written: false,
+            generation: 1,
+            posts: 0,
+            ceremony_id: selected.ceremony_id,
+        };
+        let result = store.on_write_with_clock(&bytes[..size], &clock);
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(store.reached, accepted);
+        assert_eq!(fixture.trace.borrow().len(), usize::from(accepted));
+        drop(store);
+        drop(shared);
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let sink = model.sink.borrow().clone().ok_or("missing sink")?;
+        sink.event(NativeEvent::BrowserExited {
+            pid: browser.browser_pid,
+        });
+        fixture
+            .surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let driver =
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        fixture.retire(driver, Err(ERROR), None)?;
+        root.remove()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_control_observation_refuses_a_snapshot_after_the_deadline() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for presence in [None, Some(crate::RendererPresence::Absent)] {
+        for (elapsed, accepted) in [
+            (Duration::from_millis(999), true),
+            (Duration::from_secs(1), false),
+            (Duration::from_secs(2), false),
+        ] {
+            let root = FixtureRoot::new()?;
+            let (mut fixture, _model) = fixture(&root)?;
+            let clock = FakeClock::start();
+            fixture.deadline = clock.now() + Duration::from_secs(1);
+            // Model a state/identity or renderer-discovery query completing here.
+            clock.advance(elapsed);
+            let mark = ProcessFaultMark::BeforeRecord {
+                generation: 1,
+                record_count: 0,
+            };
+            let result = fixture.record_control_observation(mark, presence, &clock);
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(
+                fixture.trace.borrow().len(),
+                if accepted {
+                    1 + usize::from(presence.is_some())
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                fixture.early_presence,
+                if accepted { presence } else { None }
+            );
+            assert!(!fixture.evidence_complete);
+            let driver =
+                readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+            fixture.retire(driver, Err(ERROR), None)?;
+            root.remove()?;
+        }
+    }
+    Ok(())
+}
