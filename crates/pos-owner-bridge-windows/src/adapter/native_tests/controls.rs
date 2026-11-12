@@ -463,6 +463,143 @@ mod tests {
         }
     }
 
+    // These values exercise the verdict only; they are not native callback evidence.
+    fn modeled_control(
+        kind: EventKind,
+        mode: ControlFault,
+    ) -> (ControlObservation, ControlObservation) {
+        let deferred = kind != EventKind::Navigation && mode != ControlFault::MissingDeferral;
+        let before = ControlObservation {
+            kind,
+            deferred,
+            attempts: if mode == ControlFault::RetryDenial {
+                4
+            } else {
+                1
+            },
+            readback: Some(true),
+            completions: u32::from(deferred),
+            retired: mode != ControlFault::UncertainComplete,
+            overflowed: false,
+        };
+        let after = ControlObservation {
+            retired: true,
+            ..before
+        };
+        (before, after)
+    }
+
+    fn verdict_accepts(
+        before: &[ControlObservation],
+        after: &[ControlObservation],
+        kind: EventKind,
+        mode: ControlFault,
+    ) -> bool {
+        std::panic::catch_unwind(|| assert_denials(before, after, kind, mode)).is_ok()
+    }
+
+    #[test]
+    fn modeled_denial_oracle_requires_each_mode_specific_retirement() {
+        for (kind, mode) in [
+            (EventKind::Navigation, ControlFault::Normal),
+            (EventKind::NewWindow, ControlFault::Normal),
+            (EventKind::NewWindow, ControlFault::RetryDenial),
+            (EventKind::NewWindow, ControlFault::MissingDeferral),
+            (EventKind::NewWindow, ControlFault::UncertainComplete),
+        ] {
+            let (before, after) = modeled_control(kind, mode);
+            assert!(verdict_accepts(&[before], &[after], kind, mode));
+            let no_readback = ControlObservation {
+                readback: None,
+                ..before
+            };
+            let false_readback = ControlObservation {
+                readback: Some(false),
+                ..before
+            };
+            let wrong_attempts = ControlObservation {
+                attempts: before.attempts + 1,
+                ..before
+            };
+            let wrong_deferral = ControlObservation {
+                deferred: !before.deferred,
+                ..before
+            };
+            let wrong_completions = ControlObservation {
+                completions: before.completions + 1,
+                ..before
+            };
+            let wrong_retirement = ControlObservation {
+                retired: !before.retired,
+                ..before
+            };
+            for invalid in [
+                no_readback,
+                false_readback,
+                wrong_attempts,
+                wrong_deferral,
+                wrong_completions,
+                wrong_retirement,
+            ] {
+                assert!(!verdict_accepts(&[invalid], &[after], kind, mode));
+            }
+            assert!(!verdict_accepts(
+                &[before],
+                &[ControlObservation {
+                    retired: false,
+                    ..after
+                }],
+                kind,
+                mode
+            ));
+            assert!(!verdict_accepts(
+                &[before],
+                &[ControlObservation {
+                    completions: after.completions + 1,
+                    ..after
+                }],
+                kind,
+                mode
+            ));
+        }
+    }
+
+    #[test]
+    fn modeled_denial_oracle_requires_nonempty_matching_ordered_snapshots() {
+        let kind = EventKind::NewWindow;
+        let mode = ControlFault::Normal;
+        let (before, after) = modeled_control(kind, mode);
+        assert!(!verdict_accepts(&[], &[], kind, mode));
+        assert!(!verdict_accepts(&[before], &[], kind, mode));
+        assert!(!verdict_accepts(&[before, before], &[after], kind, mode));
+        let wrong_kind = ControlObservation {
+            kind: EventKind::Permission,
+            ..before
+        };
+        assert!(!verdict_accepts(
+            &[before, wrong_kind],
+            &[after, after],
+            kind,
+            mode
+        ));
+        let wrong_after = ControlObservation {
+            completions: after.completions + 1,
+            ..after
+        };
+        assert!(!verdict_accepts(
+            &[before, before],
+            &[after, wrong_after],
+            kind,
+            mode
+        ));
+        assert!(verdict_accepts(
+            &[before, before],
+            &[after, after],
+            kind,
+            mode
+        ));
+    }
+
     fn probe() -> Probe {
         let events = Rc::new(Events::default());
         events.begin();
