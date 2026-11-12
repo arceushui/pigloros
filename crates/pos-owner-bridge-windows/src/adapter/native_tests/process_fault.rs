@@ -2353,8 +2353,8 @@ fn run_awaiting_load(
         native_zeroed: None,
         message: "awaiting-load failure, wipe, or evidence was not established",
     };
-    fixture.finish_failed_case(driver, result, failure, finish)?;
-    mark.ok_or_else(|| "awaiting-load state was not reached".into())
+    pass(fixture.finish_failed_case(driver, result, failure, finish));
+    Ok(pass(mark.ok_or("awaiting-load state was not reached")))
 }
 
 impl Fixture {
@@ -2374,48 +2374,52 @@ impl Fixture {
                 && matches!(&step, Step::Pending)
                 && self.surface.navigating_fault_ready()
             {
-                let mark = self
-                    .surface
-                    .navigating_fault_state(driver.generation(), driver.posts())
-                    .map_err(|()| "navigating fault state could not be established")?;
-                self.record_control_observation(mark, None, &SystemClock)?;
+                let mark = pass(
+                    self.surface
+                        .navigating_fault_state(driver.generation(), driver.posts())
+                        .map_err(|()| "navigating fault state could not be established"),
+                );
+                pass(self.record_control_observation(mark, None, &SystemClock));
                 if inject {
                     let seal = crate::FaultSeal {
                         trace: Rc::clone(&self.trace),
                         deadline: self.deadline,
                     };
-                    self.handle = Some(
+                    self.handle = Some(pass(
                         self.surface
                             .inject_navigating_fault(ProcessFaultTarget::Browser, seal)
-                            .map_err(|()| "navigating process fault refused")?,
-                    );
-                    self.observe_fault_from(ProcessFaultTarget::Browser, mark)?;
+                            .map_err(|()| "navigating process fault refused"),
+                    ));
+                    pass(self.observe_fault_from(ProcessFaultTarget::Browser, mark));
                 } else {
                     self.evidence_complete = true;
                 }
-                if !self.evidence_complete
-                    || !self.surface.navigating_fault_owners_retained()
-                    || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
-                    || !self.surface.navigating_fault_owners_retained()
-                {
-                    return Err("navigating owners or blocked admission missing".into());
-                }
+                assert!(
+                    self.evidence_complete
+                        && self.surface.navigating_fault_owners_retained()
+                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && self.surface.navigating_fault_owners_retained(),
+                    "navigating owners or blocked admission missing"
+                );
                 if !inject {
                     self.surface.controller_lost();
                 }
                 reached = Some(mark);
-                writeln!(
+                pass(writeln!(
                     std::io::stderr(),
                     "NATIVE_NAVIGATING injected={inject} trace={:?}",
                     self.trace.borrow()
-                )?;
+                ));
             }
             match step {
                 Step::Finished(result) => {
-                    return Ok((result, reached.ok_or("navigating state was not observed")?))
+                    return Ok((
+                        result,
+                        pass(reached.ok_or("navigating state was not observed")),
+                    ))
                 }
                 Step::Done => return Err("navigating driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -2428,8 +2432,11 @@ fn run_navigating(
     inject: bool,
 ) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut fixture = pass(Fixture::new(runtime, root, number, FixtureProfile::Pending));
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_navigating(&mut driver, inject)
     }));
@@ -2448,8 +2455,8 @@ fn run_navigating(
         native_zeroed: None,
         message: "navigating failure, wipe, or evidence was not established",
     };
-    fixture.finish_failed_case(driver, result, failure, finish)?;
-    mark.ok_or_else(|| "navigating state was not reached".into())
+    pass(fixture.finish_failed_case(driver, result, failure, finish));
+    Ok(pass(mark.ok_or("navigating state was not reached")))
 }
 
 impl Fixture {
@@ -2470,18 +2477,17 @@ impl Fixture {
                 && driver.posts() == 1
                 && driver.first_receipt_at().is_none()
             {
-                let deadline = self.deadline.min(
+                let deadline = self.deadline.min(pass(
                     driver
                         .next_wake()
-                        .ok_or("empty-reply driver deadline missing")?,
+                        .ok_or("empty-reply driver deadline missing"),
+                ));
+                let state = pass(
+                    self.surface
+                        .posted_empty_fault_state(driver.posts())
+                        .map_err(|()| "empty-reply fault state was not observed"),
                 );
-                let state = self
-                    .surface
-                    .posted_empty_fault_state(driver.posts())
-                    .map_err(|()| "empty-reply fault state was not observed")?;
-                if Instant::now() >= deadline {
-                    return Err("empty-reply fault point expired".into());
-                }
+                assert!(Instant::now() < deadline, "empty-reply fault point expired");
                 self.reached = Some(state);
                 self.trace
                     .borrow_mut()
@@ -2491,32 +2497,37 @@ impl Fixture {
                         trace: Rc::clone(&self.trace),
                         deadline,
                     };
-                    self.handle = Some(
+                    self.handle = Some(pass(
                         self.surface
                             .inject_posted_empty_fault(target, seal)
-                            .map_err(|()| "empty-reply owned fault refused")?,
-                    );
-                    self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
+                            .map_err(|()| "empty-reply owned fault refused"),
+                    ));
+                    pass(self.observe_fault_until(
+                        target,
+                        ProcessFaultMark::Reached(state),
+                        deadline,
+                    ));
                 } else {
                     self.evidence_complete = true;
                 }
-                if !self.evidence_complete || !self.surface.fault_owners_retained() {
-                    return Err("empty-reply evidence or owners missing".into());
-                }
-                self.check_blocked_admission()?;
+                assert!(
+                    self.evidence_complete && self.surface.fault_owners_retained(),
+                    "empty-reply evidence or owners missing"
+                );
+                pass(self.check_blocked_admission());
                 if !inject {
                     self.surface.controller_lost();
                 }
-                writeln!(
+                pass(writeln!(
                     std::io::stderr(),
                     "NATIVE_POSTED_EMPTY target={target:?} injected={inject} trace={:?}",
                     self.trace.borrow()
-                )?;
+                ));
             }
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("empty-reply driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -2530,9 +2541,17 @@ fn run_posted_empty(
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::DelayedDelivery)?;
+    let mut fixture = pass(Fixture::new(
+        runtime,
+        root,
+        number,
+        FixtureProfile::DelayedDelivery,
+    ));
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_empty(&mut driver, target, inject)
     }));
@@ -2546,8 +2565,8 @@ fn run_posted_empty(
         native_zeroed: Some(native_zeroed),
         message: "empty-reply failure, wipe, or evidence was not established",
     };
-    fixture.finish_failed_case(driver, result, failure, finish)?;
-    state.ok_or_else(|| "empty-reply state was not reached".into())
+    pass(fixture.finish_failed_case(driver, result, failure, finish));
+    Ok(pass(state.ok_or("empty-reply state was not reached")))
 }
 
 impl Fixture {
@@ -2559,42 +2578,44 @@ impl Fixture {
             if !self.surface.recordless_opening_ready() || Instant::now() >= self.deadline {
                 return Err("opening browser cutpoint was not reached".into());
             }
-            match self.surface.pending_opening_completion() {
-                None => {
-                    if let Some(browser) = self
-                        .surface
+            let completion = self.surface.pending_opening_completion();
+            assert_ne!(
+                completion,
+                Some(false),
+                "controller callback failed before browser cutpoint"
+            );
+            if completion.is_none() {
+                if let Some(browser) = pass(
+                    self.surface
                         .prepare_pending_opening_browser()
-                        .map_err(|()| "pending-opening browser or callback indeterminate")?
-                    {
-                        return Ok((
-                            browser,
-                            ProcessFaultMark::PendingOpening {
-                                generation: 1,
-                                record_count: 0,
-                            },
-                        ));
-                    }
-                    readiness::pump(&self.surface)?;
-                }
-                Some(true) => {
-                    if !controller_held_before_exit(&crate::Native::callback_order()) {
-                        return Err("held controller callback order was not established".into());
-                    }
-                    let browser = self
-                        .surface
-                        .prepare_recordless_browser()
-                        .map_err(|()| "held-opening browser identity indeterminate")?;
+                        .map_err(|()| "pending-opening browser or callback indeterminate"),
+                ) {
                     return Ok((
                         browser,
-                        ProcessFaultMark::RecordlessOpening {
+                        ProcessFaultMark::PendingOpening {
                             generation: 1,
                             record_count: 0,
                         },
                     ));
                 }
-                Some(false) => {
-                    return Err("controller callback failed before browser cutpoint".into())
-                }
+                pass(readiness::pump(&self.surface));
+            } else {
+                assert!(
+                    controller_held_before_exit(&crate::Native::callback_order()),
+                    "held controller callback order was not established"
+                );
+                let browser = pass(
+                    self.surface
+                        .prepare_recordless_browser()
+                        .map_err(|()| "held-opening browser identity indeterminate"),
+                );
+                return Ok((
+                    browser,
+                    ProcessFaultMark::RecordlessOpening {
+                        generation: 1,
+                        record_count: 0,
+                    },
+                ));
             }
         }
     }
@@ -2635,15 +2656,16 @@ impl Fixture {
                 }
             }
             ProcessFaultMark::RecordlessOpening { .. } => {
-                self.handle = Some(
+                self.handle = Some(pass(
                     self.surface
                         .inject_recordless_browser(seal)
-                        .map_err(|()| "held-opening browser fault refused")?,
+                        .map_err(|()| "held-opening browser fault refused"),
+                ));
+                pass(self.observe_recordless(browser));
+                assert!(
+                    self.surface.recordless_fault_owners_retained(),
+                    "held-opening callback owner not retained"
                 );
-                self.observe_recordless(browser)?;
-                if !self.surface.recordless_fault_owners_retained() {
-                    return Err("held-opening callback owner not retained".into());
-                }
             }
             _ => return Err("unexpected opening fault cutpoint".into()),
         }
@@ -2665,17 +2687,18 @@ impl Fixture {
             ));
             if !reached && matches!(&step, Step::Pending) && self.surface.recordless_opening_ready()
             {
-                if driver.generation() != 1 || driver.posts() != 0 {
-                    return Err("opening generation or post count changed".into());
-                }
-                let (browser, first) = self.opening_first_browser()?;
+                assert!(
+                    driver.generation() == 1 && driver.posts() == 0,
+                    "opening generation or post count changed"
+                );
+                let (browser, first) = pass(self.opening_first_browser());
                 self.trace.borrow_mut().push(first);
-                if !self.opening_first_owners_retained(first)
-                    || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
-                    || !self.opening_first_owners_retained(first)
-                {
-                    return Err("opening owners or blocked admission missing".into());
-                }
+                assert!(
+                    self.opening_first_owners_retained(first)
+                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && self.opening_first_owners_retained(first),
+                    "opening owners or blocked admission missing"
+                );
                 let _logged = writeln!(
                     std::io::stderr(),
                     "NATIVE_OPENING_FIRST case={} inject={inject} cutpoint={first:?}",
@@ -2683,7 +2706,7 @@ impl Fixture {
                 );
                 reached = true;
                 if inject {
-                    self.inject_opening_first_browser(browser, first)?;
+                    pass(self.inject_opening_first_browser(browser, first));
                     self.surface.controller_lost();
                     cancelled = true;
                 }
@@ -2702,7 +2725,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("opening driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -2728,11 +2751,11 @@ impl Fixture {
         callback_order: Box<dyn FnOnce() -> Vec<crate::NativeCallbackMoment> + '_>,
     ) -> TestResult {
         loop {
-            if let Some(event) = self
-                .surface
-                .recordless_fault_event()
-                .map_err(|()| "pending-opening browser exit mismatched")?
-            {
+            if let Some(event) = pass(
+                self.surface
+                    .recordless_fault_event()
+                    .map_err(|()| "pending-opening browser exit mismatched"),
+            ) {
                 let held = self
                     .handle
                     .as_ref()
@@ -2869,9 +2892,9 @@ fn run_first_opening_browser(
 ) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
     let _callback_order = CallbackOrderGuard::arm();
-    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
+    let mut fixture = pass(Fixture::new(runtime, root, number, FixtureProfile::Pending));
     let ceremony_id = CeremonyId::from_bytes([number; 16]);
-    let mut driver = readiness::new_driver(ceremony_id, Instant::now())?;
+    let mut driver = pass(readiness::new_driver(ceremony_id, Instant::now()));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_first_opening_browser(&mut driver, inject)
     }));
@@ -2886,11 +2909,11 @@ fn run_first_opening_browser(
     let complete = fixture.evidence_complete;
     let first = fixture.trace.borrow().first().copied();
     let restart = (inject && complete).then_some(ceremony_id);
-    fixture.retire(driver, result, restart)?;
-    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
+    pass(fixture.retire(driver, result, restart));
+    pass(check_final_process_failures(
+        inject.then_some(ProcessFaultTarget::Browser),
+    ));
+    assert!(failure.is_none(), "{failure:?}");
     FirstOpeningVerdict {
         failed,
         wipe: OpeningWipe {
@@ -2921,10 +2944,11 @@ impl Fixture {
             if let (None, Step::Pending, Some(receipt)) =
                 (self.reached, &step, driver.first_receipt_at())
             {
-                let state = self
-                    .surface
-                    .reply_load_state()
-                    .map_err(|_| "writing reply read failed")?;
+                let state = pass(
+                    self.surface
+                        .reply_load_state()
+                        .map_err(|_| "writing reply read failed"),
+                );
                 if state == ControlState::Writing as u32 {
                     let first = *writing_seen.get_or_insert_with(Instant::now);
                     // Let the real driver poll again after the observed WRITING,
@@ -2932,16 +2956,19 @@ impl Fixture {
                     if step_started.saturating_duration_since(first)
                         >= pos_owner_bridge::ceremony::timing::FAST_POLL
                     {
-                        self.at_posted_writing(driver, target, inject, receipt)?;
+                        pass(self.at_posted_writing(driver, target, inject, receipt));
                     }
-                } else if writing_seen.is_some() {
-                    return Err("writing phase advanced before its fault point".into());
+                } else {
+                    assert!(
+                        writing_seen.is_none(),
+                        "writing phase advanced before its fault point"
+                    );
                 }
             }
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("writing driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -2954,13 +2981,12 @@ impl Fixture {
         receipt: Instant,
     ) -> TestResult {
         let deadline = interaction_deadline(self.deadline, receipt);
-        let state = self
-            .surface
-            .posted_writing_fault_state(driver.posts())
-            .map_err(|()| "writing fault state was not established")?;
-        if Instant::now() >= deadline {
-            return Err("writing fault point expired".into());
-        }
+        let state = pass(
+            self.surface
+                .posted_writing_fault_state(driver.posts())
+                .map_err(|()| "writing fault state was not established"),
+        );
+        assert!(Instant::now() < deadline, "writing fault point expired");
         self.reached = Some(state);
         self.trace
             .borrow_mut()
@@ -2970,27 +2996,28 @@ impl Fixture {
                 trace: Rc::clone(&self.trace),
                 deadline,
             };
-            self.handle = Some(
+            self.handle = Some(pass(
                 self.surface
                     .inject_posted_writing_fault(target, seal)
-                    .map_err(|()| "owned writing fault refused")?,
-            );
-            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
+                    .map_err(|()| "owned writing fault refused"),
+            ));
+            pass(self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline));
         } else {
             self.evidence_complete = true;
         }
-        if !self.evidence_complete || !self.surface.fault_owners_retained() {
-            return Err("writing evidence or owners missing".into());
-        }
-        self.check_blocked_admission()?;
+        assert!(
+            self.evidence_complete && self.surface.fault_owners_retained(),
+            "writing evidence or owners missing"
+        );
+        pass(self.check_blocked_admission());
         if !inject {
             self.surface.controller_lost();
         }
-        writeln!(
+        pass(writeln!(
             std::io::stderr(),
             "NATIVE_POSTED_WRITING target={target:?} injected={inject} trace={:?}",
             self.trace.borrow()
-        )?;
+        ));
         Ok(())
     }
 }
@@ -3003,21 +3030,24 @@ fn run_posted_writing(
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(
+    let mut fixture = pass(Fixture::new(
         runtime,
         root,
         number,
         FixtureProfile::SuccessfulGetWritingDelay,
-    )?;
+    ));
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_writing(&mut driver, target, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let state = fixture.reached;
     let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
-    fixture.finish_failed_case(
+    pass(fixture.finish_failed_case(
         driver,
         result,
         failure,
@@ -3028,8 +3058,8 @@ fn run_posted_writing(
             native_zeroed: Some(native_zeroed),
             message: "writing failure, wipe, or evidence was not established",
         },
-    )?;
-    state.ok_or_else(|| "writing state was not reached".into())
+    ));
+    Ok(pass(state.ok_or("writing state was not reached")))
 }
 
 impl Fixture {
@@ -3048,7 +3078,7 @@ impl Fixture {
                     .reply_load_state()
                     .map_err(|_| "ready reply read failed")?;
                 if state == ControlState::Ready as u32 {
-                    self.at_posted_ready(driver, target, inject, receipt)?;
+                    pass(self.at_posted_ready(driver, target, inject, receipt));
                 }
             }
             let step = driver.step(&mut readiness::env(
@@ -3059,7 +3089,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("ready driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -3072,13 +3102,12 @@ impl Fixture {
         receipt: Instant,
     ) -> TestResult {
         let deadline = interaction_deadline(self.deadline, receipt);
-        let state = self
-            .surface
-            .posted_ready_fault_state(driver.posts())
-            .map_err(|()| "ready fault state was not established")?;
-        if Instant::now() >= deadline {
-            return Err("ready fault point expired".into());
-        }
+        let state = pass(
+            self.surface
+                .posted_ready_fault_state(driver.posts())
+                .map_err(|()| "ready fault state was not established"),
+        );
+        assert!(Instant::now() < deadline, "ready fault point expired");
         self.reached = Some(state);
         self.trace
             .borrow_mut()
@@ -3088,27 +3117,28 @@ impl Fixture {
                 trace: Rc::clone(&self.trace),
                 deadline,
             };
-            self.handle = Some(
+            self.handle = Some(pass(
                 self.surface
                     .inject_posted_ready_fault(target, seal)
-                    .map_err(|()| "owned ready fault refused")?,
-            );
-            self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
+                    .map_err(|()| "owned ready fault refused"),
+            ));
+            pass(self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline));
         } else {
             self.evidence_complete = true;
         }
-        if !self.evidence_complete || !self.surface.fault_owners_retained() {
-            return Err("ready evidence or owners missing".into());
-        }
-        self.check_blocked_admission()?;
+        assert!(
+            self.evidence_complete && self.surface.fault_owners_retained(),
+            "ready evidence or owners missing"
+        );
+        pass(self.check_blocked_admission());
         if !inject {
             self.surface.controller_lost();
         }
-        writeln!(
+        pass(writeln!(
             std::io::stderr(),
             "NATIVE_POSTED_READY target={target:?} injected={inject} trace={:?}",
             self.trace.borrow()
-        )?;
+        ));
         Ok(())
     }
 }
@@ -3121,14 +3151,17 @@ fn run_posted_ready(
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(
+    let mut fixture = pass(Fixture::new(
         runtime,
         root,
         number,
         FixtureProfile::SuccessfulGetReleaseDelay,
-    )?;
+    ));
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_ready(&mut driver, target, inject)
     }));
@@ -3136,7 +3169,7 @@ fn run_posted_ready(
     let state = fixture.reached;
     let observations = crate::Native::take_native_zero_observations();
     let native_zeroed = nonzero_reply_zeroing_observed(&observations);
-    fixture.finish_failed_case(
+    pass(fixture.finish_failed_case(
         driver,
         result,
         failure,
@@ -3147,8 +3180,8 @@ fn run_posted_ready(
             native_zeroed: Some(native_zeroed),
             message: "ready failure, wipe, or evidence was not established",
         },
-    )?;
-    state.ok_or_else(|| "ready state was not reached".into())
+    ));
+    Ok(pass(state.ok_or("ready state was not reached")))
 }
 
 fn run_retries(runtime: &Path, root: &Path) -> TestResult {
@@ -3159,8 +3192,17 @@ fn run_retries(runtime: &Path, root: &Path) -> TestResult {
             (2, ProcessFaultTarget::Browser),
         ] {
             let number = 0x50 + (point.post() - 2) * 4 + index;
-            let control = run_posted_retry(runtime, root, number, target, point, false)?;
-            let fault = run_posted_retry(runtime, root, number + 1, target, point, true)?;
+            let control = pass(run_posted_retry(
+                runtime, root, number, target, point, false,
+            ));
+            let fault = pass(run_posted_retry(
+                runtime,
+                root,
+                number + 1,
+                target,
+                point,
+                true,
+            ));
             assert_eq!(
                 control, fault,
                 "retry control and fault reached different states"
@@ -3188,28 +3230,30 @@ impl Fixture {
                 && driver.posts() == point.post()
                 && driver.first_receipt_at().is_none()
             {
-                let deadline = self.deadline.min(
+                let deadline = self.deadline.min(pass(
                     driver
                         .next_wake()
-                        .ok_or("retry empty-reply driver deadline missing")?,
-                );
+                        .ok_or("retry empty-reply driver deadline missing"),
+                ));
                 let previous = crate::Native::take_native_zero_observations();
-                if previous.len() != usize::from(point.post() - 1) * 2
-                    || !previous.chunks_exact(2).all(native_zeroing_observed)
-                {
-                    return Err("retired retry pairs did not prove their native wipes".into());
-                }
+                assert!(
+                    previous.len() == usize::from(point.post() - 1) * 2
+                        && previous.chunks_exact(2).all(native_zeroing_observed),
+                    "retired retry pairs did not prove their native wipes"
+                );
                 self.prior_native_wipe = true;
                 // Taking the completed-pair observations disarms the witness;
                 // re-arm it for the currently live pair before any fault.
                 crate::Native::arm_native_zero_observations();
-                let state = self
-                    .surface
-                    .posted_retry_fault_state(driver.posts(), point)
-                    .map_err(|()| "retry empty-reply fault state was not observed")?;
-                if Instant::now() >= deadline {
-                    return Err("retry empty-reply fault point expired".into());
-                }
+                let state = pass(
+                    self.surface
+                        .posted_retry_fault_state(driver.posts(), point)
+                        .map_err(|()| "retry empty-reply fault state was not observed"),
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "retry empty-reply fault point expired"
+                );
                 self.reached = Some(state);
                 self.trace
                     .borrow_mut()
@@ -3219,32 +3263,37 @@ impl Fixture {
                         trace: Rc::clone(&self.trace),
                         deadline,
                     };
-                    self.handle = Some(
+                    self.handle = Some(pass(
                         self.surface
                             .inject_posted_retry_fault(target, point, seal)
-                            .map_err(|()| "retry empty-reply owned fault refused")?,
-                    );
-                    self.observe_fault_until(target, ProcessFaultMark::Reached(state), deadline)?;
+                            .map_err(|()| "retry empty-reply owned fault refused"),
+                    ));
+                    pass(self.observe_fault_until(
+                        target,
+                        ProcessFaultMark::Reached(state),
+                        deadline,
+                    ));
                 } else {
                     self.evidence_complete = true;
                 }
-                if !self.evidence_complete || !self.surface.fault_owners_retained() {
-                    return Err("retry empty-reply evidence or owners missing".into());
-                }
-                self.check_blocked_admission()?;
+                assert!(
+                    self.evidence_complete && self.surface.fault_owners_retained(),
+                    "retry empty-reply evidence or owners missing"
+                );
+                pass(self.check_blocked_admission());
                 if !inject {
                     self.surface.controller_lost();
                 }
-                writeln!(
+                pass(writeln!(
                     std::io::stderr(),
                     "NATIVE_POSTED_RETRY_EMPTY target={target:?} injected={inject} trace={:?}",
                     self.trace.borrow()
-                )?;
+                ));
             }
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("retry empty-reply driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -3259,9 +3308,17 @@ fn run_posted_retry(
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::WithheldDelivery)?;
+    let mut fixture = pass(Fixture::new(
+        runtime,
+        root,
+        number,
+        FixtureProfile::WithheldDelivery,
+    ));
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));
@@ -3269,7 +3326,7 @@ fn run_posted_retry(
     let state = fixture.reached;
     let native_zeroed = fixture.prior_native_wipe
         && native_zeroing_observed(&crate::Native::take_native_zero_observations());
-    fixture.finish_failed_case(
+    pass(fixture.finish_failed_case(
         driver,
         result,
         failure,
@@ -3280,8 +3337,8 @@ fn run_posted_retry(
             native_zeroed: Some(native_zeroed),
             message: "retry empty-reply failure, wipe, or evidence was not established",
         },
-    )?;
-    state.ok_or_else(|| "retry empty-reply state was not reached".into())
+    ));
+    Ok(pass(state.ok_or("retry empty-reply state was not reached")))
 }
 
 // The wrapper delegates the real Surface CAS. Its only intervention is after
@@ -3456,8 +3513,8 @@ fn run_consuming_cases(runtime: &Path, root: &Path) -> TestResult {
         (0x74, ProcessFaultTarget::Renderer),
         (0x76, ProcessFaultTarget::Browser),
     ] {
-        let control = run_consuming(runtime, root, number, target, false)?;
-        let fault = run_consuming(runtime, root, number + 1, target, true)?;
+        let control = pass(run_consuming(runtime, root, number, target, false));
+        let fault = pass(run_consuming(runtime, root, number + 1, target, true));
         assert_eq!(
             control, fault,
             "consuming control and fault reached different states"
@@ -3476,27 +3533,27 @@ impl Fixture {
         loop {
             let receipt = driver.first_receipt_at().filter(|_| self.reached.is_none());
             let ready = if receipt.is_some() {
-                self.surface
-                    .reply_load_state()
-                    .map_err(|_| "consuming reply read failed")?
-                    == ControlState::Ready as u32
+                pass(
+                    self.surface
+                        .reply_load_state()
+                        .map_err(|_| "consuming reply read failed"),
+                ) == ControlState::Ready as u32
             } else {
                 false
             };
             if let (Some(receipt), true) = (receipt, ready) {
-                let state = self
-                    .surface
-                    .posted_ready_fault_state(driver.posts())
-                    .map_err(|()| "pre-consuming state unavailable")?;
+                let state = pass(
+                    self.surface
+                        .posted_ready_fault_state(driver.posts())
+                        .map_err(|()| "pre-consuming state unavailable"),
+                );
                 let deadline = interaction_deadline(self.deadline, receipt);
-                if Instant::now() >= deadline {
-                    return Err("consuming fault point expired".into());
-                }
-                let step = self.consuming_step(driver, target, inject, state, deadline)?;
+                assert!(Instant::now() < deadline, "consuming fault point expired");
+                let step = pass(self.consuming_step(driver, target, inject, state, deadline));
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => readiness::pump(&self.surface)?,
+                    Step::Pending => pass(readiness::pump(&self.surface)),
                 }
             } else {
                 let step = driver.step(&mut readiness::env(
@@ -3507,7 +3564,7 @@ impl Fixture {
                 match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => readiness::pump(&self.surface)?,
+                    Step::Pending => pass(readiness::pump(&self.surface)),
                 }
             }
         }
@@ -3547,13 +3604,8 @@ impl Fixture {
             (attempt, handle, failure, reached)
         };
         self.handle = handle;
-        let step = match attempt {
-            Ok(step) => step,
-            Err(payload) => std::panic::resume_unwind(payload),
-        };
-        if let Some(error) = failure {
-            return Err(error.into());
-        }
+        let step = pass(attempt);
+        assert!(failure.is_none(), "{failure:?}");
         if !reached {
             return Ok(step);
         }
@@ -3562,10 +3614,11 @@ impl Fixture {
         state.reply_state = ControlState::Consuming as u32;
         self.reached = Some(state);
         self.evidence_complete = true;
-        if !self.surface.fault_owners_retained() {
-            return Err("consuming owners missing".into());
-        }
-        self.check_blocked_admission()?;
+        assert!(
+            self.surface.fault_owners_retained(),
+            "consuming owners missing"
+        );
+        pass(self.check_blocked_admission());
         Ok(step)
     }
 }
@@ -3696,14 +3749,17 @@ fn run_consuming(
     inject: bool,
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = Fixture::new(
+    let mut fixture = pass(Fixture::new(
         runtime,
         root,
         number,
         FixtureProfile::SuccessfulGetReleaseDelay,
-    )?;
+    ));
     let _zero_witness = ZeroWitness::arm();
-    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let mut driver = pass(readiness::new_driver(
+        CeremonyId::from_bytes([number; 16]),
+        Instant::now(),
+    ));
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_consuming(&mut driver, target, inject)
     }));
@@ -3718,11 +3774,9 @@ fn run_consuming(
     let state = fixture.reached;
     let observations = crate::Native::take_native_zero_observations();
     let native_zeroed = nonzero_reply_zeroing_observed(&observations);
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
+    pass(fixture.retire(driver, result, None));
+    pass(check_final_process_failures(inject.then_some(target)));
+    assert!(failure.is_none(), "{failure:?}");
     let outcome = if inject {
         ConsumingOutcome::Fault {
             accepted,
@@ -4009,8 +4063,20 @@ impl CleanupStore for BeforeRecordStore<'_, '_> {
 }
 
 fn run_before_record_cases(runtime: &Path, root: &Path) -> TestResult {
-    let control = run_before_record(runtime, root, 0x78, ProcessFaultTarget::Browser, false)?;
-    let fault = run_before_record(runtime, root, 0x79, ProcessFaultTarget::Browser, true)?;
+    let control = pass(run_before_record(
+        runtime,
+        root,
+        0x78,
+        ProcessFaultTarget::Browser,
+        false,
+    ));
+    let fault = pass(run_before_record(
+        runtime,
+        root,
+        0x79,
+        ProcessFaultTarget::Browser,
+        true,
+    ));
     assert_eq!(
         control, fault,
         "pre-record browser control and fault reached different states"
@@ -4021,23 +4087,25 @@ fn run_before_record_cases(runtime: &Path, root: &Path) -> TestResult {
 #[test]
 fn native_before_record_renderer_classification_and_fault() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
-    let root = FixtureRoot::new()?;
-    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
-        .ok_or("canonical retained runtime is required by process qualification")?;
-    let control = run_before_record(
+    let root = pass(FixtureRoot::new());
+    let runtime = pass(
+        std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .ok_or("canonical retained runtime is required by process qualification"),
+    );
+    let control = pass(run_before_record(
         Path::new(&runtime),
         &root.0,
         0x7a,
         ProcessFaultTarget::Renderer,
         false,
-    )?;
-    let fault = run_before_record(
+    ));
+    let fault = pass(run_before_record(
         Path::new(&runtime),
         &root.0,
         0x7b,
         ProcessFaultTarget::Renderer,
         true,
-    )?;
+    ));
     assert_eq!(
         control, fault,
         "pre-record renderer control and fault reached different states or observations"
@@ -4088,21 +4156,16 @@ impl Fixture {
             (attempt, handle, failure, reached, written, presence)
         };
         self.handle = handle;
-        let step = match attempt {
-            Ok(step) => step,
-            Err(payload) => std::panic::resume_unwind(payload),
-        };
-        if let Some(error) = failure {
-            return Err(error.into());
-        }
+        let step = pass(attempt);
+        assert!(failure.is_none(), "{failure:?}");
         if reached {
             self.early_presence = presence;
-            if !written
-                || self.trace.borrow().last() != Some(&ProcessFaultMark::RecordWritten)
-                || self.store.records()?.len() != 1
-            {
-                return Err("real pre-record durable write was not established".into());
-            }
+            assert!(
+                written
+                    && self.trace.borrow().last() == Some(&ProcessFaultMark::RecordWritten)
+                    && pass(self.store.records()).len() == 1,
+                "real pre-record durable write was not established"
+            );
             self.evidence_complete = true;
         }
         Ok(step)
@@ -4124,7 +4187,7 @@ impl Fixture {
                     &mut self.store,
                 ))
             } else {
-                self.before_record_step(driver, ceremony_id, target, inject)?
+                pass(self.before_record_step(driver, ceremony_id, target, inject))
             };
             if self.evidence_complete && self.handle.is_none() && !cancelled {
                 self.surface.controller_lost();
@@ -4133,7 +4196,7 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("pre-record driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
