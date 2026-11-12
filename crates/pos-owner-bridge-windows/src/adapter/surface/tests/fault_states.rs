@@ -176,7 +176,10 @@ fn modeled_before_record_snapshot_requires_readable_empty_store_and_admitted_env
     fixture.factory.failure.set(Some("environment"));
     assert!(fixture.surface.before_record_fault_state().is_err());
     fixture.factory.failure.set(None);
-    fixture.factory.environment_version.set("not-the-pinned-runtime");
+    fixture
+        .factory
+        .environment_version
+        .set("not-the-pinned-runtime");
     assert!(fixture.surface.before_record_fault_state().is_err());
     fixture.factory.environment_version.set("153.0.4234.48");
 
@@ -209,7 +212,12 @@ fn modeled_early_callback_invalidates_pre_record_and_renderer_observations() -> 
             fixture.surface.early_renderer_presence(),
             Ok(crate::RendererPresence::Absent)
         );
-        let sink = fixture.factory.sink.borrow().clone().ok_or("missing sink")?;
+        let sink = fixture
+            .factory
+            .sink
+            .borrow()
+            .clone()
+            .ok_or("missing sink")?;
         let _action = sink.event(event);
         assert!(fixture.surface.before_record_fault_state().is_err());
         assert!(fixture.surface.early_renderer_presence().is_err());
@@ -258,15 +266,17 @@ fn modeled_pre_record_observation_refuses_activation_failure_and_later_phases() 
 }
 
 #[test]
-fn modeled_pre_environment_retention_refuses_untrusted_observations_until_retirement(
-) -> TestResult {
+fn modeled_pre_environment_retention_refuses_untrusted_observations_until_retirement() -> TestResult
+{
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.environment_creation.set(Creation::Pending);
     let selected = spec(40);
     assert!(fixture.surface.open(&selected).is_pending());
     assert_eq!(fixture.surface.pre_environment_completion(), Ok(None));
     assert_eq!(
-        fixture.surface.pre_environment_retention(&selected.ceremony_id),
+        fixture
+            .surface
+            .pre_environment_retention(&selected.ceremony_id),
         Some(super::super::PreEnvironmentRetention::Active)
     );
 
@@ -311,10 +321,15 @@ fn modeled_pre_environment_retention_refuses_untrusted_observations_until_retire
     fixture.surface.abandon_opening();
     assert!(fixture.surface.pre_environment_completion().is_err());
     assert_eq!(
-        fixture.surface.pre_environment_retention(&selected.ceremony_id),
+        fixture
+            .surface
+            .pre_environment_retention(&selected.ceremony_id),
         Some(super::super::PreEnvironmentRetention::Abandoned)
     );
-    fixture.factory.environment_creation.set(Creation::CallbackFailure);
+    fixture
+        .factory
+        .environment_creation
+        .set(Creation::CallbackFailure);
     assert!(fixture
         .surface
         .poll_failed_open()
@@ -331,14 +346,22 @@ fn modeled_pending_environment_event_refuses_observation_without_dropping_owners
     let selected = spec(40);
     assert!(fixture.surface.open(&selected).is_pending());
     assert_eq!(fixture.surface.pre_environment_completion(), Ok(None));
-    let sink = fixture.factory.sink.borrow().clone().ok_or("missing sink")?;
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing sink")?;
     let _action = sink.event(NativeEvent::NewWindow);
     assert!(fixture.surface.pre_environment_completion().is_err());
     assert!(!fixture.surface.idle());
     assert!(fixture.surface.native.pending());
     fixture.assert_no_ceremony_data();
     fixture.surface.abandon_opening();
-    fixture.factory.environment_creation.set(Creation::CallbackFailure);
+    fixture
+        .factory
+        .environment_creation
+        .set(Creation::CallbackFailure);
     assert!(fixture
         .surface
         .poll_failed_open()
