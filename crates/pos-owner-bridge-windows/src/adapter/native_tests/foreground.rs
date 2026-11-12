@@ -78,19 +78,11 @@ fn waiting_cases_keep_their_turn_when_a_hot_worker_returns_or_a_waiter_cancels()
     let foreground = Foreground::default();
     let now = Instant::now();
     let first = foreground.request(1, now);
-    assert!(first.is_ok(), "request failed: {:?}", first.as_ref().err());
+    assert_eq!(first.as_ref().err().map(ToString::to_string), None);
     let cancelled = foreground.request(2, now);
-    assert!(
-        cancelled.is_ok(),
-        "request failed: {:?}",
-        cancelled.as_ref().err()
-    );
+    assert_eq!(cancelled.as_ref().err().map(ToString::to_string), None);
     let waiting = foreground.request(3, now);
-    assert!(
-        waiting.is_ok(),
-        "request failed: {:?}",
-        waiting.as_ref().err()
-    );
+    assert_eq!(waiting.as_ref().err().map(ToString::to_string), None);
     assert_eq!(ticket_turn(&first, now), Ok(true));
     assert_eq!(ticket_turn(&waiting, now), Ok(false));
     drop(cancelled);
@@ -109,11 +101,7 @@ fn poisoned_foreground_coordination_refuses_new_and_waiting_cases() {
     let foreground = Foreground::default();
     let now = Instant::now();
     let waiting = foreground.request(1, now);
-    assert!(
-        waiting.is_ok(),
-        "request failed: {:?}",
-        waiting.as_ref().err()
-    );
+    assert_eq!(waiting.as_ref().err().map(ToString::to_string), None);
     // Narrow fault injection: no page/input code executes under this lock.
     // A harness unwind must refuse focus rather than admit competing cases.
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -137,17 +125,9 @@ fn expired_unstarted_cases_refuse_admission_and_release_their_place() {
     let foreground = Foreground::default();
     let start = Instant::now();
     let active = foreground.request(1, start);
-    assert!(
-        active.is_ok(),
-        "request failed: {:?}",
-        active.as_ref().err()
-    );
+    assert_eq!(active.as_ref().err().map(ToString::to_string), None);
     let expired = foreground.request(2, start);
-    assert!(
-        expired.is_ok(),
-        "request failed: {:?}",
-        expired.as_ref().err()
-    );
+    assert_eq!(expired.as_ref().err().map(ToString::to_string), None);
     let limit = start + Duration::from_mins(2);
     assert_eq!(
         ticket_turn(&expired, start + Duration::from_millis(119_999)),
