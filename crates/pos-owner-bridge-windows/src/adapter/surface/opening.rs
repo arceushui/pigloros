@@ -105,16 +105,24 @@ impl Surface {
         Ok(())
     }
 
-    fn activate_controller(&mut self) -> Result<()> {
-        self.foreground_deadline =
-            Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
+    fn activate_controller(&mut self) -> Result<bool> {
+        let deadline = (self.clock.now() + Duration::from_secs(1)).min(self.deadline);
+        self.foreground_deadline = Some(deadline);
         self.native.show_window().map_err(unavailable)?;
+        // This observation is optional: a failed or late query cannot establish
+        // foreground, and must not alter the subsequent focus/error path.
+        let started = self.clock.now();
+        let observed = self.native.window();
+        let finished = self.clock.now();
+        let timely_foreground = started < deadline
+            && finished < deadline
+            && observed.is_ok_and(|window| window.foreground);
         {
             #[cfg(test)]
             let _duration = crate::Native::readiness_span("focus");
             self.native.focus_controller().map_err(unavailable)?;
         }
-        Ok(())
+        Ok(timely_foreground)
     }
 
     pub(super) fn navigate_native(&mut self) -> Result<Poll<pos_owner_bridge::NavigationId>> {
@@ -127,16 +135,31 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         if !self.navigation_issued {
+            let mut timely_foreground = false;
             if self.foreground_deadline.is_none() {
-                if let Err(error) = self.activate_controller() {
-                    self.activation_error = Some(error);
-                    return Err(error);
+                match self.activate_controller() {
+                    Ok(observed) => timely_foreground = observed,
+                    Err(error) => {
+                        self.activation_error = Some(error);
+                        return Err(error);
+                    }
                 }
             }
             let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
-            self.check_foreground_deadline(deadline)?;
+            if timely_foreground {
+                self.before_deadline()?;
+            } else {
+                self.check_foreground_deadline(deadline)?;
+            }
+            if self.events.invalid() {
+                return Err(super::navigation_lost());
+            }
             let foreground = self.native.window().map_err(unavailable)?.foreground;
-            self.check_foreground_deadline(deadline)?;
+            if timely_foreground && foreground {
+                self.before_deadline()?;
+            } else {
+                self.check_foreground_deadline(deadline)?;
+            }
             if self.events.invalid() {
                 return Err(super::navigation_lost());
             }

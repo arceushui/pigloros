@@ -36,6 +36,9 @@ pub(in crate::adapter) struct Factory {
     pub(super) foreground: Cell<bool>,
     pub(super) show_delay: Cell<Duration>,
     pub(super) focus_delay: Cell<Duration>,
+    pub(super) focus_foreground: Cell<Option<bool>>,
+    pub(super) pre_focus_window_delay: Cell<Duration>,
+    pub(super) pre_focus_window_error: Cell<bool>,
     pub(super) reenter_on_activation: Cell<Option<&'static str>>,
     pub(super) window_delay: Cell<Duration>,
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
@@ -73,6 +76,9 @@ impl Factory {
             foreground: Cell::new(true),
             show_delay: Cell::new(Duration::ZERO),
             focus_delay: Cell::new(Duration::ZERO),
+            focus_foreground: Cell::new(None),
+            pre_focus_window_delay: Cell::new(Duration::ZERO),
+            pre_focus_window_error: Cell::new(false),
             reenter_on_activation: Cell::new(None),
             window_delay: Cell::new(Duration::ZERO),
             navigation_succeeds: Cell::new(false),
@@ -292,6 +298,22 @@ impl NativeOperations for Session {
     }
     fn window(&self) -> NativeResult<WindowSnapshot> {
         self.check("window")?;
+        let calls = self.factory.calls.borrow();
+        let before_focus = calls.contains(&"show_window") && !calls.contains(&"focus_controller");
+        drop(calls);
+        if before_focus {
+            self.factory
+                .clock
+                .advance(self.factory.pre_focus_window_delay.get());
+            if self.factory.reenter_on_activation.get() == Some("window") {
+                if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                    sink.event(crate::NativeEvent::NewWindow);
+                }
+            }
+            if self.factory.pre_focus_window_error.get() {
+                return Err(failed());
+            }
+        }
         self.factory.clock.advance(self.factory.window_delay.get());
         Ok(WindowSnapshot {
             exists: self.factory.window_exists.get(),
@@ -320,6 +342,9 @@ impl NativeOperations for Session {
     fn focus_controller(&self) -> NativeResult<()> {
         self.effect("focus_controller")?;
         self.factory.clock.advance(self.factory.focus_delay.get());
+        if let Some(foreground) = self.factory.focus_foreground.get() {
+            self.factory.foreground.set(foreground);
+        }
         if self.factory.reenter_on_activation.get() == Some("focus_controller") {
             if let Some(sink) = self.factory.sink.borrow().as_ref() {
                 sink.event(crate::NativeEvent::NewWindow);
