@@ -565,6 +565,23 @@ fn header_completing_at_deadline_is_silent() {
 }
 
 #[test]
+fn observations_just_before_each_deadline_remain_accepted() {
+    let tick = Duration::from_nanos(1);
+    for chunks in [
+        vec![(ADR_TIMEOUTS.first_byte - tick, OWNER_REQUEST.to_vec())],
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (ADR_TIMEOUTS.header - tick, OWNER_REQUEST[4..].to_vec()),
+        ],
+    ] {
+        let (outcome, count, silent) = read_advancing(chunks, Duration::ZERO);
+        assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
+        assert_eq!(count, 1);
+        assert!(silent.is_empty());
+    }
+}
+
+#[test]
 fn callback_latency_does_not_restart_header_deadline() {
     let (outcome, count, silent) = read_advancing(
         vec![
