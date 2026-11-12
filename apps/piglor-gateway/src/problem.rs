@@ -1,9 +1,12 @@
 //! RFC 9457 problem details of the public Gateway v1 contract (#301, #1312).
 //!
 //! Every failure the Gateway answers is an `application/problem+json` body whose `code` is one
-//! of the closed problem families of `contracts/gateway/v1/problem-types.json`. The `type` is a
-//! stable URN derived from the code, `instance` is the matched route template, and `detail` never carries
-//! a host fault description: an internal failure answers a fixed safe text.
+//! of the problem families of `contracts/gateway/v1/problem-types.json`. That registry is open
+//! within v1: a later revision appends a family, and a client handles a code it does not know by
+//! its HTTP status and `retryable`. [`ProblemCodeV1::ALL`] is the registry of this revision in
+//! order, which a test pins. The `type` is a stable URN derived from the code, `instance` is the
+//! matched route template, and `detail` never carries a host fault description: an internal
+//! failure answers a fixed safe text.
 
 use axum::{
     body::Body,
@@ -31,7 +34,7 @@ pub const PROBLEM_TYPE_PREFIX: &str = "urn:pigloros:gateway:v1:problem:";
 /// The fixed `detail` of an internal failure; host fault text never leaves the Gateway.
 const INTERNAL_DETAIL: &str = "the Gateway could not complete the request";
 
-/// The closed public failure families of the v1 contract.
+/// The public failure families of this v1 revision; the registry is open and only appends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProblemCodeV1 {
     InvalidRequest,

@@ -135,10 +135,15 @@ enforces them against the frozen baseline `contracts/gateway/v1/compatibility/`.
   breaking change runs as a parallel new major with an explicit migration and retirement
   decision; the baseline only gains entries.
 - **Additive fields:** within v1 a change may add only optional members, optional parameters,
-  responses, response headers and operations, or accept more request values. Removing or newly
-  requiring a member, narrowing what a request accepts, widening what a response returns, or
-  changing a schema identity is a new major. A served limit moves only in its declared
+  responses, response headers, operations and problem types, or accept more request values.
+  Removing or newly requiring a member, narrowing what a request accepts, widening what a
+  response returns (other than with a new problem type), or changing a schema identity is a new
+  major. A served limit moves only in its declared
   direction: a `request` limit may grow, a `response` limit may shrink, a `both` limit is fixed.
+- **Unknown problem codes:** the problem registry `problem-types.json` is open, and a later v1
+  revision may add a problem type. A client handles a problem `code` it does not know by its HTTP
+  status and `retryable` and never fails on it; a registered `code` is never removed or renamed
+  within v1. Every other response enumeration is closed.
 - **Unknown members:** an open request object ignores an unknown member; a closed one
   (`additionalProperties: false`, such as the `world.action.v1` payload) rejects it; a
   schema-less value such as `EventView.payload` is preserved verbatim. Response schemas are

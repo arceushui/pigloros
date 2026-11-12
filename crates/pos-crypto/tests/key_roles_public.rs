@@ -16,6 +16,23 @@ use pos_crypto::signing::public_key_from_verifying_key;
 struct FailingDestruction(&'static str);
 
 #[test]
+fn public_key_fingerprint_preserves_ordinary_blake3_identity() {
+    // Public synthetic inputs: this oracle checks identity, not erasure.
+    for material in (u8::MIN..=u8::MAX).map(|value| [value; 32]).chain([
+        *b"0123456789abcdefghijklmnopqrstuv",
+        *b"vutsrqponmlkjihgfedcba9876543210",
+    ]) {
+        let mut preimage = b"pigloros/key-material/v1".to_vec();
+        preimage.extend_from_slice(&material);
+        let expected = blake3::hash(&preimage);
+        assert_eq!(
+            key_material_digest(&material).as_bytes(),
+            expected.as_bytes()
+        );
+    }
+}
+
+#[test]
 fn public_role_verification_preserves_independent_contiguous_framing(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[71; 32]);
