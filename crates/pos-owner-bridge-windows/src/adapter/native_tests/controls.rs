@@ -205,21 +205,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             unexpected_navigation: Cell::new(false),
         });
         let mut native = session::Session::new(&factory, events)?;
-        native.create_window(None, 480, 640)?;
-        let sink: Rc<dyn EventSink> = probe.clone();
-        native.create_environment(
-            runtime.root(),
-            &folder,
-            super::super::settings::OPTIONS,
-            sink,
-        )?;
-        completion(&factory, "control environment", || {
-            native.environment_completion()
-        })?;
-        native.create_controller()?;
-        completion(&factory, "control controller", || {
-            native.controller_completion()
-        })?;
+        create_control_session(&mut native, &factory, &probe, runtime.root(), &folder)?;
         let identity = runtime.browser_identity(native.browser_pid()?)?;
         native.require_shared_interfaces()?;
         let sink: Rc<dyn EventSink> = probe.clone();
@@ -272,6 +258,28 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let composed_root = root.join("composed-control");
     crate::create_private_directory(&composed_root)?;
     super::denial::run_control(runtime_path, &composed_root)?;
+    Ok(())
+}
+
+// Keep the owning Session alive on every error; its Drop performs the same
+// retained native retirement as the surrounding qualification run.
+fn create_control_session(
+    native: &mut session::Session<'_>,
+    factory: &dyn StaPump,
+    probe: &Rc<Probe>,
+    runtime: &Path,
+    folder: &Path,
+) -> TestResult {
+    native.create_window(None, 480, 640)?;
+    let sink: Rc<dyn EventSink> = probe.clone();
+    native.create_environment(runtime, folder, super::super::settings::OPTIONS, sink)?;
+    completion(factory, "control environment", || {
+        native.environment_completion()
+    })?;
+    native.create_controller()?;
+    completion(factory, "control controller", || {
+        native.controller_completion()
+    })?;
     Ok(())
 }
 
@@ -499,6 +507,76 @@ mod tests {
             );
             assert_eq!(model.calls.borrow().as_slice(), expected, "{failure:?}");
             assert!(!model.calls.borrow().contains(&"navigate"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn modeled_control_creation_stops_at_failure_and_retires_owners() -> super::TestResult {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use pos_owner_bridge::fake::clock::FakeClock;
+        use std::path::Path;
+
+        // Fake responses model setup failure; they are not native SDK results.
+        for (creation, failure, expected, success) in [
+            (
+                Creation::Ready,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                true,
+            ),
+            (
+                Creation::Ready,
+                Some("create_window"),
+                &["create_window"][..],
+                false,
+            ),
+            (
+                Creation::Ready,
+                Some("create_environment"),
+                &["create_window", "create_environment"][..],
+                false,
+            ),
+            (
+                Creation::SynchronousFailure,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                false,
+            ),
+            (
+                Creation::CallbackFailure,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                false,
+            ),
+        ] {
+            let factory = Factory::new(creation, FakeClock::start());
+            factory.failure.set(failure);
+            let probe = Rc::new(probe());
+            let events = Rc::clone(&probe.events);
+            let mut native = super::session::Session::new(&factory, Rc::clone(&events))
+                .map_err(|error| format!("{error:?}"))?;
+            let result = super::create_control_session(
+                &mut native,
+                &factory,
+                &probe,
+                Path::new("modeled-runtime"),
+                Path::new("modeled-folder"),
+            );
+            let calls_before_retirement = factory.calls.borrow().clone();
+            if success {
+                assert_eq!(
+                    native.browser_pid().map_err(|error| format!("{error:?}"))?,
+                    42
+                );
+                events.event(NativeEvent::BrowserExited { pid: 42 });
+            }
+            factory.failure.set(None);
+            drop(native);
+            assert_eq!(result.is_ok(), success);
+            assert_eq!(calls_before_retirement.as_slice(), expected);
+            assert!(!calls_before_retirement.contains(&"navigate"));
+            assert!(factory.calls.borrow().contains(&"drop_environment"));
         }
         Ok(())
     }
