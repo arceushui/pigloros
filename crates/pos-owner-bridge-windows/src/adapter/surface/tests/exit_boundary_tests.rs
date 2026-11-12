@@ -320,6 +320,23 @@ fn exit_capture_rejects_record_loss_and_corruption_without_discarding_the_record
     Ok(())
 }
 
+fn wrong_identity_record(fixture: &Fixture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let selected = spec(40);
+    let browser = fixture.surface.identity.ok_or("missing browser")?;
+    let wrong = CleanupRecordV1::new(
+        selected.ceremony_id,
+        &selected.folder_name,
+        browser.browser_pid,
+        browser.creation_filetime + 1,
+        browser.image_path_sha256,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut encoded = [0; 4096];
+    let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
+        .map_err(|error| error.to_string())?;
+    Ok(encoded[..size].to_vec())
+}
+
 #[test]
 fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestResult {
     for case in [
@@ -353,23 +370,12 @@ fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestRes
         if case == "generation" {
             fixture.surface.generation = Some(2);
         } else if case == "record_identity" {
-            let browser = fixture.surface.identity.ok_or("missing browser")?;
-            let wrong = CleanupRecordV1::new(
-                ceremony,
-                &selected.folder_name,
-                browser.browser_pid,
-                browser.creation_filetime + 1,
-                browser.image_path_sha256,
-            )
-            .map_err(|error| error.to_string())?;
-            let mut encoded = [0; 4096];
-            let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
-                .map_err(|error| error.to_string())?;
+            let wrong = wrong_identity_record(&fixture)?;
             fixture
                 .store
                 .delete_record(&original)
                 .map_err(|_| "remove modeled record")?;
-            fixture.store.preload(encoded[..size].to_vec());
+            fixture.store.preload(wrong);
         } else if case == "runtime_identity" {
             super::fault_states::change_identity(&mut fixture, 0);
         } else if case == "store_unavailable" {
