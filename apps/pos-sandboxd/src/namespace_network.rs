@@ -27,7 +27,8 @@ mod route;
 mod rule_codec;
 
 pub use attempt_network::{
-    AttemptNetworkError, EgressProbe, EgressProbeError, NamespaceConnector, NamespacedLocalNetwork,
+    AttemptNetworkError, EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe,
+    NamespaceConnector, NamespacedLocalNetwork,
 };
 pub use control::{NetlinkNamespaceControl, OrphanSweepError};
 pub use host_egress::{

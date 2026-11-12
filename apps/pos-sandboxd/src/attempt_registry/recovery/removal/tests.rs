@@ -63,12 +63,12 @@ mod cases {
                     private_directory(&attempt.join("root"))?;
                 }
                 7 => {
-                    let prepared = committed.prepare_directory()?;
+                    let prepared = committed.prepare_fixture_directory()?;
                     let identity = crate::test_fixtures::recorded_identity(&prepared)?;
                     prepared.record_root(&identity, || Ok(()))?;
                 }
                 _ => {
-                    drop(committed.prepare_directory()?);
+                    drop(committed.prepare_fixture_directory()?);
                     if id >= 5 {
                         fs::remove_dir(attempt.join("root"))?;
                     }

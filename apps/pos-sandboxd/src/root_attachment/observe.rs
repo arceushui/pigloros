@@ -23,20 +23,12 @@ use rustix::{
 };
 
 use super::{cmdline, AttachmentKernel};
-use crate::ImageActivationError;
+use crate::{ImageActivationError, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE};
 
 mod absence;
 
 /// The loop backing path is opened only as a path, never through a symlink.
 pub(super) const BACKING_OPEN: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
-/// The attempt root is reopened only as a directory path, beneath the held
-/// attempt directory and never through a symlink.
-pub(super) const ATTEMPT_ROOT_OPEN: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-pub(super) const ATTEMPT_ROOT_RESOLVE: ResolveFlags =
-    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 /// The admitted executable is opened read-only (`O_RDONLY` is zero) and
 /// non-blocking, so a FIFO cannot stall the open before the regular-file check.
 pub(super) const EXECUTABLE_OPEN: OFlags = OFlags::CLOEXEC.union(OFlags::NONBLOCK);
@@ -241,19 +233,14 @@ impl HostKernel {
     /// cannot be listed or a bound device's backing file is unreadable or
     /// empty. See `provider_backed` for how a backing file is matched.
     pub(super) fn provider_loops_absent(&self, images: &Path) -> Option<bool> {
-        let directory = fs::canonicalize(images).ok().and_then(|canonical| {
-            fs::metadata(&canonical)
-                .ok()
-                .map(|metadata| (canonical, (metadata.dev(), metadata.ino())))
-        });
-        directory
-            .zip(self.loop_backings())
-            .map(|((canonical, identity), backings)| {
+        image_directory(images).zip(self.loop_backings()).map(
+            |((canonical, identity), backings)| {
                 let prefixes = [images, canonical.as_path()];
                 backings
                     .iter()
                     .all(|printed| !provider_backed(printed, prefixes, identity))
-            })
+            },
+        )
     }
 
     /// The printed backing file of every bound `loop<N>` whole device.
@@ -288,6 +275,15 @@ impl HostKernel {
                     .collect::<Option<Vec<_>>>()
             })
     }
+}
+
+/// The canonical image directory and its device and inode.
+fn image_directory(images: &Path) -> Option<(PathBuf, (u64, u64))> {
+    fs::canonicalize(images).ok().and_then(|canonical| {
+        fs::metadata(&canonical)
+            .ok()
+            .map(|metadata| (canonical, (metadata.dev(), metadata.ino())))
+    })
 }
 
 /// Whether a loop's printed backing file is a provider image.
@@ -357,6 +353,33 @@ impl AttachmentKernel for HostKernel {
             mapper: attached.map(|node| self.mapper(node.device)),
             executable: executable_of(mount, executable),
         }
+    }
+
+    fn provider_image(&self, loop_name: &str, images: &Path) -> bool {
+        image_directory(images)
+            .zip(
+                read_text(
+                    &self
+                        .sys
+                        .join("block")
+                        .join(loop_name)
+                        .join("loop/backing_file"),
+                )
+                .filter(|printed| !printed.is_empty()),
+            )
+            .is_some_and(|((canonical, identity), printed)| {
+                provider_backed(&printed, [images, canonical.as_path()], identity)
+            })
+    }
+
+    fn has_submounts(&self, mount_id: u64) -> Option<bool> {
+        read_text(&self.proc.join("self/mountinfo")).and_then(|mountinfo| {
+            mountinfo
+                .lines()
+                .map(parse_entry)
+                .collect::<Option<Vec<_>>>()
+                .map(|entries| entries.iter().any(|entry| entry.parent_id == mount_id))
+        })
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
