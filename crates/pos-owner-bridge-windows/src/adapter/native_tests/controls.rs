@@ -177,12 +177,12 @@ const CASES: [Case; 10] = [
     ),
 ];
 
-pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
+pub(super) fn run(runtime_path: &Path, root: &Path) {
     let runtime = pass(crate::verify_fixed_runtime(runtime_path, root));
     let mut factory = pass(crate::Native::owner_factory());
     for (index, case) in CASES.into_iter().enumerate() {
         let (profile, kind, mode) = case;
-        pass(log_start(index, case));
+        log_start(index, case);
         let _fault = Fault::new(kind, mode);
         let folder = root.join(format!("control-{index}"));
         pass(crate::create_private_directory(&folder));
@@ -220,7 +220,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         pass(native.navigate_owner());
         let mut armed = false;
         let callback = wait_for_control(&factory, &probe, &listener, &mut armed);
-        pass(log_callback(index, case, &probe, &listener, &callback));
+        log_callback(index, case, &probe, &listener, &callback);
         pass(callback);
         if mode == ControlFault::RetryDenial {
             for attempts in [2, 3] {
@@ -257,8 +257,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     drop(factory);
     let composed_root = root.join("composed-control");
     pass(crate::create_private_directory(&composed_root));
-    pass(super::denial::run_control(runtime_path, &composed_root));
-    Ok(())
+    super::denial::run_control(runtime_path, &composed_root);
 }
 
 // Keep the owning Session alive on every error; its Drop performs the same
@@ -360,12 +359,11 @@ fn prepare_control_view(native: &dyn crate::NativeOperations) -> TestResult {
     Ok(())
 }
 
-fn log_start(index: usize, (profile, kind, mode): Case) -> TestResult {
+fn log_start(index: usize, (profile, kind, mode): Case) {
     pass(writeln!(
         std::io::stderr(),
         "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
     ));
-    Ok(())
 }
 
 fn log_callback(
@@ -374,7 +372,7 @@ fn log_callback(
     probe: &Probe,
     listener: &LoopbackListener,
     callback: &TestResult,
-) -> TestResult {
+) {
     let served = listener.served();
     pass(writeln!(
         std::io::stderr(),
@@ -390,7 +388,6 @@ fn log_callback(
         listener.observation(),
         callback.as_ref().map_err(ToString::to_string)
     ));
-    Ok(())
 }
 
 fn assert_denials(

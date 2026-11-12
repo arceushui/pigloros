@@ -69,8 +69,8 @@ fn retire(root: FixtureRoot, fixture: Fixture, model: &Factory) -> TestResult {
         exit(model)?;
     }
     let id = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let driver = readiness::new_driver(id, Instant::now())?;
-    fixture.retire(driver, Err(ERROR), Some(id))?;
+    let driver = readiness::new_driver(id, Instant::now());
+    fixture.retire(driver, Err(ERROR), Some(id));
     root.remove()
 }
 

@@ -13,7 +13,7 @@ use pos_owner_bridge::listener::FixtureProfile;
 use pos_owner_bridge::{BridgeError, CleanupStore, LoopbackPort, QuarantineCode, SystemClock};
 use pos_owner_bridge_codec::CeremonyId;
 
-use super::{pass, readiness, trace::Trace, ResourceProbeGuard, TestResult};
+use super::{pass, readiness, trace::Trace, ResourceProbeGuard};
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::NativeFactory;
 
@@ -27,18 +27,14 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(
-        runtime: &Path,
-        root: &Path,
-        profile: Option<FixtureProfile>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(runtime: &Path, root: &Path, profile: Option<FixtureProfile>) -> Self {
         let runtime = Arc::new(pass(crate::verify_fixed_runtime(runtime, root)));
         let factory: Rc<dyn NativeFactory> = Rc::new(pass(crate::Native::owner_factory()));
         let store = pass(WindowsCleanupStore::open(root.to_path_buf()));
-        let loopback = match profile {
-            Some(profile) => pass(SharedLoopback::start_fixture(profile)),
-            None => pass(SharedLoopback::start()),
-        };
+        let loopback = profile.map_or_else(
+            || pass(SharedLoopback::start()),
+            |profile| pass(SharedLoopback::start_fixture(profile)),
+        );
         let surface = pass(
             Surface::new(
                 Rc::clone(&factory),
@@ -50,14 +46,14 @@ impl Fixture {
             )
             .map_err(pos_owner_bridge::SurfaceError::error),
         );
-        Ok(Self {
+        Self {
             surface,
             loopback,
             store,
             factory,
             trace: Trace::new(0x27, Instant::now()),
             lose_after_receipt: false,
-        })
+        }
     }
 
     fn drive(
@@ -120,7 +116,7 @@ impl Fixture {
         (result, Some(failure))
     }
 
-    fn finish(mut self) -> TestResult {
+    fn finish(mut self) {
         assert!(pass(self.store.records()).is_empty());
         assert!(pass(self.store.folders()).is_empty());
         drop(self.surface);
@@ -128,22 +124,18 @@ impl Fixture {
             pass(Rc::get_mut(&mut self.factory).ok_or("native fixture factory still shared"))
                 .stop(),
         );
-        Ok(())
     }
 }
 
-pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
-    let mut fixture = pass(Fixture::new(runtime, root, None));
+pub(super) fn run(runtime: &Path, root: &Path) {
+    let mut fixture = Fixture::new(runtime, root, None);
     let _mode = ResourceProbeGuard::new(crate::ResourceDenialFixture::DriverRetry);
     let started = Instant::now();
     fixture.trace = Trace::new(0x27, started);
     fixture
         .surface
         .set_deadline(started + Duration::from_secs(15));
-    let mut driver = pass(readiness::new_driver(
-        CeremonyId::from_bytes([0x27; 16]),
-        started,
-    ));
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([0x27; 16]), started);
     // A modeled policy denial and failed SetResponse run in the real callback.
     // Real GetDeferral holds it while the first three Stop attempts fail without
     // side effects: callback, one driver retry, one keeper retry. Repeated Close
@@ -170,15 +162,11 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     assert_eq!(crate::Native::resource_deferral_completion_attempts(), 1);
     assert_eq!(pass(fixture.loopback.received_request_count()), 0);
     assert_eq!(fixture.loopback.served().count, 0);
-    fixture.finish()
+    fixture.finish();
 }
 
-pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
-    let mut fixture = pass(Fixture::new(
-        runtime,
-        root,
-        Some(FixtureProfile::PopupReceipt),
-    ));
+pub(super) fn run_control(runtime: &Path, root: &Path) {
+    let mut fixture = Fixture::new(runtime, root, Some(FixtureProfile::PopupReceipt));
     let _fault = super::controls::Fault::new(
         crate::EventKind::NewWindow,
         crate::ControlFault::RetryDenial,
@@ -188,10 +176,7 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
     fixture
         .surface
         .set_deadline(started + Duration::from_secs(15));
-    let mut driver = pass(readiness::new_driver(
-        CeremonyId::from_bytes([0x28; 16]),
-        started,
-    ));
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([0x28; 16]), started);
     let (result, failure) = fixture.attempt(&mut driver);
     let error = result.as_ref().err().copied();
     let records = fixture.store.records();
@@ -220,7 +205,7 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
     assert_eq!(retired[0].completions, 1);
     assert!(retired[0].retired);
     assert_eq!(fixture.loopback.served().count, 1);
-    fixture.finish()
+    fixture.finish();
 }
 
 struct ProcessObservations;
@@ -238,7 +223,7 @@ impl Drop for ProcessObservations {
     }
 }
 
-pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
+pub(super) fn run_renderer(runtime: &Path, root: &Path) {
     for (value, profile, control) in [
         (0x29, FixtureProfile::ReadOnlyControl, true),
         (0x2a, FixtureProfile::ReadOnlyWrite, false),
@@ -246,17 +231,14 @@ pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
         let _observations = ProcessObservations::new();
         let case_root = root.join(format!("renderer-{value}"));
         pass(crate::create_private_directory(&case_root));
-        let mut fixture = pass(Fixture::new(runtime, &case_root, Some(profile)));
+        let mut fixture = Fixture::new(runtime, &case_root, Some(profile));
         fixture.lose_after_receipt = control;
         let started = Instant::now();
         fixture.trace = Trace::new(u64::from(value), started);
         fixture
             .surface
             .set_deadline(started + Duration::from_secs(15));
-        let mut driver = pass(readiness::new_driver(
-            CeremonyId::from_bytes([value; 16]),
-            started,
-        ));
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([value; 16]), started);
         let (result, failure) = fixture.attempt(&mut driver);
         let error = result.as_ref().err().copied();
         let request_clear = driver.request_clear();
@@ -295,12 +277,11 @@ pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
         }
         assert_eq!(posts, 1);
         assert_eq!(fixture.loopback.served().count, 1);
-        pass(fixture.finish());
+        fixture.finish();
     }
-    Ok(())
 }
 
-pub(super) fn run_delivery(runtime: &Path, root: &Path) -> TestResult {
+pub(super) fn run_delivery(runtime: &Path, root: &Path) {
     for (value, profile, minimum_posts) in [
         (0x2b, FixtureProfile::Pending, 1),
         (0x2c, FixtureProfile::DuplicateRequest, 2),
@@ -310,16 +291,13 @@ pub(super) fn run_delivery(runtime: &Path, root: &Path) -> TestResult {
         let _observations = ProcessObservations::new();
         let case_root = root.join(format!("delivery-{value}"));
         pass(crate::create_private_directory(&case_root));
-        let mut fixture = pass(Fixture::new(runtime, &case_root, Some(profile)));
+        let mut fixture = Fixture::new(runtime, &case_root, Some(profile));
         fixture.lose_after_receipt = true;
         let started = Instant::now();
         fixture.trace = Trace::new(u64::from(value), started);
         let deadline = started + Duration::from_secs(15);
         fixture.surface.set_deadline(deadline);
-        let mut driver = pass(readiness::new_driver(
-            CeremonyId::from_bytes([value; 16]),
-            started,
-        ));
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([value; 16]), started);
         let (result, failure) = fixture.attempt(&mut driver);
         let error = result.as_ref().err().copied();
         let posts = driver.posts();
@@ -348,9 +326,8 @@ pub(super) fn run_delivery(runtime: &Path, root: &Path) -> TestResult {
         assert!(request_clear);
         assert!(crate::Native::process_failure_observations().is_empty());
         assert_eq!(fixture.loopback.served().count, 1);
-        pass(fixture.finish());
+        fixture.finish();
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -409,55 +386,52 @@ mod model_tests {
                                 fixture.surface.set_deadline(
                                     started + pos_owner_bridge::ceremony::timing::READINESS,
                                 );
-                                let result = readiness::new_driver(
+                                let mut driver = readiness::new_driver(
                                     CeremonyId::from_bytes([240; 16]),
                                     started,
-                                )
-                                .map(|mut driver| {
-                                    if fault == "already_done" {
-                                        let cancelled = readiness::cancel_driver(
-                                            &mut driver,
-                                            &mut fixture.surface,
-                                            &mut fixture.loopback,
-                                            &mut fixture.store,
-                                        );
-                                        assert_eq!(
-                                            cancelled.err(),
-                                            Some(pos_owner_bridge::BridgeError::Lifecycle(
-                                                pos_owner_bridge::LifecycleCode::ControllerLost,
-                                            ))
-                                        );
-                                    }
-                                    let (result, failure) = fixture.attempt(&mut driver);
-                                    let error = failure.map(|error| error.to_string());
-                                    let request_clear = driver.request_clear();
-                                    let quarantined = fixture.retire(driver, result);
-                                    assert!(!quarantined, "{fault}");
-                                    assert!(
-                                        error
-                                            .as_deref()
-                                            .is_some_and(|value| value.starts_with(expected)),
-                                        "{fault}"
+                                );
+                                if fault == "already_done" {
+                                    let cancelled = readiness::cancel_driver(
+                                        &mut driver,
+                                        &mut fixture.surface,
+                                        &mut fixture.loopback,
+                                        &mut fixture.store,
                                     );
-                                    assert!(request_clear);
-                                    assert!(fixture.surface.idle());
-                                    assert!(fixture
-                                        .store
-                                        .records()
-                                        .is_ok_and(|records| records.is_empty()));
-                                    let calls = model.calls.borrow();
-                                    assert!(!calls.contains(&"navigate"));
-                                    assert!(!calls.contains(&"create_buffers"));
-                                    assert!(!calls.contains(&"post"));
-                                    if fault == "already_done" {
-                                        assert!(!calls.contains(&"create_environment"));
-                                    } else {
-                                        assert!(calls.contains(&"drop_environment"));
-                                    }
-                                    drop(calls);
-                                    drop(fixture);
-                                });
-                                assert!(result.is_ok(), "driver creation: {result:?}");
+                                    assert_eq!(
+                                        cancelled.err(),
+                                        Some(pos_owner_bridge::BridgeError::Lifecycle(
+                                            pos_owner_bridge::LifecycleCode::ControllerLost,
+                                        ))
+                                    );
+                                }
+                                let (result, failure) = fixture.attempt(&mut driver);
+                                let error = failure.map(|error| error.to_string());
+                                let request_clear = driver.request_clear();
+                                let quarantined = fixture.retire(driver, result);
+                                assert!(!quarantined, "{fault}");
+                                assert!(
+                                    error
+                                        .as_deref()
+                                        .is_some_and(|value| value.starts_with(expected)),
+                                    "{fault}"
+                                );
+                                assert!(request_clear);
+                                assert!(fixture.surface.idle());
+                                assert!(fixture
+                                    .store
+                                    .records()
+                                    .is_ok_and(|records| records.is_empty()));
+                                let calls = model.calls.borrow();
+                                assert!(!calls.contains(&"navigate"));
+                                assert!(!calls.contains(&"create_buffers"));
+                                assert!(!calls.contains(&"post"));
+                                if fault == "already_done" {
+                                    assert!(!calls.contains(&"create_environment"));
+                                } else {
+                                    assert!(calls.contains(&"drop_environment"));
+                                }
+                                drop(calls);
+                                drop(fixture);
                             });
                             assert!(result.is_ok(), "surface creation: {result:?}");
                         });

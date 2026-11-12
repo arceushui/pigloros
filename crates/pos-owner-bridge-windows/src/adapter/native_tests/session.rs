@@ -317,8 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_native_session_refuses_operations_until_their_owners_exist(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn idle_native_session_refuses_operations_until_their_owners_exist() {
         let _port = crate::Native::fixed_port_fixture();
         let mut factory = pass(crate::Native::owner_factory());
         let events = Rc::new(Events::default());
@@ -411,6 +410,5 @@ mod tests {
         }
         drop(session);
         pass(factory.stop());
-        Ok(())
     }
 }

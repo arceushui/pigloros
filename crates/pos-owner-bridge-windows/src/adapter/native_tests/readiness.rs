@@ -26,7 +26,7 @@ use crate::{NativeFactory, NativePulse, StaPump};
 const WORKERS: usize = 4;
 const RUNS_PER_WORKER: usize = 250;
 
-pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
+pub(super) fn run(runtime_path: &Path, root: &Path) {
     let loopback = pass(SharedLoopback::start_fixture(
         pos_owner_bridge::listener::FixtureProfile::Pending,
     ));
@@ -56,7 +56,6 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         completed += pass(result);
     }
     assert_eq!(completed, 1_000);
-    Ok(())
 }
 
 fn run_worker(
@@ -208,7 +207,7 @@ fn run_ceremony(
     crate::Native::readiness_navigation_case(Some((number, started)));
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
-    let mut driver = pass(new_driver(id, started));
+    let mut driver = new_driver(id, started);
     let mut trace = Trace::new(number, started);
     let mut receipt = None;
     let mut timing = ProgressTiming::default();
@@ -303,10 +302,7 @@ fn readiness_verdict(
     Ok(())
 }
 
-pub(super) fn new_driver(
-    id: CeremonyId,
-    started: Instant,
-) -> Result<CeremonyDriver, Box<dyn std::error::Error>> {
+pub(super) fn new_driver(id: CeremonyId, started: Instant) -> CeremonyDriver {
     let stored = StoredGet::new(
         vec![0x80, 0x81],
         OwnerUserHandle::from_bytes([4; 32]),
@@ -326,7 +322,7 @@ pub(super) fn new_driver(
         started,
     )
     .with_stored(Some(stored));
-    Ok(CeremonyDriver::for_test(plan))
+    CeremonyDriver::for_test(plan)
 }
 
 pub(super) fn env<'a>(
@@ -485,31 +481,26 @@ mod tests {
                             assert!(matches!(surface.poll_failed_open(), Ok(true)));
                             assert!(surface.idle());
 
-                            let result =
-                                super::new_driver(ceremony, Instant::now()).map(|mut driver| {
-                                    for _ in 0..2 {
-                                        let error = super::cancel_driver(
-                                            &mut driver,
-                                            &mut surface,
-                                            &mut loopback,
-                                            &mut store,
-                                        )
-                                        .err();
-                                        assert_eq!(
-                                            error,
-                                            Some(pos_owner_bridge::BridgeError::Lifecycle(
-                                                pos_owner_bridge::LifecycleCode::ControllerLost
-                                            ))
-                                        );
-                                        assert!(driver.request_clear());
-                                    }
-                                    assert!(surface.idle());
-                                    assert!(store
-                                        .records()
-                                        .is_ok_and(|records| records.is_empty()));
-                                    assert!(retained_driver.replace(Some(driver)).is_none());
-                                });
-                            assert!(result.is_ok(), "driver creation: {result:?}");
+                            let mut driver = super::new_driver(ceremony, Instant::now());
+                            for _ in 0..2 {
+                                let error = super::cancel_driver(
+                                    &mut driver,
+                                    &mut surface,
+                                    &mut loopback,
+                                    &mut store,
+                                )
+                                .err();
+                                assert_eq!(
+                                    error,
+                                    Some(pos_owner_bridge::BridgeError::Lifecycle(
+                                        pos_owner_bridge::LifecycleCode::ControllerLost
+                                    ))
+                                );
+                                assert!(driver.request_clear());
+                            }
+                            assert!(surface.idle());
+                            assert!(store.records().is_ok_and(|records| records.is_empty()));
+                            assert!(retained_driver.replace(Some(driver)).is_none());
                             drop(surface);
                         });
                         assert!(result.is_ok(), "surface creation: {result:?}");

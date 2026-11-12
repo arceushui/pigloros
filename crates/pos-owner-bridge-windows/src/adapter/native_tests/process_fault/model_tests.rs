@@ -94,7 +94,7 @@ fn modeled_attempt_errors_and_panics_cancel_before_preserving_the_original_failu
         let root = FixtureRoot::new()?;
         let (mut fixture, _model) = fixture(&root)?;
         let mut driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
         let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
         assert!(result.is_err());
         assert_eq!(
@@ -104,7 +104,7 @@ fn modeled_attempt_errors_and_panics_cancel_before_preserving_the_original_failu
         assert!(driver.request_clear());
         assert!(driver.prf().iter().all(|byte| *byte == 0));
         assert!(fixture.surface.idle());
-        fixture.retire(driver, result, None)?;
+        fixture.retire(driver, result, None);
         root.remove()?;
     }
     Ok(())
@@ -116,14 +116,14 @@ fn modeled_completed_attempt_preserves_its_result_without_cancelling() -> TestRe
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
     let mut driver =
-        readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
     let calls = model.calls.borrow().clone();
     let (result, failure) = fixture.resolve_attempt(&mut driver, Ok(Ok(Err(ERROR))));
     assert_eq!(result, Err(ERROR));
     assert!(failure.is_none());
     assert_eq!(*model.calls.borrow(), calls);
     assert!(!driver.plan_secrets_clear());
-    fixture.retire(driver, result, None)?;
+    fixture.retire(driver, result, None);
     root.remove()
 }
 
@@ -136,11 +136,9 @@ fn assert_drive_error<T>(result: Result<T, Box<dyn std::error::Error>>, expected
     );
 }
 
-fn cancelled_driver(
-    fixture: &mut Fixture,
-) -> Result<(CeremonyDriver, super::CeremonyResult), Box<dyn std::error::Error>> {
+fn cancelled_driver(fixture: &mut Fixture) -> (CeremonyDriver, super::CeremonyResult) {
     let mut driver =
-        readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+        readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
     let result = readiness::cancel_driver(
         &mut driver,
         &mut fixture.surface,
@@ -148,7 +146,7 @@ fn cancelled_driver(
         &mut fixture.store,
     );
     assert!(fixture.finished_driver_is_done(&mut driver));
-    Ok((driver, result))
+    (driver, result)
 }
 
 #[test]
@@ -156,7 +154,7 @@ fn modeled_fault_stages_refuse_a_cancelled_driver_without_native_work() -> TestR
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
-    let (mut driver, result) = cancelled_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture);
     let calls = model.calls.borrow().clone();
     let stages: [(DriveStage, &str); 6] = [
         (Fixture::drive, "driver ended without result"),
@@ -196,7 +194,7 @@ fn modeled_fault_stages_refuse_a_cancelled_driver_without_native_work() -> TestR
     assert!(fixture.trace.borrow().is_empty());
     assert!(!fixture.evidence_complete);
     assert!(fixture.surface.idle());
-    fixture.retire(driver, result, None)?;
+    fixture.retire(driver, result, None);
     root.remove()
 }
 
@@ -206,7 +204,7 @@ fn modeled_creation_and_exit_stages_refuse_a_cancelled_driver() -> TestResult {
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
     let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let (mut driver, result) = cancelled_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture);
     let calls = model.calls.borrow().clone();
     assert_drive_error(
         fixture.drive_recordless(&mut driver, false),
@@ -249,7 +247,7 @@ fn modeled_creation_and_exit_stages_refuse_a_cancelled_driver() -> TestResult {
     assert!(fixture.trace.borrow().is_empty());
     assert!(!fixture.evidence_complete);
     assert!(fixture.surface.idle());
-    fixture.retire(driver, result, None)?;
+    fixture.retire(driver, result, None);
     root.remove()
 }
 
@@ -259,7 +257,7 @@ fn modeled_controller_stages_report_a_cancelled_driver_without_new_provenance() 
     let root = FixtureRoot::new()?;
     let (mut fixture, model) = fixture(&root)?;
     let ceremony = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let (mut driver, result) = cancelled_driver(&mut fixture)?;
+    let (mut driver, result) = cancelled_driver(&mut fixture);
     let calls = model.calls.borrow().clone();
     let mut provenance = None;
     let mut failure_stage = None;
@@ -283,7 +281,7 @@ fn modeled_controller_stages_report_a_cancelled_driver_without_new_provenance() 
     assert!(fixture.trace.borrow().is_empty());
     assert!(!fixture.evidence_complete);
     assert!(fixture.surface.idle());
-    fixture.retire(driver, result, None)?;
+    fixture.retire(driver, result, None);
     root.remove()
 }
 
@@ -307,7 +305,7 @@ fn modeled_failure_finish_checks_evidence_after_retiring_and_preserves_prior_err
         let root = FixtureRoot::new()?;
         let (mut fixture, _model) = fixture(&root)?;
         let mut driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
         let result = readiness::cancel_driver(
             &mut driver,
             &mut fixture.surface,
@@ -413,8 +411,8 @@ fn modeled_fault_observer_requires_a_reached_state_and_unexpired_deadline() -> T
             .as_deref(),
         Some("native fault event timed out")
     );
-    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-    fixture.retire(driver, Err(ERROR), None)?;
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+    fixture.retire(driver, Err(ERROR), None);
     root.remove()
 }
 
@@ -490,8 +488,8 @@ fn modeled_fault_observer_requires_retained_exit_code_and_ordered_trace() -> Tes
             .map_err(pos_owner_bridge::SurfaceError::error)?;
         drop(sink);
         let driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-        fixture.retire(driver, Err(ERROR), None)?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
     Ok(())
@@ -545,8 +543,8 @@ fn modeled_exit_fault_rejects_duplicate_own_exit_before_querying_handle() -> Tes
         .finish()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     drop(sink);
-    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-    fixture.retire(driver, Err(ERROR), None)?;
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+    fixture.retire(driver, Err(ERROR), None);
     root.remove()
 }
 
@@ -647,8 +645,8 @@ fn modeled_exit_control_requires_unique_callback_zero_status_and_live_deadline()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
         drop(sink);
         let driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-        fixture.retire(driver, Err(ERROR), None)?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
     Ok(())
@@ -764,8 +762,8 @@ fn consuming_or_pre_record_deadline_case(
         .finish()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     drop(sink);
-    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-    fixture.retire(driver, Err(ERROR), None)?;
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+    fixture.retire(driver, Err(ERROR), None);
     root.remove()?;
     Ok(())
 }
@@ -830,8 +828,8 @@ fn modeled_short_retry_deadline_precedes_readiness_deadline() -> TestResult {
         .finish()
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     drop(sink);
-    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-    fixture.retire(driver, Err(ERROR), None)?;
+    let driver = readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+    fixture.retire(driver, Err(ERROR), None);
     root.remove()
 }
 
@@ -910,8 +908,8 @@ fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
         drop(sink);
         crate::Native::reset_process_failure_observations();
         let driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-        fixture.retire(driver, Err(ERROR), None)?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
     Ok(())
@@ -956,8 +954,8 @@ fn modeled_consuming_control_requires_timely_completed_cas() -> TestResult {
         }
         assert_eq!(fixture.trace.borrow().len(), usize::from(accepted));
         let driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-        fixture.retire(driver, Err(ERROR), None)?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
     Ok(())
@@ -1026,8 +1024,8 @@ fn modeled_pre_record_control_rejects_query_crossing_deadline() -> TestResult {
             .finish()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
         let driver =
-            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-        fixture.retire(driver, Err(ERROR), None)?;
+            readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+        fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
     Ok(())
@@ -1093,8 +1091,8 @@ fn modeled_control_observation_refuses_a_snapshot_after_the_deadline() -> TestRe
             );
             assert!(!fixture.evidence_complete);
             let driver =
-                readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
-            fixture.retire(driver, Err(ERROR), None)?;
+                readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
+            fixture.retire(driver, Err(ERROR), None);
             root.remove()?;
         }
     }
@@ -1119,8 +1117,8 @@ fn modeled_exit_cutpoint_refuses_unprepared_surface_before_authority() -> TestRe
         assert!(fixture.exit_reached.is_none());
         assert!(!fixture.evidence_complete);
         assert!(fixture.trace.borrow().is_empty());
-        let (driver, result) = cancelled_driver(&mut fixture)?;
-        fixture.retire(driver, result, None)?;
+        let (driver, result) = cancelled_driver(&mut fixture);
+        fixture.retire(driver, result, None);
         root.remove()?;
     }
     Ok(())

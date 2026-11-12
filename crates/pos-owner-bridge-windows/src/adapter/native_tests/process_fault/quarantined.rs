@@ -238,17 +238,14 @@ fn run_case(
     inject: bool,
 ) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
-    let mut fixture = pass(Fixture::new(
+    let mut fixture = Fixture::new(
         runtime,
         root,
         number,
         FixtureProfile::SuccessfulGetReleaseDelay,
-    ));
+    );
     let _zero = ZeroWitness::arm();
-    let mut driver = pass(readiness::new_driver(
-        CeremonyId::from_bytes([number; 16]),
-        Instant::now(),
-    ));
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now());
     let mut refused = false;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         drive_to_quarantine(&mut fixture, &mut driver, &mut refused)
@@ -260,14 +257,14 @@ fn run_case(
             &mut fixture.loopback,
             &mut fixture.store,
         );
-        fixture.retire(driver, result, None)?;
+        fixture.retire(driver, result, None);
         return Err("quarantined drive panicked".into());
     };
     let expected = Err(BridgeError::Quarantine(
         QuarantineCode::ControllerCloseFailed,
     ));
     if result != expected {
-        fixture.retire(driver, result, None)?;
+        fixture.retire(driver, result, None);
         return Err("modeled close refusal did not quarantine".into());
     }
     let wiped = driver.request_clear()
@@ -290,7 +287,7 @@ fn run_case(
         Ok(held) => held,
         Err(error) => {
             let _closed_or_retained = fixture.surface.close_controller();
-            fixture.retire(driver, result, None)?;
+            fixture.retire(driver, result, None);
             return Err(error.into());
         }
     };
@@ -335,7 +332,7 @@ fn run_case(
     Ok(state)
 }
 
-pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
+pub(super) fn run(runtime: &Path, root: &Path) {
     for (number, target) in [
         (0xe0, ProcessFaultTarget::Renderer),
         (0xe2, ProcessFaultTarget::Browser),
@@ -347,7 +344,6 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
             "quarantined control and fault reached different states"
         );
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -397,60 +393,59 @@ mod tests {
         fail_at: &AtomicUsize,
     ) {
         let ceremony = CeremonyId::from_bytes([240; 16]);
-        let ran_driver = readiness::new_driver(ceremony, Instant::now()).map(|mut driver| {
-            let mut refused = false;
-            let result = drive_to_quarantine(fixture, &mut driver, &mut refused);
-            assert_eq!(
-                result,
-                Err(BridgeError::Quarantine(
-                    QuarantineCode::ControllerCloseFailed
-                ))
-            );
-            assert!(refused);
-            let mut keeper = QuarantineKeeper::new();
-            assert!(keeper.finish(driver, result).driver.is_none());
-            let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
-            let marker = folder.join("quarantine-held");
-            assert!(std::fs::write(&marker, []).is_ok());
+        let mut driver = readiness::new_driver(ceremony, Instant::now());
+        let mut refused = false;
+        let result = drive_to_quarantine(fixture, &mut driver, &mut refused);
+        assert_eq!(
+            result,
+            Err(BridgeError::Quarantine(
+                QuarantineCode::ControllerCloseFailed
+            ))
+        );
+        assert!(refused);
+        let mut keeper = QuarantineKeeper::new();
+        assert!(keeper.finish(driver, result).driver.is_none());
+        let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
+        let marker = folder.join("quarantine-held");
+        assert!(std::fs::write(&marker, []).is_ok());
+        let before = calls.load(Ordering::SeqCst);
+        let polled = keeper_poll(&mut keeper, fixture);
+        assert!(polled.remaining && polled.driver.is_none());
+        let keeper_lists = calls.load(Ordering::SeqCst) - before;
+        let before = calls.load(Ordering::SeqCst);
+        assert!(blocked(&mut keeper, fixture, &folder).is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst) - before, keeper_lists + 2);
+        for list in 1..=2 {
             let before = calls.load(Ordering::SeqCst);
-            let polled = keeper_poll(&mut keeper, fixture);
-            assert!(polled.remaining && polled.driver.is_none());
-            let keeper_lists = calls.load(Ordering::SeqCst) - before;
-            let before = calls.load(Ordering::SeqCst);
-            assert!(blocked(&mut keeper, fixture, &folder).is_ok());
-            assert_eq!(calls.load(Ordering::SeqCst) - before, keeper_lists + 2);
-            for list in 1..=2 {
-                let before = calls.load(Ordering::SeqCst);
-                fail_at.store(before + keeper_lists + list, Ordering::SeqCst);
-                assert!(blocked(&mut keeper, fixture, &folder).is_err());
-                assert_eq!(calls.load(Ordering::SeqCst), before + keeper_lists + list);
-                fail_at.store(0, Ordering::SeqCst);
-                assert!(!fixture.surface.idle());
-                assert!(marker.is_file());
-                assert!(fixture.store.folders().is_ok_and(
-                    |folders| folders.contains(&pos_owner_bridge::folder_name(&ceremony))
-                ));
-                assert!(fixture
-                    .store
-                    .records()
-                    .is_ok_and(|records| records.len() == 1));
-                assert!(blocked(&mut keeper, fixture, &folder).is_ok());
-            }
-            assert!(std::fs::remove_file(&marker).is_ok());
-            assert!(fixture.surface.close_controller().is_ok());
-            let sink = model.sink.borrow().clone();
-            let action = sink
-                .as_ref()
-                .map(|sink| sink.event(NativeEvent::BrowserExited { pid: 42 }));
-            assert!(action.is_some(), "modeled sink must remain available");
-            retire_keeper(&mut keeper, fixture);
-            assert!(fixture.surface.idle());
+            fail_at.store(before + keeper_lists + list, Ordering::SeqCst);
+            assert!(blocked(&mut keeper, fixture, &folder).is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), before + keeper_lists + list);
+            fail_at.store(0, Ordering::SeqCst);
+            assert!(!fixture.surface.idle());
+            assert!(marker.is_file());
+            assert!(fixture
+                .store
+                .folders()
+                .is_ok_and(|folders| folders.contains(&pos_owner_bridge::folder_name(&ceremony))));
             assert!(fixture
                 .store
                 .records()
-                .is_ok_and(|records| records.is_empty()));
-        });
-        assert!(ran_driver.is_ok(), "create modeled driver: {ran_driver:?}");
+                .is_ok_and(|records| records.len() == 1));
+            assert!(blocked(&mut keeper, fixture, &folder).is_ok());
+        }
+        assert!(std::fs::remove_file(&marker).is_ok());
+        assert!(fixture.surface.close_controller().is_ok());
+        let sink = model.sink.borrow().clone();
+        let action = sink
+            .as_ref()
+            .map(|sink| sink.event(NativeEvent::BrowserExited { pid: 42 }));
+        assert!(action.is_some(), "modeled sink must remain available");
+        retire_keeper(&mut keeper, fixture);
+        assert!(fixture.surface.idle());
+        assert!(fixture
+            .store
+            .records()
+            .is_ok_and(|records| records.is_empty()));
     }
 
     #[test]
@@ -612,10 +607,7 @@ mod tests {
         let _port = crate::Native::fixed_port_fixture();
         let root = pass(super::super::FixtureRoot::new());
         let (mut fixture, model) = pass(super::super::model_tests::fixture(&root));
-        let mut driver = pass(readiness::new_driver(
-            CeremonyId::from_bytes([240; 16]),
-            Instant::now(),
-        ));
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now());
         let result = readiness::cancel_driver(
             &mut driver,
             &mut fixture.surface,
@@ -634,7 +626,7 @@ mod tests {
         assert!(!refused);
         assert_eq!(*model.calls.borrow(), calls);
         assert!(fixture.surface.idle());
-        pass(fixture.retire(driver, result, None));
+        fixture.retire(driver, result, None);
         root.remove()
     }
 
@@ -680,17 +672,14 @@ mod tests {
         }
         assert!(fixture.surface.idle());
         drop(sink);
-        let driver = pass(readiness::new_driver(
-            CeremonyId::from_bytes([240; 16]),
-            Instant::now(),
-        ));
-        pass(fixture.retire(
+        let driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), Instant::now());
+        fixture.retire(
             driver,
             Err(BridgeError::Unavailable(
                 UnavailableCode::InterfaceUnavailable,
             )),
             None,
-        ));
+        );
         root.remove()
     }
 }

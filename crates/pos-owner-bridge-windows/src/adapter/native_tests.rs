@@ -275,7 +275,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by delivery qualification")?;
-        denial::run_delivery(&runtime, &root.0)?;
+        denial::run_delivery(&runtime, &root.0);
         root.remove()
     }
 
@@ -285,7 +285,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by renderer qualification")?;
-        denial::run_renderer(&runtime, &root.0)?;
+        denial::run_renderer(&runtime, &root.0);
         root.remove()
     }
 
@@ -295,7 +295,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by control qualification")?;
-        controls::run(&runtime, &root.0)?;
+        controls::run(&runtime, &root.0);
         root.remove()
     }
 
@@ -392,7 +392,7 @@ impl crate::Native {
         drop(listener);
         let driver_root = root.0.join("resource-driver");
         crate::create_private_directory(&driver_root)?;
-        denial::run(&runtime_path, &driver_root)?;
+        denial::run(&runtime_path, &driver_root);
         root.remove()?;
         Ok(())
     }
@@ -557,7 +557,7 @@ impl crate::Native {
         factory.stop()?;
         listener.shutdown();
         drop(listener);
-        readiness::run(&runtime_path, &root.0)?;
+        readiness::run(&runtime_path, &root.0);
         root.remove()?;
         Ok(())
     }
