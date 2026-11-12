@@ -13,15 +13,19 @@ use pos_owner_bridge::{
     NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity, ReplyImage, RequestImage,
     ServedSnapshot, SurfaceError, SurfaceEvent, SurfaceSpec, UnavailableCode,
 };
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct DelayedOpening<'a> {
     inner: &'a mut dyn OwnerWebSurface,
     clock: FakeClock,
     delay: Duration,
     read_delay: Duration,
+    ready_target: Rc<Cell<Option<Instant>>>,
+    consume_target: Rc<Cell<Option<Instant>>>,
     open_pending: u32,
     navigation_pending: u32,
     navigation: Poll<Result<NavigationId, SurfaceError>>,
@@ -75,10 +79,28 @@ impl OwnerWebSurface for DelayedOpening<'_> {
         if result.as_ref().is_ok_and(|state| *state != 0) {
             self.clock.advance(self.read_delay);
         }
+        if result
+            .as_ref()
+            .is_ok_and(|state| *state == pos_owner_bridge_codec::ControlState::Ready as u32)
+        {
+            if let Some(target) = self.ready_target.take() {
+                self.clock
+                    .advance(target.saturating_duration_since(self.clock.now()));
+            }
+        }
         result
     }
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool, SurfaceError> {
-        self.inner.reply_compare_exchange(current, new)
+        let result = self.inner.reply_compare_exchange(current, new);
+        if current == pos_owner_bridge_codec::ControlState::Ready as u32
+            && new == pos_owner_bridge_codec::ControlState::Consuming as u32
+        {
+            if let Some(target) = self.consume_target.take() {
+                self.clock
+                    .advance(target.saturating_duration_since(self.clock.now()));
+            }
+        }
+        result
     }
     fn reply_copy(&self, out: &mut ReplyImage) -> Result<(), SurfaceError> {
         self.inner.reply_copy(out)
@@ -165,6 +187,8 @@ fn test_plan_owner_window_reaches_the_surface_open_port() -> TestResult {
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
             read_delay: Duration::ZERO,
+            ready_target: Rc::default(),
+            consume_target: Rc::default(),
             open_pending: 1,
             navigation_pending: 0,
             navigation: Poll::Pending,
@@ -201,6 +225,8 @@ fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestR
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
         read_delay: Duration::ZERO,
+        ready_target: Rc::default(),
+        consume_target: Rc::default(),
         open_pending: 2,
         navigation_pending: 2,
         navigation: Poll::Pending,
@@ -251,6 +277,8 @@ fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
             read_delay: Duration::ZERO,
+            ready_target: Rc::default(),
+            consume_target: Rc::default(),
             open_pending: if opening { u32::MAX } else { 0 },
             navigation_pending: if opening { 0 } else { u32::MAX },
             navigation: Poll::Pending,
@@ -294,6 +322,8 @@ fn late_open_results_do_not_resurrect_a_cancelled_or_timed_out_driver() -> TestR
                     clock: rig.clock.clone(),
                     delay: Duration::ZERO,
                     read_delay: Duration::ZERO,
+                    ready_target: Rc::default(),
+                    consume_target: Rc::default(),
                     open_pending: u32::MAX,
                     navigation_pending: 0,
                     navigation: Poll::Pending,
@@ -373,6 +403,8 @@ fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() 
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
         read_delay: Duration::ZERO,
+        ready_target: Rc::default(),
+        consume_target: Rc::default(),
         open_pending: 0,
         navigation_pending: 2,
         navigation: Poll::Pending,
@@ -428,6 +460,8 @@ fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() 
                 clock: rig.clock.clone(),
                 delay: if opening { delay } else { Duration::ZERO },
                 read_delay: Duration::ZERO,
+                ready_target: Rc::default(),
+                consume_target: Rc::default(),
                 open_pending: 0,
                 navigation_pending: 0,
                 navigation: Poll::Pending,
@@ -481,6 +515,8 @@ fn expiration_during_mapping_or_retry_retirement_prevents_late_posts() -> TestRe
                 clock: rig.clock.clone(),
                 delay: Duration::ZERO,
                 read_delay: Duration::ZERO,
+                ready_target: Rc::default(),
+                consume_target: Rc::default(),
                 open_pending: 0,
                 navigation_pending: 0,
                 navigation: Poll::Pending,
@@ -565,6 +601,8 @@ fn first_receipt_timestamp_follows_completed_state_read() -> TestResult {
             clock: rig.clock.clone(),
             delay: Duration::ZERO,
             read_delay: delay,
+            ready_target: Rc::default(),
+            consume_target: Rc::default(),
             open_pending: 0,
             navigation_pending: 0,
             navigation: Poll::Pending,
@@ -609,6 +647,8 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
         clock: rig.clock.clone(),
         delay: Duration::ZERO,
         read_delay: READINESS,
+        ready_target: Rc::default(),
+        consume_target: Rc::default(),
         open_pending: 0,
         navigation_pending: 0,
         navigation: Poll::Pending,
@@ -633,4 +673,97 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
         rig.clock.advance(Duration::from_millis(10));
     }
     Err("retirement race did not produce a receipt".into())
+}
+
+#[test]
+fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult {
+    use pos_owner_bridge::ceremony::timing::INTERACTION;
+    use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
+    use pos_owner_bridge_codec::ControlState;
+
+    for stage in ["read", "cas"] {
+        for offset_ms in [-1_i64, 0, 1] {
+            let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+            let mut driver = new_driver(create_plan(&rig.clock));
+            let ready_target = Rc::new(Cell::new(None));
+            let consume_target = Rc::new(Cell::new(None));
+            let mut store = rig.store.clone();
+            let mut loopback = rig.loopback.clone();
+            let mut surface = DelayedOpening {
+                inner: &mut rig.surface,
+                clock: rig.clock.clone(),
+                delay: Duration::ZERO,
+                read_delay: Duration::ZERO,
+                ready_target: Rc::clone(&ready_target),
+                consume_target: Rc::clone(&consume_target),
+                open_pending: 0,
+                navigation_pending: 0,
+                navigation: Poll::Pending,
+                owner_observation: None,
+                mapping_delays: VecDeque::new(),
+                close_delays: VecDeque::new(),
+            };
+            let mut env = StepEnv {
+                surface: &mut surface,
+                clock: &rig.clock,
+                loopback: &mut loopback,
+                store: &mut store,
+            };
+            let mut armed = false;
+            let mut outcome = None;
+            for _ in 0..10_000 {
+                match driver.step(&mut env) {
+                    Step::Finished(result) => {
+                        outcome = Some(result);
+                        break;
+                    }
+                    Step::Done => return Err("driver ended without result".into()),
+                    Step::Pending => {}
+                }
+                if !armed {
+                    if let Some(receipt) = driver.first_receipt_at() {
+                        let boundary = receipt + INTERACTION;
+                        let target = if offset_ms < 0 {
+                            boundary - Duration::from_millis(1)
+                        } else {
+                            boundary + Duration::from_millis(u64::try_from(offset_ms)?)
+                        };
+                        if stage == "read" {
+                            ready_target.set(Some(target));
+                        } else {
+                            consume_target.set(Some(target));
+                        }
+                        armed = true;
+                    }
+                }
+                rig.clock.advance(Duration::from_millis(10));
+            }
+            let outcome = outcome.ok_or("driver did not finish")?;
+            if offset_ms < 0 {
+                assert!(outcome.is_ok(), "{stage}");
+            } else {
+                assert_eq!(
+                    outcome.err(),
+                    Some(BridgeError::Lifecycle(LifecycleCode::InteractionTimeout)),
+                    "{stage} {offset_ms}"
+                );
+            }
+            let log = rig.handle.log();
+            let consume = log.iter().filter(|entry| matches!(entry, LogEntry::Cas { actor: Actor::Host, current, new, won: true, .. } if *current == ControlState::Ready as u32 && *new == ControlState::Consuming as u32)).count();
+            assert_eq!(
+                consume,
+                usize::from(stage == "cas" || offset_ms < 0),
+                "{stage} {offset_ms}"
+            );
+            if offset_ms >= 0 {
+                assert!(!log
+                    .iter()
+                    .any(|entry| matches!(entry, LogEntry::HostCopy { .. })));
+            }
+            assert!(log.contains(&LogEntry::ControllerClosed));
+            assert!(log.contains(&LogEntry::Finished));
+            assert!(rig.store.records_now().is_empty());
+        }
+    }
+    Ok(())
 }
