@@ -1222,7 +1222,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     callback_block = root_code[callback_begin:callback_end] if callback_begin >= 0 and callback_end >= 0 else ""
     if hashlib.sha256(re.sub(r"\s+", "", callback_block).encode()).hexdigest() != "671b74e45e73bea3a430fb1c093e4fae333c98f2bed44b18a7867877228563e6":
         found.append(f"{SHIM}/src/lib.rs: callback ordering recorder differs from reviewed test-only code")
-    for relative, digest in (("src/ffi/creation.rs", "fb272314f1c1d0320ea5e25d294ef7b4db16c970aa0b33b7bfb152cf0a32b21f"), ("src/ffi/environment.rs", "3fcf212e5718bca6a7262b768a7c711e05b76d6a34c1f446beb1acc2e9158bf9")):
+    for relative, digest in (("src/ffi/creation.rs", "a280e1ec7cb83ce6ab11082454e0162ed5d92035d538cc4ee72cc2cb8d6702fe"), ("src/ffi/environment.rs", "3fcf212e5718bca6a7262b768a7c711e05b76d6a34c1f446beb1acc2e9158bf9")):
         item = scans.get(relative)
         body = item[0].code if item else ""
         if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:

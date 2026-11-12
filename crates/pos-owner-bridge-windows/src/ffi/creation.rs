@@ -52,15 +52,7 @@ impl EnvironmentCreation {
             CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |hr, value| {
                 #[cfg(test)]
                 crate::Native::creation_moment(crate::NativeCreationMoment::EnvironmentCallback(
-                    if hr.is_err() && value.is_some() {
-                        crate::CreationCallback::Inconsistent
-                    } else if hr.is_err() {
-                        crate::CreationCallback::NativeFailure
-                    } else if value.is_none() {
-                        crate::CreationCallback::MissingInterface
-                    } else {
-                        crate::CreationCallback::Success
-                    },
+                    classify_creation(hr.is_err(), value.is_some()),
                 ));
                 let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
                 #[cfg(test)]
@@ -124,15 +116,7 @@ impl ControllerCreation {
             CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |hr, value| {
                 #[cfg(test)]
                 crate::Native::creation_moment(crate::NativeCreationMoment::ControllerCallback(
-                    if hr.is_err() && value.is_some() {
-                        crate::CreationCallback::Inconsistent
-                    } else if hr.is_err() {
-                        crate::CreationCallback::NativeFailure
-                    } else if value.is_none() {
-                        crate::CreationCallback::MissingInterface
-                    } else {
-                        crate::CreationCallback::Success
-                    },
+                    classify_creation(hr.is_err(), value.is_some()),
                 ));
                 let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
                 #[cfg(test)]
@@ -179,4 +163,35 @@ fn path_string(path: &Path) -> Result<HSTRING> {
         return Err(unavailable());
     }
     Ok(HSTRING::from_wide(&units))
+}
+
+#[cfg(test)]
+const fn classify_creation(failed: bool, present: bool) -> crate::CreationCallback {
+    if failed && present {
+        crate::CreationCallback::Inconsistent
+    } else if failed {
+        crate::CreationCallback::NativeFailure
+    } else if !present {
+        crate::CreationCallback::MissingInterface
+    } else {
+        crate::CreationCallback::Success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    #[test]
+    fn modeled_creation_diagnostic_classifies_both_observations() {
+        use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
+        for (failed, present, expected) in [
+            (false, true, Success),
+            (false, false, MissingInterface),
+            (true, false, NativeFailure),
+            (true, true, Inconsistent),
+        ] {
+            assert_eq!(super::classify_creation(failed, present), expected);
+        }
+    }
 }
