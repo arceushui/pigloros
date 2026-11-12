@@ -620,6 +620,19 @@ fn pending_candidate_checked(
     Ok(candidate)
 }
 
+fn failed(_: windows::core::Error) -> NativeError {
+    NativeError {
+        operation: Operation::Controller,
+        failure: Failure::CallFailed,
+    }
+}
+const fn closed() -> NativeError {
+    NativeError {
+        operation: Operation::Controller,
+        failure: Failure::Closed,
+    }
+}
+
 #[cfg(test)]
 mod pending_candidate_tests {
     #![forbid(unsafe_code)]
@@ -720,18 +733,5 @@ mod pending_candidate_tests {
             assert_eq!(result, expected);
             assert_eq!(calls.into_inner(), expected_calls);
         }
-    }
-}
-
-fn failed(_: windows::core::Error) -> NativeError {
-    NativeError {
-        operation: Operation::Controller,
-        failure: Failure::CallFailed,
-    }
-}
-const fn closed() -> NativeError {
-    NativeError {
-        operation: Operation::Controller,
-        failure: Failure::Closed,
     }
 }
