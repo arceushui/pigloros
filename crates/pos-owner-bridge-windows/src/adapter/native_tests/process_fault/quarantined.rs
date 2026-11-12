@@ -372,18 +372,12 @@ mod tests {
         }
     }
 
-    fn require<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
-        match result {
-            Ok(value) => value,
-            Err(error) => std::panic::resume_unwind(Box::new(error.to_string())),
-        }
-    }
-
     #[test]
     fn modeled_list_refusals_retain_quarantined_owner_until_cleanup() {
         let _port = crate::Native::fixed_port_fixture();
-        let root = require(super::super::FixtureRoot::new());
-        let (mut fixture, model) = require(super::super::model_tests::fixture(&root));
+        let root = super::super::FixtureRoot::new().expect("create private root");
+        let (mut fixture, model) =
+            super::super::model_tests::fixture(&root).expect("create modeled fixture");
         let calls = Arc::new(AtomicUsize::new(0));
         let fail_at = Arc::new(AtomicUsize::new(0));
         let store = super::super::WindowsCleanupStore::new(ListRefusal {
@@ -391,23 +385,22 @@ mod tests {
             calls: Arc::clone(&calls),
             fail_at: Arc::clone(&fail_at),
         });
-        let mut surface = require(
-            super::super::Surface::new(
-                std::rc::Rc::clone(&fixture.factory),
-                Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
-                root.0.clone(),
-                Box::new(fixture.loopback.clone()),
-                Box::new(store.clone()),
-                Box::new(SystemClock),
-            )
-            .map_err(SurfaceError::error),
-        );
+        let mut surface = super::super::Surface::new(
+            std::rc::Rc::clone(&fixture.factory),
+            Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
+            root.0.clone(),
+            Box::new(fixture.loopback.clone()),
+            Box::new(store.clone()),
+            Box::new(SystemClock),
+        )
+        .map_err(SurfaceError::error)
+        .expect("create modeled surface");
         surface.set_deadline(fixture.deadline);
         fixture.surface = surface;
         fixture.store = store;
 
         let ceremony = CeremonyId::from_bytes([240; 16]);
-        let mut driver = require(readiness::new_driver(ceremony, Instant::now()));
+        let mut driver = readiness::new_driver(ceremony, Instant::now()).expect("create driver");
         let mut refused = false;
         let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
         assert_eq!(
@@ -421,13 +414,13 @@ mod tests {
         assert!(keeper.finish(driver, result).driver.is_none());
         let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
         let marker = folder.join("quarantine-held");
-        require(std::fs::write(&marker, []));
+        std::fs::write(&marker, []).expect("create held marker");
         let before = calls.load(Ordering::SeqCst);
         let polled = keeper_poll(&mut keeper, &mut fixture);
         assert!(polled.remaining && polled.driver.is_none());
         let keeper_lists = calls.load(Ordering::SeqCst) - before;
         let before = calls.load(Ordering::SeqCst);
-        require(blocked(&mut keeper, &mut fixture, &folder));
+        blocked(&mut keeper, &mut fixture, &folder).expect("quarantine remains blocked");
         assert_eq!(calls.load(Ordering::SeqCst) - before, keeper_lists + 2);
         for list in 1..=2 {
             let before = calls.load(Ordering::SeqCst);
@@ -437,26 +430,39 @@ mod tests {
             fail_at.store(0, Ordering::SeqCst);
             assert!(!fixture.surface.idle());
             assert!(marker.is_file());
-            assert_eq!(require(fixture.store.records()).len(), 1);
-            require(blocked(&mut keeper, &mut fixture, &folder));
+            let folders = fixture.store.folders().expect("list retained folders");
+            assert!(folders.contains(&pos_owner_bridge::folder_name(&ceremony)));
+            assert_eq!(
+                fixture
+                    .store
+                    .records()
+                    .expect("modeled quarantine fixture")
+                    .len(),
+                1
+            );
+            blocked(&mut keeper, &mut fixture, &folder).expect("quarantine remains blocked");
         }
-        require(std::fs::remove_file(&marker));
-        require(
-            fixture
-                .surface
-                .close_controller()
-                .map_err(SurfaceError::error),
-        );
-        let Some(sink) = model.sink.borrow().clone() else {
-            std::panic::resume_unwind(Box::new("missing modeled sink"));
-        };
-        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        std::fs::remove_file(&marker).expect("remove held marker");
+        fixture
+            .surface
+            .close_controller()
+            .map_err(SurfaceError::error)
+            .expect("close modeled controller");
+        let sink = model.sink.borrow().clone();
+        let action = sink
+            .as_ref()
+            .map(|sink| sink.event(NativeEvent::BrowserExited { pid: 42 }));
+        assert!(action.is_some(), "modeled sink must remain available");
         retire_keeper(&mut keeper, &mut fixture);
         assert!(fixture.surface.idle());
-        assert!(require(fixture.store.records()).is_empty());
+        assert!(fixture
+            .store
+            .records()
+            .expect("modeled quarantine fixture")
+            .is_empty());
         drop(sink);
         drop(fixture);
-        require(root.remove());
+        root.remove().expect("remove fixture root");
     }
 
     #[test]
