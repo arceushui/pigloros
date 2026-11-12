@@ -1554,8 +1554,8 @@ def test_owned_process_fault_authority() -> None:
         ("self.surface.abandoned_completed_browser(ceremony).ok()", "None"),
         ("|| !sdk_success", "|| false"),
         ("|| !no_resurrection", "|| false"),
-        ("Some(EnvironmentSdkOutcome::NativeFailure) if obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
-        ("Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
+        ("Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
+        ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing new evidence mutation target: {old}")
