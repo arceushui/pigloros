@@ -227,11 +227,8 @@ mod tests {
             assert!(created.is_ok(), "controller creation: {created:?}");
             session
         });
-        assert!(
-            session.is_ok(),
-            "session creation: {:?}",
-            session.as_ref().err()
-        );
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
         drop(session);
         assert_eq!(factory.pumps.get(), 1);
         let calls = native.calls.borrow();
@@ -263,11 +260,8 @@ mod tests {
                 pumps: Cell::new(0),
             };
             let session = Session::new(&factory, Rc::new(Events::default()));
-            assert!(
-                session.is_ok(),
-                "session creation: {:?}",
-                session.as_ref().err()
-            );
+            let error = session.as_ref().err();
+            assert!(session.is_ok(), "session creation: {error:?}");
             drop(session);
             assert_eq!(factory.pumps.get(), 1, "{failing}");
             let calls = native.calls.borrow();
