@@ -85,6 +85,89 @@ fn pending_environment_repoll_retains_owners_until_normal_completion() -> TestRe
     fixture.finish()
 }
 
+#[test]
+fn modeled_controller_qualification_retains_pending_owners_on_refusal() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let selected = spec(113);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    let ceremony = selected.ceremony_id;
+    assert_eq!(
+        fixture.surface.controller_creation_retention(&ceremony),
+        Some(super::super::PreEnvironmentRetention::Active)
+    );
+    assert!(fixture.surface.abandoned_completed_browser(&ceremony).is_err());
+
+    fixture.factory.failure.set(Some("pending-owner"));
+    assert!(fixture.surface.controller_creation_retention(&ceremony).is_none());
+    assert!(fixture.surface.lose_pending_controller_parent(&ceremony).is_err());
+    fixture.factory.failure.set(None);
+    fixture
+        .surface
+        .native
+        .pending_opening_browser_candidate()
+        .map_err(|()| "modeled candidate")?;
+    fixture.factory.failure.set(Some("pending-callback-after"));
+    assert!(fixture.surface.controller_creation_retention(&ceremony).is_none());
+    assert_eq!(
+        fixture.surface.controller_result_retention(&ceremony),
+        Some((super::super::PreEnvironmentRetention::Active, true))
+    );
+    assert!(fixture.surface.lose_pending_controller_parent(&ceremony).is_err());
+    assert!(!fixture.surface.idle());
+    assert!(fixture.store.records_now().is_empty());
+    fixture.assert_no_ceremony_data();
+
+    fixture.factory.failure.set(None);
+    fixture.surface.abandon_opening();
+    fixture.factory.creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    Ok(())
+}
+
+#[test]
+fn modeled_abandoned_controller_rechecks_the_selected_browser() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let selected = spec(114);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    let browser = fixture
+        .surface
+        .runtime
+        .identity(42)
+        .map_err(|_| "modeled browser")?;
+    fixture.factory.pending_browser.set(Some(browser));
+    fixture
+        .surface
+        .native
+        .pending_opening_browser_candidate()
+        .map_err(|()| "modeled candidate")?;
+    fixture.factory.failure.set(Some("pending-callback-after"));
+    fixture.surface.abandon_opening();
+    super::fault_states::change_identity(&mut fixture, 0);
+    assert!(fixture
+        .surface
+        .abandoned_completed_browser(&selected.ceremony_id)
+        .is_err());
+    assert!(!fixture.surface.idle());
+    assert!(fixture.store.records_now().is_empty());
+    fixture.assert_no_ceremony_data();
+
+    fixture.surface.runtime = std::sync::Arc::new(super::Runtime(fixture.root.clone()));
+    fixture.factory.failure.set(None);
+    fixture.factory.creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    Ok(())
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
     Environment,
