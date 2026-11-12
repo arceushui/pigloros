@@ -26,6 +26,27 @@ def contract(document: dict | None = None, registry: dict | None = None) -> chec
     )
 
 
+PROBLEM_CODES = [entry["code"] for entry in REGISTRY["problem_types"]]
+
+
+def with_problem_code(code: str) -> tuple[dict, dict]:
+    """The description and registry with one more problem type, as a later v1 revision adds it."""
+    document, registry = copy.deepcopy(DOCUMENT), copy.deepcopy(REGISTRY)
+    registry["problem_types"].append({
+        "code": code,
+        "type": checker.PROBLEM_TYPE_PREFIX + code,
+        "title": "Quota exhausted",
+        "statuses": [429],
+        "description": "A new problem type of a later v1 revision.",
+    })
+    document["components"]["schemas"]["Problem"]["properties"]["code"]["enum"].append(code)
+    return document, registry
+
+
+def problem_code(baseline: dict) -> dict:
+    return baseline["components"]["schemas"]["Problem"]["properties"]["code"]
+
+
 UNROUTED_PATHS = Path(__file__).resolve().parent / "data/gateway_unrouted_paths.json"
 TIMELINES = "/v1/timelines"
 EVENTS = "/v1/timelines/{timeline_id}/events"
@@ -721,6 +742,80 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "does not declare the window"):
             checker.check_compatibility(contract(), baseline=baseline)
 
+    def test_a_new_problem_code_stays_in_v1_and_freezes(self) -> None:
+        document, registry = with_problem_code("quota-exhausted")
+        current = contract(document=document, registry=registry)
+        checker.check_registry(current)
+        self.assertGreater(checker.check_compatibility(current), 0)
+        baseline = checker.load(checker.BASELINE)
+        frozen = checker.freeze(current, baseline)
+        self.assertEqual(frozen["problem_types"][-1]["code"], "quota-exhausted")
+        codes = frozen["components"]["schemas"]["Problem"]["properties"]["code"]["enum"]
+        self.assertEqual(codes, PROBLEM_CODES + ["quota-exhausted"])
+        checker.check_appended(baseline, frozen)
+        self.assertGreater(checker.check_compatibility(current, baseline=frozen), 0)
+        self.assertEqual(checker.freeze(current, frozen), frozen)
+        self.assertEqual(checker.freeze(current, None), frozen)
+        # Once frozen, the new code is as permanent as the others.
+        with self.assertRaisesRegex(checker.ContractError, "quota-exhausted was removed"):
+            checker.check_compatibility(contract(), baseline=frozen)
+
+    def test_a_frozen_problem_code_is_never_removed_or_changed(self) -> None:
+        for change in ("remove", "rename", "drop-enum"):
+            document = copy.deepcopy(DOCUMENT)
+            registry = copy.deepcopy(REGISTRY)
+            code = document["components"]["schemas"]["Problem"]["properties"]["code"]
+            if change == "drop-enum":
+                code["type"] = "string"
+                del code["enum"]
+            else:
+                code["enum"].remove("revoked")
+            if change == "rename":
+                code["enum"].append("withdrawn")
+            # The registry keeps the frozen entry, so only the enumeration rule can reject it.
+            with self.assertRaisesRegex(checker.ContractError, "frozen problem code was removed"):
+                checker.check_compatibility(contract(document=document, registry=registry))
+        document, registry = with_problem_code("revoked-v2")
+        registry["problem_types"] = [
+            entry for entry in registry["problem_types"] if entry["code"] != "revoked"
+        ]
+        document["components"]["schemas"]["Problem"]["properties"]["code"]["enum"].remove("revoked")
+        with self.assertRaisesRegex(checker.ContractError, "revoked was removed or renamed"):
+            checker.check_compatibility(contract(document=document, registry=registry))
+
+    def test_a_new_problem_code_is_appended_never_inserted_or_reordered(self) -> None:
+        def inserted(codes: list) -> None:
+            codes.insert(3, codes.pop())
+
+        def reordered(codes: list) -> None:
+            codes[0], codes[1] = codes[1], codes[0]
+
+        for move in (inserted, reordered):
+            document, registry = with_problem_code("quota-exhausted")
+            move(document["components"]["schemas"]["Problem"]["properties"]["code"]["enum"])
+            # The registry keeps the frozen order, so only the enumeration rule can reject it.
+            with self.assertRaisesRegex(checker.ContractError, "code was removed or moved"):
+                checker.check_compatibility(contract(document=document, registry=registry))
+            move(registry["problem_types"])
+            current = contract(document=document, registry=registry)
+            checker.check_registry(current)
+            with self.assertRaisesRegex(checker.ContractError, "problem type was moved"):
+                checker.check_compatibility(current)
+
+    def test_only_the_problem_code_enumeration_may_widen_in_a_response(self) -> None:
+        document, registry = with_problem_code("quota-exhausted")
+        code = document["components"]["schemas"]["Problem"]["properties"]["code"]
+        code["pattern"] = "^[a-z-]+$"
+        with self.assertRaisesRegex(checker.ContractError, "pattern of a frozen schema changed"):
+            checker.check_compatibility(contract(document=document, registry=registry))
+        document = copy.deepcopy(DOCUMENT)
+        schema_id = document["components"]["schemas"]["Problem"]["properties"]["schema_id"]
+        schema_id["enum"] = [schema_id.pop("const"), "urn:pigloros:gateway:v1:schema:other"]
+        self.assert_breaking(document, "schema_id: a response enumeration was widened")
+        document = copy.deepcopy(DOCUMENT)
+        document["components"]["schemas"]["HealthOk"]["properties"]["ok"] = {"type": "boolean"}
+        self.assert_breaking(document, "response enumeration was widened")
+
     def test_old_supported_fixtures_stay_executable(self) -> None:
         frozen = checker.load_examples(checker.FROZEN_EXAMPLES)
         broken = copy.deepcopy(frozen)
@@ -810,7 +905,19 @@ class CheckGatewayContractTest(unittest.TestCase):
         grown["components"]["schemas"]["Extra"] = {"type": "string"}
         grown["problem_types"].append({"code": "x"})
         grown["x-pigloros-limits"]["extra"] = {"value": 1}
+        problem_code(grown)["enum"].append("x")
         checker.check_appended(baseline, grown)
+        widened = copy.deepcopy(baseline)
+        widened["components"]["schemas"]["SignalRequest"]["properties"]["dimension"][
+            "enum"
+        ].append("mobility")
+        cases.append((widened, "dimension/enum: a frozen list was changed"))
+        shrunk = copy.deepcopy(baseline)
+        problem_code(shrunk)["enum"].pop()
+        cases.append((shrunk, "code/enum: a frozen list was changed"))
+        shuffled = copy.deepcopy(baseline)
+        problem_code(shuffled)["enum"].insert(0, "x")
+        cases.append((shuffled, "code/enum/0: a frozen value changed"))
         loosened = copy.deepcopy(baseline)
         loosened["components"]["schemas"]["IdempotencyKey"]["maxLength"] = 64
         cases.append((loosened, "a frozen value changed"))
@@ -865,6 +972,10 @@ class CheckGatewayContractTest(unittest.TestCase):
             grown["components"]["schemas"]["EventView"]["properties"]["fork"] = {"type": "string"}
             (target / "baseline.json").write_text(json.dumps(grown), encoding="utf-8")
             (target / "examples" / "b.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(checker.check_append_only("main", root), 2)
+            document, registry = with_problem_code("quota-exhausted")
+            coded = checker.freeze(contract(document=document, registry=registry), grown)
+            (target / "baseline.json").write_text(json.dumps(coded), encoding="utf-8")
             self.assertEqual(checker.check_append_only("main", root), 2)
             loosened = copy.deepcopy(baseline)
             loosened["components"]["schemas"]["IdempotencyKey"]["maxLength"] = 256
