@@ -138,6 +138,17 @@ fn modeled_fault_environment_validation_requires_the_existing_admitted_folder() 
         assert_eq!(*fixture.factory.calls.borrow(), before);
         let restored = std::fs::rename(&displaced, &folder);
         assert!(restored.is_ok(), "restore modeled folder: {restored:?}");
+        assert!(fixture.surface.admit_environment(&displaced).is_err());
+        let previous = fixture
+            .factory
+            .environment_folder
+            .borrow_mut()
+            .replace(displaced);
+        assert!(previous.is_none());
+        assert!(fixture.surface.admit_environment(&folder).is_err());
+        let removed = fixture.factory.environment_folder.borrow_mut().take();
+        assert!(removed.is_some());
+        assert!(fixture.surface.admit_environment(&folder).is_ok());
 
         fixture.factory.failure.set(Some("environment"));
         assert_eq!(fixture.surface.verify_fault_environment(), Err(()));
