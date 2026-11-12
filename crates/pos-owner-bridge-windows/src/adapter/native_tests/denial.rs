@@ -367,10 +367,13 @@ mod model_tests {
         for (fault, expected) in [
             ("pump", "Sta: CallFailed"),
             ("panic_pump", "native denial driver panicked"),
+            ("already_done", "denial driver finished without result"),
         ] {
             let root = FixtureRoot::new()?;
             let model = Factory::new(Creation::Ready, FakeClock::start());
-            model.failure.set(Some(fault));
+            model
+                .failure
+                .set((fault != "already_done").then_some(fault));
             let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
             let store = WindowsCleanupStore::open(root.0.clone())?;
             let loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
@@ -396,6 +399,20 @@ mod model_tests {
                 .surface
                 .set_deadline(started + pos_owner_bridge::ceremony::timing::READINESS);
             let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), started)?;
+            if fault == "already_done" {
+                let cancelled = readiness::cancel_driver(
+                    &mut driver,
+                    &mut fixture.surface,
+                    &mut fixture.loopback,
+                    &mut fixture.store,
+                );
+                assert_eq!(
+                    cancelled.err(),
+                    Some(pos_owner_bridge::BridgeError::Lifecycle(
+                        pos_owner_bridge::LifecycleCode::ControllerLost,
+                    ))
+                );
+            }
             let (result, failure) = fixture.attempt(&mut driver);
             let error = failure.map(|error| error.to_string());
             let request_clear = driver.request_clear();
@@ -414,7 +431,11 @@ mod model_tests {
             assert!(!calls.contains(&"navigate"));
             assert!(!calls.contains(&"create_buffers"));
             assert!(!calls.contains(&"post"));
-            assert!(calls.contains(&"drop_environment"));
+            if fault == "already_done" {
+                assert!(!calls.contains(&"create_environment"));
+            } else {
+                assert!(calls.contains(&"drop_environment"));
+            }
             drop(calls);
             drop(fixture);
             root.remove()?;
