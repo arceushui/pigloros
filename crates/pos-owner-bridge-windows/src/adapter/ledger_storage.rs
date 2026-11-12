@@ -442,6 +442,53 @@ mod native_tests {
         }
         refuse_changed_ledger(&guard, ledger, base)?;
         refuse_directory_swap_after_rename(&guard, base)?;
+        refuse_staging_swap(&guard, base)?;
+        Ok(())
+    }
+
+    fn refuse_staging_swap(guard: &WindowsSubjectEncryptorLock, base: &Path) -> TestResult {
+        let ledger = guard.open_nonce_ledger()?;
+        ledger.replace_nonce_ledger_bytes(b"original before staging")?;
+        let directory = base.join("PiglorOS");
+        let temporary = directory.join(TEMPORARY);
+        let backup = directory.join("staging-observed-backup");
+        let mut swap_failure = None;
+        let mut saw_stage = false;
+        let result = ledger.replace_observing(b"staged candidate", |stage| {
+            if stage == CommitStage::LedgerChecked {
+                saw_stage = true;
+                if let Err(error) = fs::rename(&temporary, &backup) {
+                    swap_failure = Some(format!("rename staging file: {error}"));
+                    return Err(());
+                }
+                let replacement = crate::Native::create_private_ledger_file(&temporary)
+                    .and_then(|mut file| file.write_all(b"substitute").map_err(|_| ()));
+                if replacement.is_err() {
+                    swap_failure = Some("create or write substitute staging file".to_owned());
+                    return Err(());
+                }
+            }
+            Ok(())
+        });
+        assert!(saw_stage, "replacement failed before staging swap");
+        assert!(swap_failure.is_none(), "{swap_failure:?}");
+        assert_eq!(result, Err(()));
+        assert_eq!(
+            ledger.read_nonce_ledger_bytes()?,
+            b"original before staging"
+        );
+        assert_eq!(fs::read(&backup)?, b"staged candidate");
+        assert_eq!(fs::read(&temporary)?, b"substitute");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        drop(ledger);
+        fs::remove_file(&temporary)?;
+        fs::rename(&backup, &temporary)?;
+        let recovered = guard.open_nonce_ledger()?;
+        assert_eq!(
+            recovered.read_nonce_ledger_bytes()?,
+            b"original before staging"
+        );
+        assert!(!temporary.exists());
         Ok(())
     }
 
