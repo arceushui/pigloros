@@ -1565,7 +1565,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 153
+line = 148
 function = "candidates"
 operation = "GetProcessInfos"
 invariant = "Current retained environment on its creating STA; no other source."
@@ -1573,7 +1573,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 156
+line = 151
 function = "candidates"
 operation = "Count"
 invariant = "Live collection and initialized count; reject more than 64."
@@ -1581,7 +1581,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 163
+line = 158
 function = "candidates"
 operation = "GetValueAtIndex"
 invariant = "Index stays within the checked bounded collection."
@@ -1589,7 +1589,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 167
+line = 162
 function = "candidates"
 operation = "ProcessId"
 invariant = "Live collection item and initialized unique output."
@@ -1597,7 +1597,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 169
+line = 164
 function = "candidates"
 operation = "Kind"
 invariant = "Live collection item and initialized unique output."
@@ -1605,7 +1605,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 228
+line = 223
 function = "open_owned_process"
 operation = "OpenProcess"
 invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
@@ -1613,7 +1613,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 241
+line = 236
 function = "terminate_owned_process"
 operation = "TerminateProcess"
 invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."

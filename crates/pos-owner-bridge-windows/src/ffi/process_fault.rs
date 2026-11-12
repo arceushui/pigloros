@@ -134,13 +134,8 @@ impl ProcessFaultHandle for Retained {
     fn exit_code(&self) -> Result<Option<u32>, ()> {
         let mut code = 0;
         // SAFETY: the owned process handle stays live and the output is writable.
-        unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.map_err(|error| {
-            let _logged_or_unavailable = writeln!(
-                std::io::stderr(),
-                "NATIVE_EXIT_QUERY stage=exit_code result=query_failed hresult={:#x}",
-                error.code().0
-            );
-        })?;
+        unsafe { GetExitCodeProcess(self.handle, &raw mut code) }
+            .map_err(|error| write_exit_query_failure(&mut std::io::stderr(), error.code().0))?;
         Ok((code != ACTIVE).then_some(code))
     }
 }
@@ -260,32 +255,24 @@ pub(super) fn retain_exit_browser(
         handle: open_owned_process(expected.browser_pid)?,
         identity: expected,
     };
-    let (identity, image) = super::process::read_identity(retained.handle, expected.browser_pid)
-        .map_err(|()| {
-            fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed");
-        })?;
-    if identity != expected {
-        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch");
-        return Err(());
-    }
+    let (identity, image) = check_pre_close_identity(
+        super::process::read_identity(retained.handle, expected.browser_pid),
+        expected,
+        None,
+        &fault_diagnostic,
+    )?;
     if retained.exit_code()?.is_some()
         || select(&candidates(environment)?, COREWEBVIEW2_PROCESS_KIND_BROWSER)?
             != expected.browser_pid
     {
         return Err(());
     }
-    let (rechecked_identity, rechecked_image) =
-        super::process::read_identity(retained.handle, expected.browser_pid).map_err(|()| {
-            fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed");
-        })?;
-    if rechecked_image != image {
-        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch");
-        return Err(());
-    }
-    if rechecked_identity != identity {
-        fault_diagnostic("NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch");
-        return Err(());
-    }
+    check_pre_close_identity(
+        super::process::read_identity(retained.handle, expected.browser_pid),
+        identity,
+        Some(&image),
+        &fault_diagnostic,
+    )?;
     if retained.exit_code()?.is_some() || !authority.valid() {
         return Err(());
     }
@@ -486,6 +473,42 @@ fn browser_candidate_from_observations(
 }
 
 mod candidate_tests;
+
+fn write_exit_query_failure(output: &mut dyn std::io::Write, code: i32) {
+    let _logged_or_unavailable = writeln!(
+        output,
+        "NATIVE_EXIT_QUERY stage=exit_code result=query_failed hresult={code:#x}"
+    );
+}
+
+fn check_pre_close_identity(
+    observation: Result<(ProcessIdentity, std::path::PathBuf), ()>,
+    expected: ProcessIdentity,
+    expected_image: Option<&std::path::Path>,
+    report: &dyn Fn(&'static str),
+) -> Result<(ProcessIdentity, std::path::PathBuf), ()> {
+    let second = expected_image.is_some();
+    let (identity, image) = observation.map_err(|()| {
+        report(if second {
+            "NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed"
+        } else {
+            "NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed"
+        });
+    })?;
+    if expected_image.is_some_and(|expected| image.as_path() != expected) {
+        report("NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch");
+        return Err(());
+    }
+    if identity != expected {
+        report(if second {
+            "NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch"
+        } else {
+            "NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch"
+        });
+        return Err(());
+    }
+    Ok((identity, image))
+}
 
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,

@@ -910,7 +910,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "6108acf0135289feba8dff337de0cc50084b62d9bba0180ae0199ca7dd47c666"
+    return hashlib.sha256(normalized).hexdigest() == "31d6ce4b86a3f3316828599a0bb6e72bd81fdf073c8d6f969c8026dc56c09eb7"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1605,8 +1605,8 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'bd6ce6cae654ee04b191e8486c0b173a6c7eb41b1e2dfc29d91f3e4f14d99cca',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'd1a3d6d9e2b4e961aedc060b0c82bd7072c74e9b2cd3cfe794dfee86b2056cc3',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': 'e92b2de8f8bb1333038e59298c9bae3aaa56cea1a1693307d7b2495b5e9aad1e',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '0dc0799c4e2ba2da0e7e1240d2e3d46cef356e28d2a994fee8febe923d912afc',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '06c9c91606a4500a0ade936cb0b3292c14853128671c88df6e1781e7bbc61fe0',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '29ea47f5ebe24db94d0d8104b2bb13e8338743c7411db543f00cd350d2fd22df',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '95c472ff1aa10f08e2788921da6524d9a4e16e8164d853e0ad46c238ba07bf58',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'cf9f1cb7a28dea1bce36c1c939bd0f901177e3f84dc0b020d450c43d2b4359e7',
