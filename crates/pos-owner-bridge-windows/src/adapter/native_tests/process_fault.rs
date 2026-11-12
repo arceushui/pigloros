@@ -3916,6 +3916,173 @@ struct PreEnvironmentDrive {
     boundary_completion: Result<Option<bool>, ()>,
 }
 
+#[derive(Clone, Copy)]
+struct PreEnvironmentStart {
+    driver_pending: bool,
+    active_blocked: bool,
+    pump_failed: bool,
+    initial_completion: Result<Option<bool>, ()>,
+    boundary_completion: Result<Option<bool>, ()>,
+}
+
+/// Captured observations used only after the native owner has been retired.
+#[derive(Clone, Copy)]
+struct PreEnvironmentEvidence<'a> {
+    start: PreEnvironmentStart,
+    case: EnvironmentCase,
+    termination: Option<BridgeError>,
+    wiped: bool,
+    callbacks: &'a [crate::NativeCallbackMoment],
+    creation: &'a [crate::NativeCreationMoment],
+    retirement: EnvironmentRetirementEvidence,
+    record: EnvironmentRecordEvidence,
+}
+
+fn expected_pre_environment_termination(case: EnvironmentCase, error: Option<BridgeError>) -> bool {
+    use pos_owner_bridge::LifecycleCode;
+    match case {
+        EnvironmentCase::Timeout => {
+            error == Some(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
+        }
+        EnvironmentCase::Cancellation => {
+            error == Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
+        }
+    }
+}
+
+impl PreEnvironmentEvidence<'_> {
+    fn validate(self) -> TestResult {
+        let initial_witness = self.start.driver_pending
+            && matches!(self.start.initial_completion, Ok(None | Some(true)));
+        let expected_termination =
+            expected_pre_environment_termination(self.case, self.termination);
+        let ordered = clean_environment_callback_order(self.callbacks, self.case);
+        let sdk_success = sdk_environment_result(self.creation, crate::CreationCallback::Success);
+        if !initial_witness
+            || !self.start.active_blocked
+            || !self.retirement.abandoned_blocked
+            || self.start.pump_failed
+            || !expected_termination
+            || !self.wiped
+            || !self.retirement.no_resurrection
+            || !ordered
+            || !sdk_success
+            || !self.record.no_record
+            || !self.record.retained_orphan
+            || !self.retirement.idle
+        {
+            let Self {
+                start,
+                retirement,
+                record,
+                wiped,
+                ..
+            } = self;
+            return Err(format!("pre-environment witness failed: driver_pending={} active_blocked={} abandoned_blocked={} initial_completion={:?} completion={:?} expected_termination={} wiped={} ordered={} no_record={} retained_orphan={} idle={}", start.driver_pending, start.active_blocked, retirement.abandoned_blocked, start.initial_completion, start.boundary_completion, expected_termination, wiped, ordered, record.no_record, record.retained_orphan, retirement.idle).into());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn modeled_pre_environment_verdict_refuses_missing_evidence_after_retirement() {
+    use crate::NativeCallbackMoment::{DriverTimeout, EnvironmentCompletion};
+    use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
+    use pos_owner_bridge::LifecycleCode::{ControllerLost, ReadinessTimeout};
+    type Change = fn(&mut PreEnvironmentEvidence<'static>);
+    let success = PreEnvironmentEvidence {
+        start: PreEnvironmentStart {
+            driver_pending: true,
+            active_blocked: true,
+            pump_failed: false,
+            initial_completion: Ok(None),
+            boundary_completion: Ok(Some(true)),
+        },
+        case: EnvironmentCase::Cancellation,
+        termination: Some(BridgeError::Lifecycle(ControllerLost)),
+        wiped: true,
+        callbacks: &[EnvironmentCompletion(true)],
+        creation: &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(crate::CreationCallback::Success),
+        ],
+        retirement: EnvironmentRetirementEvidence {
+            no_resurrection: true,
+            abandoned_blocked: true,
+            idle: true,
+        },
+        record: EnvironmentRecordEvidence {
+            no_record: true,
+            retained_orphan: true,
+        },
+    };
+    assert!(success.validate().is_ok());
+    assert!(PreEnvironmentEvidence {
+        case: EnvironmentCase::Timeout,
+        termination: Some(BridgeError::Lifecycle(ReadinessTimeout)),
+        callbacks: &[EnvironmentCompletion(true), DriverTimeout],
+        start: PreEnvironmentStart {
+            initial_completion: Ok(Some(true)),
+            ..success.start
+        },
+        ..success
+    }
+    .validate()
+    .is_ok());
+    let contradictions: [(&str, Change); 13] = [
+        ("driver not pending", |e| {
+            e.start.driver_pending = false;
+        }),
+        ("admission unblocked", |e| {
+            e.start.active_blocked = false;
+        }),
+        ("pump failed", |e| {
+            e.start.pump_failed = true;
+        }),
+        ("initial callback failed", |e| {
+            e.start.initial_completion = Ok(Some(false));
+        }),
+        ("initial observation invalid", |e| {
+            e.start.initial_completion = Err(());
+        }),
+        ("wrong termination", |e| {
+            e.termination = Some(BridgeError::Lifecycle(ReadinessTimeout));
+        }),
+        ("unwiped", |e| {
+            e.wiped = false;
+        }),
+        ("callback order wrong", |e| {
+            e.callbacks = &[DriverTimeout, EnvironmentCompletion(true)];
+        }),
+        ("SDK evidence absent", |e| {
+            e.creation = &[EnvironmentReturned(false)];
+        }),
+        ("driver resurrected", |e| {
+            e.retirement.no_resurrection = false;
+        }),
+        ("abandoned admission unblocked", |e| {
+            e.retirement.abandoned_blocked = false;
+        }),
+        ("record retained", |e| {
+            e.record.no_record = false;
+        }),
+        ("orphan missing", |e| {
+            e.record.retained_orphan = false;
+        }),
+    ];
+    for (label, change) in contradictions {
+        let mut evidence = success;
+        change(&mut evidence);
+        assert!(evidence.validate().is_err(), "{label}");
+    }
+    let mut not_idle = success;
+    not_idle.retirement.idle = false;
+    assert_eq!(
+        not_idle.validate().err().map(|error| error.to_string()).as_deref(),
+        Some("pre-environment witness failed: driver_pending=true active_blocked=true abandoned_blocked=true initial_completion=Ok(None) completion=Ok(Some(true)) expected_termination=true wiped=true ordered=true no_record=true retained_orphan=true idle=false")
+    );
+}
+
 impl Fixture {
     fn finished_driver_is_done(&mut self, driver: &mut CeremonyDriver) -> bool {
         matches!(
@@ -3990,7 +4157,6 @@ impl Fixture {
 }
 
 fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> TestResult {
-    use pos_owner_bridge::LifecycleCode;
     let root = FixtureRoot::new()?;
     let callback_order_guard = CallbackOrderGuard::arm();
     let creation_order_guard = CreationOrderGuard::arm();
@@ -4024,16 +4190,8 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         },
     };
     let initial_witness = driver_pending && matches!(initial_completion, Ok(None | Some(true)));
-    let expected_termination = match case {
-        EnvironmentCase::Timeout => matches!(
-            &result,
-            Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
-        ),
-        EnvironmentCase::Cancellation => matches!(
-            &result,
-            Err(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
-        ),
-    };
+    let termination = result.as_ref().err().copied();
+    let expected_termination = expected_pre_environment_termination(case, termination);
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     fixture.surface.abandon_opening();
     let abandoned_blocked = catch_unwind(AssertUnwindSafe(|| {
@@ -4060,6 +4218,29 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
+    let evidence = PreEnvironmentEvidence {
+        start: PreEnvironmentStart {
+            driver_pending,
+            active_blocked,
+            pump_failed,
+            initial_completion,
+            boundary_completion,
+        },
+        case,
+        termination,
+        wiped,
+        callbacks: &order,
+        creation: &creation_order,
+        retirement: EnvironmentRetirementEvidence {
+            no_resurrection,
+            abandoned_blocked,
+            idle,
+        },
+        record: EnvironmentRecordEvidence {
+            no_record,
+            retained_orphan,
+        },
+    };
     let _logged = writeln!(std::io::stderr(), "NATIVE_PRE_ENV_VERDICT case={number} initial_witness={initial_witness} driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} boundary_completion={boundary_completion:?} pump_failed={pump_failed} expected_termination={expected_termination} wiped={wiped} order={order:?} creation_order={creation_order:?} sdk_success={sdk_success} no_resurrection={no_resurrection} ordered={ordered} no_record={no_record} orphan={retained_orphan} idle={idle}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
@@ -4067,21 +4248,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         .stop()?;
     // No process/exit was established. Preserve the recordless folder for real
     // later recovery; neither an orphan sweep nor remove_dir_all is evidence.
-    if !initial_witness
-        || !active_blocked
-        || !abandoned_blocked
-        || pump_failed
-        || !expected_termination
-        || !wiped
-        || !no_resurrection
-        || !ordered
-        || !sdk_success
-        || !no_record
-        || !retained_orphan
-        || !idle
-    {
-        return Err(format!("pre-environment witness failed: driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} completion={boundary_completion:?} expected_termination={expected_termination} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
-    }
+    evidence.validate()?;
     drop(callback_order_guard);
     drop(creation_order_guard);
     if matches!(case, EnvironmentCase::Timeout) {

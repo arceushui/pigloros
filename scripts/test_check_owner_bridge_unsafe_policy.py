@@ -1553,7 +1553,7 @@ def test_owned_process_fault_authority() -> None:
         ("self.surface.controller_creation_retention(ceremony) == Some(Abandoned)", "true"),
         ("self.surface.abandoned_completed_browser(ceremony).ok()", "None"),
         ("|| !sdk_success", "|| false"),
-        ("|| !no_resurrection", "|| false"),
+        ("|| !self.retirement.no_resurrection", "|| false"),
         ("Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
         ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
     ):
