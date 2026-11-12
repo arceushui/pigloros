@@ -56,6 +56,35 @@ fn modeled_mismatched_folder_refuses_before_window_creation_and_allows_fresh_ope
     fixture.finish()
 }
 
+#[test]
+fn pending_environment_repoll_retains_owners_until_normal_completion() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.environment_creation.set(Creation::Pending);
+    let selected = spec(112);
+    let readiness = pos_owner_bridge::ceremony::timing::READINESS;
+    let deadline = fixture.clock.now() + readiness;
+    fixture.surface.set_deadline(deadline);
+    assert!(fixture.surface.open(&selected).is_pending());
+    fixture.clock.advance(readiness / 2);
+    for _ in 0..2 {
+        assert!(fixture.surface.open(&selected).is_pending());
+        pending_owners_are_retained(&fixture, Stage::Environment);
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+    }
+    assert!(fixture.clock.now() < deadline);
+    fixture.factory.environment_creation.set(Creation::Ready);
+    let identity = fixture
+        .open(&selected)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    assert_eq!(count(&fixture, "create_environment"), 1);
+    assert_eq!(count(&fixture, "create_controller"), 1);
+    assert_eq!(fixture.factory.environment_completions.get(), 1);
+    assert_eq!(fixture.factory.controller_completions.get(), 1);
+    fixture.assert_no_ceremony_data();
+    fixture.finish()
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
     Environment,

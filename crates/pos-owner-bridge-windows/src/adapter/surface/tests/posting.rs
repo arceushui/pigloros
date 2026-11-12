@@ -851,3 +851,42 @@ fn foreground_budget_bounds_show_and_each_first_observation() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn readiness_deadline_crossed_during_foreground_operations_blocks_navigation() -> TestResult {
+    use pos_owner_bridge::MonotonicClock as _;
+    use std::time::Duration;
+
+    for operation in ["show", "window"] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture
+            .open(&super::spec(126))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let remaining = Duration::from_millis(500);
+        let deadline = fixture.clock.now() + remaining;
+        fixture.surface.set_deadline(deadline);
+        if operation == "show" {
+            fixture.factory.show_delay.set(remaining);
+        } else {
+            fixture.factory.window_delay.set(Duration::from_millis(300));
+        }
+        assert!(matches!(
+            fixture.surface.navigate(),
+            std::task::Poll::Ready(Err(error))
+                if error.error() == BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)
+        ));
+        let expected = if operation == "show" {
+            deadline
+        } else {
+            deadline + Duration::from_millis(100)
+        };
+        assert_eq!(fixture.clock.now(), expected);
+        assert!(fixture.factory.calls.borrow().contains(&"show_window"));
+        fixture.assert_no_ceremony_data();
+        assert!(!fixture.surface.idle());
+        fixture.factory.window_delay.set(Duration::ZERO);
+        fixture.factory.show_delay.set(Duration::ZERO);
+        fixture.finish()?;
+    }
+    Ok(())
+}
