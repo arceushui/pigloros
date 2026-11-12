@@ -1584,7 +1584,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'b4be8557ded8b04c063a5521226ca1bf7e598309d50109b2a7c2ae6823130bd1',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '480108d45bae573b95db34fe4f9d5154f66de904986f94a396415982f87f90c6',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '18d2656cc315199a9fe7da5dc9f6d8d012f52f0d690e476dc418b10a6cf0255f',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '7092d9da1b8dc450df5eb0abb81840ed9435105c3815f66a69715ae72591b2e5',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '1fc463501f4590c17e1e6f50bea051cabe5cdfa3e90e1585c6d70275718b78a5',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'a510a6cfa3b90c208ba32d8941a3a0deb0379b7c0d08b4230237dfe84442cf32',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
     'crates/pos-owner-bridge-windows/src/adapter/host/tests.rs': 'f987aa8a99b0e5d55e476f1b8db2e4665942dd934997269b54639f7e63030236',
