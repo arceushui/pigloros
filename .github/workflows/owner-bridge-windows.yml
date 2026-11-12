@@ -36,15 +36,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- modeled_quit_retains_pending_owners_and_cancel_done_is_stable --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Focused model tests failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean -- modeled_denial_attempt_preserves_errors_after_owner_retirement --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Focused model tests failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean -- modeled_control_ --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Focused model tests failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean -- modeled_pending_controller_and_quit_retain_owners_until_completion --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Focused model tests failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean -- modeled_teardown_failure_retains_later_owners_until_retry --include-ignored --nocapture --test-threads=1
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- modeled_ --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Focused model tests failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --output-path "$env:RUNNER_TEMP/test-mechanics.lcov"
           if ($LASTEXITCODE -ne 0) { throw 'LCOV export failed' }
