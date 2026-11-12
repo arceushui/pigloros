@@ -565,16 +565,10 @@ fn header_completing_at_deadline_is_silent() {
 }
 
 #[test]
-fn observations_just_before_each_deadline_remain_accepted() -> TestResult {
+fn observations_just_before_each_deadline_remain_accepted() {
     let tick = Duration::from_nanos(1);
-    let first = ADR_TIMEOUTS
-        .first_byte
-        .checked_sub(tick)
-        .ok_or("first-byte deadline")?;
-    let header = ADR_TIMEOUTS
-        .header
-        .checked_sub(tick)
-        .ok_or("header deadline")?;
+    let first = ADR_TIMEOUTS.first_byte.saturating_sub(tick);
+    let header = ADR_TIMEOUTS.header.saturating_sub(tick);
     for chunks in [
         vec![(first, OWNER_REQUEST.to_vec())],
         vec![
@@ -587,7 +581,6 @@ fn observations_just_before_each_deadline_remain_accepted() -> TestResult {
         assert_eq!(count, 1);
         assert!(silent.is_empty());
     }
-    Ok(())
 }
 
 #[test]
