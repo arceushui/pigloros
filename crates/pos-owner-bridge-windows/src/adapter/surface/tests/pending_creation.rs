@@ -96,24 +96,39 @@ fn modeled_controller_qualification_retains_pending_owners_on_refusal() -> TestR
         fixture.surface.controller_creation_retention(&ceremony),
         Some(super::super::PreEnvironmentRetention::Active)
     );
-    assert!(fixture.surface.abandoned_completed_browser(&ceremony).is_err());
+    assert!(fixture
+        .surface
+        .abandoned_completed_browser(&ceremony)
+        .is_err());
 
     fixture.factory.failure.set(Some("pending-owner"));
-    assert!(fixture.surface.controller_creation_retention(&ceremony).is_none());
-    assert!(fixture.surface.lose_pending_controller_parent(&ceremony).is_err());
+    assert!(fixture
+        .surface
+        .controller_creation_retention(&ceremony)
+        .is_none());
+    assert!(fixture
+        .surface
+        .lose_pending_controller_parent(&ceremony)
+        .is_err());
     fixture.factory.failure.set(None);
-    fixture
+    let _candidate = fixture
         .surface
         .native
         .pending_opening_browser_candidate()
         .map_err(|()| "modeled candidate")?;
     fixture.factory.failure.set(Some("pending-callback-after"));
-    assert!(fixture.surface.controller_creation_retention(&ceremony).is_none());
+    assert!(fixture
+        .surface
+        .controller_creation_retention(&ceremony)
+        .is_none());
     assert_eq!(
         fixture.surface.controller_result_retention(&ceremony),
         Some((super::super::PreEnvironmentRetention::Active, true))
     );
-    assert!(fixture.surface.lose_pending_controller_parent(&ceremony).is_err());
+    assert!(fixture
+        .surface
+        .lose_pending_controller_parent(&ceremony)
+        .is_err());
     assert!(!fixture.surface.idle());
     assert!(fixture.store.records_now().is_empty());
     fixture.assert_no_ceremony_data();
@@ -141,7 +156,7 @@ fn modeled_abandoned_controller_rechecks_the_selected_browser() -> TestResult {
         .identity(42)
         .map_err(|_| "modeled browser")?;
     fixture.factory.pending_browser.set(Some(browser));
-    fixture
+    let _candidate = fixture
         .surface
         .native
         .pending_opening_browser_candidate()
