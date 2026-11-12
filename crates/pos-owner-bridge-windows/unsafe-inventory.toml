@@ -27,7 +27,7 @@ hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_pr
 
 [[block]]
 file = "src/ffi/cleanup.rs"
-line = 66
+line = 63
 function = "cleanup_file_volume"
 operation = "GetVolumeInformationByHandleW"
 invariant = "Borrowed handle stays owned by the live File; distinct initialized scalar/name outputs; require NTFS and consistent volume serial for actual opened files."
@@ -35,7 +35,7 @@ hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_pr
 
 [[block]]
 file = "src/ffi/cleanup.rs"
-line = 89
+line = 84
 function = "publish_cleanup"
 operation = "MoveFileExW MOVEFILE_WRITE_THROUGH"
 invariant = "Owned terminated same-directory paths; pending File was flushed and dropped; WRITE_THROUGH alone never requests copy or replacement; preserve both possible names on failure."

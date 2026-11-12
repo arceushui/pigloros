@@ -52,10 +52,7 @@ impl crate::Native {
             )
         }
         .map_err(|_| ())?;
-        if filesystem[..5] != [78, 84, 70, 83, 0] {
-            return Err(());
-        }
-        Ok(())
+        require_ntfs(&filesystem)
     }
 
     pub(crate) fn cleanup_file_volume(file: &File) -> Result<u32, ()> {
@@ -74,9 +71,7 @@ impl crate::Native {
             )
         }
         .map_err(|_| ())?;
-        if filesystem[..5] != [78, 84, 70, 83, 0] {
-            return Err(());
-        }
+        require_ntfs(&filesystem)?;
         Ok(serial)
     }
 
@@ -94,5 +89,36 @@ impl crate::Native {
             )
         }
         .map_err(|_| ())
+    }
+}
+
+fn require_ntfs(filesystem: &[u16; 32]) -> Result<(), ()> {
+    if filesystem[..5] != [78, 84, 70, 83, 0] {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    #[test]
+    fn modeled_volume_name_requires_the_exact_ntfs_terminated_prefix() {
+        let mut name = [0_u16; 32];
+        name[..5].copy_from_slice(&[78, 84, 70, 83, 0]);
+        assert_eq!(super::require_ntfs(&name), Ok(()));
+        name[5] = 42;
+        assert_eq!(super::require_ntfs(&name), Ok(()));
+        for prefix in [
+            [110, 116, 102, 115, 0],
+            [78, 84, 70, 83, 88],
+            [78, 0, 70, 83, 0],
+            [70, 65, 84, 0, 0],
+            [0, 0, 0, 0, 0],
+        ] {
+            name[..5].copy_from_slice(&prefix);
+            assert_eq!(super::require_ntfs(&name), Err(()));
+        }
     }
 }
