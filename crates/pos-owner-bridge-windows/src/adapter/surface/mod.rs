@@ -261,6 +261,21 @@ impl Surface {
     }
 
     #[cfg(test)]
+    fn verify_fault_environment(&self) -> std::result::Result<(), ()> {
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    fn verify_fault_identity(&self, browser: ProcessIdentity) -> std::result::Result<(), ()> {
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(in crate::adapter) fn prepare_recordless_browser(
         &mut self,
     ) -> std::result::Result<ProcessIdentity, ()> {
@@ -272,13 +287,9 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
+        self.verify_fault_environment()?;
         let browser = self.native.recordless_browser_candidate()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_identity(browser)?;
         self.events.expect_browser(browser.browser_pid);
         self.recordless_fault = Some(browser);
         Ok(browser)
@@ -301,12 +312,9 @@ impl Surface {
             return Err(());
         }
         let browser = self.recordless_fault.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.recordless_browser_candidate()? != browser
-        {
+        self.verify_fault_environment()?;
+        self.verify_fault_identity(browser)?;
+        if self.native.recordless_browser_candidate()? != browser {
             return Err(());
         }
         let events = Rc::clone(&self.events);
@@ -432,12 +440,9 @@ impl Surface {
             return Err(());
         }
         let browser = self.recordless_fault.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.pending_opening_browser_candidate()? != Some(browser)
-        {
+        self.verify_fault_environment()?;
+        self.verify_fault_identity(browser)?;
+        if self.native.pending_opening_browser_candidate()? != Some(browser) {
             return Err(());
         }
         let events = Rc::clone(&self.events);
@@ -497,14 +502,10 @@ impl Surface {
             return Err(());
         }
         let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_identity(browser)?;
         let presence = self.native.early_renderer_presence()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.events.invalid()
-            || self.events.exited().is_some()
-        {
+        self.verify_fault_identity(browser)?;
+        if self.events.invalid() || self.events.exited().is_some() {
             return Err(());
         }
         Ok(presence)
@@ -537,12 +538,8 @@ impl Surface {
             return Err(());
         }
         let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_environment()?;
+        self.verify_fault_identity(browser)?;
         let record_count = self.store.records().map_err(|_| ())?.len();
         if record_count != 1 {
             return Err(());
@@ -616,12 +613,8 @@ impl Surface {
             return Err(());
         }
         let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_environment()?;
+        self.verify_fault_identity(browser)?;
         let record_count = self.store.records().map_err(|_| ())?.len();
         if record_count != 1 {
             return Err(());
@@ -686,13 +679,9 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
+        self.verify_fault_environment()?;
         let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_identity(browser)?;
         Ok(browser)
     }
 
@@ -762,13 +751,9 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
+        self.verify_fault_environment()?;
         let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_identity(browser)?;
         // The caller is the sealed single-view fixture; subscriptions were
         // installed before its only navigation, and every frame/popup callback
         // invalidates these events. The policy binds the fixture asset bytes.
@@ -1034,14 +1019,9 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.folder.as_ref().ok_or(())?;
-        let folder = self.root.join(folder);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
+        self.verify_fault_environment()?;
         let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_identity(browser)?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {

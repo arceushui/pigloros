@@ -35,12 +35,8 @@ impl Surface {
             return Err(());
         }
         let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        self.verify_fault_environment()?;
+        self.verify_fault_identity(browser)?;
         let state = crate::ProcessExitState {
             generation: self.generation.ok_or(())?,
             record_count: self.store.records().map_err(|_| ())?.len(),

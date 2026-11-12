@@ -103,6 +103,82 @@ pub(super) fn change_identity(fixture: &mut Fixture, change_after: usize) {
     fixture.surface.runtime = runtime;
 }
 
+struct UnavailableIdentity(PathBuf);
+
+impl RuntimeAdmission for UnavailableIdentity {
+    fn root(&self) -> &Path {
+        &self.0
+    }
+
+    fn identity(&self, _: u32) -> Result<ProcessIdentity, BridgeError> {
+        Err(BridgeError::Unavailable(
+            pos_owner_bridge::UnavailableCode::RuntimeIntegrity,
+        ))
+    }
+}
+
+#[test]
+fn modeled_fault_environment_validation_requires_the_existing_admitted_folder() {
+    let result = Fixture::new(Creation::Ready).map(|mut fixture| {
+        let before = fixture.factory.calls.borrow().clone();
+        assert_eq!(fixture.surface.verify_fault_environment(), Err(()));
+        assert_eq!(*fixture.factory.calls.borrow(), before);
+
+        let selected = spec(40);
+        let opened = fixture.open(&selected);
+        assert!(opened.is_ok(), "modeled open: {opened:?}");
+        assert_eq!(fixture.surface.verify_fault_environment(), Ok(()));
+
+        let folder = fixture.root.join(&selected.folder_name);
+        let displaced = fixture.root.join("displaced-fault-folder");
+        let moved = std::fs::rename(&folder, &displaced);
+        assert!(moved.is_ok(), "displace modeled folder: {moved:?}");
+        let before = fixture.factory.calls.borrow().clone();
+        assert_eq!(fixture.surface.verify_fault_environment(), Err(()));
+        assert_eq!(*fixture.factory.calls.borrow(), before);
+        let restored = std::fs::rename(&displaced, &folder);
+        assert!(restored.is_ok(), "restore modeled folder: {restored:?}");
+
+        fixture.factory.failure.set(Some("environment"));
+        assert_eq!(fixture.surface.verify_fault_environment(), Err(()));
+        fixture.factory.failure.set(None);
+        fixture
+            .factory
+            .environment_version
+            .set("unexpected-runtime");
+        assert_eq!(fixture.surface.verify_fault_environment(), Err(()));
+        fixture.factory.environment_version.set("153.0.4234.48");
+        assert_eq!(fixture.surface.verify_fault_environment(), Ok(()));
+        assert!(!fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+        let finished = fixture.finish();
+        assert!(finished.is_ok(), "modeled retirement: {finished:?}");
+    });
+    assert!(result.is_ok(), "modeled fixture: {result:?}");
+}
+
+#[test]
+fn modeled_fault_identity_validation_refuses_changed_and_unavailable_observations() {
+    let result = Fixture::new(Creation::Ready).map(|mut fixture| {
+        let opened = fixture.open(&spec(40));
+        let checked = opened.map(|browser| {
+            assert_eq!(fixture.surface.verify_fault_identity(browser), Ok(()));
+            change_identity(&mut fixture, 0);
+            assert_eq!(fixture.surface.verify_fault_identity(browser), Err(()));
+            fixture.surface.runtime = Arc::new(UnavailableIdentity(fixture.root.clone()));
+            assert_eq!(fixture.surface.verify_fault_identity(browser), Err(()));
+            fixture.surface.runtime = Arc::new(Runtime(fixture.root.clone()));
+            assert_eq!(fixture.surface.verify_fault_identity(browser), Ok(()));
+        });
+        assert!(checked.is_ok(), "modeled open: {checked:?}");
+        assert!(!fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+        let finished = fixture.finish();
+        assert!(finished.is_ok(), "modeled retirement: {finished:?}");
+    });
+    assert!(result.is_ok(), "modeled fixture: {result:?}");
+}
+
 #[test]
 fn modeled_early_renderer_snapshot_rechecks_identity_and_retains_the_owner() -> TestResult {
     for change_after in [0, 1] {
