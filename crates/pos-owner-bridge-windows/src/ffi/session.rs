@@ -303,23 +303,15 @@ impl NativeOperations for Session {
     fn pending_opening_browser_candidate(
         &self,
     ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
-        if !self.pending_opening_owners_retained() {
-            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
-            return Err(());
-        }
-        if self.recordless_controller_completion().is_some() {
-            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
-            return Err(());
-        }
-        let candidate = super::process_fault::pending_browser_candidate(
-            &self.environment_ref().map_err(|_| ())?.raw,
-        )?;
-        if !self.pending_opening_owners_retained()
-            || self.recordless_controller_completion().is_some()
-        {
-            return Err(());
-        }
-        Ok(candidate)
+        pending_candidate_checked(
+            || self.pending_opening_owners_retained(),
+            || self.recordless_controller_completion(),
+            || {
+                super::process_fault::pending_browser_candidate(
+                    &self.environment_ref().map_err(|_| ())?.raw,
+                )
+            },
+        )
     }
 
     #[cfg(test)]
@@ -604,6 +596,130 @@ impl NativeOperations for Session {
         self.check().is_err()
             || self.environment_creation.is_some()
             || self.controller_creation.is_some()
+    }
+}
+
+#[cfg(test)]
+fn pending_candidate_checked(
+    mut owners: impl FnMut() -> bool,
+    mut callback: impl FnMut() -> Option<bool>,
+    observe: impl FnOnce() -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()>,
+) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+    if !owners() {
+        pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
+        return Err(());
+    }
+    if callback().is_some() {
+        pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
+        return Err(());
+    }
+    let candidate = observe()?;
+    if !owners() || callback().is_some() {
+        return Err(());
+    }
+    Ok(candidate)
+}
+
+#[cfg(test)]
+mod pending_candidate_tests {
+    #![forbid(unsafe_code)]
+
+    use pos_owner_bridge::ProcessIdentity;
+    use pos_owner_bridge_codec::ImagePathSha256;
+    use std::cell::RefCell;
+
+    #[test]
+    fn modeled_pending_candidate_refuses_changed_owners_or_completion_in_order() {
+        let identity = ProcessIdentity {
+            browser_pid: 7,
+            creation_filetime: 9,
+            image_path_sha256: ImagePathSha256::from_bytes([3; 32]),
+        };
+        for (
+            initial_owner,
+            initial_callback,
+            observed,
+            final_owner,
+            final_callback,
+            expected,
+            expected_calls,
+        ) in [
+            (false, None, Ok(None), true, None, Err(()), &["owners"][..]),
+            (
+                true,
+                Some(true),
+                Ok(None),
+                true,
+                None,
+                Err(()),
+                &["owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Err(()),
+                true,
+                None,
+                Err(()),
+                &["owners", "callback", "observe"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                false,
+                None,
+                Err(()),
+                &["owners", "callback", "observe", "owners"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                true,
+                Some(false),
+                Err(()),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                true,
+                None,
+                Ok(None),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(Some(identity)),
+                true,
+                None,
+                Ok(Some(identity)),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let mut owner_values = [initial_owner, final_owner].into_iter();
+            let mut callback_values = [initial_callback, final_callback].into_iter();
+            let result = super::pending_candidate_checked(
+                || {
+                    calls.borrow_mut().push("owners");
+                    owner_values.next().unwrap_or(false)
+                },
+                || {
+                    calls.borrow_mut().push("callback");
+                    callback_values.next().unwrap_or(Some(false))
+                },
+                || {
+                    calls.borrow_mut().push("observe");
+                    observed
+                },
+            );
+            assert_eq!(result, expected);
+            assert_eq!(calls.into_inner(), expected_calls);
+        }
     }
 }
 

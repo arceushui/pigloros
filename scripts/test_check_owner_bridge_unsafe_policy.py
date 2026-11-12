@@ -1836,6 +1836,10 @@ def test_recordless_and_release_authority() -> None:
     cases = (
         ("src/ffi/creation.rs", "succeeded", "Result::is_ok", "Result::is_err"),
         ("src/ffi/session.rs", "recordless_fault_owners_retained", "== Some(true)", "== Some(false)"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if !owners() {", "if false {"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if callback().is_some() {", "if false {"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "let candidate = observe()?;", "let candidate = None;"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if !owners() || callback().is_some() {", "if false {"),
         ("src/ffi/session.rs", "exit_fault_owners_retained", "self.view.is_none()", "self.view.is_some()"),
         ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
         ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),

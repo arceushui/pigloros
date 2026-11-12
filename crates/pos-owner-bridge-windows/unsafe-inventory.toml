@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 386
+line = 378
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 391
+line = 383
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 451
+line = 443
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 463
+line = 455
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 492
+line = 484
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 553
+line = 545
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
