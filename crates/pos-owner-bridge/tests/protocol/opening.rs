@@ -677,11 +677,16 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
 
 #[test]
 fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult {
-    use pos_owner_bridge::ceremony::timing::INTERACTION;
+    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION};
     use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
     use pos_owner_bridge_codec::ControlState;
 
-    for stage in ["read", "cas"] {
+    for (stage, challenge) in [
+        ("read", false),
+        ("cas", false),
+        ("read", true),
+        ("cas", true),
+    ] {
         for offset_ms in [-1_i64, 0, 1] {
             let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
             let mut driver = new_driver(create_plan(&rig.clock));
@@ -693,7 +698,11 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: Duration::ZERO,
-                read_delay: Duration::ZERO,
+                read_delay: if challenge {
+                    Duration::from_secs(35)
+                } else {
+                    Duration::ZERO
+                },
                 ready_target: Rc::clone(&ready_target),
                 consume_target: Rc::clone(&consume_target),
                 open_pending: 0,
@@ -722,7 +731,11 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 }
                 if !armed {
                     if let Some(receipt) = driver.first_receipt_at() {
-                        let boundary = receipt + INTERACTION;
+                        let boundary = if challenge {
+                            driver.t0() + CHALLENGE_TTL
+                        } else {
+                            receipt + INTERACTION
+                        };
                         let target = if offset_ms < 0 {
                             boundary - Duration::from_millis(1)
                         } else {
@@ -742,10 +755,15 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
             if offset_ms < 0 {
                 assert!(outcome.is_ok(), "{stage}");
             } else {
+                let expected = if challenge {
+                    LifecycleCode::ChallengeExpired
+                } else {
+                    LifecycleCode::InteractionTimeout
+                };
                 assert_eq!(
                     outcome.err(),
-                    Some(BridgeError::Lifecycle(LifecycleCode::InteractionTimeout)),
-                    "{stage} {offset_ms}"
+                    Some(BridgeError::Lifecycle(expected)),
+                    "{stage} {offset_ms} {challenge}"
                 );
             }
             let log = rig.handle.log();
