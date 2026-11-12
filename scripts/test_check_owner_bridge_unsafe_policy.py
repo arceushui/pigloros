@@ -1947,6 +1947,21 @@ def test_private_fault_capability_construction() -> None:
     if expected not in errors(resurrected):
         raise SystemExit("removed exit authority could be resurrected by its old name")
 
+    # The source-bound model spy may borrow a validated authority, but its
+    # method allowance must not permit minting authority or adjacent callers.
+    native = "src/adapter/surface/tests/native.rs"
+    spy = (ROOT / SHIM / native).read_text()
+    if errors(dict(sources, **{native: spy})):
+        raise SystemExit("the source-bound fault model spy was rejected")
+    for statement, expected in (
+        ("fn unreviewed(authority: &crate::FaultAuthority) {}", "fault capability references belong only in reviewed authority paths"),
+        ("fn inject_process_fault() { let _ = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
+        ("fn inject_process_fault() { let _ = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
+    ):
+        changed = dict(sources, **{native: spy + "\n" + statement})
+        if f"{SHIM}/{native}: {expected}" not in errors(changed):
+            raise SystemExit(f"fault model spy allowance accepted bypass: {statement}")
+
     for statement in (
         "type Alias = crate::FaultAuthority; fn forge() -> Alias { Alias { browser, target, valid, trace } }",
         "type Alias<T> = T; fn forge() { let _ = Alias::<crate::FaultAuthority> { browser, target, valid, trace }; }",
