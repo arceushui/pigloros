@@ -175,8 +175,8 @@ impl Held {
                     return false;
                 }
             }
-            if let Err(error) = self.control.deny(&self.view) {
-                self.sink.failed(self.control.kind(), error);
+            let denied = self.control.deny(&self.view);
+            if !super::report_result(self.sink.as_ref(), self.control.kind(), denied) {
                 return false;
             }
             self.denied = true;
@@ -207,13 +207,8 @@ impl Held {
                 return false;
             }
         }
-        match super::denial::complete_request(deferral) {
-            Ok(()) => true,
-            Err(error) => {
-                self.sink.failed(self.control.kind(), error);
-                false
-            }
-        }
+        let completed = super::denial::complete_request(deferral);
+        super::report_result(self.sink.as_ref(), self.control.kind(), completed)
     }
 }
 

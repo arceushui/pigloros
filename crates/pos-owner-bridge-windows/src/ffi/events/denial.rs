@@ -163,8 +163,8 @@ impl Held {
                 self.signals.failed(EventKind::Resource, unavailable());
                 return false;
             }
-            if let Err(error) = stop_fetches(&self.view) {
-                self.signals.failed(EventKind::Resource, error);
+            let stopped = stop_fetches(&self.view);
+            if !super::report_result(self.signals.as_ref(), EventKind::Resource, stopped) {
                 return false;
             }
             self.stopped = true;
@@ -176,13 +176,8 @@ impl Held {
             return false;
         }
         self.completed = true;
-        match complete_request(deferral) {
-            Ok(()) => true,
-            Err(error) => {
-                self.signals.failed(EventKind::Resource, error);
-                false
-            }
-        }
+        let completed = complete_request(deferral);
+        super::report_result(self.signals.as_ref(), EventKind::Resource, completed)
     }
 }
 

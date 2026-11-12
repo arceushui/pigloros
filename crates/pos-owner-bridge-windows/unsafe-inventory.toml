@@ -1389,7 +1389,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 193
+line = 188
 function = "stop_fetches"
 operation = "view.Stop()"
 invariant = "Exact retained session view on its creating STA; resource denial or failed mandatory navigation cancellation only. Stop HRESULT guards security-subscription removal and Close; it grants no control-family permission."
@@ -1397,7 +1397,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 205
+line = 200
 function = "defer_request"
 operation = "args.GetDeferral()"
 invariant = "Owned live resource callback arguments on their creating STA. Retain returned deferral with arguments and exact session view while cancellation is unresolved."
@@ -1405,7 +1405,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 219
+line = 214
 function = "complete_request"
 operation = "deferral.Complete()"
 invariant = "Retained creating-STA deferral; Complete at most once, marked before COM, only after successful resource Stop or ADR-130 mandatory control denial. An uncertain result keeps the event owners until the matching own browser exit."
