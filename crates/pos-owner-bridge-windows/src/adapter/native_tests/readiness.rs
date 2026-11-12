@@ -511,7 +511,7 @@ mod tests {
 
         let start = Instant::now();
         let deadline = start + Duration::from_secs(15);
-        let before = Some(deadline - Duration::from_nanos(1));
+        let before = Some(start + Duration::from_secs(14) + Duration::from_nanos(999_999_999));
         let snapshot = Some((Some(7), 0, false, 1));
         for code in [LifecycleCode::ControllerLost, LifecycleCode::ClientFailed] {
             assert!(super::readiness_verdict(
