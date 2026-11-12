@@ -28,6 +28,16 @@ pub(super) fn observe(
     }
 }
 
+fn report_result(sink: &dyn EventSink, kind: EventKind, result: Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            sink.failed(kind, error);
+            false
+        }
+    }
+}
+
 fn action(sink: &dyn EventSink, kind: EventKind, actual: NativeAction, expected: NativeAction) {
     if actual != expected {
         sink.failed(
@@ -115,7 +125,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use super::{action, observe, Subscriptions};
+    use super::{action, observe, report_result, Subscriptions};
     use crate::{EventKind, EventSink, Failure, NativeAction, NativeError, NativeEvent, Operation};
     use windows::core::{Error, HRESULT};
 
@@ -135,6 +145,37 @@ mod tests {
             self.failures.borrow_mut().push((kind, error));
             NativeAction::BlockResource
         }
+    }
+
+    #[test]
+    fn modeled_containment_results_report_exact_failures() {
+        let sink = Sink::default();
+        assert!(report_result(&sink, EventKind::Resource, Ok(())));
+        assert!(sink.failures.borrow().is_empty());
+        for kind in [
+            EventKind::Resource,
+            EventKind::Navigation,
+            EventKind::Permission,
+        ] {
+            let error = NativeError {
+                operation: Operation::Subscription,
+                failure: Failure::CallFailed,
+            };
+            assert!(!report_result(&sink, kind, Err(error)));
+        }
+        let error = NativeError {
+            operation: Operation::Subscription,
+            failure: Failure::CallFailed,
+        };
+        assert_eq!(
+            *sink.failures.borrow(),
+            [
+                (EventKind::Resource, error),
+                (EventKind::Navigation, error),
+                (EventKind::Permission, error)
+            ]
+        );
+        assert!(sink.events.borrow().is_empty());
     }
 
     #[test]
