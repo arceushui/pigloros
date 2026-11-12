@@ -1145,7 +1145,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ('src/adapter/surface/mod.rs', 'inject_posted_consuming_fault', '8d2a7e8a867ac336094f4bfdc45194220735cd8e709c28d12d7e07c7422e4427'),
         ('src/adapter/surface/mod.rs', 'posted_ready_fault_state', '338bbaa04356e3f9d6e235d859e1427608723276a67ba1a17da3ea1abc0e143a'),
         ('src/adapter/surface/mod.rs', 'inject_posted_ready_fault', '43214afa0e0beb3daf39dc3ad67d4b3dc3a985f5299362e169cac58c141e1820'),
-        ('src/adapter/surface/mod.rs', 'posted_retry_fault_state', '21e04f9cd0e24ca2af57f54efa6ac0eacf10ddeb1b230a31b3e9f05cd6e9dcea'),
+        ('src/adapter/surface/mod.rs', 'posted_retry_fault_state', '32f6a4721488f17a6d9629b3112ca4cf8de196df49ab8eea7d9fe8a150fed8c0'),
         ('src/adapter/surface/mod.rs', 'inject_posted_retry_fault', '0ce323d34f99595ccb3bf45db32abff3a0d1fb636a7f20be5864941a32505926'),
         ('src/adapter/surface/mod.rs', 'posted_writing_fault_state', '5be6d3f63972546114c8ce0fb27c34bd28f63434ee4c702b6649a23f0b502a16'),
         ('src/adapter/surface/mod.rs', 'inject_posted_writing_fault', 'a6c54d48ab66301c9c77e8e3282ff609dd28143ae27b625bf5ba66b60746c33d'),
@@ -1193,7 +1193,8 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/adapter/surface/mod.rs", "inject_recordless_browser", "5511b49b260de834605d7df5b09ae676a81c252e8f23afebc643f475de4b4f73"),
         ("src/adapter/surface/mod.rs", "recordless_fault_event", "cdd869c7f6fdb57285a2b11bf88ea524706e4a2721a3ed76641b2ab3c2bad75a"),
         ("src/adapter/surface/mod.rs", "recordless_fault_owners_retained", "b4a262133309e1950953a8aecb3a15780bb2c2aa5d23d03934f576f8a8fd0093"),
-        ("src/adapter/surface/mod.rs", "posted_fault_state", "6bedb3fc63d1f1ecbe0e5c4bf8b5831d87262fb38faa49439f214c34ac659c50"),
+        ("src/adapter/surface/mod.rs", "posted_fault_state", "7b58fa51f4ecc3d9c39f0721dd9c0b6e6afdbcafbad2198e42e565f8a6a5bf3b"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", "1134fc3bcaabdfee43ef2b50662f0c8f86c2a97cca0d278c5a9e2e33b578724a"),
         ("src/adapter/surface/mod.rs", "posted_fault_event", "9997eb9c0ff65871d2253e99fbe0cde02f599225d18c07e2dfc4c25e1c71d36f"),
         ("src/adapter/surface/mod.rs", "inject_posted_fault", "b0c851aca731b5aa318fa1dcc33f0f426cbad6a9ec6d61a2cf17d60ddc299050"),
     )
