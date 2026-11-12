@@ -653,6 +653,17 @@ fn exercise_unacknowledged_buffers(
     assert!(!native.compare_exchange(ControlState::Empty as u32, ControlState::Failed as u32)?);
     assert!(native.compare_exchange(ControlState::Writing as u32, ControlState::Empty as u32)?);
     let mut copied = ReplyImage::zeroed();
+    copied.select(CeremonyKind::Get);
+    copied.as_mut_bytes().fill(0xa5);
+    assert_eq!(
+        native.copy_reply(&mut copied),
+        Err(crate::NativeError {
+            operation: crate::Operation::Buffers,
+            failure: crate::Failure::CallFailed,
+        })
+    );
+    assert!(copied.as_bytes().iter().all(|byte| *byte == 0xa5));
+    copied.select(CeremonyKind::Create);
     native.copy_reply(&mut copied)?;
     assert_eq!(&copied.as_bytes()[..64], &reply_header);
     native.post(BufferSlot::Request)?;
