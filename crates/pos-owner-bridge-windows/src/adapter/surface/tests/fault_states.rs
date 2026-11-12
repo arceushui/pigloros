@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use pos_owner_bridge::fake::host::StoreOp;
 use pos_owner_bridge::{BridgeError, CleanupStore, OwnerWebSurface, ProcessIdentity, RequestImage};
 use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, ControlState, OwnerBridgeControlV1};
 
@@ -146,6 +147,205 @@ fn modeled_before_record_snapshot_refuses_a_changed_browser_identity() -> TestRe
     assert!(fixture.store.records_now().is_empty());
     assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
     fixture.finish()
+}
+
+#[test]
+fn modeled_before_record_snapshot_requires_readable_empty_store_and_admitted_environment(
+) -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let selected = spec(40);
+    fixture.factory.preload_owners.set(true);
+    let browser = fixture
+        .open(&selected)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(fixture.surface.before_record_fault_state(), Ok(browser));
+
+    fixture.store.set_failing(&[StoreOp::List]);
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    fixture.store.set_failing(&[]);
+    fixture.store.preload(vec![0x80]);
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+    fixture
+        .store
+        .delete_record(&[0x80])
+        .map_err(|_| "restore modeled record")?;
+
+    fixture.factory.failure.set(Some("preload-owner"));
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    fixture.factory.failure.set(Some("environment"));
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    fixture.factory.failure.set(None);
+    fixture.factory.environment_version.set("not-the-pinned-runtime");
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    fixture.factory.environment_version.set("153.0.4234.48");
+
+    let folder = fixture.root.join(&selected.folder_name);
+    let displaced = fixture.root.join("displaced-modeled-folder");
+    std::fs::rename(&folder, &displaced)?;
+    assert!(fixture.surface.before_record_fault_state().is_err());
+    std::fs::rename(&displaced, &folder)?;
+    assert_eq!(fixture.surface.before_record_fault_state(), Ok(browser));
+    assert!(fixture.surface.before_record_owners_retained());
+    assert!(!fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
+    fixture.finish()
+}
+
+#[test]
+fn modeled_early_callback_invalidates_pre_record_and_renderer_observations() -> TestResult {
+    for event in [NativeEvent::Frame, NativeEvent::NewWindow] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.preload_owners.set(true);
+        fixture
+            .factory
+            .renderer_presence
+            .set(Some(crate::RendererPresence::Absent));
+        fixture
+            .open(&spec(40))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert!(fixture.surface.before_record_fault_state().is_ok());
+        assert_eq!(
+            fixture.surface.early_renderer_presence(),
+            Ok(crate::RendererPresence::Absent)
+        );
+        let sink = fixture.factory.sink.borrow().clone().ok_or("missing sink")?;
+        let _action = sink.event(event);
+        assert!(fixture.surface.before_record_fault_state().is_err());
+        assert!(fixture.surface.early_renderer_presence().is_err());
+        assert!(matches!(
+            fixture.surface.navigate(),
+            std::task::Poll::Ready(Err(_))
+        ));
+        assert!(!fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_pre_record_observation_refuses_activation_failure_and_later_phases() -> TestResult {
+    let mut failed = Fixture::new(Creation::Ready)?;
+    failed.factory.preload_owners.set(true);
+    failed.factory.failure.set(Some("fit_controller"));
+    let browser = failed
+        .open(&spec(40))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(browser.browser_pid, 42);
+    failed.factory.failure.set(None);
+    assert!(failed.surface.before_record_fault_state().is_err());
+    assert!(matches!(
+        failed.surface.navigate(),
+        std::task::Poll::Ready(Err(_))
+    ));
+    assert!(!failed.surface.idle());
+    failed.assert_no_ceremony_data();
+    failed.finish()?;
+
+    let mut navigated = Fixture::new(Creation::Ready)?;
+    navigated.factory.preload_owners.set(true);
+    navigated.ready()?;
+    let calls = navigated.factory.calls.borrow().clone();
+    assert!(navigated.surface.before_record_fault_state().is_err());
+    assert_eq!(*navigated.factory.calls.borrow(), calls);
+    create_buffers(&mut navigated, 1)?;
+    assert!(navigated.surface.before_record_fault_state().is_err());
+    assert!(navigated.surface.early_renderer_presence().is_err());
+    assert!(navigated.store.records_now().is_empty());
+    assert!(!navigated.surface.idle());
+    navigated.finish()
+}
+
+#[test]
+fn modeled_pre_environment_retention_refuses_untrusted_observations_until_retirement(
+) -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.environment_creation.set(Creation::Pending);
+    let selected = spec(40);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert_eq!(fixture.surface.pre_environment_completion(), Ok(None));
+    assert_eq!(
+        fixture.surface.pre_environment_retention(&selected.ceremony_id),
+        Some(super::super::PreEnvironmentRetention::Active)
+    );
+
+    fixture.store.set_failing(&[StoreOp::List]);
+    assert!(fixture.surface.pre_environment_completion().is_err());
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&selected.ceremony_id)
+        .is_none());
+    fixture.store.set_failing(&[]);
+    fixture.store.preload(vec![0x80]);
+    assert!(fixture.surface.pre_environment_completion().is_err());
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&selected.ceremony_id)
+        .is_none());
+    fixture
+        .store
+        .delete_record(&[0x80])
+        .map_err(|_| "restore modeled record")?;
+    fixture.factory.window_exists.set(false);
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&selected.ceremony_id)
+        .is_none());
+    fixture.factory.window_exists.set(true);
+    let folder = fixture.root.join(&selected.folder_name);
+    let displaced = fixture.root.join("displaced-pending-folder");
+    std::fs::rename(&folder, &displaced)?;
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&selected.ceremony_id)
+        .is_none());
+    std::fs::rename(&displaced, &folder)?;
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&spec(41).ceremony_id)
+        .is_none());
+    assert_eq!(fixture.surface.pre_environment_completion(), Ok(None));
+    fixture.assert_no_ceremony_data();
+
+    fixture.surface.abandon_opening();
+    assert!(fixture.surface.pre_environment_completion().is_err());
+    assert_eq!(
+        fixture.surface.pre_environment_retention(&selected.ceremony_id),
+        Some(super::super::PreEnvironmentRetention::Abandoned)
+    );
+    fixture.factory.environment_creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    assert!(fixture.store.records_now().is_empty());
+    Ok(())
+}
+
+#[test]
+fn modeled_pending_environment_event_refuses_observation_without_dropping_owners() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.environment_creation.set(Creation::Pending);
+    let selected = spec(40);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert_eq!(fixture.surface.pre_environment_completion(), Ok(None));
+    let sink = fixture.factory.sink.borrow().clone().ok_or("missing sink")?;
+    let _action = sink.event(NativeEvent::NewWindow);
+    assert!(fixture.surface.pre_environment_completion().is_err());
+    assert!(!fixture.surface.idle());
+    assert!(fixture.surface.native.pending());
+    fixture.assert_no_ceremony_data();
+    fixture.surface.abandon_opening();
+    fixture.factory.environment_creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    assert!(fixture.store.records_now().is_empty());
+    Ok(())
 }
 
 #[test]
