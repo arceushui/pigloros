@@ -438,10 +438,7 @@ fn parse_limits(
     let memory = parse_single(&raw[0], EffectiveLimitSource::MemoryMax)?;
     let swap = parse_single(&raw[1], EffectiveLimitSource::MemorySwapMax)?;
     let pids = parse_single(&raw[2], EffectiveLimitSource::PidsMax)?;
-    let (quota, period) = single_line(&raw[3])
-        .and_then(|line| line.split_once(' '))
-        .and_then(|(quota, period)| parse_limit(quota).zip(parse_period(period)))
-        .ok_or_else(|| malformed(EffectiveLimitSource::CpuMax))?;
+    let (quota, period) = parse_cpu_max(&raw[3])?;
     Ok(EffectiveCgroupLimits {
         identity,
         raw,
@@ -454,15 +451,20 @@ fn parse_single(
     raw: &[u8],
     source: EffectiveLimitSource,
 ) -> Result<EffectiveKernelLimit, EffectiveLimitError> {
-    single_line(raw)
-        .and_then(parse_limit)
-        .ok_or_else(|| malformed(source))
+    let malformed = || EffectiveLimitError::Malformed {
+        property: source.name(),
+    };
+    single_line(raw).and_then(parse_limit).ok_or_else(malformed)
 }
 
-const fn malformed(source: EffectiveLimitSource) -> EffectiveLimitError {
-    EffectiveLimitError::Malformed {
-        property: source.name(),
-    }
+fn parse_cpu_max(raw: &[u8]) -> Result<(EffectiveKernelLimit, u64), EffectiveLimitError> {
+    let malformed = || EffectiveLimitError::Malformed {
+        property: EffectiveLimitSource::CpuMax.name(),
+    };
+    single_line(raw)
+        .and_then(|line| line.split_once(' '))
+        .and_then(|(quota, period)| parse_limit(quota).zip(parse_period(period)))
+        .ok_or_else(malformed)
 }
 
 fn single_line(raw: &[u8]) -> Option<&str> {
@@ -486,11 +488,9 @@ fn parse_period(field: &str) -> Option<u64> {
 }
 
 fn parse_digits(field: &str) -> Option<u64> {
-    field
-        .bytes()
-        .all(|byte| byte.is_ascii_digit())
-        .then(|| field.parse().ok())
-        .flatten()
+    Some(field)
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse().ok())
 }
 
 const fn floor_to_page(value: u64, page: u64) -> EffectiveKernelLimit {
