@@ -463,6 +463,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn modeled_control_view_setup_stops_at_the_first_failure() -> super::TestResult {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use crate::NativeFactory as _;
+        use pos_owner_bridge::fake::clock::FakeClock;
+
+        // These are modeled NativeOperations responses, not SDK failures.
+        for (failure, expected, success) in [
+            (
+                None,
+                &["fit_controller", "show_window", "focus_controller"][..],
+                true,
+            ),
+            (Some("set_bool"), &[][..], false),
+            (Some("fit_controller"), &["fit_controller"][..], false),
+            (
+                Some("show_window"),
+                &["fit_controller", "show_window"][..],
+                false,
+            ),
+            (
+                Some("focus_controller"),
+                &["fit_controller", "show_window", "focus_controller"][..],
+                false,
+            ),
+        ] {
+            let model = Factory::new(Creation::Ready, FakeClock::start());
+            model.failure.set(failure);
+            let native = model.session().map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                super::prepare_control_view(native.as_ref()).is_ok(),
+                success,
+                "{failure:?}"
+            );
+            assert_eq!(model.calls.borrow().as_slice(), expected, "{failure:?}");
+            assert!(!model.calls.borrow().contains(&"navigate"));
+        }
+        Ok(())
+    }
+
     fn probe() -> Probe {
         let events = Rc::new(Events::default());
         events.begin();
