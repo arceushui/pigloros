@@ -75,6 +75,15 @@ impl AttemptCleanupDeadlines {
     pub(crate) const fn released(self) -> Instant {
         self.released
     }
+
+    /// The same phases, each `by` later.
+    pub(crate) fn shifted(self, by: std::time::Duration) -> Self {
+        Self {
+            shutdown: self.shutdown.shifted(by),
+            unit_absent: self.unit_absent + by,
+            released: self.released + by,
+        }
+    }
 }
 
 /// Why an attempt's terminal cleanup did not complete.
@@ -240,6 +249,13 @@ async fn release_root<R: RootRelease>(
         .map_err(AttemptCleanupError::Root);
     released
 }
+
+mod attempts;
+pub use attempts::{
+    AttemptCleanup, AttemptLaunch, AttemptLifecycle, AttemptLifecycleError, AttemptProgress,
+    CleanupBudget, EndedAttempt, LiveAttemptIdentity, LiveAttemptSnapshot, OwnedAttempt,
+    ReconciledAttempt, SystemdAttemptSteps,
+};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
