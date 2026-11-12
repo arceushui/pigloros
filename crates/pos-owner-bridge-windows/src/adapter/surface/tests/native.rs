@@ -184,6 +184,13 @@ impl crate::RetainedExitHandle for ExitHandle {
         if self.factory.failure.get() == Some("exit_observation") {
             Err(())
         } else {
+            if self.factory.failure.get() == Some("exit_observe_invalid") {
+                let sink = self.factory.sink.borrow().clone();
+                if let Some(sink) = sink {
+                    sink.event(crate::NativeEvent::Frame);
+                    sink.event(crate::NativeEvent::BrowserExited { pid: 42 });
+                }
+            }
             Ok(self.factory.exit_code.get())
         }
     }
@@ -320,6 +327,14 @@ impl NativeOperations for Session {
         (self.factory.failure.get() == Some("pending-callback-after")
             && self.factory.calls.borrow().contains(&"pending_candidate"))
         .then_some(true)
+    }
+
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if self.factory.failure.get() == Some("pending-callback-after") {
+            self.factory.pending_browser.get().ok_or(())
+        } else {
+            Err(())
+        }
     }
 
     fn create_window(&mut self, _: Option<u64>, _: u32, _: u32) -> NativeResult<()> {
