@@ -560,6 +560,33 @@ fn foreground_observation_is_optional_and_never_extends_deadlines() -> TestResul
 }
 
 #[test]
+fn foreground_lost_during_focus_must_be_reacquired_before_original_deadline() -> TestResult {
+    use std::time::Duration;
+
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    fixture.factory.focus_foreground.set(Some(false));
+    fixture
+        .open(&super::spec(132))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
+    fixture.clock.advance(Duration::from_millis(999));
+    fixture.factory.foreground.set(true);
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let activation: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(activation, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
 fn foreground_activation_waits_for_navigation_after_slow_record_work() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.navigation_succeeds.set(true);
