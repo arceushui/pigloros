@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +32,11 @@ pub(in crate::adapter) type TestResult = Result<(), Box<dyn std::error::Error>>;
 pub(in crate::adapter) fn pass<T, E: std::fmt::Debug>(step: Result<T, E>) -> T {
     match step {
         Ok(value) => value,
-        Err(error) => std::panic::panic_any(format!("native fixture step failed: {error:?}")),
+        Err(error) => {
+            let message = format!("native fixture step failed: {error:?}");
+            let _logged = writeln!(std::io::stderr(), "{message}");
+            std::panic::resume_unwind(Box::new(message))
+        }
     }
 }
 
