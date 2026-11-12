@@ -1,0 +1,68 @@
+{
+  "name": "draft-export-exported",
+  "operation_id": "getExport",
+  "request": {
+    "path": {
+      "export_id": "01JC0GATEWAYW90EXP0RT00001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:export",
+      "id": "01JC0GATEWAYW90EXP0RT00001",
+      "generation": 2,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "host-derived"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "state": "exported",
+      "repro_manifest": {
+        "digest": "1616161616161616161616161616161616161616161616161616161616161616",
+        "byte_size": 1840,
+        "signature": "signed",
+        "replay_claim": "exact"
+      },
+      "member_count": 3,
+      "members": [
+        {
+          "class": "repro-manifest",
+          "media_type": "application/cbor",
+          "digest": "1616161616161616161616161616161616161616161616161616161616161616",
+          "byte_size": 1840,
+          "redaction": "none"
+        },
+        {
+          "class": "events",
+          "media_type": "application/cbor",
+          "digest": "1717171717171717171717171717171717171717171717171717171717171717",
+          "byte_size": 9216,
+          "redaction": "none"
+        },
+        {
+          "class": "trace",
+          "media_type": "application/json",
+          "digest": "1818181818181818181818181818181818181818181818181818181818181818",
+          "byte_size": 2048,
+          "redaction": "redacted"
+        }
+      ],
+      "next_cursor": null,
+      "replay_claim": "exact",
+      "external_copy_disclosure": "copies-outside-pigloros-cannot-be-recalled"
+    }
+  }
+}

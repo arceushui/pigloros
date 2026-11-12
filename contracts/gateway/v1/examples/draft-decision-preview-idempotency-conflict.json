@@ -1,0 +1,42 @@
+{
+  "name": "draft-decision-preview-idempotency-conflict",
+  "operation_id": "createDecisionPreview",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-4",
+      "content-type": "application/json"
+    },
+    "body": {
+      "scenario_room": {
+        "id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 2,
+        "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+      },
+      "preference": {
+        "id": "01JC0GATEWAYW9PREF0000001A",
+        "revision": 1,
+        "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "option_spec": {
+        "id": "01JC0GATEWAYW9QPT10N00001A",
+        "revision": 1,
+        "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      },
+      "profile_id": "live-local-v1"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:idempotency-conflict",
+      "title": "Idempotency conflict",
+      "status": 409,
+      "detail": "the key was used for a different request",
+      "instance": "/v1/decision-previews",
+      "code": "idempotency-conflict",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

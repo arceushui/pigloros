@@ -1,0 +1,58 @@
+{
+  "name": "draft-decision-preview-admitted-not-committed",
+  "operation_id": "getDecisionPreview",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:decision-preview",
+      "id": "01JC0GATEWAYW90PREV1EW0001",
+      "generation": 1,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "host-derived"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "state": "admitted",
+      "inputs": {
+        "scenario_room": {
+          "id": "01JC0GATEWAYW9R00M00000001",
+          "revision": 2,
+          "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        },
+        "preference": {
+          "id": "01JC0GATEWAYW9PREF0000001A",
+          "revision": 1,
+          "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+        },
+        "option_spec": {
+          "id": "01JC0GATEWAYW9QPT10N00001A",
+          "revision": 1,
+          "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+        }
+      },
+      "factual_timeline_id": null,
+      "recommendation": {
+        "status": "pending"
+      },
+      "committed": null,
+      "proposals": "inert",
+      "actuation": "none"
+    }
+  }
+}

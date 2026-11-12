@@ -1,0 +1,23 @@
+{
+  "name": "malformed-page-limit",
+  "operation_id": "listEvents",
+  "request": {
+    "query": {
+      "limit": 101
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "event poll limit must be between 1 and 100",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

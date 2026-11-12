@@ -20,6 +20,15 @@ const MAX_RECORD_BYTES: usize = 1_048_624;
 /// state or create another persistence encoding.
 /// Plaintext hashing belongs to the qualified protected owner, which must
 /// account for the cryptographic implementation's temporary copies.
+///
+/// The portable view cannot hash private State outside that owner:
+///
+/// ```compile_fail,E0599
+/// use pos_core::community_lifecycle::CommunityStateContentV1;
+/// fn hash_without_owner(state: &CommunityStateContentV1<'_>) {
+///     let _ = state.digest();
+/// }
+/// ```
 pub struct CommunityStateContentV1<'a> {
     schema: Hash,
     state: &'a [u8],

@@ -1,0 +1,29 @@
+{
+  "name": "draft-erasure-without-impact-acknowledgement",
+  "operation_id": "requestErasure",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-22",
+      "content-type": "application/json"
+    },
+    "body": {
+      "scopes": [
+        "private-subject-data"
+      ]
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "the impact is not acknowledged",
+      "instance": "/v1/me/erasures",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

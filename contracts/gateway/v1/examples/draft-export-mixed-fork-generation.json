@@ -1,0 +1,33 @@
+{
+  "name": "draft-export-mixed-fork-generation",
+  "operation_id": "createExport",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-17",
+      "content-type": "application/json"
+    },
+    "body": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "include": [
+        "repro-manifest",
+        "events",
+        "trace"
+      ],
+      "external_copy_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:mixed-fork-generation",
+      "title": "Mixed Fork generation",
+      "status": 409,
+      "detail": "the closure would mix Fork generations",
+      "instance": "/v1/exports",
+      "code": "mixed-fork-generation",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

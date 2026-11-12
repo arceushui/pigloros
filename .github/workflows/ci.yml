@@ -430,6 +430,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The Gateway contract check compares compatibility/ with the merge base of main.
+          fetch-depth: 0
       - name: Install fixture verification tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Obtain pinned offline SCS1 derivation inputs
@@ -463,6 +466,17 @@ jobs:
         run: python3 scripts/generate_erasure_conformance_fixtures.py --check
       - name: Check the gateway conformance fixture generator and its outputs
         run: python3 scripts/generate_gateway_conformance_fixtures.py --check
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.11
+      - name: Install the pinned Gateway contract validator
+        run: >
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-pinned-dependencies.txt
+      - name: Check the Gateway v1 contract, its frozen v1 baseline and served fixtures
+        run: |
+          python scripts/check_gateway_contract.py --append-only origin/main
+          python scripts/test_check_gateway_contract.py
       - name: Check the Plugin conformance evidence-status records stay pending
         run: |
           python3 scripts/check_plugin_conformance_expected.py

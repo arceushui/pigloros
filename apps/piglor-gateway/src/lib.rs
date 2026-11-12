@@ -29,6 +29,7 @@ pub mod local_fork_listener;
 pub mod local_fork_service;
 pub mod owntracks;
 pub mod owntracks_http;
+pub mod problem;
 pub mod startup;
 
 pub use authorization::{
@@ -3650,9 +3651,6 @@ pub struct ActionRequest {
     pub payload: serde_json::Value,
     /// Capability required to submit the action.
     pub capability: String,
-    /// Optional external ingress identity for retry-safe append.
-    #[serde(default)]
-    pub ingress_id: Option<String>,
 }
 
 fn default_action_type() -> String {
