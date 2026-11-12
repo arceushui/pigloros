@@ -1,44 +1,72 @@
 //! Typed terminal-result readback of the exact systemd attempt service object.
 
-use zbus::proxy::CacheProperties;
-use zbus_systemd::systemd1::ServiceProxy;
+use std::collections::HashMap;
+
+use rustix::process::Signal;
+use zbus::{fdo::PropertiesProxy, names::InterfaceName, OwnedVariant};
 
 use super::{SystemdTransientUnitTransport, SystemdVerifiedStart, TransientServiceUnitName};
 
-/// The `waitid` `si_code` values systemd reports as `ExecMainCode`.
+const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
+const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
+const SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
+/// The `ActiveState` values in which systemd has finished with a unit run.
+const SETTLED_STATES: [&str; 2] = ["inactive", "failed"];
+
+/// `ExecMainCode` when systemd recorded no main exit, and the `waitid`
+/// `si_code` values it reports for a recorded one.
+const CLD_NONE: i32 = 0;
 const CLD_EXITED: i32 = 1;
 const CLD_KILLED: i32 = 2;
 const CLD_DUMPED: i32 = 3;
 /// The highest Linux signal number, including real-time signals.
 const MAX_SIGNAL: u8 = 64;
-/// `SIGXFSZ` on the supported Linux architectures (x86-64 and 64-bit Arm).
-const SIGXFSZ: u8 = 25;
+/// The signals systemd v260.2's `is_clean_exit` treats as a clean main exit
+/// of a non-oneshot service (`EXIT_CLEAN_DAEMON`), such as this `Type=exec`
+/// attempt unit, when no `SuccessExitStatus=` is set.
+const DAEMON_CLEAN_SIGNALS: [Signal; 4] = [Signal::HUP, Signal::INT, Signal::PIPE, Signal::TERM];
 
-/// One closed systemd service `Result` value the provider can classify.
+/// One systemd service `Result` value, total over systemd v260.2's
+/// `service_result_table` and in its numeric order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub enum SystemdServiceResult {
     /// `success`.
     Success,
+    /// `resources`: systemd's catch-all for an unexpected setup error.
+    Resources,
+    /// `protocol`.
+    Protocol,
+    /// `timeout`, including the `RuntimeMaxSec` attempt watchdog.
+    Timeout,
     /// `exit-code`.
     ExitCode,
     /// `signal`.
     Signal,
     /// `core-dump`.
     CoreDump,
-    /// `timeout`, including the `RuntimeMaxSec` attempt watchdog.
-    Timeout,
-    /// `oom-kill`.
+    /// `watchdog`.
+    Watchdog,
+    /// `start-limit-hit`.
+    StartLimitHit,
+    /// `oom-kill`, by the kernel or systemd-oomd.
     OomKill,
+    /// `exec-condition`: an `ExecCondition=` command skipped the unit.
+    ExecCondition,
 }
 
-const SERVICE_RESULTS: [(&str, SystemdServiceResult); 6] = [
+const SERVICE_RESULTS: [(&str, SystemdServiceResult); 11] = [
     ("success", SystemdServiceResult::Success),
+    ("resources", SystemdServiceResult::Resources),
+    ("protocol", SystemdServiceResult::Protocol),
+    ("timeout", SystemdServiceResult::Timeout),
     ("exit-code", SystemdServiceResult::ExitCode),
     ("signal", SystemdServiceResult::Signal),
     ("core-dump", SystemdServiceResult::CoreDump),
-    ("timeout", SystemdServiceResult::Timeout),
+    ("watchdog", SystemdServiceResult::Watchdog),
+    ("start-limit-hit", SystemdServiceResult::StartLimitHit),
     ("oom-kill", SystemdServiceResult::OomKill),
+    ("exec-condition", SystemdServiceResult::ExecCondition),
 ];
 
 impl SystemdServiceResult {
@@ -59,6 +87,8 @@ impl SystemdServiceResult {
 /// How the unit's main process ended, from `ExecMainCode` and `ExecMainStatus`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemdMainExit {
+    /// Code and status zero: systemd recorded no main exit.
+    NotRecorded,
     /// `CLD_EXITED` with its exit status.
     Exited { status: u8 },
     /// `CLD_KILLED` with the terminating signal number.
@@ -70,6 +100,7 @@ pub enum SystemdMainExit {
 impl SystemdMainExit {
     fn decode(code: i32, status: i32) -> Result<Self, SystemdUnitResultError> {
         let decoded = match code {
+            CLD_NONE => (status == 0).then_some(Self::NotRecorded),
             CLD_EXITED => u8::try_from(status)
                 .ok()
                 .map(|status| Self::Exited { status }),
@@ -87,28 +118,55 @@ fn signal_number(status: i32) -> Option<u8> {
         .filter(|signal| (1..=MAX_SIGNAL).contains(signal))
 }
 
-/// The closed classification of one consistent service result.
+/// The classification of one consistent service result.
+///
+/// Every systemd `Result` has a variant. The ones that describe the main
+/// exit themselves (`success`, `exit-code`, `signal`, `core-dump`) must agree
+/// with it, using systemd's own clean-exit rule. All others carry the main
+/// exit systemd recorded, if any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemdUnitOutcome {
     /// `success` with main exit status zero.
     Success,
+    /// `success` after `SIGHUP`, `SIGINT`, `SIGPIPE` or `SIGTERM`, which
+    /// systemd counts as a clean exit for a non-oneshot service.
+    CleanSignal { signal: u8 },
     /// `exit-code` with a nonzero main exit status.
     ExitCode { status: u8 },
     /// `signal` or `core-dump` with a signal other than `SIGXFSZ`.
     Signal { signal: u8, core_dumped: bool },
-    /// `signal` or `core-dump` naming `SIGXFSZ`: the file-size ceiling.
+    /// `signal` or `core-dump` naming `SIGXFSZ`.
+    ///
+    /// This is only a hint that the file-size ceiling was reached: a payload
+    /// can raise `SIGXFSZ` itself. Classifying it as the ceiling needs kernel
+    /// or `/work` evidence.
     FileSizeLimit { core_dumped: bool },
-    /// `timeout`, with the main exit systemd recorded.
+    /// `timeout`.
     Timeout { main: SystemdMainExit },
-    /// `oom-kill`, with the main exit systemd recorded.
+    /// `oom-kill`.
     OomKill { main: SystemdMainExit },
+    /// `resources`.
+    Resources { main: SystemdMainExit },
+    /// `protocol`.
+    Protocol { main: SystemdMainExit },
+    /// `watchdog`.
+    Watchdog { main: SystemdMainExit },
+    /// `start-limit-hit`.
+    StartLimitHit { main: SystemdMainExit },
+    /// `exec-condition`.
+    ExecCondition { main: SystemdMainExit },
 }
 
 impl SystemdUnitOutcome {
-    const fn combine(result: SystemdServiceResult, main: SystemdMainExit) -> Option<Self> {
+    fn combine(result: SystemdServiceResult, main: SystemdMainExit) -> Option<Self> {
         match (result, main) {
             (SystemdServiceResult::Success, SystemdMainExit::Exited { status: 0 }) => {
                 Some(Self::Success)
+            }
+            (SystemdServiceResult::Success, SystemdMainExit::Killed { signal })
+                if is_daemon_clean_signal(signal) =>
+            {
+                Some(Self::CleanSignal { signal })
             }
             (SystemdServiceResult::ExitCode, SystemdMainExit::Exited { status }) if status != 0 => {
                 Some(Self::ExitCode { status })
@@ -121,12 +179,17 @@ impl SystemdUnitOutcome {
             }
             (SystemdServiceResult::Timeout, main) => Some(Self::Timeout { main }),
             (SystemdServiceResult::OomKill, main) => Some(Self::OomKill { main }),
+            (SystemdServiceResult::Resources, main) => Some(Self::Resources { main }),
+            (SystemdServiceResult::Protocol, main) => Some(Self::Protocol { main }),
+            (SystemdServiceResult::Watchdog, main) => Some(Self::Watchdog { main }),
+            (SystemdServiceResult::StartLimitHit, main) => Some(Self::StartLimitHit { main }),
+            (SystemdServiceResult::ExecCondition, main) => Some(Self::ExecCondition { main }),
             _ => None,
         }
     }
 
-    const fn signaled(signal: u8, core_dumped: bool) -> Self {
-        if signal == SIGXFSZ {
+    fn signaled(signal: u8, core_dumped: bool) -> Self {
+        if i32::from(signal) == Signal::XFSZ.as_raw() {
             Self::FileSizeLimit { core_dumped }
         } else {
             Self::Signal {
@@ -137,23 +200,36 @@ impl SystemdUnitOutcome {
     }
 }
 
+fn is_daemon_clean_signal(signal: u8) -> bool {
+    DAEMON_CLEAN_SIGNALS
+        .iter()
+        .any(|clean| clean.as_raw() == i32::from(signal))
+}
+
 /// Failure to obtain one closed, consistent service result.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemdUnitResultError {
-    /// The generated typed service proxy could not be constructed.
-    #[error("failed to construct the typed systemd service proxy")]
+    /// The typed properties proxy could not be constructed.
+    #[error("failed to construct the systemd unit properties proxy")]
     Proxy(#[source] zbus::Error),
-    /// One typed service property could not be read or had the wrong type.
-    #[error("failed to read systemd service property {property}")]
+    /// One property snapshot could not be read, or one property in it was
+    /// missing or had the wrong type.
+    #[error("failed to read systemd unit property {property}")]
     PropertyRead {
         property: &'static str,
         #[source]
         source: Box<zbus::Error>,
     },
-    /// systemd reported a `Result` outside the closed classified set.
-    #[error("systemd returned unclassified service Result {0:?}")]
+    /// The unit had not settled, so its result could still change.
+    #[error("systemd unit is {active_state:?}, not inactive or failed")]
+    NotSettled { active_state: String },
+    /// `ActiveState` or `InvocationID` changed while the result was read.
+    #[error("systemd unit state changed while its result was read")]
+    StateChanged,
+    /// systemd reported a `Result` outside its `service_result_table`.
+    #[error("systemd returned unknown service Result {0:?}")]
     UnknownResult(String),
-    /// systemd reported an `ExecMainCode` that is not a terminal `si_code`.
+    /// systemd reported an `ExecMainCode` that is neither zero nor a terminal `si_code`.
     #[error("systemd returned unknown ExecMainCode {0}")]
     UnknownExecMainCode(i32),
     /// The `ExecMainStatus` is out of range for its `ExecMainCode`.
@@ -167,6 +243,27 @@ pub enum SystemdUnitResultError {
     },
 }
 
+/// The settled `ActiveState` and `InvocationID` around one result snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnitState {
+    active_state: String,
+    invocation_id: Vec<u8>,
+}
+
+impl UnitState {
+    fn settled(self, after: &Self) -> Result<Self, SystemdUnitResultError> {
+        if !SETTLED_STATES.contains(&self.active_state.as_str()) {
+            return Err(SystemdUnitResultError::NotSettled {
+                active_state: self.active_state,
+            });
+        }
+        if self != *after {
+            return Err(SystemdUnitResultError::StateChanged);
+        }
+        Ok(self)
+    }
+}
+
 /// The terminal result read from the exact verified attempt unit object.
 ///
 /// This classifies systemd's record only; kernel limit-event evidence and
@@ -175,6 +272,7 @@ pub enum SystemdUnitResultError {
 pub struct SystemdUnitResultObservation {
     unit_name: TransientServiceUnitName,
     unit_path: String,
+    state: UnitState,
     result: SystemdServiceResult,
     main: SystemdMainExit,
     outcome: SystemdUnitOutcome,
@@ -183,6 +281,7 @@ pub struct SystemdUnitResultObservation {
 impl SystemdUnitResultObservation {
     fn decode(
         started: &SystemdVerifiedStart,
+        state: UnitState,
         result: &str,
         code: i32,
         status: i32,
@@ -194,6 +293,7 @@ impl SystemdUnitResultObservation {
             .map(|outcome| Self {
                 unit_name: started.unit_name.clone(),
                 unit_path: started.unit_path.as_str().to_owned(),
+                state,
                 result,
                 main,
                 outcome,
@@ -213,7 +313,19 @@ impl SystemdUnitResultObservation {
         &self.unit_path
     }
 
-    /// Return the closed systemd `Result` value.
+    /// Return the settled `ActiveState`: `inactive` or `failed`.
+    #[must_use]
+    pub fn active_state(&self) -> &str {
+        &self.state.active_state
+    }
+
+    /// Return the `InvocationID` bytes, unchanged across the snapshot.
+    #[must_use]
+    pub fn invocation_id(&self) -> &[u8] {
+        &self.state.invocation_id
+    }
+
+    /// Return the systemd `Result` value.
     #[must_use]
     pub const fn result(&self) -> SystemdServiceResult {
         self.result
@@ -232,45 +344,86 @@ impl SystemdUnitResultObservation {
     }
 }
 
+type PropertySnapshot = HashMap<String, OwnedVariant>;
+
 impl SystemdTransientUnitTransport {
-    /// Read `Result`, `ExecMainCode`, and `ExecMainStatus` of the started unit.
+    /// Read the settled result of the started unit as one snapshot.
     ///
-    /// The properties are read uncached from the exact object path verified
-    /// at start, never from a name lookup. The caller reads them after the
-    /// main exit, while the unit is still loaded.
+    /// One `GetAll` of the `Service` interface returns `Result`,
+    /// `ExecMainCode` and `ExecMainStatus` together. A `GetAll` of the `Unit`
+    /// interface before and after must report the same settled
+    /// `ActiveState` (`inactive` or `failed`) and `InvocationID`. Every read
+    /// targets the exact object path verified at start, never a name lookup,
+    /// and nothing is cached. The caller reads after the main exit, while the
+    /// unit is still loaded.
     ///
     /// # Errors
-    /// Rejects a proxy or property-read failure, a wrongly typed property, an
-    /// unclassified `Result` or `ExecMainCode`, an out-of-range status, or a
-    /// `Result` that contradicts the main exit.
+    /// Rejects a proxy or snapshot failure, a missing or wrongly typed
+    /// property, an unsettled or changing unit, an unknown `Result` or
+    /// `ExecMainCode`, an out-of-range status, or a `Result` that
+    /// contradicts the main exit.
     pub async fn read_unit_result(
         &self,
         started: &SystemdVerifiedStart,
     ) -> Result<SystemdUnitResultObservation, SystemdUnitResultError> {
-        let service = ServiceProxy::builder(&self.connection)
+        let properties = PropertiesProxy::builder(&self.connection)
+            .destination(SYSTEMD_DESTINATION)
             .path(started.unit_path.clone())
-            .cache_properties(CacheProperties::No)
             .build()
             .await;
-        read_with_proxy(service, started).await
+        read_with_proxy(properties, started).await
     }
 }
 
 async fn read_with_proxy(
-    service: zbus::Result<ServiceProxy<'_>>,
+    properties: zbus::Result<PropertiesProxy<'_>>,
     started: &SystemdVerifiedStart,
 ) -> Result<SystemdUnitResultObservation, SystemdUnitResultError> {
-    let service = service.map_err(SystemdUnitResultError::Proxy)?;
-    let result = service.result().await.map_err(property_error("Result"))?;
-    let code = service
-        .exec_main_code()
+    let properties = properties.map_err(SystemdUnitResultError::Proxy)?;
+    let before = read_unit_state(&properties).await?;
+    let mut service = snapshot(&properties, SERVICE_INTERFACE).await?;
+    let after = read_unit_state(&properties).await?;
+    let state = before.settled(&after)?;
+    let result: String = take(&mut service, "Result")?;
+    let code = take(&mut service, "ExecMainCode")?;
+    let status = take(&mut service, "ExecMainStatus")?;
+    SystemdUnitResultObservation::decode(started, state, &result, code, status)
+}
+
+async fn read_unit_state(
+    properties: &PropertiesProxy<'_>,
+) -> Result<UnitState, SystemdUnitResultError> {
+    let mut unit = snapshot(properties, UNIT_INTERFACE).await?;
+    let active_state = take(&mut unit, "ActiveState")?;
+    let invocation_id = take(&mut unit, "InvocationID")?;
+    Ok(UnitState {
+        active_state,
+        invocation_id,
+    })
+}
+
+async fn snapshot(
+    properties: &PropertiesProxy<'_>,
+    interface: &'static str,
+) -> Result<PropertySnapshot, SystemdUnitResultError> {
+    properties
+        .get_all(InterfaceName::from_static_str_unchecked(interface))
         .await
-        .map_err(property_error("ExecMainCode"))?;
-    let status = service
-        .exec_main_status()
-        .await
-        .map_err(property_error("ExecMainStatus"))?;
-    SystemdUnitResultObservation::decode(started, &result, code, status)
+        .map_err(|error| property_error(interface)(error.into()))
+}
+
+fn take<T>(
+    snapshot: &mut PropertySnapshot,
+    property: &'static str,
+) -> Result<T, SystemdUnitResultError>
+where
+    T: TryFrom<OwnedVariant, Error = zbus::Error>,
+{
+    snapshot
+        .remove(property)
+        .ok_or(zbus::Error::MissingField)
+        .and_then(T::try_from)
+        .map_err(property_error(property))
 }
 
 fn property_error(property: &'static str) -> impl FnOnce(zbus::Error) -> SystemdUnitResultError {
@@ -284,9 +437,9 @@ fn property_error(property: &'static str) -> impl FnOnce(zbus::Error) -> Systemd
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use zbus::{fdo, Connection, OwnedObjectPath};
+    use zbus::{fdo, object_server::Interface, Connection, OwnedObjectPath};
 
     use crate::system_bus::test_support::peer_connections;
     use crate::system_bus::SystemdStartJob;
@@ -294,19 +447,82 @@ mod tests {
 
     use super::*;
 
-    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+    type Read = Result<SystemdUnitResultObservation, SystemdUnitResultError>;
 
     const UNIT_PATH: &str =
         "/org/freedesktop/systemd1/unit/pigloros_2dattempt_2d40404040404040404040404040404040_2eservice";
+    const INVOCATION: [u8; 16] = [0x11; 16];
 
-    struct ResultService {
+    fn failed() -> Vec<(String, Vec<u8>)> {
+        vec![("failed".to_owned(), INVOCATION.to_vec())]
+    }
+
+    /// Serves `ActiveState` and `InvocationID`; the n-th `GetAll` sees the
+    /// n-th state, and the last state repeats.
+    struct UnitFixture {
+        states: Vec<(String, Vec<u8>)>,
+        state_reads: AtomicUsize,
+        invocation_reads: AtomicUsize,
+        failing: Option<&'static str>,
+    }
+
+    impl UnitFixture {
+        fn new(states: Vec<(String, Vec<u8>)>) -> Self {
+            Self {
+                states,
+                state_reads: AtomicUsize::new(0),
+                invocation_reads: AtomicUsize::new(0),
+                failing: None,
+            }
+        }
+
+        fn state(&self, reads: &AtomicUsize) -> &(String, Vec<u8>) {
+            let read = reads.fetch_add(1, Ordering::SeqCst);
+            &self.states[read.min(self.states.len() - 1)]
+        }
+
+        fn check(&self, property: &str) -> fdo::Result<()> {
+            if self.failing == Some(property) {
+                Err(fdo::Error::Failed(format!("test {property} read failure")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl UnitFixture {
+        #[zbus(property, name = "ActiveState")]
+        fn active_state(&self) -> fdo::Result<String> {
+            self.check("ActiveState")
+                .map(|()| self.state(&self.state_reads).0.clone())
+        }
+
+        #[zbus(property, name = "InvocationID")]
+        fn invocation_id(&self) -> fdo::Result<Vec<u8>> {
+            self.check("InvocationID")
+                .map(|()| self.state(&self.invocation_reads).1.clone())
+        }
+    }
+
+    struct ServiceFixture {
         result: String,
         code: i32,
         status: i32,
         failing: Option<&'static str>,
     }
 
-    impl ResultService {
+    impl ServiceFixture {
+        fn new(result: &str, code: i32, status: i32) -> Self {
+            Self {
+                result: result.to_owned(),
+                code,
+                status,
+                failing: None,
+            }
+        }
+
         fn read<T>(&self, property: &str, value: T) -> fdo::Result<T> {
             if self.failing == Some(property) {
                 Err(fdo::Error::Failed(format!("test {property} read failure")))
@@ -317,7 +533,7 @@ mod tests {
     }
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
-    impl ResultService {
+    impl ServiceFixture {
         #[zbus(property, name = "Result")]
         fn result(&self) -> fdo::Result<String> {
             self.read("Result", self.result.clone())
@@ -334,22 +550,22 @@ mod tests {
         }
     }
 
-    /// Serves `Result` as `ay` instead of `s`.
-    struct WrongResultType(Vec<u8>);
+    /// Serves `Result` typed `ay`.
+    struct WrongService(String);
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
-    impl WrongResultType {
+    impl WrongService {
         #[zbus(property, name = "Result")]
         fn result(&self) -> Vec<u8> {
-            self.0.clone()
+            self.0.clone().into_bytes()
         }
     }
 
-    /// Serves `ExecMainCode` as `s` instead of `i`.
-    struct WrongCodeType(String);
+    /// Serves a correct `Result` and a `ExecMainCode` typed `s`.
+    struct WrongCodeService(String);
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
-    impl WrongCodeType {
+    impl WrongCodeService {
         #[zbus(property, name = "Result")]
         fn result(&self) -> String {
             self.0.clone()
@@ -361,23 +577,55 @@ mod tests {
         }
     }
 
-    /// Serves `ExecMainStatus` as `s` instead of `i`.
-    struct WrongStatusType(String, AtomicI32);
+    /// Serves `ExecMainStatus` typed `s` next to correct values.
+    struct WrongStatusService(ServiceFixture);
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
-    impl WrongStatusType {
+    impl WrongStatusService {
         #[zbus(property, name = "Result")]
         fn result(&self) -> String {
-            self.0.clone()
+            self.0.result.clone()
         }
 
         #[zbus(property, name = "ExecMainCode")]
-        fn exec_main_code(&self) -> i32 {
-            self.1.load(Ordering::SeqCst)
+        fn exec_main_code(&self) -> fdo::Result<i32> {
+            self.0.read("ExecMainCode", self.0.code)
         }
 
         #[zbus(property, name = "ExecMainStatus")]
         fn exec_main_status(&self) -> String {
+            self.0.result.clone()
+        }
+    }
+
+    /// Serves `ActiveState` typed `ay`.
+    struct WrongStateUnit(Vec<u8>);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl WrongStateUnit {
+        #[zbus(property, name = "ActiveState")]
+        fn active_state(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+
+        #[zbus(property, name = "InvocationID")]
+        fn invocation_id(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+    }
+
+    /// Serves `InvocationID` typed `s`.
+    struct WrongInvocationUnit(String);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl WrongInvocationUnit {
+        #[zbus(property, name = "ActiveState")]
+        fn active_state(&self) -> String {
+            self.0.clone()
+        }
+
+        #[zbus(property, name = "InvocationID")]
+        fn invocation_id(&self) -> String {
             self.0.clone()
         }
     }
@@ -397,27 +645,34 @@ mod tests {
         })
     }
 
-    async fn serve<I: zbus::object_server::Interface>(
-        service: I,
-    ) -> TestResult<(SystemdTransientUnitTransport, Connection)> {
-        let (server, client) =
-            peer_connections(|server| server.serve_at(UNIT_PATH, service)).await?;
-        Ok((SystemdTransientUnitTransport { connection: client }, server))
+    async fn read_from(unit: impl Interface, service: Option<impl Interface>) -> TestResult<Read> {
+        let (_server, client) = peer_connections(|server| {
+            service
+                .into_iter()
+                .fold(server.serve_at(UNIT_PATH, unit), |server, service| {
+                    server.serve_at(UNIT_PATH, service)
+                })
+        })
+        .await?;
+        let transport = SystemdTransientUnitTransport { connection: client };
+        let started = started()?;
+        let observed = transport.read_unit_result(&started).await;
+        Ok(observed)
     }
 
-    async fn read(
-        result: &str,
-        code: i32,
-        status: i32,
-    ) -> TestResult<Result<SystemdUnitResultObservation, SystemdUnitResultError>> {
-        let service = ResultService {
-            result: result.to_owned(),
-            code,
-            status,
-            failing: None,
-        };
-        let (transport, _server) = serve(service).await?;
-        Ok(transport.read_unit_result(&started()?).await)
+    async fn read(result: &str, code: i32, status: i32) -> TestResult<Read> {
+        read_from(
+            UnitFixture::new(failed()),
+            Some(ServiceFixture::new(result, code, status)),
+        )
+        .await
+    }
+
+    fn assert_property(read: &Read, expected: &str) {
+        assert!(
+            matches!(read, Err(SystemdUnitResultError::PropertyRead { property, .. }) if *property == expected),
+            "{expected}: {read:?}"
+        );
     }
 
     const fn signaled(signal: u8, core_dumped: bool) -> SystemdUnitOutcome {
@@ -431,16 +686,52 @@ mod tests {
         SystemdUnitOutcome::FileSizeLimit { core_dumped }
     }
 
+    const fn main_of(code: i32, status: u8) -> SystemdMainExit {
+        match code {
+            CLD_NONE => SystemdMainExit::NotRecorded,
+            CLD_EXITED => SystemdMainExit::Exited { status },
+            CLD_KILLED => SystemdMainExit::Killed { signal: status },
+            _ => SystemdMainExit::Dumped { signal: status },
+        }
+    }
+
+    #[test]
+    fn every_service_result_round_trips_in_systemd_table_order() {
+        assert_eq!(SERVICE_RESULTS.len(), 11);
+        for (index, (name, result)) in SERVICE_RESULTS.into_iter().enumerate() {
+            assert_eq!(result as usize, index);
+            assert_eq!(result.as_str(), name);
+            assert_eq!(SystemdServiceResult::parse(result.as_str()), Some(result));
+        }
+        let names = SERVICE_RESULTS.map(|(name, _)| name);
+        assert_eq!(
+            names,
+            [
+                "success",
+                "resources",
+                "protocol",
+                "timeout",
+                "exit-code",
+                "signal",
+                "core-dump",
+                "watchdog",
+                "start-limit-hit",
+                "oom-kill",
+                "exec-condition",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn every_consistent_result_and_main_exit_is_classified() -> TestResult {
-        let killed = SystemdMainExit::Killed { signal: 9 };
-        let exited = SystemdMainExit::Exited { status: 0 };
-        let dumped = SystemdMainExit::Dumped { signal: 6 };
-        let timeout = |main| SystemdUnitOutcome::Timeout { main };
-        let oom = |main| SystemdUnitOutcome::OomKill { main };
         let exit_code = |status| SystemdUnitOutcome::ExitCode { status };
-        let cases = [
+        let clean = |signal| SystemdUnitOutcome::CleanSignal { signal };
+        let mut cases = vec![
             ("success", CLD_EXITED, 0, SystemdUnitOutcome::Success),
+            ("success", CLD_KILLED, 1, clean(1)),
+            ("success", CLD_KILLED, 2, clean(2)),
+            ("success", CLD_KILLED, 13, clean(13)),
+            ("success", CLD_KILLED, 15, clean(15)),
             ("exit-code", CLD_EXITED, 1, exit_code(1)),
             ("exit-code", CLD_EXITED, 255, exit_code(255)),
             ("signal", CLD_KILLED, 1, signaled(1, false)),
@@ -451,35 +742,48 @@ mod tests {
             ("signal", CLD_KILLED, 64, signaled(64, false)),
             ("core-dump", CLD_DUMPED, 6, signaled(6, true)),
             ("core-dump", CLD_DUMPED, 25, file_size(true)),
-            ("timeout", CLD_KILLED, 9, timeout(killed)),
-            ("timeout", CLD_EXITED, 0, timeout(exited)),
-            ("timeout", CLD_DUMPED, 6, timeout(dumped)),
-            ("oom-kill", CLD_KILLED, 9, oom(killed)),
-            ("oom-kill", CLD_EXITED, 0, oom(exited)),
-            ("oom-kill", CLD_DUMPED, 6, oom(dumped)),
         ];
+        let recorded: [(&str, fn(SystemdMainExit) -> SystemdUnitOutcome); 7] = [
+            ("timeout", |main| SystemdUnitOutcome::Timeout { main }),
+            ("oom-kill", |main| SystemdUnitOutcome::OomKill { main }),
+            ("resources", |main| SystemdUnitOutcome::Resources { main }),
+            ("protocol", |main| SystemdUnitOutcome::Protocol { main }),
+            ("watchdog", |main| SystemdUnitOutcome::Watchdog { main }),
+            ("start-limit-hit", |main| {
+                SystemdUnitOutcome::StartLimitHit { main }
+            }),
+            ("exec-condition", |main| SystemdUnitOutcome::ExecCondition {
+                main,
+            }),
+        ];
+        for (result, outcome) in recorded {
+            for (code, status) in [
+                (CLD_NONE, 0),
+                (CLD_EXITED, 0),
+                (CLD_EXITED, 3),
+                (CLD_KILLED, 9),
+                (CLD_DUMPED, 6),
+            ] {
+                cases.push((
+                    result,
+                    code,
+                    i32::from(status),
+                    outcome(main_of(code, status)),
+                ));
+            }
+        }
         for (result, code, status, outcome) in cases {
             let observed = read(result, code, status).await??;
             assert_eq!(observed.outcome(), outcome, "{result} {code} {status}");
             assert_eq!(observed.result().as_str(), result);
+            assert_eq!(observed.main_exit(), main_of(code, u8::try_from(status)?));
             assert_eq!(
                 observed.unit_name(),
                 &TransientServiceUnitName::from_attempt_id([0x40; 16])?
             );
             assert_eq!(observed.unit_path(), UNIT_PATH);
-            let main = observed.main_exit();
-            let expected_main = match code {
-                CLD_EXITED => SystemdMainExit::Exited {
-                    status: u8::try_from(status)?,
-                },
-                CLD_KILLED => SystemdMainExit::Killed {
-                    signal: u8::try_from(status)?,
-                },
-                _ => SystemdMainExit::Dumped {
-                    signal: u8::try_from(status)?,
-                },
-            };
-            assert_eq!(main, expected_main);
+            assert_eq!(observed.active_state(), "failed");
+            assert_eq!(observed.invocation_id(), INVOCATION);
         }
         Ok(())
     }
@@ -487,15 +791,24 @@ mod tests {
     #[tokio::test]
     async fn every_contradictory_result_and_main_exit_is_refused() -> TestResult {
         let cases = [
+            ("success", CLD_NONE, 0),
             ("success", CLD_EXITED, 1),
+            ("success", CLD_KILLED, 3),
             ("success", CLD_KILLED, 9),
+            ("success", CLD_KILLED, 14),
+            ("success", CLD_KILLED, 16),
+            ("success", CLD_KILLED, 25),
+            ("success", CLD_DUMPED, 15),
             ("success", CLD_DUMPED, 6),
+            ("exit-code", CLD_NONE, 0),
             ("exit-code", CLD_EXITED, 0),
             ("exit-code", CLD_KILLED, 9),
             ("exit-code", CLD_DUMPED, 6),
+            ("signal", CLD_NONE, 0),
             ("signal", CLD_EXITED, 0),
             ("signal", CLD_EXITED, 25),
             ("signal", CLD_DUMPED, 6),
+            ("core-dump", CLD_NONE, 0),
             ("core-dump", CLD_EXITED, 0),
             ("core-dump", CLD_KILLED, 9),
         ];
@@ -517,24 +830,26 @@ mod tests {
     async fn unknown_results_codes_and_statuses_are_typed_errors() -> TestResult {
         for result in [
             "",
-            "resources",
-            "watchdog",
-            "protocol",
-            "start-limit-hit",
             "Success",
+            "skip-condition",
+            "oom",
+            "exec_condition",
+            "success ",
         ] {
             assert!(matches!(
                 read(result, CLD_EXITED, 0).await?,
                 Err(SystemdUnitResultError::UnknownResult(value)) if value == result
             ));
         }
-        for code in [0, 4, 5, 6, -1, i32::MAX] {
+        for code in [4, 5, 6, -1, i32::MAX] {
             assert!(matches!(
                 read("success", code, 0).await?,
                 Err(SystemdUnitResultError::UnknownExecMainCode(value)) if value == code
             ));
         }
         for (code, status) in [
+            (CLD_NONE, 1),
+            (CLD_NONE, -1),
             (CLD_EXITED, -1),
             (CLD_EXITED, 256),
             (CLD_KILLED, 0),
@@ -553,69 +868,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn property_read_failures_and_wrong_types_are_typed_errors() -> TestResult {
-        for property in ["Result", "ExecMainCode", "ExecMainStatus"] {
-            let service = ResultService {
-                result: "success".to_owned(),
-                code: CLD_EXITED,
-                status: 0,
-                failing: Some(property),
-            };
-            let (transport, _server) = serve(service).await?;
-            assert!(matches!(
-                transport.read_unit_result(&started()?).await,
-                Err(SystemdUnitResultError::PropertyRead { property: read, .. }) if read == property
-            ));
+    async fn an_unsettled_unit_is_refused() -> TestResult {
+        for state in [
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+            "maintenance",
+            "",
+        ] {
+            let unit = UnitFixture::new(vec![(state.to_owned(), INVOCATION.to_vec())]);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(
+                    &observed,
+                    Err(SystemdUnitResultError::NotSettled { active_state }) if active_state == state
+                ),
+                "{state}: {observed:?}"
+            );
         }
-        let (transport, _server) = serve(WrongResultType(b"success".to_vec())).await?;
+        let unit = UnitFixture::new(vec![("inactive".to_owned(), Vec::new())]);
+        let observed =
+            read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await??;
+        assert_eq!(observed.active_state(), "inactive");
+        assert!(observed.invocation_id().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_changes_around_the_snapshot_is_refused() -> TestResult {
+        let settled = ("failed".to_owned(), INVOCATION.to_vec());
+        for after in [
+            ("active".to_owned(), INVOCATION.to_vec()),
+            ("inactive".to_owned(), INVOCATION.to_vec()),
+            ("failed".to_owned(), vec![0x22; 16]),
+            ("failed".to_owned(), Vec::new()),
+        ] {
+            let unit = UnitFixture::new(vec![settled.clone(), after.clone()]);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(observed, Err(SystemdUnitResultError::StateChanged)),
+                "{after:?}: {observed:?}"
+            );
+        }
+        let unit = UnitFixture::new(vec![("active".to_owned(), INVOCATION.to_vec()), settled]);
+        let observed = read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
         assert!(matches!(
-            transport.read_unit_result(&started()?).await,
-            Err(SystemdUnitResultError::PropertyRead {
-                property: "Result",
-                ..
-            })
-        ));
-        let (transport, _server) = serve(WrongCodeType("success".to_owned())).await?;
-        assert!(matches!(
-            transport.read_unit_result(&started()?).await,
-            Err(SystemdUnitResultError::PropertyRead {
-                property: "ExecMainCode",
-                ..
-            })
-        ));
-        let (transport, _server) = serve(WrongStatusType(
-            "success".to_owned(),
-            AtomicI32::new(CLD_EXITED),
-        ))
-        .await?;
-        assert!(matches!(
-            transport.read_unit_result(&started()?).await,
-            Err(SystemdUnitResultError::PropertyRead {
-                property: "ExecMainStatus",
-                ..
-            })
+            observed,
+            Err(SystemdUnitResultError::NotSettled { .. })
         ));
         Ok(())
     }
 
     #[tokio::test]
+    async fn missing_properties_and_snapshots_are_typed_errors() -> TestResult {
+        for property in ["Result", "ExecMainCode", "ExecMainStatus"] {
+            let mut service = ServiceFixture::new("success", CLD_EXITED, 0);
+            service.failing = Some(property);
+            let observed = read_from(UnitFixture::new(failed()), Some(service)).await?;
+            assert_property(&observed, property);
+        }
+        for property in ["ActiveState", "InvocationID"] {
+            let mut unit = UnitFixture::new(failed());
+            unit.failing = Some(property);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert_property(&observed, property);
+        }
+        let no_service = read_from(UnitFixture::new(failed()), None::<ServiceFixture>).await?;
+        assert_property(&no_service, SERVICE_INTERFACE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wrongly_typed_properties_are_typed_errors() -> TestResult {
+        let observed = read_from(
+            UnitFixture::new(failed()),
+            Some(WrongService("success".to_owned())),
+        )
+        .await?;
+        assert_property(&observed, "Result");
+        let observed = read_from(
+            UnitFixture::new(failed()),
+            Some(WrongCodeService("success".to_owned())),
+        )
+        .await?;
+        assert_property(&observed, "ExecMainCode");
+        let service = WrongStatusService(ServiceFixture::new("success", CLD_EXITED, 0));
+        let observed = read_from(UnitFixture::new(failed()), Some(service)).await?;
+        assert_property(&observed, "ExecMainStatus");
+        let service = || Some(ServiceFixture::new("success", CLD_EXITED, 0));
+        let observed = read_from(WrongStateUnit(b"failed".to_vec()), service()).await?;
+        assert_property(&observed, "ActiveState");
+        let observed = read_from(WrongInvocationUnit("failed".to_owned()), service()).await?;
+        assert_property(&observed, "InvocationID");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn another_unit_object_is_never_read() -> TestResult {
-        let service = ResultService {
-            result: "success".to_owned(),
-            code: CLD_EXITED,
-            status: 0,
-            failing: None,
-        };
-        let (transport, _server) = serve(service).await?;
+        let (_server, client) = peer_connections(|server| {
+            server
+                .serve_at(UNIT_PATH, UnitFixture::new(failed()))
+                .serve_at(UNIT_PATH, ServiceFixture::new("success", CLD_EXITED, 0))
+        })
+        .await?;
+        let transport = SystemdTransientUnitTransport { connection: client };
         let mut other = started()?;
         other.unit_path = OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/other")?;
-        assert!(matches!(
-            transport.read_unit_result(&other).await,
-            Err(SystemdUnitResultError::PropertyRead {
-                property: "Result",
-                ..
-            })
-        ));
+        assert_property(&transport.read_unit_result(&other).await, UNIT_INTERFACE);
+        let started = started()?;
+        assert!(transport.read_unit_result(&started).await.is_ok());
         Ok(())
     }
 

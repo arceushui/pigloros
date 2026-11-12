@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::io::Read;
 
-use rustix::fs::{fstatfs, openat2, Mode, OFlags};
+use rustix::fs::{fstatfs, openat2, statx, AtFlags, Mode, OFlags, StatxAttributes, StatxFlags};
 use rustix::io::Errno;
 use rustix::param::page_size;
 
@@ -134,7 +134,8 @@ pub enum EffectiveLimitError {
     /// A limit file exceeded its closed read bound.
     #[error("effective limit source {property} exceeded the read bound")]
     TooLong { property: &'static str },
-    /// A limit file was not one canonical kernel value line.
+    /// A limit file was not one canonical kernel value line: decimal digits
+    /// without a leading zero, or `max`, then one newline.
     #[error("effective limit source {property} was malformed")]
     Malformed { property: &'static str },
     /// The retained `/work` directory could not be inspected.
@@ -146,6 +147,18 @@ pub enum EffectiveLimitError {
     /// The `/work` block size or capacity is not representable.
     #[error("the retained /work capacity is not representable")]
     WorkCapacityMalformed,
+    /// The retained `/work` directory could not be described by `statx`.
+    #[error("failed to statx the retained /work directory")]
+    WorkStatx(#[source] Errno),
+    /// The retained `/work` directory is not the root of its mount.
+    #[error("the retained /work directory is not a mount root")]
+    WorkNotMountRoot,
+    /// The manager-reported cgroup path no longer names any directory.
+    ///
+    /// `retained_unlinked` reports whether the retained directory itself was
+    /// deleted, as opposed to the path being moved away.
+    #[error("the bound attempt cgroup path is missing")]
+    CgroupMissing { retained_unlinked: bool },
 }
 
 /// Effective cgroup v2 limits read from one exact bound attempt cgroup.
@@ -210,7 +223,10 @@ impl EffectiveCgroupLimits {
     /// Memory and swap ceilings match at page granularity, rounded down as
     /// the kernel stores them. The CPU quota must equal the requested
     /// per-million share of the reported period, rounded down; a larger
-    /// kernel quota is a mismatch. `/work` must be absent when zero bytes are
+    /// kernel quota is a mismatch. systemd may stretch the period for small
+    /// shares, which is why the reported period is used; shares whose quota
+    /// systemd would raise to its 1 ms minimum are refused when the request
+    /// is compiled, so they never reach this comparison. `/work` must be absent when zero bytes are
     /// requested, or exactly the request rounded up to whole pages, both
     /// before and after the payload. `max` never matches a requested ceiling.
     #[must_use]
@@ -278,7 +294,11 @@ impl EffectiveCgroupLimits {
     }
 }
 
-/// One `statfs` capacity observation of the retained `/work` directory.
+/// One `statfs` capacity observation of a retained tmpfs mount root.
+///
+/// It proves the handle is the root of a tmpfs mount with this capacity. It
+/// cannot prove which mount namespace the handle came from: the caller must
+/// open it as the attempt's own `/work` mount and retain it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkCapacity {
     bytes: u64,
@@ -289,26 +309,29 @@ type StatfsFields = (Option<u64>, Option<u64>, u64);
 impl WorkCapacity {
     /// Observe the tmpfs capacity through a retained `/work` directory handle.
     ///
-    /// The caller must open the handle inside the attempt's mount namespace
-    /// and retain it; this method never resolves a path.
+    /// The handle must be the root of a tmpfs mount. This method never
+    /// resolves a path, and it cannot tell which namespace the mount belongs
+    /// to; that binding is the caller's responsibility.
     ///
     /// # Errors
-    /// Rejects a failed `statfs`, a non-tmpfs filesystem, or an
-    /// unrepresentable block size or capacity.
+    /// Rejects a failed `statfs` or `statx`, a non-tmpfs filesystem, a
+    /// directory that is not its mount's root, or an unrepresentable block
+    /// size or capacity.
     pub fn observe(directory: &File) -> Result<Self, EffectiveLimitError> {
-        Self::from_statfs(fstatfs(directory).map(|filesystem| {
-            (
-                u64::try_from(filesystem.f_type).ok(),
-                u64::try_from(filesystem.f_bsize).ok(),
-                filesystem.f_blocks,
-            )
-        }))
+        Self::from_observations(statfs_fields(directory), is_mount_root(directory))
     }
 
-    fn from_statfs(observed: Result<StatfsFields, Errno>) -> Result<Self, EffectiveLimitError> {
-        let (filesystem, block_size, blocks) = observed.map_err(EffectiveLimitError::WorkStatfs)?;
+    fn from_observations(
+        filesystem: Result<StatfsFields, Errno>,
+        mount_root: Result<bool, Errno>,
+    ) -> Result<Self, EffectiveLimitError> {
+        let (filesystem, block_size, blocks) =
+            filesystem.map_err(EffectiveLimitError::WorkStatfs)?;
         if filesystem != Some(TMPFS_MAGIC) {
             return Err(EffectiveLimitError::WorkNotTmpfs);
+        }
+        if !mount_root.map_err(EffectiveLimitError::WorkStatx)? {
+            return Err(EffectiveLimitError::WorkNotMountRoot);
         }
         block_size
             .and_then(|size| size.checked_mul(blocks))
@@ -321,6 +344,26 @@ impl WorkCapacity {
     pub const fn bytes(self) -> u64 {
         self.bytes
     }
+}
+
+fn statfs_fields(directory: &File) -> Result<StatfsFields, Errno> {
+    fstatfs(directory).map(|filesystem| {
+        (
+            u64::try_from(filesystem.f_type).ok(),
+            u64::try_from(filesystem.f_bsize).ok(),
+            filesystem.f_blocks,
+        )
+    })
+}
+
+/// Whether the kernel reports the handle as the root of its mount.
+fn is_mount_root(directory: &File) -> Result<bool, Errno> {
+    statx(directory, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS).map(|status| {
+        status
+            .stx_attributes_mask
+            .contains(StatxAttributes::MOUNT_ROOT)
+            && status.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+    })
 }
 
 /// The typed result of comparing effective kernel limits with a request.
@@ -386,7 +429,7 @@ impl BoundAttemptCgroup {
 
     fn read_effective_limits_with_verifier(
         &self,
-        mut verify: impl FnMut(&Self) -> Result<(), AttemptCgroupError>,
+        mut verify: impl FnMut(&Self) -> Result<(), EffectiveLimitError>,
     ) -> Result<EffectiveCgroupLimits, EffectiveLimitError> {
         verify(self)?;
         let mut raw: [Vec<u8>; CGROUP_SOURCE_COUNT] = Default::default();
@@ -398,10 +441,12 @@ impl BoundAttemptCgroup {
         Ok(limits)
     }
 
-    fn verify_effective_limit_identity(&self) -> Result<(), AttemptCgroupError> {
+    fn verify_effective_limit_identity(&self) -> Result<(), EffectiveLimitError> {
         match self.inspect_path_with_metadata(File::metadata)? {
             BoundCgroupPath::Present => Ok(()),
-            BoundCgroupPath::Missing { .. } => Err(AttemptCgroupError::PathOpen(Errno::NOENT)),
+            BoundCgroupPath::Missing { retained_unlinked } => {
+                Err(EffectiveLimitError::CgroupMissing { retained_unlinked })
+            }
         }
     }
 
@@ -490,6 +535,7 @@ fn parse_period(field: &str) -> Option<u64> {
 fn parse_digits(field: &str) -> Option<u64> {
     Some(field)
         .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .filter(|digits| digits.len() == 1 || !digits.starts_with('0'))
         .and_then(|digits| digits.parse().ok())
 }
 
@@ -537,6 +583,9 @@ mod tests {
     use crate::CgroupRoot;
 
     use super::*;
+
+    /// A source, two values around its exact limit, and its file rendering.
+    type RenderCase = (EffectiveLimitSource, [u64; 2], fn(u64) -> String);
 
     const PIDS: u64 = 16;
     const CPU_PER_MILLION: u64 = 500_000;
@@ -597,7 +646,10 @@ mod tests {
     }
 
     fn work(bytes: u64) -> Result<WorkCapacity, EffectiveLimitError> {
-        WorkCapacity::from_statfs(Ok((Some(TMPFS_MAGIC), Some(page()), bytes / page())))
+        WorkCapacity::from_observations(
+            Ok((Some(TMPFS_MAGIC), Some(page()), bytes / page())),
+            Ok(true),
+        )
     }
 
     fn fixture(root: &Path) -> Result<(BoundAttemptCgroup, PathBuf), Box<dyn Error>> {
@@ -730,7 +782,7 @@ mod tests {
         let (bound, directory) = fixture(temporary.path())?;
         let request = exact_request()?;
         let capacity = work(page())?;
-        let cases: [(EffectiveLimitSource, [u64; 2], fn(u64) -> String); 4] = [
+        let cases: [RenderCase; 4] = [
             (
                 EffectiveLimitSource::MemoryMax,
                 [31 * page(), 33 * page()],
@@ -800,7 +852,8 @@ mod tests {
             (1_500_000, "1500000 1000000\n"),
             (500_000, "500 1000\n"),
             (999_999, "99999 100000\n"),
-            (1, "0 1000\n"),
+            (5_000, "1000 200000\n"),
+            (8_000, "1000 125000\n"),
         ] {
             fs::write(&path, line)?;
             let limits = bound.read_effective_limits()?;
@@ -888,45 +941,82 @@ mod tests {
     }
 
     #[test]
-    fn work_statfs_requires_a_representable_tmpfs() -> Result<(), Box<dyn Error>> {
-        let temporary = tempfile::tempdir()?;
-        let observed = WorkCapacity::observe(&File::open(temporary.path())?);
+    fn work_capacity_requires_a_representable_tmpfs_mount_root() -> Result<(), Box<dyn Error>> {
+        let tmpfs = TMPFS_MAGIC;
         assert!(matches!(
-            observed,
-            Ok(_) | Err(EffectiveLimitError::WorkNotTmpfs)
-        ));
-        assert!(matches!(
-            WorkCapacity::from_statfs(Err(Errno::BADF)),
+            WorkCapacity::from_observations(Err(Errno::BADF), Ok(true)),
             Err(EffectiveLimitError::WorkStatfs(Errno::BADF))
         ));
-        for filesystem in [None, Some(TMPFS_MAGIC + 1), Some(0x6367_7270)] {
+        for filesystem in [None, Some(tmpfs + 1), Some(0x6367_7270)] {
             assert!(matches!(
-                WorkCapacity::from_statfs(Ok((filesystem, Some(4096), 1))),
+                WorkCapacity::from_observations(Ok((filesystem, Some(4096), 1)), Ok(true)),
                 Err(EffectiveLimitError::WorkNotTmpfs)
             ));
         }
+        assert!(matches!(
+            WorkCapacity::from_observations(Ok((Some(tmpfs), Some(4096), 1)), Err(Errno::NOSYS)),
+            Err(EffectiveLimitError::WorkStatx(Errno::NOSYS))
+        ));
+        assert!(matches!(
+            WorkCapacity::from_observations(Ok((Some(tmpfs), Some(4096), 1)), Ok(false)),
+            Err(EffectiveLimitError::WorkNotMountRoot)
+        ));
         for (block_size, blocks) in [(None, 1), (Some(2), u64::MAX)] {
             assert!(matches!(
-                WorkCapacity::from_statfs(Ok((Some(TMPFS_MAGIC), block_size, blocks))),
+                WorkCapacity::from_observations(Ok((Some(tmpfs), block_size, blocks)), Ok(true)),
                 Err(EffectiveLimitError::WorkCapacityMalformed)
             ));
         }
-        assert_eq!(
-            WorkCapacity::from_statfs(Ok((Some(TMPFS_MAGIC), Some(4096), 3)))?.bytes(),
-            12_288
-        );
-        assert_eq!(
-            WorkCapacity::from_statfs(Ok((Some(TMPFS_MAGIC), Some(4096), 0)))?.bytes(),
-            0
-        );
+        let three_pages =
+            WorkCapacity::from_observations(Ok((Some(tmpfs), Some(4096), 3)), Ok(true));
+        assert_eq!(three_pages?.bytes(), 12_288);
+        let empty = WorkCapacity::from_observations(Ok((Some(tmpfs), Some(4096), 0)), Ok(true));
+        assert_eq!(empty?.bytes(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn work_capacity_observes_a_real_tmpfs_mount_root_exactly() -> Result<(), Box<dyn Error>> {
+        let shm = File::open("/dev/shm")?;
+        let statfs = fstatfs(&shm)?;
+        let expected = statfs.f_blocks * u64::try_from(statfs.f_bsize)?;
+        assert_eq!(WorkCapacity::observe(&shm)?.bytes(), expected);
+
+        let below_root = tempfile::tempdir_in("/dev/shm")?;
+        assert!(matches!(
+            WorkCapacity::observe(&File::open(below_root.path())?),
+            Err(EffectiveLimitError::WorkNotMountRoot)
+        ));
+
+        let source_tree = File::open(env!("CARGO_MANIFEST_DIR"))?;
+        assert!(matches!(
+            WorkCapacity::observe(&source_tree),
+            Err(EffectiveLimitError::WorkNotTmpfs)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_quota_handles_the_largest_share_without_overflow() {
+        for period in [
+            MIN_CPU_PERIOD_MICROSECONDS,
+            100_000,
+            MICROSECONDS_PER_SECOND,
+        ] {
+            let exact = u128::from(u64::MAX) * u128::from(period) / 1_000_000;
+            assert_eq!(u128::from(cpu_quota(u64::MAX, period)), exact);
+        }
+        assert_eq!(cpu_quota(u64::MAX, MICROSECONDS_PER_SECOND), u64::MAX);
     }
 
     #[test]
     fn malformed_values_fail_closed_for_every_source() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
         let (bound, directory) = fixture(temporary.path())?;
-        let single: [&[u8]; 11] = [
+        let single: [&[u8]; 14] = [
+            b"05\n",
+            b"00\n",
+            b"018446744073709551615\n",
             b"",
             b"\n",
             b"5",
@@ -939,7 +1029,9 @@ mod tests {
             b"MAX\n",
             b"18446744073709551616\n",
         ];
-        let cpu: [&[u8]; 11] = [
+        let cpu: [&[u8]; 13] = [
+            b"050000 100000\n",
+            b"50000 0100000\n",
             b"",
             b"max\n",
             b"50000\n",
@@ -981,6 +1073,21 @@ mod tests {
                 Some(EffectiveKernelLimit::Bounded(5))
             );
         }
+        let memory = directory.join("memory.max");
+        fs::write(&memory, b"18446744073709551615\n")?;
+        assert_eq!(
+            bound
+                .read_effective_limits()?
+                .value(EffectiveLimitSource::MemoryMax),
+            Some(EffectiveKernelLimit::Bounded(u64::MAX))
+        );
+        fs::write(&memory, b"0\n")?;
+        assert_eq!(
+            bound
+                .read_effective_limits()?
+                .value(EffectiveLimitSource::MemoryMax),
+            Some(EffectiveKernelLimit::Bounded(0))
+        );
         Ok(())
     }
 
@@ -1048,9 +1155,19 @@ mod tests {
         fs::remove_dir(&directory)?;
         assert!(matches!(
             bound.read_effective_limits(),
-            Err(EffectiveLimitError::Cgroup(AttemptCgroupError::PathOpen(
-                Errno::NOENT
-            )))
+            Err(EffectiveLimitError::CgroupMissing {
+                retained_unlinked: false
+            })
+        ));
+        for entry in fs::read_dir(&moved)? {
+            fs::remove_file(entry?.path())?;
+        }
+        fs::remove_dir(&moved)?;
+        assert!(matches!(
+            bound.read_effective_limits(),
+            Err(EffectiveLimitError::CgroupMissing {
+                retained_unlinked: true
+            })
         ));
         Ok(())
     }
@@ -1065,7 +1182,7 @@ mod tests {
             bound.read_effective_limits_with_verifier(|cgroup| {
                 checks += 1;
                 if checks == 2 {
-                    Err(AttemptCgroupError::PathReused)
+                    Err(AttemptCgroupError::PathReused.into())
                 } else {
                     cgroup.verify_effective_limit_identity()
                 }
