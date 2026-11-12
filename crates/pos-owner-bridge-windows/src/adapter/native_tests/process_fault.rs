@@ -1250,7 +1250,7 @@ impl Fixture {
         loop {
             // The release transition occurs inside this step. Its start is a
             // conservative lower bound for the driver's real release deadline.
-            let step_started = (self.number == 107).then(Instant::now);
+            let step_started = Instant::now();
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -2720,7 +2720,7 @@ impl Fixture {
         let mut step_count = 0_u32;
         let mut pump_count = 0_u32;
         loop {
-            let step_started = Instant::now();
+            let step_started = (self.number == 107).then(Instant::now);
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
