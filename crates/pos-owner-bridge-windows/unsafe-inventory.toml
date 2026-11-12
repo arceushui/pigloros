@@ -341,7 +341,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 75
+line = 67
 function = "start"
 operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
 invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
@@ -349,7 +349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 147
+line = 131
 function = "start"
 operation = "environment.CreateCoreWebView2Controller(hwnd, &callback)"
 invariant = "retained live STA environment and callback; the surface keeps its owned top-level HWND alive until this async operation completes."
