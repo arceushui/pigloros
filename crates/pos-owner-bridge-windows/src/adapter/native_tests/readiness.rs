@@ -261,6 +261,13 @@ fn run_ceremony(
     };
     let result_error = result.as_ref().err().copied();
     trace.update("caller-complete", surface, &driver, loopback);
+    if receipt.is_none() || failure.is_some() {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_LISTENER_DIAGNOSTIC case={number} stage=before-retirement {}",
+            loopback.diagnostic_snapshot(started)
+        );
+    }
     retirement::retire(
         surface,
         loopback,
@@ -272,6 +279,13 @@ fn run_ceremony(
         },
     );
     surface.report_readiness_timing();
+    if receipt.is_none() || failure.is_some() {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_LISTENER_DIAGNOSTIC case={number} stage=after-retirement {}",
+            loopback.diagnostic_snapshot(started)
+        );
+    }
     let resource = crate::Native::readiness_resource_snapshot();
     let _logged = writeln!(std::io::stderr(),
         "NATIVE_G3_RESOURCE_SNAPSHOT case={number} fields=(captured_case,entries,overflow,subscriptions) snapshot={resource:?}");

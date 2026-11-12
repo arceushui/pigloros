@@ -33,6 +33,8 @@ pub(super) struct ServeContext {
     /// Aggregate test-only connection outcomes.
     #[cfg(feature = "test-support")]
     pub(super) observations: Arc<super::Observations>,
+    #[cfg(feature = "test-support")]
+    pub(super) diagnostic: Arc<super::DiagnosticRing>,
 }
 
 /// How reading one request ended.
@@ -193,18 +195,52 @@ pub(super) fn respond<W: Write>(
     writer: &mut W,
     admitted: Option<LoopbackRequestDisposition>,
     context: &ServeContext,
+    #[cfg(feature = "test-support")] connection: usize,
 ) {
     match admitted {
         // A failed write of a fixed error response only closes the connection: it carries no
         // served count and there is nothing further to report.
-        None => drop(writer.write_all(BAD_REQUEST_RESPONSE.as_bytes())),
+        None => {
+            let result = writer.write_all(BAD_REQUEST_RESPONSE.as_bytes());
+            #[cfg(feature = "test-support")]
+            context.diagnostic.record(
+                connection,
+                if result.is_ok() {
+                    "error-response-complete"
+                } else {
+                    "error-response-incomplete"
+                },
+                0,
+            );
+            drop(result);
+        }
         Some(LoopbackRequestDisposition::NotFound) => {
-            drop(writer.write_all(NOT_FOUND_RESPONSE.as_bytes()));
+            let result = writer.write_all(NOT_FOUND_RESPONSE.as_bytes());
+            #[cfg(feature = "test-support")]
+            context.diagnostic.record(
+                connection,
+                if result.is_ok() {
+                    "not-found-complete"
+                } else {
+                    "not-found-incomplete"
+                },
+                0,
+            );
+            drop(result);
         }
         Some(LoopbackRequestDisposition::OwnerDocument) => {
-            if let OwnerWrite::Complete { digest_ok } =
-                write_owner_response(writer, &context.expected_digest, context.response)
-            {
+            let result = write_owner_response(writer, &context.expected_digest, context.response);
+            #[cfg(feature = "test-support")]
+            context.diagnostic.record(
+                connection,
+                match result {
+                    OwnerWrite::Complete { digest_ok: true } => "owner-write-complete-digest-ok",
+                    OwnerWrite::Complete { digest_ok: false } => "owner-write-complete-digest-bad",
+                    OwnerWrite::Incomplete => "owner-write-incomplete",
+                },
+                0,
+            );
+            if let OwnerWrite::Complete { digest_ok } = result {
                 context.ledger.complete(digest_ok);
             }
         }
@@ -216,6 +252,7 @@ pub(super) fn serve_connection(
     mut stream: TcpStream,
     accepted_at: Instant,
     context: &ServeContext,
+    #[cfg(feature = "test-support")] connection: usize,
 ) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
     let outcome = read_request(
@@ -226,6 +263,8 @@ pub(super) fn serve_connection(
         &SystemClock,
         || {
             #[cfg(feature = "test-support")]
+            context.diagnostic.record(connection, "first-byte", 0);
+            #[cfg(feature = "test-support")]
             context
                 .received
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -234,6 +273,15 @@ pub(super) fn serve_connection(
         |reason| {
             use std::sync::atomic::Ordering;
             let observations = &context.observations;
+            context.diagnostic.record(
+                connection,
+                match reason {
+                    SilentReason::Eof => "read-eof",
+                    SilentReason::Timeout => "read-timeout",
+                    SilentReason::Other => "read-error",
+                },
+                0,
+            );
             let counter = match reason {
                 SilentReason::Eof => &observations.silent_eof,
                 SilentReason::Timeout => &observations.silent_timeout,
@@ -250,9 +298,22 @@ pub(super) fn serve_connection(
             ReadOutcome::TooLarge => &context.observations.too_large,
         };
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        context.diagnostic.record(
+            connection,
+            match outcome {
+                ReadOutcome::Silent => "read-silent",
+                ReadOutcome::Complete(_) => "header-complete",
+                ReadOutcome::TooLarge => "header-too-large",
+            },
+            0,
+        );
     }
     let admitted = match outcome {
-        ReadOutcome::Silent => return,
+        ReadOutcome::Silent => {
+            #[cfg(feature = "test-support")]
+            context.diagnostic.record(connection, "close-intent", 0);
+            return;
+        }
         ReadOutcome::TooLarge => None,
         ReadOutcome::Complete(length) => buffer
             .get(..length)
@@ -262,6 +323,21 @@ pub(super) fn serve_connection(
         .set_write_timeout(Some(context.timeouts.idle))
         .is_ok();
     if armed {
-        respond(&mut stream, admitted, context);
+        #[cfg(feature = "test-support")]
+        context.diagnostic.record(connection, "write-enter", 0);
+        respond(
+            &mut stream,
+            admitted,
+            context,
+            #[cfg(feature = "test-support")]
+            connection,
+        );
+    } else {
+        #[cfg(feature = "test-support")]
+        context
+            .diagnostic
+            .record(connection, "write-timeout-arm-failed", 0);
     }
+    #[cfg(feature = "test-support")]
+    context.diagnostic.record(connection, "close-intent", 0);
 }

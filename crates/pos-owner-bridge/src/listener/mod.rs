@@ -166,6 +166,64 @@ struct Observations {
     too_large: AtomicUsize,
 }
 
+// Diagnostic-only bounded observations; anonymous connections are not case identities.
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct DiagnosticRing {
+    origin: Instant,
+    sequence: AtomicUsize,
+    next_connection: AtomicUsize,
+    lost: AtomicUsize,
+    overwritten: AtomicUsize,
+    events: std::sync::Mutex<std::collections::VecDeque<DiagnosticEvent>>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+struct DiagnosticEvent {
+    sequence: usize,
+    elapsed: Duration,
+    connection: usize,
+    stage: &'static str,
+    value: usize,
+}
+
+#[cfg(feature = "test-support")]
+impl Default for DiagnosticRing {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+            sequence: AtomicUsize::new(0),
+            next_connection: AtomicUsize::new(1),
+            lost: AtomicUsize::new(0),
+            overwritten: AtomicUsize::new(0),
+            events: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(256)),
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl DiagnosticRing {
+    fn record(&self, connection: usize, stage: &'static str, value: usize) {
+        let event = DiagnosticEvent {
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+            elapsed: self.origin.elapsed(),
+            connection,
+            stage,
+            value,
+        };
+        if let Ok(mut events) = self.events.try_lock() {
+            if events.len() == 256 {
+                drop(events.pop_front());
+                self.overwritten.fetch_add(1, Ordering::Relaxed);
+            }
+            events.push_back(event);
+        } else {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// State shared by the accept threads.
 #[derive(Debug, Default)]
 struct Shared {
@@ -173,6 +231,8 @@ struct Shared {
     active: AtomicUsize,
     #[cfg(feature = "test-support")]
     observations: Arc<Observations>,
+    #[cfg(feature = "test-support")]
+    diagnostic: Arc<DiagnosticRing>,
 }
 
 impl Shared {
@@ -195,6 +255,8 @@ struct SlotGuard {
     shared: Arc<Shared>,
     #[cfg(feature = "test-support")]
     accepted: bool,
+    #[cfg(feature = "test-support")]
+    connection: usize,
 }
 
 impl SlotGuard {
@@ -203,6 +265,8 @@ impl SlotGuard {
             shared: Arc::clone(shared),
             #[cfg(feature = "test-support")]
             accepted: false,
+            #[cfg(feature = "test-support")]
+            connection: 0,
         })
     }
 }
@@ -217,6 +281,14 @@ impl Drop for SlotGuard {
                 .fetch_sub(1, Ordering::SeqCst);
         }
         self.shared.release();
+        #[cfg(feature = "test-support")]
+        if self.accepted {
+            self.shared.diagnostic.record(
+                self.connection,
+                "slot-released",
+                self.shared.active.load(Ordering::SeqCst),
+            );
+        }
     }
 }
 
@@ -233,14 +305,44 @@ fn dispatch(
     spawn: impl FnOnce(Work) -> io::Result<()>,
 ) {
     let context = Arc::clone(context);
+    #[cfg(feature = "test-support")]
+    let diagnostic = Arc::clone(&slot.shared.diagnostic);
+    #[cfg(feature = "test-support")]
+    let connection = slot.connection;
+    #[cfg(feature = "test-support")]
+    let worker_diagnostic = Arc::clone(&diagnostic);
     let work: Work = Box::new(move || {
         let _slot = slot;
+        #[cfg(feature = "test-support")]
+        worker_diagnostic.record(connection, "worker-enter", 0);
         if stream.set_nonblocking(false).is_ok() {
-            serve_connection(stream, accepted_at, &context);
+            serve_connection(
+                stream,
+                accepted_at,
+                &context,
+                #[cfg(feature = "test-support")]
+                connection,
+            );
+        } else {
+            #[cfg(feature = "test-support")]
+            worker_diagnostic.record(connection, "nonblocking-failed", 0);
         }
+        #[cfg(feature = "test-support")]
+        worker_diagnostic.record(connection, "worker-return", 0);
     });
     // A failed spawn has already dropped the work, so there is nothing further to do.
-    drop(spawn(work));
+    let spawned = spawn(work);
+    #[cfg(feature = "test-support")]
+    diagnostic.record(
+        connection,
+        if spawned.is_ok() {
+            "spawn-ok"
+        } else {
+            "spawn-failed"
+        },
+        0,
+    );
+    drop(spawned);
 }
 
 fn spawn_thread(work: Work) -> io::Result<()> {
@@ -292,11 +394,29 @@ fn accept_loop(
     shared: &Arc<Shared>,
     mut pause: impl FnMut(),
 ) {
+    #[cfg(feature = "test-support")]
+    let mut saturated = false;
     while !shared.stop.load(Ordering::SeqCst) {
         let Some(slot) = SlotGuard::acquire(shared) else {
+            #[cfg(feature = "test-support")]
+            if !saturated {
+                shared.diagnostic.record(
+                    0,
+                    "slots-saturated",
+                    shared.active.load(Ordering::SeqCst),
+                );
+                saturated = true;
+            }
             pause();
             continue;
         };
+        #[cfg(feature = "test-support")]
+        if saturated {
+            shared
+                .diagnostic
+                .record(0, "slot-available", shared.active.load(Ordering::SeqCst));
+            saturated = false;
+        }
         #[cfg(feature = "test-support")]
         let mut slot = slot;
         let accepted = listener.accept();
@@ -305,6 +425,15 @@ fn accept_loop(
             #[cfg(feature = "test-support")]
             {
                 slot.accepted = true;
+                slot.connection = shared
+                    .diagnostic
+                    .next_connection
+                    .fetch_add(1, Ordering::Relaxed);
+                shared.diagnostic.record(
+                    slot.connection,
+                    "accepted",
+                    shared.active.load(Ordering::SeqCst),
+                );
                 shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
                 shared.observations.handling.fetch_add(1, Ordering::SeqCst);
             }
@@ -359,6 +488,8 @@ impl LoopbackListener {
             received: Arc::clone(&received),
             #[cfg(feature = "test-support")]
             observations: Arc::clone(&shared.observations),
+            #[cfg(feature = "test-support")]
+            diagnostic: Arc::clone(&shared.diagnostic),
         });
         let accepting = std::iter::once(sockets.v4).chain(sockets.v6);
         let workers = start_accept_threads(
@@ -412,6 +543,27 @@ impl LoopbackListener {
             silent_error: o.silent_error.load(Ordering::SeqCst),
             complete: o.complete.load(Ordering::SeqCst),
             too_large: o.too_large.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Diagnostic-only lossy anonymous listener history, relative to its origin.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn diagnostic_snapshot(&self, case_started: Instant) -> String {
+        let d = &self.shared.diagnostic;
+        let origin = case_started.saturating_duration_since(d.origin);
+        let lost = d.lost.load(Ordering::Relaxed);
+        let overwritten = d.overwritten.load(Ordering::Relaxed);
+        match d.events.try_lock() {
+            Ok(events) => {
+                let mut text = format!("case_t0={origin:?} lost={lost} overwritten={overwritten} count={} ", events.len());
+                for event in events.iter() {
+                    use std::fmt::Write as _;
+                    let _written = write!(text, "[{} {:?} {} {} {}]", event.sequence, event.elapsed, event.connection, event.stage, event.value);
+                }
+                text
+            }
+            Err(_) => format!("case_t0={origin:?} lost={lost} overwritten={overwritten} snapshot_unavailable=true"),
         }
     }
 

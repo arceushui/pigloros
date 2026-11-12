@@ -315,6 +315,7 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
         ledger: Arc::clone(&ledger),
         received: Arc::default(),
         observations: Arc::default(),
+        diagnostic: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,
@@ -324,13 +325,14 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
         Some(LoopbackRequestDisposition::NotFound),
         None,
     ] {
-        respond(&mut flaky(8, 20, true), disposition, &context);
+        respond(&mut flaky(8, 20, true), disposition, &context, 0);
     }
     assert_eq!(ledger.snapshot().count, 0);
     respond(
         &mut flaky(4_096, usize::MAX, false),
         Some(LoopbackRequestDisposition::OwnerDocument),
         &context,
+        0,
     );
     assert_eq!(ledger.snapshot().count, 1);
 }
@@ -770,6 +772,7 @@ fn the_fixed_error_responses_are_written_exactly() {
         ledger: Arc::new(ServedLedger::default()),
         received: Arc::default(),
         observations: Arc::default(),
+        diagnostic: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,
@@ -783,7 +786,7 @@ fn the_fixed_error_responses_are_written_exactly() {
     ];
     for (disposition, expected) in cases {
         let mut writer = flaky(64, usize::MAX, false);
-        respond(&mut writer, disposition, &context);
+        respond(&mut writer, disposition, &context, 0);
         assert_eq!(writer.accepted, expected.as_bytes());
     }
     assert_eq!(context.ledger.snapshot().count, 0);
@@ -814,6 +817,7 @@ fn serve_context() -> Arc<ServeContext> {
         ledger: Arc::new(ServedLedger::default()),
         received: Arc::default(),
         observations: Arc::default(),
+        diagnostic: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,

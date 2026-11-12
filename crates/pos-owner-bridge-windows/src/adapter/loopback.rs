@@ -35,6 +35,14 @@ impl SharedLoopback {
     }
 
     #[cfg(test)]
+    pub(super) fn diagnostic_snapshot(&self, started: std::time::Instant) -> String {
+        self.0.try_lock().map_or_else(
+            |_| "listener_snapshot_unavailable=true".to_owned(),
+            |listener| listener.diagnostic_snapshot(started),
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn received_request_count(&self) -> Result<u64, BridgeError> {
         self.0
             .lock()
