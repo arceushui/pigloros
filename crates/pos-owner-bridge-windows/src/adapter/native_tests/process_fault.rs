@@ -398,11 +398,13 @@ fn modeled_target_pair_preserves_order_and_short_circuits_errors() {
                 }
                 Ok(state)
             };
-        let result = run_target_pair(
+        let result = run_target_pairs(
             Path::new("."),
             Path::new("."),
-            0x31,
-            ProcessFaultTarget::Browser,
+            &[
+                (0x31, ProcessFaultTarget::Browser),
+                (0x33, ProcessFaultTarget::Renderer),
+            ],
             &mut case,
             "modeled mismatch",
         );
@@ -421,12 +423,18 @@ fn modeled_target_pair_preserves_order_and_short_circuits_errors() {
         if fail_at != Some(false) {
             expected_calls.push((0x32, ProcessFaultTarget::Browser, true));
         }
+        if fail_at.is_none() {
+            expected_calls.extend([
+                (0x33, ProcessFaultTarget::Renderer, false),
+                (0x34, ProcessFaultTarget::Renderer, true),
+            ]);
+        }
         assert_eq!(calls, expected_calls);
     }
 }
 
 #[test]
-fn modeled_target_pair_preserves_mismatch_panic() {
+fn modeled_target_pair_preserves_mismatch_panic() -> TestResult {
     let state = ProcessFaultState {
         phase: ProcessFaultPhase::PostedReceipt,
         topology: ProcessFaultTopology::SealedSingleViewFrameFree,
@@ -452,12 +460,27 @@ fn modeled_target_pair_preserves_mismatch_panic() {
             "modeled mismatch",
         );
     }))
-    .expect_err("different states must panic");
+    .err()
+    .ok_or("different states must panic")?;
     let message = panic
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied());
     assert!(message.is_some_and(|text| text.contains("modeled mismatch")));
+    Ok(())
+}
+
+fn run_target_pairs(
+    runtime: &Path,
+    root: &Path,
+    cases: &[(u8, ProcessFaultTarget)],
+    case: &mut TargetFaultCase<'_>,
+    mismatch: &str,
+) -> TestResult {
+    for &(number, target) in cases {
+        run_target_pair(runtime, root, number, target, case, mismatch)?;
+    }
+    Ok(())
 }
 
 fn run() -> TestResult {
@@ -465,34 +488,28 @@ fn run() -> TestResult {
     let root = FixtureRoot::new()?;
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
-    for (number, target) in [
-        (0x31, ProcessFaultTarget::Renderer),
-        (0x33, ProcessFaultTarget::Browser),
-    ] {
-        run_target_pair(
-            Path::new(&runtime),
-            &root.0,
-            number,
-            target,
-            &mut run_case,
-            "control and fault reached different substates",
-        )?;
-    }
+    run_target_pairs(
+        Path::new(&runtime),
+        &root.0,
+        &[
+            (0x31, ProcessFaultTarget::Renderer),
+            (0x33, ProcessFaultTarget::Browser),
+        ],
+        &mut run_case,
+        "control and fault reached different substates",
+    )?;
     run_recordless_case(Path::new(&runtime), &root.0, 0x35, false)?;
     run_recordless_case(Path::new(&runtime), &root.0, 0x36, true)?;
-    for (number, target) in [
-        (0x37, ProcessFaultTarget::Renderer),
-        (0x39, ProcessFaultTarget::Browser),
-    ] {
-        run_target_pair(
-            Path::new(&runtime),
-            &root.0,
-            number,
-            target,
-            &mut run_success_releasing,
-            "release control and fault reached different states",
-        )?;
-    }
+    run_target_pairs(
+        Path::new(&runtime),
+        &root.0,
+        &[
+            (0x37, ProcessFaultTarget::Renderer),
+            (0x39, ProcessFaultTarget::Browser),
+        ],
+        &mut run_success_releasing,
+        "release control and fault reached different states",
+    )?;
     let control = run_success_exit(Path::new(&runtime), &root.0, 0x3b, false)?;
     let fault = run_success_exit(Path::new(&runtime), &root.0, 0x3c, true)?;
     let state = |boundary| match boundary {
@@ -517,51 +534,42 @@ fn run() -> TestResult {
         control, fault,
         "navigation control and fault reached different states"
     );
-    for (number, target) in [
-        (0x41, ProcessFaultTarget::Renderer),
-        (0x43, ProcessFaultTarget::Browser),
-    ] {
-        run_target_pair(
-            Path::new(&runtime),
-            &root.0,
-            number,
-            target,
-            &mut run_posted_empty,
-            "empty-reply control and fault reached different states",
-        )?;
-    }
+    run_target_pairs(
+        Path::new(&runtime),
+        &root.0,
+        &[
+            (0x41, ProcessFaultTarget::Renderer),
+            (0x43, ProcessFaultTarget::Browser),
+        ],
+        &mut run_posted_empty,
+        "empty-reply control and fault reached different states",
+    )?;
     let control = run_first_opening_browser(Path::new(&runtime), &root.0, 0x45, false)?;
     let fault = run_first_opening_browser(Path::new(&runtime), &root.0, 0x46, true)?;
     assert_eq!(
         control, fault,
         "opening control and fault reached different cutpoints"
     );
-    for (number, target) in [
-        (0x4b, ProcessFaultTarget::Renderer),
-        (0x4d, ProcessFaultTarget::Browser),
-    ] {
-        run_target_pair(
-            Path::new(&runtime),
-            &root.0,
-            number,
-            target,
-            &mut run_posted_writing,
-            "writing control and fault reached different states",
-        )?;
-    }
-    for (number, target) in [
-        (0x70, ProcessFaultTarget::Renderer),
-        (0x72, ProcessFaultTarget::Browser),
-    ] {
-        run_target_pair(
-            Path::new(&runtime),
-            &root.0,
-            number,
-            target,
-            &mut run_posted_ready,
-            "ready control and fault reached different states",
-        )?;
-    }
+    run_target_pairs(
+        Path::new(&runtime),
+        &root.0,
+        &[
+            (0x4b, ProcessFaultTarget::Renderer),
+            (0x4d, ProcessFaultTarget::Browser),
+        ],
+        &mut run_posted_writing,
+        "writing control and fault reached different states",
+    )?;
+    run_target_pairs(
+        Path::new(&runtime),
+        &root.0,
+        &[
+            (0x70, ProcessFaultTarget::Renderer),
+            (0x72, ProcessFaultTarget::Browser),
+        ],
+        &mut run_posted_ready,
+        "ready control and fault reached different states",
+    )?;
     run_retries(Path::new(&runtime), &root.0)?;
     run_consuming_cases(Path::new(&runtime), &root.0)?;
     run_before_record_cases(Path::new(&runtime), &root.0)?;
