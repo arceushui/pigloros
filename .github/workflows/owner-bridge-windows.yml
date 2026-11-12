@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.97.1
@@ -40,7 +40,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- modeled_process_collection_refuses_invalid_counts_and_duplicate_or_invalid_pids --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Process model failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report --no-clean -- empty_native_session_refuses_operations_and_allows_ordered_cleanup --include-ignored --nocapture --test-threads=1
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean -- empty_native_session_refuses_operations_and_allows_ordered_cleanup --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Empty session failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --output-path "$env:RUNNER_TEMP/ffi-boundaries.lcov"
           if ($LASTEXITCODE -ne 0) { throw 'LCOV export failed' }
