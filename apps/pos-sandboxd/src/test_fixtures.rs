@@ -26,7 +26,7 @@ use crate::{ActiveAttempt, AdmittedAttempt};
 pub use crate::attempt_registry::{in_lock_test_process, root_record_fixture, with_io_fault};
 pub use crate::root_attachment::{
     attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,
-    FakeRootRelease,
+    FakeRecoveredRoots, FakeRootRelease,
 };
 pub use crate::system_bus::{
     peer_connections, TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop,

@@ -30,6 +30,7 @@
 mod cmdline;
 mod identity;
 mod observe;
+mod recovered;
 mod release;
 mod verify;
 
@@ -78,6 +79,14 @@ trait AttachmentKernel: Sync {
         root: &File,
         executable: &str,
     ) -> Observations;
+    /// Whether the bound loop device `loop_name` is backed by a file in the
+    /// `images` directory, by the rules of the provider loop sweep. An
+    /// unresolvable image directory or an unreadable or empty backing file is
+    /// not a provider image.
+    fn provider_image(&self, loop_name: &str, images: &std::path::Path) -> bool;
+    /// Whether any mount has the mount `mount_id` as its parent; `None` when
+    /// the mount table cannot be read completely.
+    fn has_submounts(&self, mount_id: u64) -> Option<bool>;
     /// Detach an owned, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
     /// Independently observe whether both original block generations ended.
@@ -254,9 +263,7 @@ impl RootResourceIdentity {
     /// directory cannot be resolved, or the block class or a bound loop
     /// device's backing file cannot be read.
     pub(crate) async fn provider_loops_absent() -> Result<bool, ImageActivationError> {
-        let images =
-            std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
-                .join("images");
+        let images = images_directory();
         let swept = tokio::task::spawn_blocking(move || {
             HostKernel::system().provider_loops_absent(&images)
         })
@@ -266,6 +273,12 @@ impl RootResourceIdentity {
             .flatten()
             .ok_or(ImageActivationError::ResourceAbsenceUnverified)
     }
+}
+
+/// The fixed directory of installed provider images.
+fn images_directory() -> std::path::PathBuf {
+    std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+        .join("images")
 }
 
 async fn generations_absent(
@@ -285,7 +298,8 @@ async fn generations_absent(
 ///
 /// # Errors
 /// Returns [`ImageActivationError::AttachFailure`] when the prepared directory
-/// changed or attachment fails, and [`ImageActivationError::HostFeatureUnavailable`]
+/// changed, records another image than the admission holds, or attachment
+/// fails, and [`ImageActivationError::HostFeatureUnavailable`]
 /// when the kernel command line does not veto userspace Verity. Otherwise it
 /// returns the `MountImage` transport's error, or
 /// [`ImageActivationError::EvidenceMismatch`] for any readback or re-admission
@@ -335,7 +349,8 @@ where
             Expected::for_admission(admission, root_directory)
                 .zip(ActivationImage::from_admission(admission).ok())
                 .ok_or(ImageActivationError::Transport)
-        });
+        })
+        .and_then(|prepared| recorded_image_is_held(directory, &prepared.0).map(|()| prepared));
     match prepared {
         Ok((expected, image)) => {
             // The connection gets its own 60 s bound, like the call (owner decision Q7.4).
@@ -358,6 +373,16 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+/// The directory's PAI2 record must name exactly the admission's held image.
+fn recorded_image_is_held(
+    directory: &PreparedAttemptDirectory,
+    expected: &Expected,
+) -> Result<(), ImageActivationError> {
+    (expected.held == directory.image())
+        .then_some(())
+        .ok_or(ImageActivationError::AttachFailure)
 }
 
 /// Durably record the request's boot and time, so a restart can wait it out
@@ -414,6 +439,9 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
-pub use tests::{attached_fixture_root, fake_root_release, release_fake_root, FakeRootRelease};
+pub use tests::{
+    attached_fixture_root, fake_root_release, release_fake_root, FakeRecoveredRoots,
+    FakeRootRelease,
+};
 #[cfg(test)]
 pub use tests::{recorded_identity, released_root};

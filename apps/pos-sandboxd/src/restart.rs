@@ -2,57 +2,78 @@
 //!
 //! [`reconcile_restart`] runs while admission stays closed: the exclusive
 //! [`SystemdAttemptRecovery`] keeps the registry lock, so no attempt can be
-//! committed until it returns. It proves, within one deadline:
+//! committed until it returns. Within one deadline it:
 //!
-//! 1. no unit is loaded in the `pigloros-attempt-` namespace;
-//! 2. the exact unit of every recorded attempt and temporary write is absent,
-//!    including a unit the listing may have hidden;
-//! 3. orphaned provider network state is removed through
+//! 1. stops every unit still loaded in the `pigloros-attempt-` namespace. A
+//!    unit is the previous runtime's only when its name and `AttemptId` match
+//!    a committed intent; any other unit keeps admission closed. Each unit's
+//!    cgroup is bound from the listing, with the manager's unit-to-cgroup
+//!    mapping checked in both directions, and the unit is stopped with
+//!    bounded grace and escalation, its cgroup observed empty and the unit
+//!    observed unloaded, all within the cleanup's unit phases. A unit with no
+//!    cgroup is proven empty only when it is inactive or failed, since
+//!    systemd removes a cgroup only once it is empty (the owner's reading of
+//!    ADR-087 §3, decision A, 2026-11-10); a failed one is reset, and either
+//!    is then observed unloaded. A unit without a cgroup in any other state
+//!    keeps admission closed;
+//! 2. proves the exact unit of every recorded attempt and temporary write
+//!    absent, including a unit the listing may have hidden;
+//! 3. detaches a root still mounted on a recorded attempt directory. The
+//!    mount is read back through the held directory and detached by
+//!    descriptor only when it is exactly a provider root without submounts,
+//!    on a loop device backed by a provider image, matching the PAI3 record
+//!    if there is one; its mapper and loop generations are then awaited
+//!    absent by the cleanup's release deadline. Anything else is left mounted
+//!    and keeps admission closed;
+//! 4. removes orphaned provider network state through
 //!    [`OrphanNetworkCleanup`], the seam for the #911 enumerate-and-remove
-//!    primitive;
-//! 4. every PAI3 root's recorded loop/dm generations are absent now;
-//! 5. no `MountImage` request of the previous runtime can still attach a
-//!    loop device (owner decision D2). The registry's activation marker
-//!    records the boot and `CLOCK_MONOTONIC` time of the last request, written
-//!    durably before it was sent. mountfsd may still complete a request after
-//!    the client lost its connection, so a request can attach a loop device
-//!    until the activator deadline (60 s) plus a fixed server margin (10 s)
-//!    after it was sent. When the last request was sent on this boot less
-//!    than those 70 s ago, admission stays closed until they have passed.
-//!    Only in that recent-activation case does reconciliation outlast
+//!    primitive, by the overall deadline, so it cannot use up the detach
+//!    budget;
+//! 5. proves every PAI3 root's recorded loop/dm generations absent now;
+//! 6. waits until no `MountImage` request of the previous runtime can still
+//!    attach a loop device (owner decision D2). The registry's activation
+//!    marker records the boot and `CLOCK_MONOTONIC` time of the last request,
+//!    written durably before it was sent. mountfsd may still complete a
+//!    request after the client lost its connection, so a request can attach
+//!    a loop device until the activator deadline (60 s) plus a fixed server
+//!    margin (10 s) after it was sent. When the last request was sent on this
+//!    boot less than those 70 s ago, admission stays closed until they have
+//!    passed. Only in that recent-activation case does reconciliation outlast
 //!    ADR-069's 10 s restart bound, by at most that remaining wait of 70 s;
 //!    the sweep below then has the time the deadline had left. An explicit
 //!    "no request yet" marker, a request of another boot, or one at least
 //!    70 s old needs no wait. A missing marker while a directory stage is
 //!    recorded, which only an altered registry can show, a malformed marker,
-//!    or an unreadable boot ID or clock fails closed.
-//! 6. no loop device is backed by a provider image, swept once after that
-//!    wait. An activation that reached mountfsd but crashed before its PAI3
-//!    record left no recorded generations, so this sweep is what proves its
-//!    devices absent.
+//!    or an unreadable boot ID or clock fails closed;
+//! 7. proves no loop device is backed by a provider image, swept once after
+//!    that wait. An activation that reached mountfsd but crashed before its
+//!    PAI3 record left no recorded generations, so this sweep is what proves
+//!    its devices absent.
 //!
 //! Only then are the unmounted directories removed and each intent deleted
 //! last. That removal is local, bounded filesystem work under the held
 //! registry lock, done after the deadline-bound proofs; the deadline does
-//! not interrupt it. Every recognized pre-launch crash state is covered: a
-//! temporary write, a planned-only intent, a directory created before its
-//! identity extension, and a recorded tree with its root, its root removed but
-//! its attempt directory present, or both removed. A loaded unit, a mounted or unknown
-//! directory, a contradiction or the deadline keeps admission closed and
-//! removes nothing; stopping a surviving unit and detaching a mounted root are
-//! not attempted here, so either keeps admission closed until the remaining
-//! #1200 recovery lands.
+//! not interrupt it. Every recognized crash state is covered: a temporary
+//! write, a planned-only intent, a directory created before its identity
+//! extension, a recorded tree with its root, its root removed but its attempt
+//! directory present, or both removed, a surviving unit and a still-mounted
+//! root. An unknown unit or mount, an unknown directory, a contradiction or
+//! the deadline keeps admission closed. Stopping and detaching act only on
+//! resources positively identified as the previous runtime's, and nothing is
+//! removed from the registry unless every step succeeded.
 
 use std::error::Error;
 use std::future::Future;
 use std::io;
 
+use futures_util::future::join_all;
 use tokio::time::{sleep, timeout_at, Instant};
 
 use crate::{
-    BootInstant, ImageActivationError, PlannedAttemptIntent, SystemdAttemptRecovery,
-    SystemdAttemptRegistryError, SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
-    TransientServiceUnitName,
+    AttemptCleanupDeadlines, AttemptShutdownDeadlines, BootInstant, ImageActivationError,
+    PlannedAttemptIntent, RecordedRootEntry, SystemdAttemptRecovery, SystemdAttemptRegistryError,
+    SystemdAttemptUnitObservation, SystemdAttemptUnitTeardownError, SystemdTransientUnitTransport,
+    SystemdTransientUnitTransportError, TransientServiceUnitName,
 };
 
 /// Enumerates and removes orphaned provider-owned `piglor-*` network state.
@@ -124,15 +145,24 @@ pub enum RestartReconciliationError {
     /// The attempt unit namespace could not be listed.
     #[error("the attempt unit namespace could not be observed")]
     Units(#[source] SystemdTransientUnitTransportError),
-    /// A unit is still loaded in the attempt namespace.
-    #[error("an attempt unit is still loaded: {0:?}")]
+    /// A unit is loaded in the attempt namespace that no committed intent
+    /// records, so it is not positively the previous runtime's.
+    #[error("an unrecorded attempt unit is loaded: {0:?}")]
     SurvivingUnit(TransientServiceUnitName),
+    /// A recorded attempt's surviving unit could not be bound, stopped and
+    /// observed empty and unloaded.
+    #[error("a surviving attempt unit was not stopped")]
+    UnitStop(#[source] SystemdAttemptUnitTeardownError),
     /// A recorded attempt's exact unit was not observed absent in time.
     #[error("a recorded attempt unit was not observed absent")]
     UnitAbsence(#[source] SystemdTransientUnitTransportError),
     /// Orphaned network state could not be removed.
     #[error("orphaned network state could not be removed")]
     Network(#[source] Box<dyn Error + Send + Sync>),
+    /// A root still mounted on a recorded attempt directory was not a
+    /// provider root, or was not detached with its devices observed absent.
+    #[error("a still-mounted attempt root was not released")]
+    Root(#[source] ImageActivationError),
     /// A recorded root's loop/dm generations were not observed absent.
     #[error("a recorded root's devices were not observed absent")]
     Devices(#[source] Option<ImageActivationError>),
@@ -153,20 +183,30 @@ type Reconciled<T> = Result<T, RestartReconciliationError>;
 
 /// Reconcile every previous-runtime attempt within `deadline`.
 ///
+/// `cleanup` bounds the work on surviving resources: a surviving unit's
+/// process shutdown phases and unit absence, then the release of a
+/// still-mounted root. Its phases should end before `deadline`, which bounds
+/// every step; ADR-069 targets 2 s of cleanup within a 10 s restart.
+///
 /// # Errors
-/// Returns the first [`RestartReconciliationError`]. Nothing is removed unless
-/// every unit, network and device observation succeeded first.
+/// Returns the first [`RestartReconciliationError`]. Nothing is removed from
+/// the registry unless every unit, network and device step succeeded first.
 pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
     network: &N,
+    cleanup: AttemptCleanupDeadlines,
     deadline: Instant,
 ) -> Reconciled<ReconciledRestart> {
     reconcile_with(
         transport,
         recovery,
         network,
-        deadline,
+        &Host {
+            transport,
+            detach: crate::RootResourceIdentity::detach_recovered,
+        },
+        (cleanup, deadline),
         (
             crate::RootResourceIdentity::recorded_generations_absent,
             crate::RootResourceIdentity::provider_loops_absent,
@@ -176,33 +216,87 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
     .await
 }
 
+/// The previous runtime's surviving units and mounted roots, behind a port
+/// so that they can be faked without systemd cgroups or kernel mounts.
+trait Survivors: Sync {
+    /// Bind, stop and remove a listed unit of a committed intent.
+    fn stop(
+        &self,
+        unit: &SystemdAttemptUnitObservation,
+        shutdown: AttemptShutdownDeadlines,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<(), SystemdAttemptUnitTeardownError>> + Send;
+
+    /// Detach the root still mounted on a recorded attempt directory, if
+    /// any, and observe its devices absent.
+    fn detach(
+        &self,
+        entry: RecordedRootEntry,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<(), ImageActivationError>> + Send;
+}
+
+/// The host's systemd manager, and its kernel's restart detachment.
+struct Host<'a, D> {
+    transport: &'a SystemdTransientUnitTransport,
+    detach: D,
+}
+
+impl<D, F> Survivors for Host<'_, D>
+where
+    D: Fn(RecordedRootEntry, Instant) -> F + Sync,
+    F: Future<Output = Result<(), ImageActivationError>> + Send,
+{
+    fn stop(
+        &self,
+        unit: &SystemdAttemptUnitObservation,
+        shutdown: AttemptShutdownDeadlines,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<(), SystemdAttemptUnitTeardownError>> + Send {
+        self.transport.stop_listed_unit(unit, shutdown, deadline)
+    }
+
+    fn detach(
+        &self,
+        entry: RecordedRootEntry,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<(), ImageActivationError>> + Send {
+        (self.detach)(entry, deadline)
+    }
+}
+
 /// The recorded loop/dm generations of one root, mapper first.
 type Generations = [((u32, u32), u64); 2];
 
+/// `deadlines` are the surviving-resource cleanup and the overall deadline;
 /// `probes` are the recorded-generation probe, the provider loop sweep and
 /// the boot clock.
-async fn reconcile_with<N, P, F, L, G, C>(
+async fn reconcile_with<N, S, P, F, L, G, C>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
     network: &N,
-    deadline: Instant,
+    survivors: &S,
+    (cleanup, deadline): (AttemptCleanupDeadlines, Instant),
     probes: (P, L, C),
 ) -> Reconciled<ReconciledRestart>
 where
     N: OrphanNetworkCleanup + Sync,
+    S: Survivors,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
     L: FnOnce() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
     C: FnOnce() -> io::Result<BootInstant>,
 {
-    let units = observe_units(transport, deadline).await;
-    let absent = match units {
+    let stopped = stop_units(transport, &recovery, survivors, cleanup, deadline).await;
+    let absent = match stopped {
         Ok(()) => units_absent(transport, &recovery, deadline).await,
         Err(error) => Err(error),
     };
     let cleaned = match absent {
-        Ok(absent) => remove_network(network, deadline).await.map(|()| absent),
+        Ok(absent) => release_survivors(&recovery, network, survivors, cleanup, deadline)
+            .await
+            .map(|()| absent),
         Err(error) => Err(error),
     };
     let released = match cleaned {
@@ -219,20 +313,85 @@ where
     })
 }
 
-async fn observe_units(
+/// Stop every listed unit, each only when a committed intent records it.
+async fn stop_units<S: Survivors>(
     transport: &SystemdTransientUnitTransport,
+    recovery: &SystemdAttemptRecovery,
+    survivors: &S,
+    cleanup: AttemptCleanupDeadlines,
     deadline: Instant,
 ) -> Reconciled<()> {
     let listed = timeout_at(deadline, transport.observe_attempt_units()).await;
-    match listed {
-        Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),
-        Ok(Err(error)) => Err(RestartReconciliationError::Units(error)),
-        Ok(Ok(units)) => units.first().map_or(Ok(()), |unit| {
-            Err(RestartReconciliationError::SurvivingUnit(
-                unit.unit_name().clone(),
-            ))
-        }),
+    let units = match listed {
+        Err(_elapsed) => return Err(RestartReconciliationError::DeadlineElapsed),
+        Ok(Err(error)) => return Err(RestartReconciliationError::Units(error)),
+        Ok(Ok(units)) => units,
+    };
+    if let Some(unrecorded) = units
+        .iter()
+        .find(|unit| !committed(recovery, unit.attempt_id()))
+    {
+        return Err(RestartReconciliationError::SurvivingUnit(
+            unrecorded.unit_name().clone(),
+        ));
     }
+    let stop_by = cleanup.unit_absent().min(deadline);
+    let stopped = join_all(units.iter().map(|unit| {
+        timeout_at(
+            stop_by,
+            survivors.stop(unit, cleanup.shutdown(), cleanup.unit_absent()),
+        )
+    }))
+    .await;
+    let mut stopped = stopped.into_iter();
+    stopped.try_for_each(|stopped| match stopped {
+        Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),
+        Ok(result) => result.map_err(RestartReconciliationError::UnitStop),
+    })
+}
+
+/// Whether a committed intent, not an interrupted write, records `attempt_id`.
+fn committed(recovery: &SystemdAttemptRecovery, attempt_id: [u8; 16]) -> bool {
+    recovery
+        .entries()
+        .iter()
+        .any(|entry| !entry.is_temporary() && entry.attempt_id() == attempt_id)
+}
+
+/// Detach every still-mounted root by the cleanup's release deadline, then
+/// remove orphaned network state by the overall deadline. Each step has its
+/// own bound, so a slow network cleanup cannot use up the detach budget.
+async fn release_survivors<N: OrphanNetworkCleanup + Sync, S: Survivors>(
+    recovery: &SystemdAttemptRecovery,
+    network: &N,
+    survivors: &S,
+    cleanup: AttemptCleanupDeadlines,
+    deadline: Instant,
+) -> Reconciled<()> {
+    match detach_roots(recovery, survivors, cleanup.released().min(deadline)).await {
+        Ok(()) => remove_network(network, deadline).await,
+        Err(error) => Err(error),
+    }
+}
+
+/// Detach every root still mounted on a recorded attempt directory.
+async fn detach_roots<S: Survivors>(
+    recovery: &SystemdAttemptRecovery,
+    survivors: &S,
+    deadline: Instant,
+) -> Reconciled<()> {
+    let entries = recovery.recorded_root_entries()?;
+    let detached = join_all(
+        entries
+            .into_iter()
+            .map(|entry| timeout_at(deadline, survivors.detach(entry, deadline))),
+    )
+    .await;
+    let mut detached = detached.into_iter();
+    detached.try_for_each(|detached| match detached {
+        Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),
+        Ok(result) => result.map_err(RestartReconciliationError::Root),
+    })
 }
 
 async fn units_absent(
