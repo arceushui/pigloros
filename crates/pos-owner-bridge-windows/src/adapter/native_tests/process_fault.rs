@@ -4381,6 +4381,7 @@ fn modeled_environment_obstruction_success() -> EnvironmentObstructionEvidence {
 
 #[test]
 fn modeled_environment_obstruction_verdict_checks_sdk_outcomes() {
+    type Change = fn(&mut EnvironmentObstructionEvidence);
     let success = modeled_environment_obstruction_success();
     assert!(success.validate().is_ok());
     assert!(EnvironmentObstructionEvidence {
@@ -4412,41 +4413,40 @@ fn modeled_environment_obstruction_verdict_checks_sdk_outcomes() {
         ..failed_callback
     };
     assert!(refused.validate().is_ok());
-    type Change = fn(&mut EnvironmentObstructionEvidence);
     let contradictions: [(&str, EnvironmentObstructionEvidence, Change); 12] = [
         ("missing outcome", success, |e| e.outcome = None),
         ("failed success completion", success, |e| {
-            e.completion = Err(())
+            e.completion = Err(());
         }),
         ("false success completion", success, |e| {
-            e.completion = Ok(Some(false))
+            e.completion = Ok(Some(false));
         }),
         ("success without pending", success, |e| {
-            e.opening.driver_pending = false
+            e.opening.driver_pending = false;
         }),
         ("success without blocked admission", success, |e| {
-            e.opening.active_blocked = false
+            e.opening.active_blocked = false;
         }),
         ("unobstructed native failure", failed_callback, |e| {
-            e.obstruct = false
+            e.obstruct = false;
         }),
         ("failure with success completion", failed_callback, |e| {
-            e.completion = Ok(Some(true))
+            e.completion = Ok(Some(true));
         }),
         ("failure without pending", failed_callback, |e| {
-            e.opening.driver_pending = false
+            e.opening.driver_pending = false;
         }),
         ("failure without blocked admission", failed_callback, |e| {
-            e.opening.active_blocked = false
+            e.opening.active_blocked = false;
         }),
         ("unobstructed initiation refusal", refused, |e| {
-            e.obstruct = false
+            e.obstruct = false;
         }),
         ("refusal with completion", refused, |e| {
-            e.completion = Ok(None)
+            e.completion = Ok(None);
         }),
         ("refusal with pending", refused, |e| {
-            e.opening.driver_pending = true
+            e.opening.driver_pending = true;
         }),
     ];
     for (label, mut evidence, change) in contradictions {
@@ -4461,14 +4461,14 @@ fn modeled_environment_obstruction_verdict_requires_retained_custody() {
     let contradictions: [(&str, Change); 9] = [
         ("attempt failed", |e| e.opening.attempt_failed = true),
         ("driver resurrected", |e| {
-            e.retirement.no_resurrection = false
+            e.retirement.no_resurrection = false;
         }),
         ("abandoned admission unblocked", |e| {
-            e.retirement.abandoned_blocked = false
+            e.retirement.abandoned_blocked = false;
         }),
         ("request not wiped", |e| e.wipe.wiped = false),
         ("successful ceremony result", |e| {
-            e.wipe.result_failed = false
+            e.wipe.result_failed = false;
         }),
         ("plan not wiped", |e| e.wipe.plan_wiped = false),
         ("record present", |e| e.record.no_record = false),
