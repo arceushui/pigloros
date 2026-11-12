@@ -584,7 +584,7 @@ mod tests {
                     );
                     let calls_before_retirement = factory.calls.borrow().clone();
                     if success {
-                        assert!(matches!(native.browser_pid(), Ok(42)));
+                        assert_eq!(native.browser_pid(), Ok(42));
                         events.event(NativeEvent::BrowserExited { pid: 42 });
                     }
                     factory.failure.set(None);
@@ -637,7 +637,7 @@ mod tests {
                         Path::new("modeled-folder"),
                     );
                     assert!(setup.is_ok(), "control setup: {setup:?}");
-                    assert!(matches!(native.browser_pid(), Ok(42)));
+                    assert_eq!(native.browser_pid(), Ok(42));
                     let before = factory.calls.borrow().len();
                     factory.failure.set(failure);
                     let result = super::subscribe_control_view(&mut native, &probe);
