@@ -34,7 +34,7 @@ pub const PROBLEM_TYPE_PREFIX: &str = "urn:pigloros:gateway:v1:problem:";
 /// The fixed `detail` of an internal failure; host fault text never leaves the Gateway.
 const INTERNAL_DETAIL: &str = "the Gateway could not complete the request";
 
-/// The closed public failure families of the v1 contract.
+/// The public failure families of this v1 revision; the registry is open and only appends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProblemCodeV1 {
     InvalidRequest,
