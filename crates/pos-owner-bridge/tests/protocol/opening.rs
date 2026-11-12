@@ -677,7 +677,6 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
 
 #[test]
 fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult {
-    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION};
     use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
     use pos_owner_bridge_codec::ControlState;
 
@@ -738,18 +737,8 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 }
                 if !armed {
                     if let Some(receipt) = driver.first_receipt_at() {
-                        let boundary = if budget {
-                            driver.t0() + Duration::from_secs(3)
-                        } else if challenge {
-                            driver.t0() + CHALLENGE_TTL
-                        } else {
-                            receipt + INTERACTION
-                        };
-                        let target = if offset_ms < 0 {
-                            boundary - Duration::from_millis(1)
-                        } else {
-                            boundary + Duration::from_millis(u64::try_from(offset_ms)?)
-                        };
+                        let target =
+                            consumption_target(&driver, receipt, challenge, budget, offset_ms)?;
                         if stage == "read" {
                             ready_target.set(Some(target));
                         } else {
@@ -795,4 +784,28 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
         }
     }
     Ok(())
+}
+
+fn consumption_target(
+    driver: &pos_owner_bridge::ceremony::driver::CeremonyDriver,
+    receipt: Instant,
+    challenge: bool,
+    budget: bool,
+    offset_ms: i64,
+) -> Result<Instant, Box<dyn std::error::Error>> {
+    use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION};
+    let boundary = if budget {
+        driver.t0() + Duration::from_secs(3)
+    } else if challenge {
+        driver.t0() + CHALLENGE_TTL
+    } else {
+        receipt + INTERACTION
+    };
+    if offset_ms < 0 {
+        boundary
+            .checked_sub(Duration::from_millis(1))
+            .ok_or_else(|| "test deadline underflow".into())
+    } else {
+        Ok(boundary + Duration::from_millis(u64::try_from(offset_ms)?))
+    }
 }
