@@ -29,22 +29,30 @@ impl Surface {
             || !crate::Native::process_failure_observations().is_empty()
             || self.native.buffer_close_uncertain()
             || !self.native.preload_fault_owners_retained()
-            || !self.native.window().map_err(|_| ())?.exists
-            || self.native.early_renderer_presence()? != crate::RendererPresence::Unique
+            || !self.native.window().is_ok_and(|window| window.exists)
+            || self.native.early_renderer_presence() != Ok(crate::RendererPresence::Unique)
         {
             return Err(());
         }
-        let browser = self.identity.ok_or(())?;
-        self.verify_fault_environment()?;
-        self.verify_fault_identity(browser)?;
-        let state = crate::ProcessExitState {
-            generation: self.generation.ok_or(())?,
-            record_count: self.store.records().map_err(|_| ())?.len(),
-        };
-        if state.generation != 1 || state.record_count != 1 {
-            return Err(());
-        }
-        Ok(state)
+        self.identity
+            .ok_or(())
+            .and_then(|browser| {
+                self.verify_fault_environment()
+                    .and_then(|()| self.verify_fault_identity(browser))
+            })
+            .and_then(|()| self.generation.ok_or(()))
+            .and_then(|generation| {
+                self.store
+                    .records()
+                    .map(|records| crate::ProcessExitState {
+                        generation,
+                        record_count: records.len(),
+                    })
+                    .map_err(|_| ())
+            })
+            .ok()
+            .filter(|state| state.generation == 1 && state.record_count == 1)
+            .ok_or(())
     }
 
     #[cfg(test)]
@@ -57,8 +65,9 @@ impl Surface {
         if !keeper_held.get() {
             return Err(());
         }
-        self.quarantined_fault_state()?;
-        let browser = self.identity.ok_or(())?;
+        let browser = self
+            .quarantined_fault_state()
+            .and_then(|_| self.identity.ok_or(()))?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {

@@ -650,3 +650,35 @@ fn modeled_posted_snapshots_require_their_distinct_reply_states() -> TestResult 
     }
     finish_posted(fixture)
 }
+
+#[test]
+fn modeled_open_refuses_an_unavailable_browser_identity_until_its_own_exit() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.surface.runtime = Arc::new(UnavailableIdentity(fixture.root.clone()));
+    let failed = spec(40);
+    assert_eq!(
+        fixture
+            .open(&failed)
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(BridgeError::Unavailable(
+            pos_owner_bridge::UnavailableCode::RuntimeIntegrity,
+        ))
+    );
+    assert!(!fixture.surface.idle());
+    assert!(fixture.surface.identity.is_none());
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.factory.calls.borrow().contains(&"close_controller"));
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.exit();
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    assert_eq!(fixture.store.removed_folders(), vec![failed.folder_name]);
+    Ok(())
+}

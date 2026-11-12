@@ -47,8 +47,10 @@ impl Surface {
             return Ok(Poll::Pending);
         };
         self.ownership = Ownership::Environment;
-        completion.map_err(unavailable)?;
-        let folder = self.folder.as_ref().ok_or_else(|| unavailable(()))?;
+        let folder = completion
+            .ok()
+            .and(self.folder.as_ref())
+            .ok_or_else(|| unavailable(()))?;
         self.admit_environment(&self.root.join(folder))?;
         self.ownership = Ownership::CreatingController;
         self.native.create_controller().map_err(unavailable)?;
@@ -105,7 +107,7 @@ impl Surface {
         Ok(())
     }
 
-    fn activate_controller(&mut self) -> Result<bool> {
+    fn activate_controller(&mut self) -> Result<(std::time::Instant, bool)> {
         let deadline = (self.clock.now() + Duration::from_secs(1)).min(self.deadline);
         self.foreground_deadline = Some(deadline);
         self.native.show_window().map_err(unavailable)?;
@@ -122,7 +124,7 @@ impl Surface {
             let _duration = crate::Native::readiness_span("focus");
             self.native.focus_controller().map_err(unavailable)?;
         }
-        Ok(timely_foreground)
+        Ok((deadline, timely_foreground))
     }
 
     pub(super) fn navigate_native(&mut self) -> Result<Poll<pos_owner_bridge::NavigationId>> {
@@ -135,17 +137,17 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         if !self.navigation_issued {
-            let mut timely_foreground = false;
-            if self.foreground_deadline.is_none() {
+            let (deadline, timely_foreground) = if let Some(deadline) = self.foreground_deadline {
+                (deadline, false)
+            } else {
                 match self.activate_controller() {
-                    Ok(observed) => timely_foreground = observed,
+                    Ok(activated) => activated,
                     Err(error) => {
                         self.activation_error = Some(error);
                         return Err(error);
                     }
                 }
-            }
-            let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
+            };
             if timely_foreground {
                 self.before_deadline()?;
             } else {
