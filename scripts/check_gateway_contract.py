@@ -44,10 +44,11 @@ fixtures disagree:
    everything it accepted (no new required member or parameter, no narrowed type, enumeration
    or bound); a response guarantees everything it guaranteed (no removed or no longer required
    member, no widened type, enumeration or bound); an added member is optional; the `Problem`
-   `code` enumeration is the open problem registry, which may gain codes but never lose one (a
-   client handles an unknown code by its HTTP status and `retryable`); schema identities and the declared handling of unknown members are unchanged; a frozen response
-   header stays; a frozen security scheme is unchanged; a frozen served limit moves only in its
-   direction; and every frozen example under `compatibility/examples/` is still valid. Every
+   `code` enumeration is the open problem registry, to which codes are only appended (a client
+   handles an unknown code by its HTTP status and `retryable`); schema identities and the
+   declared handling of unknown members are unchanged; a frozen response header stays; a frozen
+   security scheme is unchanged; a frozen served limit moves only in its direction; and every
+   frozen example under `compatibility/examples/` is still valid. Every
    served operation is frozen, and parameters are declared per operation with a `schema`.
 
 `--append-only <git-ref>` also requires `compatibility/` to have only gained entries since the
@@ -758,7 +759,8 @@ class Compatibility:
     A request schema must keep accepting every value it accepted; a response schema must keep
     guaranteeing every property it guaranteed. A schema reached from both directions therefore
     keeps its constraints exactly. Members may be added only as optional members. The one
-    response enumeration that may widen is the `Problem` `code` of the open problem registry.
+    response enumeration that may widen is the `Problem` `code` of the open problem registry,
+    and only by appended codes.
     """
 
     def __init__(self, baseline: Contract, current: Contract) -> None:
@@ -929,15 +931,18 @@ class Compatibility:
             raise ContractError(f"{where}: the response member {name} is no longer guaranteed")
 
     def problem_code(self, where: str, base: dict, current: dict, direction: str) -> None:
-        """`Problem.code` is the open problem registry: it may gain codes, never lose one.
+        """`Problem.code` is the open problem registry: new codes are only appended to it.
 
-        A client handles an unknown code by its HTTP status and `retryable`. Every keyword other
-        than the enumeration is compared as usual; the registry check keeps each frozen code's
-        type, title and statuses.
+        The frozen codes stay in their frozen order, so the baseline `--freeze` writes keeps the
+        order of the description. A client handles an unknown code by its HTTP status and
+        `retryable`. Every keyword other than the enumeration is compared as usual; the registry
+        check keeps each frozen code's type, title and statuses.
         """
-        after = current.get("enum")
-        if not isinstance(after, list) or any(code not in after for code in base["enum"]):
-            raise ContractError(f"{where}: a frozen problem code was removed")
+        before, after = base["enum"], current.get("enum")
+        if not isinstance(after, list) or after[: len(before)] != before:
+            raise ContractError(
+                f"{where}: a frozen problem code was removed or moved; new codes are appended"
+            )
         self.schema(where, without_enum(base), without_enum(current), direction)
 
 
@@ -983,6 +988,9 @@ def check_compatibility(
             raise ContractError(f"the frozen problem type {entry['code']} was removed or renamed")
         if not set(entry["statuses"]) <= set(now["statuses"]):
             raise ContractError(f"a frozen status of the problem type {entry['code']} was removed")
+    frozen_codes = [entry["code"] for entry in baseline["problem_types"]]  # type: ignore[index]
+    if list(current_types)[: len(frozen_codes)] != frozen_codes:
+        raise ContractError("a frozen problem type was moved; new problem types are appended")
     schemes = contract.document["components"].get("securitySchemes", {})
     frozen_schemes = baseline["components"].get("securitySchemes", {})  # type: ignore[index]
     for name, scheme in frozen_schemes.items():

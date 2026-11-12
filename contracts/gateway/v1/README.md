@@ -106,7 +106,7 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    a later v1 revision may add optional ones.
 5. **Additive changes only within v1.** Within v1 a change may add an optional member, an
    optional parameter, a response, a response header or an operation, or accept more request
-   values, and may add a problem type to `problem-types.json` (a new `Problem` `code`). The
+   values, and may append a problem type to `problem-types.json` (a new `Problem` `code`). The
    problem registry is open: a client MUST handle a `code` it does not know by its HTTP status
    and `retryable`, never fail on it, and MUST NOT assume the registry it was built against is
    complete. A registered `code` is never removed or renamed, its `type` and `title` never
@@ -129,16 +129,16 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
 `scripts/check_gateway_contract.py` enforces rules 1, 4 (the declaration), 5 and 6: it compares
 the contract with the frozen baseline (requests must keep accepting what they accepted, responses
 must keep guaranteeing what they guaranteed, a schema reached from both keeps its constraints
-exactly, and the `Problem` `code` enumeration may only gain codes) and validates the frozen
-examples, so a breaking change to a v1 schema fails CI. CI runs it with
+exactly, and new codes are only appended to the `Problem` `code` enumeration) and validates the
+frozen examples, so a breaking change to a v1 schema fails CI. CI runs it with
 `--append-only origin/main`, which also fails when `compatibility/` lost or changed anything
 since the merge base with `main`: a pull request cannot loosen the baseline together with the
 contract. `servers` and `info.version` are not frozen: a client must not hard-code the server
-URL, and the description's revision label is not part of the wire contract. The golden examples `unsupported-version-api-major`, `not-found-unrouted-path`,
-`unknown-required-schema-event-type`, `unsupported-version-legacy-event-type`,
-`draft-scenario-room-unsupported-schema-version`, `draft-decision-preview-incompatible-profile`,
-`draft-replay-incompatible-profile` and `compatible-unknown-optional-member-ignored` are the
-negotiation and unknown-member cases.
+URL, and the description's revision label is not part of the wire contract. The golden examples
+`unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
+`unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
+`draft-decision-preview-incompatible-profile`, `draft-replay-incompatible-profile` and
+`compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
 
 ## Changing the contract
 

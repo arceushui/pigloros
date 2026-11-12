@@ -783,6 +783,25 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "revoked was removed or renamed"):
             checker.check_compatibility(contract(document=document, registry=registry))
 
+    def test_a_new_problem_code_is_appended_never_inserted_or_reordered(self) -> None:
+        def inserted(codes: list) -> None:
+            codes.insert(3, codes.pop())
+
+        def reordered(codes: list) -> None:
+            codes[0], codes[1] = codes[1], codes[0]
+
+        for move in (inserted, reordered):
+            document, registry = with_problem_code("quota-exhausted")
+            move(document["components"]["schemas"]["Problem"]["properties"]["code"]["enum"])
+            # The registry keeps the frozen order, so only the enumeration rule can reject it.
+            with self.assertRaisesRegex(checker.ContractError, "code was removed or moved"):
+                checker.check_compatibility(contract(document=document, registry=registry))
+            move(registry["problem_types"])
+            current = contract(document=document, registry=registry)
+            checker.check_registry(current)
+            with self.assertRaisesRegex(checker.ContractError, "problem type was moved"):
+                checker.check_compatibility(current)
+
     def test_only_the_problem_code_enumeration_may_widen_in_a_response(self) -> None:
         document, registry = with_problem_code("quota-exhausted")
         code = document["components"]["schemas"]["Problem"]["properties"]["code"]
