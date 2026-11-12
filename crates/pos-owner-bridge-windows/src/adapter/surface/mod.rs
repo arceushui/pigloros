@@ -1268,33 +1268,23 @@ impl OwnerWebSurface for Surface {
     }
 
     fn reply_load_state(&self) -> Result<u32> {
+        let state = self.native.load_state().map_err(unavailable);
         #[cfg(test)]
-        {
-            let state = self.native.load_state().map_err(unavailable);
-            if matches!(state.as_ref(), Ok(value) if *value == ControlState::Releasing as u32) {
-                self.readiness_timing.releasing();
-            }
-            state
+        if matches!(state.as_ref(), Ok(value) if *value == ControlState::Releasing as u32) {
+            self.readiness_timing.releasing();
         }
-        #[cfg(not(test))]
-        self.native.load_state().map_err(unavailable)
+        state
     }
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool> {
-        #[cfg(test)]
-        {
-            let result = self
-                .native
-                .compare_exchange(current, new)
-                .map_err(unavailable);
-            if new == ControlState::ReleaseRequested as u32 && matches!(result.as_ref(), Ok(true)) {
-                self.readiness_timing.cas();
-            }
-            result
-        }
-        #[cfg(not(test))]
-        self.native
+        let result = self
+            .native
             .compare_exchange(current, new)
-            .map_err(unavailable)
+            .map_err(unavailable);
+        #[cfg(test)]
+        if new == ControlState::ReleaseRequested as u32 && matches!(result.as_ref(), Ok(true)) {
+            self.readiness_timing.cas();
+        }
+        result
     }
     fn reply_copy(&self, out: &mut ReplyImage) -> Result<()> {
         self.native.copy_reply(out).map_err(unavailable)
