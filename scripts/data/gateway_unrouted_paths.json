@@ -1,0 +1,16 @@
+{
+  "$comment": "The answer to a request no Gateway route serves, by request path (#1314). Shared by the Rust fallback test (apps/piglor-gateway/src/problem.rs) and scripts/test_check_gateway_contract.py so that the Gateway and the contract checker cannot disagree.",
+  "cases": [
+    {"path": "/v2", "code": "unsupported-version", "status": 400},
+    {"path": "/v2/timelines", "code": "unsupported-version", "status": 400},
+    {"path": "/v01/timelines", "code": "unsupported-version", "status": 400},
+    {"path": "/v10/x/y", "code": "unsupported-version", "status": 400},
+    {"path": "/v1", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/v1/no-such-route", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/v", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/v/x", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/vault", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/v2x/y", "code": "not-found-or-unavailable", "status": 404},
+    {"path": "/", "code": "not-found-or-unavailable", "status": 404}
+  ]
+}
