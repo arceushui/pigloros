@@ -353,9 +353,7 @@ mod model_tests {
     use pos_owner_bridge::{CleanupStore as _, SystemClock};
     use pos_owner_bridge_codec::CeremonyId;
 
-    use super::{
-        readiness, Fixture, SharedLoopback, Surface, TestResult, Trace, WindowsCleanupStore,
-    };
+    use super::{readiness, Fixture, SharedLoopback, Surface, Trace, WindowsCleanupStore};
     use crate::adapter::native_tests::FixtureRoot;
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::adapter::surface::tests::Runtime;
