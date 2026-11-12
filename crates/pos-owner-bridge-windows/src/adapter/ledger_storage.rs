@@ -441,6 +441,36 @@ mod native_tests {
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
         refuse_changed_ledger(&guard, ledger, base)?;
+        refuse_directory_swap_during_commit(&guard, base)?;
+        Ok(())
+    }
+
+    fn refuse_directory_swap_during_commit(
+        guard: &WindowsSubjectEncryptorLock,
+        base: &Path,
+    ) -> TestResult {
+        let ledger = guard.open_nonce_ledger()?;
+        ledger.replace_nonce_ledger_bytes(b"original directory")?;
+        let path = base.join("PiglorOS");
+        let moved = base.join("moved-during-commit");
+        let result = ledger.replace_observing(b"staged candidate", |stage| {
+            if stage == CommitStage::FileSynced {
+                fs::rename(&path, &moved).map_err(|_| ())?;
+                crate::create_private_directory(&path).map_err(|_| ())?;
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(()));
+        assert_eq!(fs::read(moved.join(LEDGER))?, b"original directory");
+        assert_eq!(fs::read(moved.join(TEMPORARY))?, b"staged candidate");
+        assert_eq!(fs::read_dir(&path)?.count(), 0);
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        drop(ledger);
+        fs::remove_dir(&path)?;
+        fs::rename(&moved, &path)?;
+        let recovered = guard.open_nonce_ledger()?;
+        assert_eq!(recovered.read_nonce_ledger_bytes()?, b"original directory");
+        assert!(!path.join(TEMPORARY).exists());
         Ok(())
     }
 
