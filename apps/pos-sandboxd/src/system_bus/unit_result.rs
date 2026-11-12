@@ -11,7 +11,7 @@ const CLD_KILLED: i32 = 2;
 const CLD_DUMPED: i32 = 3;
 /// The highest Linux signal number, including real-time signals.
 const MAX_SIGNAL: u8 = 64;
-/// `SIGXFSZ` on the supported Linux architectures (x86-64 and AArch64).
+/// `SIGXFSZ` on the supported Linux architectures (x86-64 and 64-bit Arm).
 const SIGXFSZ: u8 = 25;
 
 /// One closed systemd service `Result` value the provider can classify.
