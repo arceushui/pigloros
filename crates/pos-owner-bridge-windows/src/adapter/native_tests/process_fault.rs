@@ -345,8 +345,16 @@ fn native_zeroing_observed(observations: &[NativeZeroObservation]) -> bool {
         && reply.header_unchanged == Some(true)
 }
 
+/// Require the reply to have held nonzero data before the observed wipe.
+fn nonzero_reply_zeroing_observed(observations: &[NativeZeroObservation]) -> bool {
+    native_zeroing_observed(observations)
+        && observations
+            .get(1)
+            .is_some_and(|reply| reply.before_nonzero == Some(true))
+}
+
 #[test]
-fn native_zeroing_evidence_rejects_missing_or_changed_readback() {
+fn modeled_native_zeroing_evidence_rejects_missing_or_changed_readback() {
     let request = NativeZeroObservation {
         slot: BufferSlot::Request,
         before_nonzero: Some(true),
@@ -362,6 +370,13 @@ fn native_zeroing_evidence_rejects_missing_or_changed_readback() {
         header_unchanged: Some(true),
     };
     assert!(native_zeroing_observed(&[request, reply]));
+    assert!(!nonzero_reply_zeroing_observed(&[request, reply]));
+    let mut nonzero_reply = reply;
+    nonzero_reply.before_nonzero = Some(true);
+    assert!(nonzero_reply_zeroing_observed(&[request, nonzero_reply]));
+    nonzero_reply.zeroed = Some(false);
+    assert!(!nonzero_reply_zeroing_observed(&[request, nonzero_reply]));
+    assert!(!nonzero_reply_zeroing_observed(&[request]));
     assert!(!native_zeroing_observed(&[request]));
     for bad in [None, Some(false)] {
         let mut changed_request = request;
@@ -1378,13 +1393,17 @@ impl Fixture {
     }
 }
 
+struct RecordlessWipe {
+    slot: bool,
+    plan_if_quarantined: bool,
+}
+
 /// Verdict over observations captured before ordinary recordless retirement.
 struct RecordlessVerdict<'a> {
     inject: bool,
     evidence_complete: bool,
     result_error: Option<BridgeError>,
-    slot_wiped: bool,
-    plan_wiped_if_quarantined: bool,
+    wipe: RecordlessWipe,
     failures: &'a [Option<bool>],
 }
 
@@ -1393,7 +1412,7 @@ impl RecordlessVerdict<'_> {
         if !self.evidence_complete || self.result_error.is_none() {
             return Err("recordless evidence incomplete".into());
         }
-        if !self.slot_wiped || !self.plan_wiped_if_quarantined {
+        if !self.wipe.slot || !self.wipe.plan_if_quarantined {
             return Err(
                 "recordless ceremony secrets were not wiped at their required boundary".into(),
             );
@@ -1412,8 +1431,10 @@ fn modeled_recordless_verdict_requires_evidence_wipe_and_control_absence() {
         inject: false,
         evidence_complete: true,
         result_error: Some(error),
-        slot_wiped: true,
-        plan_wiped_if_quarantined: true,
+        wipe: RecordlessWipe {
+            slot: true,
+            plan_if_quarantined: true,
+        },
         failures: &[],
     };
     assert!(evidence.validate().is_ok());
@@ -1426,12 +1447,12 @@ fn modeled_recordless_verdict_requires_evidence_wipe_and_control_absence() {
     evidence.result_error = None;
     assert!(evidence.validate().is_err());
     evidence.result_error = Some(error);
-    evidence.slot_wiped = false;
+    evidence.wipe.slot = false;
     assert!(evidence.validate().is_err());
-    evidence.slot_wiped = true;
-    evidence.plan_wiped_if_quarantined = false;
+    evidence.wipe.slot = true;
+    evidence.wipe.plan_if_quarantined = false;
     assert!(evidence.validate().is_err());
-    evidence.plan_wiped_if_quarantined = true;
+    evidence.wipe.plan_if_quarantined = true;
     evidence.failures = &[Some(true)];
     assert_eq!(
         evidence.validate().err().map(|e| e.to_string()).as_deref(),
@@ -1471,8 +1492,10 @@ fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) ->
         inject,
         evidence_complete,
         result_error,
-        slot_wiped,
-        plan_wiped_if_quarantined,
+        wipe: RecordlessWipe {
+            slot: slot_wiped,
+            plan_if_quarantined: plan_wiped_if_quarantined,
+        },
         failures: &failures,
     }
     .validate()
@@ -1752,10 +1775,7 @@ fn run_success_releasing(
     let reached = fixture.reached;
     let complete = fixture.evidence_complete;
     let observations = crate::Native::take_native_zero_observations();
-    let native_zeroed = native_zeroing_observed(&observations)
-        && observations
-            .get(1)
-            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     let error = result.as_ref().err().copied();
     let blocked = if error.is_some() {
         fixture.handle.is_some()
@@ -2007,10 +2027,7 @@ fn run_success_exit(
     let reached = fixture.exit_reached;
     let complete = fixture.evidence_complete;
     let observations = crate::Native::take_native_zero_observations();
-    let native_zeroed = native_zeroing_observed(&observations)
-        && observations
-            .get(1)
-            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     fixture.retire(driver, result, None)?;
     let actual_fault =
         inject && reached.is_some_and(|state| matches!(state, ExitBoundary::ActiveStatus(_)));
@@ -2051,10 +2068,7 @@ fn native_exit_cutpoint_uses_exit_window_after_fixture_readiness_ceiling() -> Te
     let complete = fixture.evidence_complete;
     let verified = result.is_ok() && has_synthetic_success_prf(&driver) && driver.request_clear();
     let observations = crate::Native::take_native_zero_observations();
-    let native_zeroed = native_zeroing_observed(&observations)
-        && observations
-            .get(1)
-            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     fixture.retire(driver, result, None)?;
     root.remove()?;
     if let Some(error) = failure {
@@ -2910,10 +2924,7 @@ fn run_posted_ready(
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let state = fixture.reached;
     let observations = crate::Native::take_native_zero_observations();
-    let native_zeroed = native_zeroing_observed(&observations)
-        && observations
-            .get(1)
-            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     fixture.finish_failed_case(
         driver,
         result,
@@ -3377,10 +3388,7 @@ fn run_consuming(
     let complete = fixture.evidence_complete;
     let state = fixture.reached;
     let observations = crate::Native::take_native_zero_observations();
-    let native_zeroed = native_zeroing_observed(&observations)
-        && observations
-            .get(1)
-            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let native_zeroed = nonzero_reply_zeroing_observed(&observations);
     fixture.retire(driver, result, None)?;
     check_final_process_failures(inject.then_some(target))?;
     if let Some(error) = failure {

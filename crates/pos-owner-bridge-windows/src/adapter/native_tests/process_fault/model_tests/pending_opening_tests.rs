@@ -476,3 +476,54 @@ fn modeled_recordless_observer_refuses_untrusted_exit_evidence() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn modeled_opening_first_refuses_expiry_and_unavailable_fault_authority() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model, _clock) = pending(&root)?;
+    fixture.handle = None;
+    fixture.deadline = Instant::now();
+    assert_eq!(
+        fixture
+            .opening_first_browser()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("opening browser cutpoint was not reached")
+    );
+    assert!(fixture.surface.pending_opening_owners_retained());
+    fixture.deadline = Instant::now() + Duration::from_secs(5);
+    let (browser, mark) = fixture.opening_first_browser()?;
+    assert_eq!(browser, BROWSER);
+    assert_eq!(mark, FIRST);
+    assert_eq!(
+        fixture
+            .inject_opening_first_browser(browser, mark)
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("pending-opening browser fault refused")
+    );
+    assert!(fixture.handle.is_none());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.pending_opening_owners_retained());
+    retire(root, fixture, &model)
+}
+
+#[test]
+fn modeled_opening_first_rejects_an_unrelated_cutpoint() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model, _clock) = pending(&root)?;
+    fixture.handle = None;
+    let result = fixture.inject_opening_first_browser(BROWSER, ProcessFaultMark::OwnBrowserExited);
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some("unexpected opening fault cutpoint")
+    );
+    assert!(fixture.handle.is_none());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.pending_opening_owners_retained());
+    retire(root, fixture, &model)
+}
