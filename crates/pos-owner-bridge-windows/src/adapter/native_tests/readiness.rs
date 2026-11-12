@@ -508,7 +508,7 @@ mod tests {
                                     assert!(store
                                         .records()
                                         .is_ok_and(|records| records.is_empty()));
-                                    retained_driver.replace(Some(driver));
+                                    assert!(retained_driver.replace(Some(driver)).is_none());
                                 });
                             assert!(result.is_ok(), "driver creation: {result:?}");
                             drop(surface);
