@@ -1605,7 +1605,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '2b092ee4205c42c7b263325193d885247376560436f180044c179965772e43fc',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '0669c03257c31be00fa41c224b3031eeaeccaab4936cbbb7eec4006ad5742fd8',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'bd6ce6cae654ee04b191e8486c0b173a6c7eb41b1e2dfc29d91f3e4f14d99cca',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'bdc8e19967188b9a5808ce01d9925e54e009137de80d14e34dada2a6d4402e9d',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': '376ef0696c53fd5dbef774f6a2573ea251f4db85b61222d7e4cf20662506945b',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '26d88ce695ea245a8666fef56cb023c0c31e4f6943c5aaf8c97ffd03fe6c7c3e',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '06c9c91606a4500a0ade936cb0b3292c14853128671c88df6e1781e7bbc61fe0',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '29ea47f5ebe24db94d0d8104b2bb13e8338743c7411db543f00cd350d2fd22df',
