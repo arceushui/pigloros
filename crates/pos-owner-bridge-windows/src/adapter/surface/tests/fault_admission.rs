@@ -11,8 +11,10 @@ use pos_owner_bridge::{
     BridgeError, CleanupStore, OwnerWebSurface, ProcessIdentity, UnavailableCode,
 };
 
-use super::{spec, Creation, Fixture, RuntimeAdmission, TestResult};
-use crate::{EventSink, FaultSeal, NativeEvent, ProcessFaultMark};
+use super::fault_states::{change_identity, finish_posted, posted_fixture};
+use super::{spec, Creation, Fixture, Runtime, RuntimeAdmission, Surface, TestResult};
+use crate::{EventSink, FaultSeal, NativeEvent, ProcessFaultMark, ProcessFaultTarget, RetryPoint};
+use pos_owner_bridge_codec::ControlState;
 
 fn pending_fixture() -> Result<(Fixture, ProcessIdentity), Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new(Creation::Pending)?;
@@ -283,4 +285,121 @@ fn modeled_pending_fault_expiry_is_observed_without_a_fault_handle() -> TestResu
     assert!(fixture.surface.pending_opening_owners_retained());
     fixture.assert_no_ceremony_data();
     retire_pending(&mut fixture)
+}
+
+#[derive(Clone, Copy)]
+enum PostedInjection {
+    Receipt,
+    Empty,
+    Writing,
+    Ready,
+    Retry,
+    Consuming,
+    Releasing,
+}
+
+impl PostedInjection {
+    fn state(self) -> ControlState {
+        match self {
+            Self::Receipt => ControlState::Received,
+            Self::Empty | Self::Retry => ControlState::Empty,
+            Self::Writing => ControlState::Writing,
+            Self::Ready => ControlState::Ready,
+            Self::Consuming => ControlState::Consuming,
+            Self::Releasing => ControlState::ReleaseRequested,
+        }
+    }
+
+    fn generation(self) -> u32 {
+        if matches!(self, Self::Retry) {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn invoke(
+        self,
+        surface: &Surface,
+        deadline: std::time::Instant,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        let seal = crate::FaultSeal {
+            trace: std::rc::Rc::default(),
+            deadline,
+        };
+        let target = ProcessFaultTarget::Browser;
+        match self {
+            Self::Receipt => surface.inject_posted_fault(target, seal),
+            Self::Empty => surface.inject_posted_empty_fault(target, seal),
+            Self::Writing => surface.inject_posted_writing_fault(target, seal),
+            Self::Ready => surface.inject_posted_ready_fault(target, seal),
+            Self::Retry => surface.inject_posted_retry_fault(target, RetryPoint::Second, seal),
+            Self::Consuming => surface.inject_posted_consuming_fault(target, seal),
+            Self::Releasing => surface.inject_releasing_fault(target, seal),
+        }
+    }
+}
+
+fn spy_calls(fixture: &Fixture) -> Vec<&'static str> {
+    fixture
+        .factory
+        .calls
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|call| matches!(*call, "fault_valid" | "fault_invalid"))
+        .collect()
+}
+
+#[test]
+fn modeled_posted_injections_validate_state_generation_identity_and_seal() -> TestResult {
+    for point in [
+        PostedInjection::Receipt,
+        PostedInjection::Empty,
+        PostedInjection::Writing,
+        PostedInjection::Ready,
+        PostedInjection::Retry,
+        PostedInjection::Consuming,
+        PostedInjection::Releasing,
+    ] {
+        let mut fixture = posted_fixture(point.generation())?;
+        fixture.factory.state.set(point.state() as u32);
+        let future = || std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid"]);
+        assert!(point
+            .invoke(&fixture.surface, std::time::Instant::now())
+            .is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        for wrong in [
+            u32::MAX,
+            if point.state() == ControlState::Ready {
+                ControlState::Empty as u32
+            } else {
+                ControlState::Ready as u32
+            },
+        ] {
+            fixture.factory.state.set(wrong);
+            assert!(point.invoke(&fixture.surface, future()).is_err());
+            assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        }
+        fixture.factory.state.set(point.state() as u32);
+        change_identity(&mut fixture, 0);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert_eq!(spy_calls(&fixture), ["fault_valid", "fault_invalid"]);
+        assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+        assert!(!fixture.surface.idle());
+        fixture.surface.runtime = Arc::new(Runtime(fixture.root.clone()));
+        finish_posted(fixture)?;
+
+        let wrong_generation = if point.generation() == 1 { 2 } else { 1 };
+        let fixture = posted_fixture(wrong_generation)?;
+        fixture.factory.state.set(point.state() as u32);
+        assert!(point.invoke(&fixture.surface, future()).is_err());
+        assert!(spy_calls(&fixture).is_empty());
+        assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+        assert!(!fixture.surface.idle());
+        finish_posted(fixture)?;
+    }
+    Ok(())
 }
