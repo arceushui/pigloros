@@ -650,6 +650,58 @@ mod pending_candidate_tests {
     use pos_owner_bridge_codec::ImagePathSha256;
 
     #[test]
+    fn empty_native_session_refuses_operations_and_allows_ordered_cleanup() {
+        use crate::{BoolProperty, BufferSlot, NativeFactory};
+        use pos_owner_bridge::ReplyImage;
+        use pos_owner_bridge_codec::CeremonyKind;
+
+        let result = super::Factory::new().and_then(|factory| {
+            factory.session().map(|mut session| {
+                let closed = Some(super::closed());
+                assert_eq!(session.window().err(), closed);
+                assert_eq!(session.resize_window(480, 640, 96).err(), closed);
+                assert_eq!(session.show_window().err(), closed);
+                assert_eq!(session.fit_controller().err(), closed);
+                assert_eq!(session.focus_controller().err(), closed);
+                assert_eq!(session.environment().err(), closed);
+                assert_eq!(session.create_controller().err(), closed);
+                assert_eq!(session.has_controller(), Ok(false));
+                assert_eq!(session.browser_pid().err(), closed);
+                assert_eq!(session.require_shared_interfaces().err(), closed);
+                assert_eq!(session.set_bool(BoolProperty::Script, true).err(), closed);
+                assert_eq!(session.get_bool(BoolProperty::Script).err(), closed);
+                assert_eq!(session.navigate_owner().err(), closed);
+                assert_eq!(session.source().err(), closed);
+                assert_eq!(
+                    session
+                        .create_buffers(CeremonyKind::Create, &[], &[0; 64])
+                        .err(),
+                    closed
+                );
+                assert_eq!(session.post(BufferSlot::Request).err(), closed);
+                assert_eq!(session.post(BufferSlot::Reply).err(), closed);
+                assert_eq!(session.load_state().err(), closed);
+                assert_eq!(session.compare_exchange(0, 1).err(), closed);
+                let mut reply = ReplyImage::zeroed();
+                reply.as_mut_bytes()[0] = 0x5a;
+                assert_eq!(session.copy_reply(&mut reply).err(), closed);
+                assert_eq!(reply.as_bytes()[0], 0x5a);
+                assert!(session.environment_completion().is_none());
+                assert!(session.controller_completion().is_none());
+                assert!(!session.pending());
+                assert!(!session.buffer_close_uncertain());
+                assert_eq!(session.close_buffers(), Ok(()));
+                assert_eq!(session.unsubscribe_view(), Ok(()));
+                assert_eq!(session.close_controller(), Ok(()));
+                assert_eq!(session.unsubscribe_exit(), Ok(()));
+                assert_eq!(session.drop_environment(), Ok(()));
+                assert_eq!(session.destroy_window(), Ok(()));
+            })
+        });
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
     fn modeled_owned_browser_check_refuses_early_without_extra_reads() {
         for (owners, pid, expected_pid, result, expected_calls) in [
             (false, Ok(7), 7, Err(()), &["owners"][..]),

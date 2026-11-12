@@ -154,9 +154,7 @@ fn candidates(
     let mut count = 0;
     // SAFETY: the collection is live and count is a unique output.
     unsafe { collection.Count(&raw mut count) }.map_err(|_| ())?;
-    if count > 64 {
-        return Err(());
-    }
+    validate_candidate_count(count)?;
     let mut entries = Vec::new();
     for index in 0..count {
         // SAFETY: index is within the checked collection count on the creating STA.
@@ -167,13 +165,29 @@ fn candidates(
         unsafe { info.ProcessId(&raw mut pid) }.map_err(|_| ())?;
         // SAFETY: live item and initialized unique kind output.
         unsafe { info.Kind(&raw mut kind) }.map_err(|_| ())?;
-        let pid = u32::try_from(pid).ok().filter(|pid| *pid != 0).ok_or(())?;
-        if entries.iter().any(|(existing, _)| *existing == pid) {
-            return Err(());
-        }
-        entries.push((pid, kind));
+        append_candidate(&mut entries, pid, kind)?;
     }
     Ok(entries)
+}
+
+fn validate_candidate_count(count: u32) -> Result<(), ()> {
+    if count > 64 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn append_candidate(
+    entries: &mut Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>,
+    pid: i32,
+    kind: COREWEBVIEW2_PROCESS_KIND,
+) -> Result<(), ()> {
+    let pid = u32::try_from(pid).ok().filter(|pid| *pid != 0).ok_or(())?;
+    if entries.iter().any(|(existing, _)| *existing == pid) {
+        return Err(());
+    }
+    entries.push((pid, kind));
+    Ok(())
 }
 
 fn select_optional(

@@ -8,9 +8,9 @@ use pos_owner_bridge::ProcessIdentity;
 use pos_owner_bridge_codec::ImagePathSha256;
 
 use super::{
-    browser_candidate_from_observations, renderer_presence_from_observations,
-    verified_exit_observation, COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_BROWSER,
-    COREWEBVIEW2_PROCESS_KIND_RENDERER,
+    append_candidate, browser_candidate_from_observations, renderer_presence_from_observations,
+    validate_candidate_count, verified_exit_observation, COREWEBVIEW2_PROCESS_KIND,
+    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
 
 type IdentityObservation = Result<Option<(ProcessIdentity, PathBuf)>, ()>;
@@ -66,6 +66,34 @@ fn renderer_image() -> (ProcessIdentity, PathBuf) {
     let mut renderer = identity();
     renderer.browser_pid = 12;
     (renderer, PathBuf::from("owned-browser"))
+}
+
+#[test]
+fn modeled_process_collection_refuses_invalid_counts_and_duplicate_or_invalid_pids() {
+    for count in [0, 1, 64] {
+        assert_eq!(validate_candidate_count(count), Ok(()));
+    }
+    for count in [65, u32::MAX] {
+        assert_eq!(validate_candidate_count(count), Err(()));
+    }
+    let mut entries = Vec::new();
+    assert_eq!(
+        append_candidate(&mut entries, 11, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+        Ok(())
+    );
+    let first = entries.clone();
+    for pid in [0, -1, i32::MIN, 11] {
+        assert_eq!(
+            append_candidate(&mut entries, pid, COREWEBVIEW2_PROCESS_KIND_RENDERER),
+            Err(())
+        );
+        assert_eq!(entries, first);
+    }
+    assert_eq!(
+        append_candidate(&mut entries, 12, COREWEBVIEW2_PROCESS_KIND_RENDERER),
+        Ok(())
+    );
+    assert_eq!(entries, [browser_entry(), renderer_entry()]);
 }
 
 #[test]
