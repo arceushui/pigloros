@@ -375,94 +375,131 @@ mod tests {
     #[test]
     fn modeled_list_refusals_retain_quarantined_owner_until_cleanup() {
         let _port = crate::Native::fixed_port_fixture();
-        let root = super::super::FixtureRoot::new().expect("create private root");
-        let (mut fixture, model) =
-            super::super::model_tests::fixture(&root).expect("create modeled fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let fail_at = Arc::new(AtomicUsize::new(0));
-        let store = super::super::WindowsCleanupStore::new(ListRefusal {
-            store: fixture.store.clone(),
-            calls: Arc::clone(&calls),
-            fail_at: Arc::clone(&fail_at),
+        let ran_root = super::super::FixtureRoot::new().ok().map(|root| {
+            let ran_fixture =
+                super::super::model_tests::fixture(&root)
+                    .ok()
+                    .map(|(mut fixture, model)| {
+                        let calls = Arc::new(AtomicUsize::new(0));
+                        let fail_at = Arc::new(AtomicUsize::new(0));
+                        let store = super::super::WindowsCleanupStore::new(ListRefusal {
+                            store: fixture.store.clone(),
+                            calls: Arc::clone(&calls),
+                            fail_at: Arc::clone(&fail_at),
+                        });
+                        let ran_surface =
+                            super::super::Surface::new(
+                                std::rc::Rc::clone(&fixture.factory),
+                                Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
+                                root.0.clone(),
+                                Box::new(fixture.loopback.clone()),
+                                Box::new(store.clone()),
+                                Box::new(SystemClock),
+                            )
+                            .ok()
+                            .map(|mut surface| {
+                                surface.set_deadline(fixture.deadline);
+                                fixture.surface = surface;
+                                fixture.store = store;
+                                let ceremony = CeremonyId::from_bytes([240; 16]);
+                                let ran_driver =
+                                    readiness::new_driver(ceremony, Instant::now()).ok().map(
+                                        |mut driver| {
+                                            let mut refused = false;
+                                            let result = drive_to_quarantine(
+                                                &mut fixture,
+                                                &mut driver,
+                                                &mut refused,
+                                            );
+                                            assert_eq!(
+                                                result,
+                                                Err(BridgeError::Quarantine(
+                                                    QuarantineCode::ControllerCloseFailed
+                                                ))
+                                            );
+                                            assert!(refused);
+                                            let mut keeper = QuarantineKeeper::new();
+                                            assert!(keeper.finish(driver, result).driver.is_none());
+                                            let folder = root
+                                                .0
+                                                .join(pos_owner_bridge::folder_name(&ceremony));
+                                            let marker = folder.join("quarantine-held");
+                                            assert!(std::fs::write(&marker, []).is_ok());
+                                            let before = calls.load(Ordering::SeqCst);
+                                            let polled = keeper_poll(&mut keeper, &mut fixture);
+                                            assert!(polled.remaining && polled.driver.is_none());
+                                            let keeper_lists =
+                                                calls.load(Ordering::SeqCst) - before;
+                                            let before = calls.load(Ordering::SeqCst);
+                                            assert!(
+                                                blocked(&mut keeper, &mut fixture, &folder).is_ok()
+                                            );
+                                            assert_eq!(
+                                                calls.load(Ordering::SeqCst) - before,
+                                                keeper_lists + 2
+                                            );
+                                            for list in 1..=2 {
+                                                let before = calls.load(Ordering::SeqCst);
+                                                fail_at.store(
+                                                    before + keeper_lists + list,
+                                                    Ordering::SeqCst,
+                                                );
+                                                assert!(blocked(
+                                                    &mut keeper,
+                                                    &mut fixture,
+                                                    &folder
+                                                )
+                                                .is_err());
+                                                assert_eq!(
+                                                    calls.load(Ordering::SeqCst),
+                                                    before + keeper_lists + list
+                                                );
+                                                fail_at.store(0, Ordering::SeqCst);
+                                                assert!(!fixture.surface.idle());
+                                                assert!(marker.is_file());
+                                                assert!(fixture.store.folders().is_ok_and(
+                                                    |folders| folders.contains(
+                                                        &pos_owner_bridge::folder_name(&ceremony)
+                                                    )
+                                                ));
+                                                assert!(fixture
+                                                    .store
+                                                    .records()
+                                                    .is_ok_and(|records| records.len() == 1));
+                                                assert!(blocked(
+                                                    &mut keeper,
+                                                    &mut fixture,
+                                                    &folder
+                                                )
+                                                .is_ok());
+                                            }
+                                            assert!(std::fs::remove_file(&marker).is_ok());
+                                            assert!(fixture.surface.close_controller().is_ok());
+                                            let sink = model.sink.borrow().clone();
+                                            let action = sink.as_ref().map(|sink| {
+                                                sink.event(NativeEvent::BrowserExited { pid: 42 })
+                                            });
+                                            assert!(
+                                                action.is_some(),
+                                                "modeled sink must remain available"
+                                            );
+                                            retire_keeper(&mut keeper, &mut fixture);
+                                            assert!(fixture.surface.idle());
+                                            assert!(fixture
+                                                .store
+                                                .records()
+                                                .is_ok_and(|records| records.is_empty()));
+                                        },
+                                    );
+                                assert!(ran_driver.is_some(), "create modeled driver");
+                            });
+                        assert!(ran_surface.is_some(), "create modeled surface");
+                        drop(fixture);
+                    });
+            assert!(ran_fixture.is_some(), "create modeled fixture");
+            assert!(root.remove().is_ok());
         });
-        let mut surface = super::super::Surface::new(
-            std::rc::Rc::clone(&fixture.factory),
-            Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
-            root.0.clone(),
-            Box::new(fixture.loopback.clone()),
-            Box::new(store.clone()),
-            Box::new(SystemClock),
-        )
-        .map_err(SurfaceError::error)
-        .expect("create modeled surface");
-        surface.set_deadline(fixture.deadline);
-        fixture.surface = surface;
-        fixture.store = store;
-
-        let ceremony = CeremonyId::from_bytes([240; 16]);
-        let mut driver = readiness::new_driver(ceremony, Instant::now()).expect("create driver");
-        let mut refused = false;
-        let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
-        assert_eq!(
-            result,
-            Err(BridgeError::Quarantine(
-                QuarantineCode::ControllerCloseFailed
-            ))
-        );
-        assert!(refused);
-        let mut keeper = QuarantineKeeper::new();
-        assert!(keeper.finish(driver, result).driver.is_none());
-        let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
-        let marker = folder.join("quarantine-held");
-        std::fs::write(&marker, []).expect("create held marker");
-        let before = calls.load(Ordering::SeqCst);
-        let polled = keeper_poll(&mut keeper, &mut fixture);
-        assert!(polled.remaining && polled.driver.is_none());
-        let keeper_lists = calls.load(Ordering::SeqCst) - before;
-        let before = calls.load(Ordering::SeqCst);
-        blocked(&mut keeper, &mut fixture, &folder).expect("quarantine remains blocked");
-        assert_eq!(calls.load(Ordering::SeqCst) - before, keeper_lists + 2);
-        for list in 1..=2 {
-            let before = calls.load(Ordering::SeqCst);
-            fail_at.store(before + keeper_lists + list, Ordering::SeqCst);
-            assert!(blocked(&mut keeper, &mut fixture, &folder).is_err());
-            assert_eq!(calls.load(Ordering::SeqCst), before + keeper_lists + list);
-            fail_at.store(0, Ordering::SeqCst);
-            assert!(!fixture.surface.idle());
-            assert!(marker.is_file());
-            let folders = fixture.store.folders().expect("list retained folders");
-            assert!(folders.contains(&pos_owner_bridge::folder_name(&ceremony)));
-            assert_eq!(
-                fixture
-                    .store
-                    .records()
-                    .expect("modeled quarantine fixture")
-                    .len(),
-                1
-            );
-            blocked(&mut keeper, &mut fixture, &folder).expect("quarantine remains blocked");
-        }
-        std::fs::remove_file(&marker).expect("remove held marker");
-        fixture
-            .surface
-            .close_controller()
-            .map_err(SurfaceError::error)
-            .expect("close modeled controller");
-        let sink = model.sink.borrow().clone();
-        let action = sink
-            .as_ref()
-            .map(|sink| sink.event(NativeEvent::BrowserExited { pid: 42 }));
-        assert!(action.is_some(), "modeled sink must remain available");
-        retire_keeper(&mut keeper, &mut fixture);
-        assert!(fixture.surface.idle());
-        assert!(fixture
-            .store
-            .records()
-            .expect("modeled quarantine fixture")
-            .is_empty());
-        drop(sink);
-        drop(fixture);
-        root.remove().expect("remove fixture root");
+        assert!(ran_root.is_some(), "create private root");
     }
 
     #[test]
