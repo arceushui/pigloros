@@ -496,11 +496,14 @@ fn modeled_opening_first_refuses_expiry_and_unavailable_fault_authority() -> Tes
             .as_deref(),
         Some("opening browser cutpoint was not reached")
     );
-    assert!(fixture.surface.pending_opening_owners_retained());
+    assert!(fixture.surface.recordless_opening_ready());
+    assert!(!fixture.surface.pending_opening_owners_retained());
     fixture.deadline = Instant::now() + Duration::from_secs(5);
     let (browser, mark) = fixture.opening_first_browser()?;
     assert_eq!(browser, BROWSER);
     assert_eq!(mark, FIRST);
+    assert!(!fixture.surface.recordless_opening_ready());
+    assert!(fixture.surface.pending_opening_owners_retained());
     assert_eq!(
         fixture
             .inject_opening_first_browser(browser, mark)
