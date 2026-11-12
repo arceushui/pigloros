@@ -425,7 +425,7 @@ mod tests {
         let mut storage = Aligned([0; 128]);
         let pointer = storage.0.as_mut_ptr();
         assert_eq!(
-            super::admit_mapping(64, 64, pointer).map(|p| p.as_ptr()),
+            super::admit_mapping(64, 64, pointer).map(std::ptr::NonNull::as_ptr),
             Ok(pointer)
         );
         for (size, capacity, pointer) in [
