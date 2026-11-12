@@ -789,7 +789,15 @@ impl CeremonyDriver {
             .get(HEADER..HEADER + length)
             .unwrap_or_default();
         let verified = parse_and_verify(&self.plan, payload, &mut slots.prf)?;
-        if expired(env.clock.now(), self.plan.t0, CHALLENGE_TTL) {
+        let verified_at = env.clock.now();
+        if self
+            .plan
+            .budget
+            .is_some_and(|budget| expired(verified_at, budget.start(), budget.limit()))
+        {
+            return Err(lifecycle(LifecycleCode::EnrollmentBudgetExceeded));
+        }
+        if expired(verified_at, self.plan.t0, CHALLENGE_TTL) {
             return Err(lifecycle(LifecycleCode::ChallengeExpired));
         }
         slots.copy_a.wipe();
