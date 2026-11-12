@@ -160,3 +160,127 @@ fn pending_fault_admission_rejects_changed_or_unavailable_process_identity() -> 
     assert!(!fixture.surface.pending_opening_owners_retained());
     retire_pending(&mut fixture)
 }
+
+struct ChangedIdentity {
+    root: std::path::PathBuf,
+    browser: ProcessIdentity,
+}
+
+impl RuntimeAdmission for ChangedIdentity {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn identity(&self, _: u32) -> Result<ProcessIdentity, BridgeError> {
+        Ok(self.browser)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IdentityChange {
+    Candidate,
+    Runtime,
+    Unavailable,
+}
+
+fn fault_attempts(fixture: &Fixture) -> Vec<&'static str> {
+    fixture
+        .factory
+        .calls
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|call| call.starts_with("fault_"))
+        .collect()
+}
+
+#[test]
+fn modeled_pending_fault_rechecks_identity_after_selection() -> TestResult {
+    for change in [
+        IdentityChange::Candidate,
+        IdentityChange::Runtime,
+        IdentityChange::Unavailable,
+    ] {
+        let (mut fixture, browser) = pending_fixture()?;
+        assert_eq!(
+            fixture.surface.prepare_pending_opening_browser(),
+            Ok(Some(browser))
+        );
+        fixture.factory.failure.set(Some("fault_spy"));
+        // The modeled port observes admission, but always refuses and never
+        // creates a handle or terminates a process.
+        assert!(fixture
+            .surface
+            .inject_pending_opening_browser(seal())
+            .is_err());
+        assert_eq!(fault_attempts(&fixture), ["fault_valid"]);
+        let original_runtime = Arc::clone(&fixture.surface.runtime);
+        let mut changed = browser;
+        changed.creation_filetime += 1;
+        match change {
+            IdentityChange::Candidate => fixture.factory.pending_browser.set(Some(changed)),
+            IdentityChange::Runtime => {
+                fixture.surface.runtime = Arc::new(ChangedIdentity {
+                    root: fixture.root.clone(),
+                    browser: changed,
+                });
+            }
+            IdentityChange::Unavailable => fixture.surface.runtime = Arc::new(UnavailableIdentity),
+        }
+        assert!(fixture
+            .surface
+            .inject_pending_opening_browser(seal())
+            .is_err());
+        assert_eq!(fault_attempts(&fixture), ["fault_valid"]);
+        assert!(!fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+        fixture.surface.runtime = original_runtime;
+        retire_pending(&mut fixture)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_pending_fault_validity_rechecks_events_at_the_native_port() -> TestResult {
+    for (mode, observed) in [
+        ("fault_spy", "fault_valid"),
+        ("fault_spy_frame", "fault_invalid"),
+        ("fault_spy_exit", "fault_invalid"),
+    ] {
+        let (mut fixture, browser) = pending_fixture()?;
+        assert_eq!(
+            fixture.surface.prepare_pending_opening_browser(),
+            Ok(Some(browser))
+        );
+        fixture.factory.failure.set(Some(mode));
+        assert!(fixture
+            .surface
+            .inject_pending_opening_browser(seal())
+            .is_err());
+        assert_eq!(fault_attempts(&fixture), [observed]);
+        assert!(!fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
+        retire_pending(&mut fixture)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_pending_fault_expiry_is_observed_without_a_fault_handle() -> TestResult {
+    let (mut fixture, browser) = pending_fixture()?;
+    assert_eq!(
+        fixture.surface.prepare_pending_opening_browser(),
+        Ok(Some(browser))
+    );
+    fixture.factory.failure.set(Some("fault_spy"));
+    let mut expired = seal();
+    expired.deadline = Instant::now();
+    assert!(fixture
+        .surface
+        .inject_pending_opening_browser(expired)
+        .is_err());
+    assert_eq!(fault_attempts(&fixture), ["fault_invalid"]);
+    assert!(fixture.surface.pending_opening_owners_retained());
+    fixture.assert_no_ceremony_data();
+    retire_pending(&mut fixture)
+}
