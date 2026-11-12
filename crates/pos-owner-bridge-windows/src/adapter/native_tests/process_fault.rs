@@ -2002,6 +2002,66 @@ impl Fixture {
     }
 }
 
+/// Verdict over the already-captured success-exit evidence.
+struct SuccessExitVerdict {
+    verified: bool,
+    complete: bool,
+    native_zeroed: bool,
+    reached: Option<ExitBoundary>,
+}
+
+impl SuccessExitVerdict {
+    fn validate(&self) -> Result<ExitBoundary, Box<dyn std::error::Error>> {
+        if !self.verified || !self.complete || !self.native_zeroed {
+            return Err("successful exit or nonzero native reply wipe was not established".into());
+        }
+        self.reached
+            .ok_or_else(|| "successful exit point was not reached".into())
+    }
+}
+
+#[test]
+fn modeled_success_exit_verdict_requires_complete_evidence_before_cutpoint() {
+    let state = crate::ProcessExitState {
+        generation: 1,
+        record_count: 1,
+    };
+    let mut verdict = SuccessExitVerdict {
+        verified: true,
+        complete: true,
+        native_zeroed: true,
+        reached: Some(ExitBoundary::AlreadyExited(state)),
+    };
+    assert!(verdict.validate().is_ok());
+    verdict.verified = false;
+    assert!(verdict.validate().is_err());
+    verdict.verified = true;
+    verdict.complete = false;
+    assert!(verdict.validate().is_err());
+    verdict.complete = true;
+    verdict.native_zeroed = false;
+    assert!(verdict.validate().is_err());
+    verdict.native_zeroed = true;
+    verdict.reached = None;
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("successful exit point was not reached")
+    );
+    verdict.complete = false;
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("successful exit or nonzero native reply wipe was not established")
+    );
+}
+
 fn run_success_exit(
     runtime: &Path,
     root: &Path,
@@ -2033,10 +2093,13 @@ fn run_success_exit(
     if let Some(error) = failure {
         return Err(error);
     }
-    if !verified || !complete || !native_zeroed {
-        return Err("successful exit or nonzero native reply wipe was not established".into());
+    SuccessExitVerdict {
+        verified,
+        complete,
+        native_zeroed,
+        reached,
     }
-    reached.ok_or_else(|| "successful exit point was not reached".into())
+    .validate()
 }
 
 #[test]
@@ -3357,6 +3420,124 @@ impl Fixture {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ConsumingOutcome {
+    Fault { accepted: bool, prf_clear: bool },
+    Control { accepted: bool, expected_prf: bool },
+}
+
+struct ConsumingWipe {
+    slot_clear: bool,
+    native_zeroed: bool,
+    plan_wiped: bool,
+}
+
+/// Verdict over already-captured consumption and wipe observations.
+struct ConsumingVerdict {
+    complete: bool,
+    wipe: ConsumingWipe,
+    outcome: ConsumingOutcome,
+    state: Option<ProcessFaultState>,
+}
+
+impl ConsumingVerdict {
+    fn validate(&self) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
+        let wrong_outcome = match self.outcome {
+            ConsumingOutcome::Fault {
+                accepted,
+                prf_clear,
+            } => accepted || !prf_clear,
+            ConsumingOutcome::Control {
+                accepted,
+                expected_prf,
+            } => !accepted || !expected_prf,
+        };
+        if !self.complete
+            || !self.wipe.slot_clear
+            || !self.wipe.native_zeroed
+            || !self.wipe.plan_wiped
+            || wrong_outcome
+        {
+            return Err("consuming result, wipe, or evidence was not established".into());
+        }
+        self.state
+            .ok_or_else(|| "consuming state was not reached".into())
+    }
+}
+
+#[test]
+fn modeled_consuming_verdict_distinguishes_fault_from_control() {
+    let state = ProcessFaultState {
+        phase: ProcessFaultPhase::PostedConsuming,
+        topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+        generation: 1,
+        reply_state: ControlState::Consuming as u32,
+        record_count: 1,
+        posts: 1,
+    };
+    let mut verdict = ConsumingVerdict {
+        complete: true,
+        wipe: ConsumingWipe {
+            slot_clear: true,
+            native_zeroed: true,
+            plan_wiped: true,
+        },
+        outcome: ConsumingOutcome::Fault {
+            accepted: false,
+            prf_clear: true,
+        },
+        state: Some(state),
+    };
+    assert!(verdict.validate().is_ok());
+    for outcome in [
+        ConsumingOutcome::Fault {
+            accepted: true,
+            prf_clear: true,
+        },
+        ConsumingOutcome::Fault {
+            accepted: false,
+            prf_clear: false,
+        },
+        ConsumingOutcome::Control {
+            accepted: false,
+            expected_prf: true,
+        },
+        ConsumingOutcome::Control {
+            accepted: true,
+            expected_prf: false,
+        },
+    ] {
+        verdict.outcome = outcome;
+        assert!(verdict.validate().is_err());
+    }
+    verdict.outcome = ConsumingOutcome::Control {
+        accepted: true,
+        expected_prf: true,
+    };
+    assert!(verdict.validate().is_ok());
+    verdict.complete = false;
+    assert!(verdict.validate().is_err());
+    verdict.complete = true;
+    verdict.wipe.slot_clear = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.slot_clear = true;
+    verdict.wipe.native_zeroed = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.native_zeroed = true;
+    verdict.wipe.plan_wiped = false;
+    assert!(verdict.validate().is_err());
+    verdict.wipe.plan_wiped = true;
+    verdict.state = None;
+    assert_eq!(
+        verdict
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("consuming state was not reached")
+    );
+}
+
 fn run_consuming(
     runtime: &Path,
     root: &Path,
@@ -3392,16 +3573,28 @@ fn run_consuming(
     if let Some(error) = failure {
         return Err(error);
     }
-    if !complete
-        || !slot_clear
-        || !native_zeroed
-        || !plan_wiped
-        || (inject && (accepted || !prf_clear))
-        || (!inject && (!accepted || !expected_prf))
-    {
-        return Err("consuming result, wipe, or evidence was not established".into());
+    let outcome = if inject {
+        ConsumingOutcome::Fault {
+            accepted,
+            prf_clear,
+        }
+    } else {
+        ConsumingOutcome::Control {
+            accepted,
+            expected_prf,
+        }
+    };
+    ConsumingVerdict {
+        complete,
+        wipe: ConsumingWipe {
+            slot_clear,
+            native_zeroed,
+            plan_wiped,
+        },
+        outcome,
+        state,
     }
-    state.ok_or_else(|| "consuming state was not reached".into())
+    .validate()
 }
 
 // Both ports borrow the same real Surface; the driver's open call has returned

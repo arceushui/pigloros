@@ -1558,6 +1558,8 @@ def test_owned_process_fault_authority() -> None:
         ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
         ("result.map_err(|()| query_error)?.ok_or(pending_error)", "Ok(0)"),
         ("nonzero_reply_zeroing_observed(&observations)", "true"),
+        ("if !self.verified || !self.complete || !self.native_zeroed", "if false"),
+        ("|| !self.wipe.plan_wiped", "|| false"),
         ("if !self.evidence_complete || self.result_error.is_none()", "if false"),
         ("|| !successful_close_observed(self.close)", "|| false"),
         ("|| !native_zeroing_observed(self.zero_observations)", "|| false"),
