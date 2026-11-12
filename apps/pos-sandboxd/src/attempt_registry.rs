@@ -36,7 +36,10 @@ pub use recovery::{
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
 #[cfg(test)]
-pub use tests::{in_lock_test_process, root_record_fixture, with_io_fault};
+pub use tests::{
+    crash_io_now, in_lock_test_process, io_count, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
+};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -589,16 +592,21 @@ mod tests {
 
     std::thread_local! {
         static IO_FAULT: Cell<(usize, Option<usize>)> = const { Cell::new((0, None)) };
+        // Whether every operation from the injected fault on fails, as after
+        // a crash, instead of that one alone.
+        static IO_CRASH: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn before_io() -> io::Result<()> {
         IO_FAULT.with(|state| {
             let (count, fail_at) = state.get();
             state.set((count + 1, fail_at));
-            if fail_at == Some(count) {
-                Err(io::Error::other("injected registry I/O failure"))
-            } else {
-                Ok(())
+            let crashed = IO_CRASH.with(Cell::get);
+            match fail_at {
+                Some(at) if count == at || (crashed && count > at) => {
+                    Err(io::Error::other("injected registry I/O failure"))
+                }
+                _ => Ok(()),
             }
         })
     }
@@ -615,6 +623,54 @@ mod tests {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))
+    }
+
+    struct RestoreIoCrash(bool);
+
+    impl Drop for RestoreIoCrash {
+        fn drop(&mut self) {
+            IO_CRASH.with(|state| state.set(self.0));
+        }
+    }
+
+    /// Run `operation`, crashing its registry I/O at operation `crash_at`.
+    ///
+    /// That operation and every later one fail before they start, so the
+    /// registry and the attempt directories keep exactly what a process crash
+    /// there leaves, while the operation itself returns normally without
+    /// unwinding. [`crash_io_now`] crashes at the next operation instead.
+    /// Returns the number of operations started.
+    ///
+    /// A crash loses no completed write: the registry lives on the tmpfs
+    /// `/run`, where a write survives a daemon crash whether or not it was
+    /// fsynced, and a reboot empties the registry. Lost or torn fsynced data
+    /// is therefore not modelled; a torn temporary write is, by truncating it.
+    pub fn with_io_crash<T>(crash_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
+        let _restore = RestoreIoCrash(IO_CRASH.with(|state| state.replace(true)));
+        with_io_fault(crash_at, operation)
+    }
+
+    /// Crash the registry I/O of the enclosing [`with_io_crash`] at its next
+    /// operation, unless it already crashed.
+    pub fn crash_io_now() {
+        IO_FAULT.with(|state| {
+            let (count, fail_at) = state.get();
+            state.set((count, fail_at.or(Some(count))));
+        });
+    }
+
+    /// The registry I/O operations started so far in the enclosing
+    /// [`with_io_fault`] or [`with_io_crash`].
+    #[must_use]
+    pub fn io_count() -> usize {
+        IO_FAULT.with(Cell::get).0
+    }
+
+    /// Whether the registry I/O of the enclosing [`with_io_crash`] crashed.
+    #[must_use]
+    pub fn io_crashed() -> bool {
+        let (count, fail_at) = IO_FAULT.with(Cell::get);
+        IO_CRASH.with(Cell::get) && fail_at.is_some_and(|at| count > at)
     }
 
     // A concurrent test's fork can retain an O_CLOEXEC flock descriptor until

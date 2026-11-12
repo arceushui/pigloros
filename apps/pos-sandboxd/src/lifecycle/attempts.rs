@@ -1310,4 +1310,7 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+mod crash_points;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

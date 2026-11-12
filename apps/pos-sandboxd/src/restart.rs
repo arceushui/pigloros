@@ -571,4 +571,12 @@ where
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+mod crash_restart;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+#[cfg(test)]
+pub use crash_restart::cases::{
+    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof, SHORT_DEADLINE,
+    SINCE_REQUEST,
+};
