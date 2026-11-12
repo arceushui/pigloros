@@ -21,7 +21,7 @@ use crate::adapter::surface::ExitBoundary;
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::{
     BufferSlot, NativeFactory, NativeZeroObservation, ProcessFaultHandle, ProcessFaultMark,
-    ProcessFaultState, ProcessFaultTarget,
+    ProcessFaultPhase, ProcessFaultState, ProcessFaultTarget, ProcessFaultTopology,
 };
 
 mod model_tests;
@@ -350,6 +350,116 @@ impl crate::Native {
     }
 }
 
+type TargetFaultCase<'a> = dyn FnMut(
+        &Path,
+        &Path,
+        u8,
+        ProcessFaultTarget,
+        bool,
+    ) -> Result<ProcessFaultState, Box<dyn std::error::Error>>
+    + 'a;
+
+fn run_target_pair(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    target: ProcessFaultTarget,
+    case: &mut TargetFaultCase<'_>,
+    mismatch: &str,
+) -> TestResult {
+    let control = case(runtime, root, number, target, false)?;
+    let fault = case(runtime, root, number + 1, target, true)?;
+    assert_eq!(control, fault, "{mismatch}");
+    Ok(())
+}
+
+#[test]
+fn modeled_target_pair_preserves_order_and_short_circuits_errors() {
+    let state = ProcessFaultState {
+        phase: ProcessFaultPhase::PostedReceipt,
+        topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+        generation: 1,
+        reply_state: ControlState::Received as u32,
+        record_count: 1,
+        posts: 1,
+    };
+    for fail_at in [Some(false), Some(true), None] {
+        let mut calls = Vec::new();
+        let mut case =
+            |_: &Path, _: &Path, number: u8, target: ProcessFaultTarget, inject: bool| {
+                calls.push((number, target, inject));
+                if fail_at == Some(inject) {
+                    return Err(if inject {
+                        "fault failed"
+                    } else {
+                        "control failed"
+                    }
+                    .into());
+                }
+                Ok(state)
+            };
+        let result = run_target_pair(
+            Path::new("."),
+            Path::new("."),
+            0x31,
+            ProcessFaultTarget::Browser,
+            &mut case,
+            "modeled mismatch",
+        );
+        let expected = fail_at.map(|inject| {
+            if inject {
+                "fault failed"
+            } else {
+                "control failed"
+            }
+        });
+        assert_eq!(
+            result.err().map(|error| error.to_string()).as_deref(),
+            expected
+        );
+        let mut expected_calls = vec![(0x31, ProcessFaultTarget::Browser, false)];
+        if fail_at != Some(false) {
+            expected_calls.push((0x32, ProcessFaultTarget::Browser, true));
+        }
+        assert_eq!(calls, expected_calls);
+    }
+}
+
+#[test]
+fn modeled_target_pair_preserves_mismatch_panic() {
+    let state = ProcessFaultState {
+        phase: ProcessFaultPhase::PostedReceipt,
+        topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+        generation: 1,
+        reply_state: ControlState::Received as u32,
+        record_count: 1,
+        posts: 1,
+    };
+    let mut case = |_: &Path, _: &Path, _: u8, _: ProcessFaultTarget, inject: bool| {
+        let mut observed = state;
+        if inject {
+            observed.posts = 2;
+        }
+        Ok(observed)
+    };
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _result = run_target_pair(
+            Path::new("."),
+            Path::new("."),
+            0x31,
+            ProcessFaultTarget::Browser,
+            &mut case,
+            "modeled mismatch",
+        );
+    }))
+    .expect_err("different states must panic");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert!(message.is_some_and(|text| text.contains("modeled mismatch")));
+}
+
 fn run() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
@@ -359,12 +469,14 @@ fn run() -> TestResult {
         (0x31, ProcessFaultTarget::Renderer),
         (0x33, ProcessFaultTarget::Browser),
     ] {
-        let control = run_case(Path::new(&runtime), &root.0, number, target, false)?;
-        let fault = run_case(Path::new(&runtime), &root.0, number + 1, target, true)?;
-        assert_eq!(
-            control, fault,
-            "control and fault reached different substates"
-        );
+        run_target_pair(
+            Path::new(&runtime),
+            &root.0,
+            number,
+            target,
+            &mut run_case,
+            "control and fault reached different substates",
+        )?;
     }
     run_recordless_case(Path::new(&runtime), &root.0, 0x35, false)?;
     run_recordless_case(Path::new(&runtime), &root.0, 0x36, true)?;
@@ -372,12 +484,14 @@ fn run() -> TestResult {
         (0x37, ProcessFaultTarget::Renderer),
         (0x39, ProcessFaultTarget::Browser),
     ] {
-        let control = run_success_releasing(Path::new(&runtime), &root.0, number, target, false)?;
-        let fault = run_success_releasing(Path::new(&runtime), &root.0, number + 1, target, true)?;
-        assert_eq!(
-            control, fault,
-            "release control and fault reached different states"
-        );
+        run_target_pair(
+            Path::new(&runtime),
+            &root.0,
+            number,
+            target,
+            &mut run_success_releasing,
+            "release control and fault reached different states",
+        )?;
     }
     let control = run_success_exit(Path::new(&runtime), &root.0, 0x3b, false)?;
     let fault = run_success_exit(Path::new(&runtime), &root.0, 0x3c, true)?;
@@ -407,12 +521,14 @@ fn run() -> TestResult {
         (0x41, ProcessFaultTarget::Renderer),
         (0x43, ProcessFaultTarget::Browser),
     ] {
-        let control = run_posted_empty(Path::new(&runtime), &root.0, number, target, false)?;
-        let fault = run_posted_empty(Path::new(&runtime), &root.0, number + 1, target, true)?;
-        assert_eq!(
-            control, fault,
-            "empty-reply control and fault reached different states"
-        );
+        run_target_pair(
+            Path::new(&runtime),
+            &root.0,
+            number,
+            target,
+            &mut run_posted_empty,
+            "empty-reply control and fault reached different states",
+        )?;
     }
     let control = run_first_opening_browser(Path::new(&runtime), &root.0, 0x45, false)?;
     let fault = run_first_opening_browser(Path::new(&runtime), &root.0, 0x46, true)?;
@@ -424,23 +540,27 @@ fn run() -> TestResult {
         (0x4b, ProcessFaultTarget::Renderer),
         (0x4d, ProcessFaultTarget::Browser),
     ] {
-        let control = run_posted_writing(Path::new(&runtime), &root.0, number, target, false)?;
-        let fault = run_posted_writing(Path::new(&runtime), &root.0, number + 1, target, true)?;
-        assert_eq!(
-            control, fault,
-            "writing control and fault reached different states"
-        );
+        run_target_pair(
+            Path::new(&runtime),
+            &root.0,
+            number,
+            target,
+            &mut run_posted_writing,
+            "writing control and fault reached different states",
+        )?;
     }
     for (number, target) in [
         (0x70, ProcessFaultTarget::Renderer),
         (0x72, ProcessFaultTarget::Browser),
     ] {
-        let control = run_posted_ready(Path::new(&runtime), &root.0, number, target, false)?;
-        let fault = run_posted_ready(Path::new(&runtime), &root.0, number + 1, target, true)?;
-        assert_eq!(
-            control, fault,
-            "ready control and fault reached different states"
-        );
+        run_target_pair(
+            Path::new(&runtime),
+            &root.0,
+            number,
+            target,
+            &mut run_posted_ready,
+            "ready control and fault reached different states",
+        )?;
     }
     run_retries(Path::new(&runtime), &root.0)?;
     run_consuming_cases(Path::new(&runtime), &root.0)?;
