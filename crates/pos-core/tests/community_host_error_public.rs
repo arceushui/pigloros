@@ -1,9 +1,10 @@
 //! Closed ADR-061 identifiers remain stable independently of display messages.
 
 use pos_core::community_lifecycle::{
-    AtomicCommitFailureV1 as Atomic, CommunityPluginHostErrorV1 as Host,
-    ComponentTrapClassV1 as Trap, HostFailureClassV1 as Class, RevocationBasisV1 as Revocation,
-    TrapReproductionV1 as Reproduction, TrustDenialBasisV1 as Denial,
+    AtomicCommitFailureV1 as Atomic, BundleContentReasonV1 as Content,
+    CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1 as Trap, HostFailureClassV1 as Class,
+    RevocationBasisV1 as Revocation, TrapReproductionV1 as Reproduction,
+    TrustDenialBasisV1 as Denial,
 };
 
 #[test]
@@ -52,6 +53,19 @@ fn a_basis_is_reported_beside_its_host_name() {
         let error = Host::ArtifactRevoked { basis };
         assert_eq!(error.name(), "ArtifactRevoked");
         assert_eq!(error.basis_name(), Some(expected));
+        assert!(error.produced_in_v1());
+    }
+    for (reason, expected) in [
+        (Content::BoundsExceeded, "BoundsExceeded"),
+        (Content::UnsupportedFormat, "UnsupportedFormat"),
+        (Content::Malformed, "Malformed"),
+        (Content::ReferenceMismatch, "ReferenceMismatch"),
+    ] {
+        assert_eq!(reason.name(), expected);
+        let error = Host::InvalidBundleContent { reason };
+        assert_eq!(error.name(), "InvalidBundleContent");
+        assert_eq!(error.basis_name(), Some(expected));
+        assert_eq!(error.class(), Class::PreExecutionRejection);
         assert!(error.produced_in_v1());
     }
 }

@@ -3,10 +3,10 @@
 use super::{
     bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, is_valid_community_id_v1,
     read_hash, read_head, read_optional_hash, read_pass_key, record_cursor, record_prefix,
-    validate_horizon, AtomicCommitFailureV1, CommunityDigestListV1, CommunityGuestErrorCodeV1,
-    CommunityGuestErrorV1, CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1,
-    CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1, FieldRefV1, Result,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+    validate_horizon, AtomicCommitFailureV1, BundleContentReasonV1, CommunityDigestListV1,
+    CommunityGuestErrorCodeV1, CommunityGuestErrorV1, CommunityLifecycleErrorV1 as Error,
+    CommunityPassKeyV1, CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1, FieldRefV1,
+    Result, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash};
 use zeroize::Zeroizing;
@@ -335,6 +335,9 @@ fn encode_host(out: &mut Vec<u8>, error: Host) {
         Host::AtomicCommitFailed { failure } => {
             encode_scalar_failure(out, 19, u64::from(atomic_code(failure)));
         }
+        Host::InvalidBundleContent { reason } => {
+            encode_scalar_failure(out, 20, u64::from(content_reason_code(reason)));
+        }
     }
 }
 
@@ -366,6 +369,9 @@ fn read_host(cursor: &mut CborCursor<'_>) -> Result<Host> {
             (1, 17) => Ok(Host::DeterministicDeadlineExceeded),
             (1, 18) => Ok(Host::OperationalWatchdogStop),
             (2, 19) => read_atomic(cursor).map(|failure| Host::AtomicCommitFailed { failure }),
+            (2, 20) => {
+                read_content_reason(cursor).map(|reason| Host::InvalidBundleContent { reason })
+            }
             _ => Err(Error::InvalidEncoding),
         })
     })
@@ -420,6 +426,14 @@ const fn atomic_code(value: AtomicCommitFailureV1) -> u8 {
         AtomicCommitFailureV1::Operational => 1,
     }
 }
+const fn content_reason_code(value: BundleContentReasonV1) -> u8 {
+    match value {
+        BundleContentReasonV1::BoundsExceeded => 0,
+        BundleContentReasonV1::UnsupportedFormat => 1,
+        BundleContentReasonV1::Malformed => 2,
+        BundleContentReasonV1::ReferenceMismatch => 3,
+    }
+}
 
 fn read_denial(cursor: &mut CborCursor<'_>) -> Result<TrustDenialBasisV1> {
     read_head(cursor, 0).and_then(|code| match code {
@@ -462,6 +476,15 @@ fn read_atomic(cursor: &mut CborCursor<'_>) -> Result<AtomicCommitFailureV1> {
     read_head(cursor, 0).and_then(|code| match code {
         0 => Ok(AtomicCommitFailureV1::DeterministicTypedResult),
         1 => Ok(AtomicCommitFailureV1::Operational),
+        _ => Err(Error::InvalidEncoding),
+    })
+}
+fn read_content_reason(cursor: &mut CborCursor<'_>) -> Result<BundleContentReasonV1> {
+    read_head(cursor, 0).and_then(|code| match code {
+        0 => Ok(BundleContentReasonV1::BoundsExceeded),
+        1 => Ok(BundleContentReasonV1::UnsupportedFormat),
+        2 => Ok(BundleContentReasonV1::Malformed),
+        3 => Ok(BundleContentReasonV1::ReferenceMismatch),
         _ => Err(Error::InvalidEncoding),
     })
 }
