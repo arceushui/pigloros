@@ -565,13 +565,21 @@ fn header_completing_at_deadline_is_silent() {
 }
 
 #[test]
-fn observations_just_before_each_deadline_remain_accepted() {
+fn observations_just_before_each_deadline_remain_accepted() -> TestResult {
     let tick = Duration::from_nanos(1);
+    let first = ADR_TIMEOUTS
+        .first_byte
+        .checked_sub(tick)
+        .ok_or("first-byte deadline")?;
+    let header = ADR_TIMEOUTS
+        .header
+        .checked_sub(tick)
+        .ok_or("header deadline")?;
     for chunks in [
-        vec![(ADR_TIMEOUTS.first_byte - tick, OWNER_REQUEST.to_vec())],
+        vec![(first, OWNER_REQUEST.to_vec())],
         vec![
             (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
-            (ADR_TIMEOUTS.header - tick, OWNER_REQUEST[4..].to_vec()),
+            (header, OWNER_REQUEST[4..].to_vec()),
         ],
     ] {
         let (outcome, count, silent) = read_advancing(chunks, Duration::ZERO);
@@ -579,6 +587,18 @@ fn observations_just_before_each_deadline_remain_accepted() {
         assert_eq!(count, 1);
         assert!(silent.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn incomplete_header_followed_by_eof_is_silent() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(Duration::ZERO, OWNER_REQUEST[..4].to_vec())],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Eof]);
 }
 
 #[test]
