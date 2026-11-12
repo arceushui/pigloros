@@ -135,8 +135,8 @@ impl ProcessFaultHandle for Retained {
         let mut code = 0;
         // SAFETY: the owned process handle stays live and the output is writable.
         unsafe { GetExitCodeProcess(self.handle, &raw mut code) }
-            .map_err(|error| write_exit_query_failure(&mut std::io::stderr(), error.code().0))?;
-        Ok((code != ACTIVE).then_some(code))
+            .map(|()| (code != ACTIVE).then_some(code))
+            .map_err(|error| write_exit_query_failure(&mut std::io::stderr(), error.code().0))
     }
 }
 

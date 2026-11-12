@@ -309,7 +309,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 217
+line = 219
 function = "observe_mapping"
 operation = "object.Buffer(&raw mut pointer)"
 invariant = "the live buffer owns the mapping; initialized output receives a borrowed pointer used only while that interface is held and not closed."
@@ -317,7 +317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 233
+line = 237
 function = "close_object"
 operation = "object.Close()"
 invariant = "a live owned STA interface; all atomic borrows ended before this call and no pointer access is attempted after it, including on error."
@@ -325,7 +325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 283
+line = 287
 function = "post_request"
 operation = "view.PostSharedBufferToScript( &self.request.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; pointer/COM owners remain on this STA. Request access is read-only."
@@ -333,7 +333,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 296
+line = 300
 function = "post_reply"
 operation = "view.PostSharedBufferToScript( &self.reply.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; this is the reply buffer's sole allowed read/write exposure."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 410
+line = 411
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 413
+line = 416
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 424
+line = 430
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 432
+line = 438
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 435
+line = 443
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 450
+line = 461
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 463
+line = 474
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 466
+line = 479
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."

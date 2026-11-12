@@ -210,12 +210,16 @@ impl Drop for Mapping {
 fn observe_mapping(object: &ICoreWebView2SharedBuffer, capacity: u32) -> Result<NonNull<u8>> {
     let mut size = 0_u64;
     // SAFETY: live owned STA buffer and initialized distinct writable output.
-    unsafe { object.Size(&raw mut size) }.map_err(|_| unavailable())?;
-    let mut pointer = std::ptr::null_mut();
-    // SAFETY: the live buffer owns the mapping; initialized output receives a
-    // borrowed pointer used only while that interface is held and not closed.
-    unsafe { object.Buffer(&raw mut pointer) }.map_err(|_| unavailable())?;
-    admit_mapping(size, capacity, pointer)
+    unsafe { object.Size(&raw mut size) }
+        .map_err(|_| unavailable())
+        .and_then(|()| {
+            let mut pointer = std::ptr::null_mut();
+            // SAFETY: the live buffer owns the mapping; initialized output receives a
+            // borrowed pointer used only while that interface is held and not closed.
+            unsafe { object.Buffer(&raw mut pointer) }
+                .map_err(|_| unavailable())
+                .and_then(|()| admit_mapping(size, capacity, pointer))
+        })
 }
 
 fn admit_mapping(size: u64, capacity: u32, pointer: *mut u8) -> Result<NonNull<u8>> {

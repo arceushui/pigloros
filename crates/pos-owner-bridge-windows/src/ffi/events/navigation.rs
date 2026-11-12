@@ -401,20 +401,26 @@ fn navigation_start(
 }
 
 fn navigation_snapshot(args: &ICoreWebView2NavigationStartingEventArgs) -> Result<NativeEvent> {
-    let uri = super::super::text::read_text(|out| {
+    super::super::text::read_text(|out| {
         // SAFETY: live arguments and helper-owned initialized writable string output.
         unsafe { args.Uri(out) }
-    })?;
-    let mut redirected = BOOL::default();
-    // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
-    unsafe { args.IsRedirected(&raw mut redirected) }.map_err(|_| unavailable())?;
-    let mut id = 0;
-    // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
-    unsafe { args.NavigationId(&raw mut id) }.map_err(|_| unavailable())?;
-    Ok(NativeEvent::Navigation {
-        uri,
-        id,
-        redirected: redirected.as_bool(),
+    })
+    .and_then(|uri| {
+        let mut redirected = BOOL::default();
+        // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
+        unsafe { args.IsRedirected(&raw mut redirected) }
+            .map_err(|_| unavailable())
+            .and_then(|()| {
+                let mut id = 0;
+                // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
+                unsafe { args.NavigationId(&raw mut id) }
+                    .map_err(|_| unavailable())
+                    .map(|()| NativeEvent::Navigation {
+                        uri,
+                        id,
+                        redirected: redirected.as_bool(),
+                    })
+            })
     })
 }
 
@@ -426,16 +432,21 @@ pub(in crate::ffi) fn source(view: &ICoreWebView2) -> Result<NativeText> {
 }
 
 fn content_loading(args: Option<ICoreWebView2ContentLoadingEventArgs>) -> Result<NativeEvent> {
-    let args = args.ok_or_else(unavailable)?;
-    let mut id = 0;
-    // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
-    unsafe { args.NavigationId(&raw mut id) }.map_err(|_| unavailable())?;
-    let mut error_page = BOOL::default();
-    // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
-    unsafe { args.IsErrorPage(&raw mut error_page) }.map_err(|_| unavailable())?;
-    Ok(NativeEvent::Content {
-        id,
-        error_page: error_page.as_bool(),
+    args.ok_or_else(unavailable).and_then(|args| {
+        let mut id = 0;
+        // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
+        unsafe { args.NavigationId(&raw mut id) }
+            .map_err(|_| unavailable())
+            .and_then(|()| {
+                let mut error_page = BOOL::default();
+                // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
+                unsafe { args.IsErrorPage(&raw mut error_page) }
+                    .map_err(|_| unavailable())
+                    .map(|()| NativeEvent::Content {
+                        id,
+                        error_page: error_page.as_bool(),
+                    })
+            })
     })
 }
 
@@ -443,30 +454,35 @@ fn dom_loaded(
     sender: Option<ICoreWebView2>,
     args: Option<ICoreWebView2DOMContentLoadedEventArgs>,
 ) -> Result<NativeEvent> {
-    let args = args.ok_or_else(unavailable)?;
-    let view = sender.ok_or_else(unavailable)?;
-    let mut id = 0;
-    // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
-    unsafe { args.NavigationId(&raw mut id) }.map_err(|_| unavailable())?;
-    Ok(NativeEvent::DomLoaded {
-        id,
-        uri: source(&view)?,
+    args.ok_or_else(unavailable).and_then(|args| {
+        sender.ok_or_else(unavailable).and_then(|view| {
+            let mut id = 0;
+            // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
+            unsafe { args.NavigationId(&raw mut id) }
+                .map_err(|_| unavailable())
+                .and_then(|()| source(&view).map(|uri| NativeEvent::DomLoaded { id, uri }))
+        })
     })
 }
 
 fn navigation_completed(
     args: Option<ICoreWebView2NavigationCompletedEventArgs>,
 ) -> Result<NativeEvent> {
-    let args = args.ok_or_else(unavailable)?;
-    let mut id = 0;
-    // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
-    unsafe { args.NavigationId(&raw mut id) }.map_err(|_| unavailable())?;
-    let mut success = BOOL::default();
-    // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
-    unsafe { args.IsSuccess(&raw mut success) }.map_err(|_| unavailable())?;
-    Ok(NativeEvent::NavigationCompleted {
-        id,
-        success: success.as_bool(),
+    args.ok_or_else(unavailable).and_then(|args| {
+        let mut id = 0;
+        // SAFETY: live invoking-STA arguments and initialized unique navigation-ID output.
+        unsafe { args.NavigationId(&raw mut id) }
+            .map_err(|_| unavailable())
+            .and_then(|()| {
+                let mut success = BOOL::default();
+                // SAFETY: live invoking-STA arguments and initialized unique BOOL output.
+                unsafe { args.IsSuccess(&raw mut success) }
+                    .map_err(|_| unavailable())
+                    .map(|()| NativeEvent::NavigationCompleted {
+                        id,
+                        success: success.as_bool(),
+                    })
+            })
     })
 }
 

@@ -910,7 +910,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "31d6ce4b86a3f3316828599a0bb6e72bd81fdf073c8d6f969c8026dc56c09eb7"
+    return hashlib.sha256(normalized).hexdigest() == "65a16b1adff0a3df08aed076c7194b0145772bdea7b1ca94f7d5117c04326443"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1422,7 +1422,7 @@ def _check_zero_witness(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], fo
     relative = "src/ffi/buffers.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "b8c453561d2bef99821a2ef593ea9a3717d13dcc2618b3087bdd2f82ba1c7f37":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "4c96ee664f3e8cff00ffe2cda2cba520796b56bcb50335d4baf546bfa101d7f4":
         found.append(f"{SHIM}/{relative}: live mapping witness differs from the reviewed atomic readback")
     for pattern in (r"mod\s+zero_witness", r"let\s+witness\s*=\s*zero_witness::before", r"zero_witness::after\s*\("):
         matches = list(re.finditer(pattern, code))
@@ -1605,7 +1605,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'bd6ce6cae654ee04b191e8486c0b173a6c7eb41b1e2dfc29d91f3e4f14d99cca',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': 'd1a3d6d9e2b4e961aedc060b0c82bd7072c74e9b2cd3cfe794dfee86b2056cc3',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': '682b4398d10aadf642285a49f570d23d18162b3813c809b5f9f7c4cb2a0d99b5',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '06c9c91606a4500a0ade936cb0b3292c14853128671c88df6e1781e7bbc61fe0',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '7b8f69083292eb7722fc15fc596aaee8d41d8fc9987b226f141ab7c592adeabc',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '29ea47f5ebe24db94d0d8104b2bb13e8338743c7411db543f00cd350d2fd22df',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '95c472ff1aa10f08e2788921da6524d9a4e16e8164d853e0ad46c238ba07bf58',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
@@ -1616,7 +1616,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': 'fed180557f6f13b8b30a4b6815cf8eb823ddef6a53f7e6055397159af3c68379',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '1514271d14a58ab895a46b71e60daf5a5a54bb751f305c99531aab20caacb8d5',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
-    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
+    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '1f9565f8c37c03dff3e56a944270b26e1f7efcc62c72461ca6a10cae4dca94ca',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '7bccb277d733e1d1f1b57f2c678259ba511183e61f98be366ea7d6adaf91caa3',
     'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '3fee8a9ea7609019c88fce323b9e5ecd8cadc372e69c14d477d1c4c66d235157',
