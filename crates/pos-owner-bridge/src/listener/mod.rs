@@ -214,7 +214,7 @@ impl DiagnosticRing {
         };
         if let Ok(mut events) = self.events.try_lock() {
             if events.len() == 256 {
-                drop(events.pop_front());
+                let _evicted = events.pop_front();
                 self.overwritten.fetch_add(1, Ordering::Relaxed);
             }
             events.push_back(event);
