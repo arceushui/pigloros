@@ -1203,6 +1203,7 @@ fn modeled_closed_exit_fixture(
 
 #[test]
 fn modeled_already_exited_cutpoint_retains_owner_without_termination() -> TestResult {
+    use pos_owner_bridge::CleanupStore;
     let _port = crate::Native::fixed_port_fixture();
     for inject in [false, true] {
         crate::Native::reset_process_failure_observations();
@@ -1221,10 +1222,20 @@ fn modeled_already_exited_cutpoint_retains_owner_without_termination() -> TestRe
         assert!(fixture.handle.is_some());
         assert!(!model.calls.borrow().contains(&"terminate_exit"));
         assert!(fixture.surface.exit_fault_owners_retained());
+        let records = fixture.store.records().map_err(|_| "modeled records")?;
+        let [record] = records.as_slice() else {
+            return Err("modeled record missing before retirement".into());
+        };
         fixture
             .surface
             .finish()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
+        // The model inserted this record directly; unlike a real driver, its
+        // fresh dummy driver has no record to delete during retirement.
+        fixture
+            .store
+            .delete_record(record)
+            .map_err(|_| "modeled record deletion")?;
         let driver =
             readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now())?;
         fixture.retire(driver, Err(ERROR), None)?;
