@@ -481,8 +481,12 @@ fn modeled_recordless_observer_refuses_untrusted_exit_evidence() -> TestResult {
 fn modeled_opening_first_refuses_expiry_and_unavailable_fault_authority() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
-    let (mut fixture, model, _clock) = pending(&root)?;
-    fixture.handle = None;
+    let (mut fixture, model) = fixture(&root)?;
+    model.creation.set(Creation::Pending);
+    let selected = super::super::fixed_competing_spec(MODEL_CASE);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    model.pending_browser.set(Some(BROWSER));
     fixture.deadline = Instant::now();
     assert_eq!(
         fixture
