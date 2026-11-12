@@ -551,92 +551,123 @@ fn run() -> TestResult {
     let root = FixtureRoot::new()?;
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
+    let runtime = Path::new(&runtime);
+    run_initial_scenarios(runtime, &root.0)
+        .and_then(|()| run_later_scenarios(runtime, &root.0))
+        .and_then(|()| root.remove())
+}
+
+fn run_initial_scenarios(runtime: &Path, root: &Path) -> TestResult {
     run_target_pairs(
-        Path::new(&runtime),
-        &root.0,
+        runtime,
+        root,
         &[
             (0x31, ProcessFaultTarget::Renderer),
             (0x33, ProcessFaultTarget::Browser),
         ],
         &mut run_case,
         "control and fault reached different substates",
-    )?;
-    run_recordless_case(Path::new(&runtime), &root.0, 0x35, false)?;
-    run_recordless_case(Path::new(&runtime), &root.0, 0x36, true)?;
+    )
+    .and_then(|()| run_recordless_case(runtime, root, 0x35, false))
+    .and_then(|()| run_recordless_case(runtime, root, 0x36, true))
+    .and_then(|()| {
+        run_target_pairs(
+            runtime,
+            root,
+            &[
+                (0x37, ProcessFaultTarget::Renderer),
+                (0x39, ProcessFaultTarget::Browser),
+            ],
+            &mut run_success_releasing,
+            "release control and fault reached different states",
+        )
+    })
+    .and_then(|()| {
+        run_success_exit(runtime, root, 0x3b, false).and_then(|control| {
+            run_success_exit(runtime, root, 0x3c, true).map(|fault| {
+                let state = |boundary| match boundary {
+                    ExitBoundary::ActiveStatus(state)
+                    | ExitBoundary::ObjectExitedAwaitingSdk(state)
+                    | ExitBoundary::AlreadyExited(state) => state,
+                };
+                assert_eq!(
+                    state(control),
+                    state(fault),
+                    "exit control and fault reached different states"
+                );
+            })
+        })
+    })
+    .and_then(|()| {
+        run_awaiting_load(runtime, root, 0x3d, false).and_then(|control| {
+            run_awaiting_load(runtime, root, 0x3e, true).map(|fault| {
+                assert_eq!(
+                    control, fault,
+                    "load control and fault reached different states"
+                );
+            })
+        })
+    })
+    .and_then(|()| {
+        run_navigating(runtime, root, 0x3f, false).and_then(|control| {
+            run_navigating(runtime, root, 0x40, true).map(|fault| {
+                assert_eq!(
+                    control, fault,
+                    "navigation control and fault reached different states"
+                );
+            })
+        })
+    })
+}
+
+fn run_later_scenarios(runtime: &Path, root: &Path) -> TestResult {
     run_target_pairs(
-        Path::new(&runtime),
-        &root.0,
-        &[
-            (0x37, ProcessFaultTarget::Renderer),
-            (0x39, ProcessFaultTarget::Browser),
-        ],
-        &mut run_success_releasing,
-        "release control and fault reached different states",
-    )?;
-    let control = run_success_exit(Path::new(&runtime), &root.0, 0x3b, false)?;
-    let fault = run_success_exit(Path::new(&runtime), &root.0, 0x3c, true)?;
-    let state = |boundary| match boundary {
-        ExitBoundary::ActiveStatus(state)
-        | ExitBoundary::ObjectExitedAwaitingSdk(state)
-        | ExitBoundary::AlreadyExited(state) => state,
-    };
-    assert_eq!(
-        state(control),
-        state(fault),
-        "exit control and fault reached different states"
-    );
-    let control = run_awaiting_load(Path::new(&runtime), &root.0, 0x3d, false)?;
-    let fault = run_awaiting_load(Path::new(&runtime), &root.0, 0x3e, true)?;
-    assert_eq!(
-        control, fault,
-        "load control and fault reached different states"
-    );
-    let control = run_navigating(Path::new(&runtime), &root.0, 0x3f, false)?;
-    let fault = run_navigating(Path::new(&runtime), &root.0, 0x40, true)?;
-    assert_eq!(
-        control, fault,
-        "navigation control and fault reached different states"
-    );
-    run_target_pairs(
-        Path::new(&runtime),
-        &root.0,
+        runtime,
+        root,
         &[
             (0x41, ProcessFaultTarget::Renderer),
             (0x43, ProcessFaultTarget::Browser),
         ],
         &mut run_posted_empty,
         "empty-reply control and fault reached different states",
-    )?;
-    let control = run_first_opening_browser(Path::new(&runtime), &root.0, 0x45, false)?;
-    let fault = run_first_opening_browser(Path::new(&runtime), &root.0, 0x46, true)?;
-    assert_eq!(
-        control, fault,
-        "opening control and fault reached different cutpoints"
-    );
-    run_target_pairs(
-        Path::new(&runtime),
-        &root.0,
-        &[
-            (0x4b, ProcessFaultTarget::Renderer),
-            (0x4d, ProcessFaultTarget::Browser),
-        ],
-        &mut run_posted_writing,
-        "writing control and fault reached different states",
-    )?;
-    run_target_pairs(
-        Path::new(&runtime),
-        &root.0,
-        &[
-            (0x70, ProcessFaultTarget::Renderer),
-            (0x72, ProcessFaultTarget::Browser),
-        ],
-        &mut run_posted_ready,
-        "ready control and fault reached different states",
-    )?;
-    run_retries(Path::new(&runtime), &root.0)?;
-    run_consuming_cases(Path::new(&runtime), &root.0)?;
-    run_before_record_cases(Path::new(&runtime), &root.0)?;
-    root.remove()
+    )
+    .and_then(|()| {
+        run_first_opening_browser(runtime, root, 0x45, false).and_then(|control| {
+            run_first_opening_browser(runtime, root, 0x46, true).map(|fault| {
+                assert_eq!(
+                    control, fault,
+                    "opening control and fault reached different cutpoints"
+                );
+            })
+        })
+    })
+    .and_then(|()| {
+        run_target_pairs(
+            runtime,
+            root,
+            &[
+                (0x4b, ProcessFaultTarget::Renderer),
+                (0x4d, ProcessFaultTarget::Browser),
+            ],
+            &mut run_posted_writing,
+            "writing control and fault reached different states",
+        )
+    })
+    .and_then(|()| {
+        run_target_pairs(
+            runtime,
+            root,
+            &[
+                (0x70, ProcessFaultTarget::Renderer),
+                (0x72, ProcessFaultTarget::Browser),
+            ],
+            &mut run_posted_ready,
+            "ready control and fault reached different states",
+        )
+    })
+    .and_then(|()| run_retries(runtime, root))
+    .and_then(|()| run_consuming_cases(runtime, root))
+    .and_then(|()| run_before_record_cases(runtime, root))
 }
 
 struct Fixture {
