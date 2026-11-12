@@ -677,9 +677,6 @@ fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
 
 #[test]
 fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult {
-    use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
-    use pos_owner_bridge_codec::ControlState;
-
     for (stage, challenge, budget) in [
         ("read", false, false),
         ("cas", false, false),
@@ -750,37 +747,7 @@ fn consuming_cas_respects_completed_read_and_exchange_deadlines() -> TestResult 
                 rig.clock.advance(Duration::from_millis(10));
             }
             let outcome = outcome.ok_or("driver did not finish")?;
-            if offset_ms < 0 {
-                assert!(outcome.is_ok(), "{stage} {challenge}: {outcome:?}");
-            } else {
-                let expected = if budget {
-                    LifecycleCode::EnrollmentBudgetExceeded
-                } else if challenge {
-                    LifecycleCode::ChallengeExpired
-                } else {
-                    LifecycleCode::InteractionTimeout
-                };
-                assert_eq!(
-                    outcome.err(),
-                    Some(BridgeError::Lifecycle(expected)),
-                    "{stage} {offset_ms} {challenge}"
-                );
-            }
-            let log = rig.handle.log();
-            let consume = log.iter().filter(|entry| matches!(entry, LogEntry::Cas { actor: Actor::Host, current, new, won: true, .. } if *current == ControlState::Ready as u32 && *new == ControlState::Consuming as u32)).count();
-            assert_eq!(
-                consume,
-                usize::from(stage == "cas" || offset_ms < 0),
-                "{stage} {offset_ms}"
-            );
-            if offset_ms >= 0 {
-                assert!(!log
-                    .iter()
-                    .any(|entry| matches!(entry, LogEntry::HostCopy { .. })));
-            }
-            assert!(log.contains(&LogEntry::ControllerClosed));
-            assert!(log.contains(&LogEntry::Finished));
-            assert!(rig.store.records_now().is_empty());
+            assert_consumption_outcome(&rig, outcome, stage, offset_ms, challenge, budget);
         }
     }
     Ok(())
@@ -808,4 +775,47 @@ fn consumption_target(
     } else {
         Ok(boundary + Duration::from_millis(u64::try_from(offset_ms)?))
     }
+}
+
+fn assert_consumption_outcome(
+    rig: &DriverRig,
+    outcome: Result<pos_owner_bridge::ceremony::plan::Verified, BridgeError>,
+    stage: &str,
+    offset_ms: i64,
+    challenge: bool,
+    budget: bool,
+) {
+    use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
+    use pos_owner_bridge_codec::ControlState;
+    if offset_ms < 0 {
+        assert!(outcome.is_ok(), "{stage} {challenge}: {outcome:?}");
+    } else {
+        let expected = if budget {
+            LifecycleCode::EnrollmentBudgetExceeded
+        } else if challenge {
+            LifecycleCode::ChallengeExpired
+        } else {
+            LifecycleCode::InteractionTimeout
+        };
+        assert_eq!(
+            outcome.err(),
+            Some(BridgeError::Lifecycle(expected)),
+            "{stage} {offset_ms} {challenge}"
+        );
+    }
+    let log = rig.handle.log();
+    let consume = log.iter().filter(|entry| matches!(entry, LogEntry::Cas { actor: Actor::Host, current, new, won: true, .. } if *current == ControlState::Ready as u32 && *new == ControlState::Consuming as u32)).count();
+    assert_eq!(
+        consume,
+        usize::from(stage == "cas" || offset_ms < 0),
+        "{stage} {offset_ms}"
+    );
+    if offset_ms >= 0 {
+        assert!(!log
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::HostCopy { .. })));
+    }
+    assert!(log.contains(&LogEntry::ControllerClosed));
+    assert!(log.contains(&LogEntry::Finished));
+    assert!(rig.store.records_now().is_empty());
 }
