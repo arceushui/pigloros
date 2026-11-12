@@ -336,7 +336,8 @@ fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestRes
             .surface
             .zero_close_buffers()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
-        let ceremony = spec(40).ceremony_id;
+        let selected = spec(40);
+        let ceremony = selected.ceremony_id;
         let deadline = Instant::now() + Duration::from_secs(10);
         let armed_ceremony = if case == "ceremony" {
             spec(41).ceremony_id
@@ -355,7 +356,7 @@ fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestRes
             let browser = fixture.surface.identity.ok_or("missing browser")?;
             let wrong = CleanupRecordV1::new(
                 ceremony,
-                &spec(40).folder_name,
+                &selected.folder_name,
                 browser.browser_pid,
                 browser.creation_filetime + 1,
                 browser.image_path_sha256,
@@ -377,7 +378,7 @@ fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestRes
                 .set_failing(&[pos_owner_bridge::fake::host::StoreOp::List]);
         } else if case == "folder_unavailable" {
             std::fs::rename(
-                fixture.root.join(&spec(40).folder_name),
+                fixture.root.join(&selected.folder_name),
                 fixture.root.join("displaced-exit-folder"),
             )?;
         } else if case == "environment_unavailable" {
@@ -407,7 +408,7 @@ fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestRes
         if case == "folder_unavailable" {
             std::fs::rename(
                 fixture.root.join("displaced-exit-folder"),
-                fixture.root.join(&spec(40).folder_name),
+                fixture.root.join(&selected.folder_name),
             )?;
         }
         if case == "record_identity" {
