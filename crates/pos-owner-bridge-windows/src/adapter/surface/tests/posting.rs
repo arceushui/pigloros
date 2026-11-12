@@ -521,7 +521,7 @@ fn foreground_observation_is_optional_and_never_extends_deadlines() -> TestResul
                     .set_deadline(fixture.clock.now() + Duration::from_millis(500));
                 fixture.factory.focus_delay.set(Duration::from_millis(500));
             }
-            _ => unreachable!(),
+            _ => return Err("unknown foreground observation case".into()),
         }
         let result = fixture.surface.navigate();
         if case == "query_error" {
