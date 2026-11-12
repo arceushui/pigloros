@@ -1556,6 +1556,7 @@ def test_owned_process_fault_authority() -> None:
         ("|| !self.retirement.no_resurrection", "|| false"),
         ("Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
         ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
+        ("result.map_err(|()| query_error)?.ok_or(pending_error)", "Ok(0)"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing new evidence mutation target: {old}")

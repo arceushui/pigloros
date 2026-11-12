@@ -46,6 +46,56 @@ type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
 
 // The fixture deadline was set before the test driver's T0. Its origin gives
 // a conservative challenge limit; these Get test plans have no enrollment budget.
+// Interpret one retained-handle observation without altering the caller's
+// identity, clock, trace, or event ordering.
+fn require_exit_code(
+    result: Result<Option<u32>, ()>,
+    query_error: &'static str,
+    pending_error: &'static str,
+) -> Result<u32, &'static str> {
+    result.map_err(|()| query_error)?.ok_or(pending_error)
+}
+
+#[test]
+fn modeled_retained_exit_code_preserves_each_scenario_error() {
+    for (query_error, pending_error) in [
+        ("exit query failed", "exit still pending at native event"),
+        (
+            "recordless exit query failed",
+            "recordless process exit pending",
+        ),
+        (
+            "consuming exit query failed",
+            "consuming exit still pending",
+        ),
+        (
+            "pre-record exit query failed",
+            "pre-record process exit pending",
+        ),
+        (
+            "early renderer exit query failed",
+            "early renderer exit pending",
+        ),
+    ] {
+        assert_eq!(
+            require_exit_code(Err(()), query_error, pending_error),
+            Err(query_error)
+        );
+        assert_eq!(
+            require_exit_code(Ok(None), query_error, pending_error),
+            Err(pending_error)
+        );
+        assert_eq!(
+            require_exit_code(Ok(Some(0)), query_error, pending_error),
+            Ok(0)
+        );
+        assert_eq!(
+            require_exit_code(Ok(Some(0x535)), query_error, pending_error),
+            Ok(0x535)
+        );
+    }
+}
+
 fn interaction_deadline(fixture_deadline: Instant, receipt: Instant) -> Instant {
     use pos_owner_bridge::ceremony::timing::{CHALLENGE_TTL, INTERACTION, READINESS};
     (receipt + INTERACTION).min(fixture_deadline + CHALLENGE_TTL.saturating_sub(READINESS))
@@ -894,10 +944,11 @@ impl Fixture {
                 }
                 let held = self.handle.as_ref().ok_or("fault handle disappeared")?;
                 let identity = held.identity();
-                let code = held
-                    .exit_code()
-                    .map_err(|()| "exit query failed")?
-                    .ok_or("exit still pending at native event")?;
+                let code = require_exit_code(
+                    held.exit_code(),
+                    "exit query failed",
+                    "exit still pending at native event",
+                )?;
                 if clock.now() >= deadline {
                     return Err("native fault event timed out".into());
                 }
@@ -1293,10 +1344,11 @@ impl Fixture {
                     .handle
                     .as_ref()
                     .ok_or("recordless handle disappeared")?;
-                let code = held
-                    .exit_code()
-                    .map_err(|()| "recordless exit query failed")?
-                    .ok_or("recordless process exit pending")?;
+                let code = require_exit_code(
+                    held.exit_code(),
+                    "recordless exit query failed",
+                    "recordless process exit pending",
+                )?;
                 if clock.now() >= self.deadline {
                     return Err("recordless browser exit timed out".into());
                 }
@@ -3019,10 +3071,11 @@ impl ConsumingPort<'_> {
                 let held = self.handle.borrow();
                 let handle = held.as_ref().ok_or("consuming fault handle missing")?;
                 let identity = handle.identity();
-                let code = handle
-                    .exit_code()
-                    .map_err(|()| "consuming exit query failed")?
-                    .ok_or("consuming exit still pending")?;
+                let code = require_exit_code(
+                    handle.exit_code(),
+                    "consuming exit query failed",
+                    "consuming exit still pending",
+                )?;
                 if clock.now() >= self.deadline {
                     return Err("consuming event timed out".into());
                 }
@@ -3478,10 +3531,11 @@ impl BeforeRecordStore<'_, '_> {
                     .handle
                     .as_ref()
                     .ok_or("pre-record fault handle missing")?;
-                let code = handle
-                    .exit_code()
-                    .map_err(|()| "pre-record exit query failed")?
-                    .ok_or("pre-record process exit pending")?;
+                let code = require_exit_code(
+                    handle.exit_code(),
+                    "pre-record exit query failed",
+                    "pre-record process exit pending",
+                )?;
                 if clock.now() >= self.deadline {
                     return Err("pre-record browser exit timed out".into());
                 }
@@ -3864,10 +3918,11 @@ impl Fixture {
                     .as_ref()
                     .ok_or("early renderer handle missing")?;
                 let identity = held.identity();
-                let code = held
-                    .exit_code()
-                    .map_err(|()| "early renderer exit query failed")?
-                    .ok_or("early renderer exit pending")?;
+                let code = require_exit_code(
+                    held.exit_code(),
+                    "early renderer exit query failed",
+                    "early renderer exit pending",
+                )?;
                 if clock.now() >= self.deadline {
                     return Err("early renderer event timed out".into());
                 }
