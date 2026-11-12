@@ -50,7 +50,7 @@ fn classify_process_kind(
     }
 }
 
-fn legacy_process_failure(failure: &crate::NativeProcessFailure) -> Option<bool> {
+fn legacy_process_failure(failure: crate::NativeProcessFailure) -> Option<bool> {
     use crate::NativeProcessFailure;
     match failure {
         NativeProcessFailure::MainRendererExited => Some(true),
@@ -184,6 +184,7 @@ impl crate::Native {
             failures
                 .borrow()
                 .iter()
+                .copied()
                 .map(legacy_process_failure)
                 .collect()
         })
@@ -226,7 +227,7 @@ fn modeled_process_failure_metadata_preserves_classification() {
         (None, Unavailable, None),
     ] {
         assert_eq!(classify_process_kind(kind), expected);
-        assert_eq!(legacy_process_failure(&expected), legacy);
+        assert_eq!(legacy_process_failure(expected), legacy);
     }
 }
 
