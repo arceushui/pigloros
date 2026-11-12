@@ -1601,6 +1601,7 @@ fn consuming_event_at_the_generation_limit_fails_closed() -> TestResult {
     Ok(())
 }
 
+#[test]
 fn enrollment_budget_does_not_interrupt_consuming_verification() -> TestResult {
     for delay in [Duration::from_secs(2), Duration::from_secs(3)] {
         let mut rig = DriverRig::with_hook(
