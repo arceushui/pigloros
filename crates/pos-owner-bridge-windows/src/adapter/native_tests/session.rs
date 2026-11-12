@@ -287,7 +287,7 @@ mod tests {
         let result = Session::new(&factory, Rc::clone(&events)).map(|mut session| {
             let created = session.create_controller();
             assert!(created.is_ok(), "controller creation: {created:?}");
-            assert!(matches!(session.controller_completion(), Some(Ok(()))));
+            assert_eq!(session.controller_completion(), Some(Ok(())));
             native.creation.set(Creation::MissingView);
             events.event(NativeEvent::BrowserExited { pid: 99 });
             drop(session);
