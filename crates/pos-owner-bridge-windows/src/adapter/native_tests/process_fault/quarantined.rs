@@ -414,6 +414,38 @@ mod tests {
             assert!(fixture.trace.borrow().is_empty());
             assert_eq!(*model.calls.borrow(), calls);
         }
+        let error = observe_case(
+            &mut fixture,
+            &mut keeper,
+            &root.0,
+            &keeper_held,
+            (true, true, &observations),
+            ProcessFaultTarget::Browser,
+            false,
+        )
+        .err()
+        .map(|error| error.to_string());
+        assert_eq!(error.as_deref(), Some("quarantined owners not established"));
+        assert!(fixture.trace.borrow().is_empty());
+        drop(fixture);
+        root.remove()
+    }
+
+    #[test]
+    fn modeled_empty_keeper_refuses_retention_without_opening_a_surface() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = super::super::FixtureRoot::new()?;
+        let (mut fixture, model) = super::super::model_tests::fixture(&root)?;
+        let calls = model.calls.borrow().clone();
+        let error = blocked(&mut QuarantineKeeper::new(), &mut fixture, &root.0)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("quarantined owners or held folder were not retained")
+        );
+        assert_eq!(*model.calls.borrow(), calls);
+        assert!(fixture.surface.idle());
         drop(fixture);
         root.remove()
     }
