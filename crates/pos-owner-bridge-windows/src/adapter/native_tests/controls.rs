@@ -207,9 +207,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let mut native = session::Session::new(&factory, events)?;
         create_control_session(&mut native, &factory, &probe, runtime.root(), &folder)?;
         let identity = runtime.browser_identity(native.browser_pid()?)?;
-        native.require_shared_interfaces()?;
-        let sink: Rc<dyn EventSink> = probe.clone();
-        native.subscribe_view(sink)?;
+        subscribe_control_view(&mut native, &probe)?;
         prepare_control_view(native.as_ref())?;
         listener.begin_navigation();
         probe.events.begin();
@@ -280,6 +278,13 @@ fn create_control_session(
     completion(factory, "control controller", || {
         native.controller_completion()
     })?;
+    Ok(())
+}
+
+fn subscribe_control_view(native: &mut session::Session<'_>, probe: &Rc<Probe>) -> TestResult {
+    native.require_shared_interfaces()?;
+    let sink: Rc<dyn EventSink> = probe.clone();
+    native.subscribe_view(sink)?;
     Ok(())
 }
 
@@ -577,6 +582,60 @@ mod tests {
             assert_eq!(calls_before_retirement.as_slice(), expected);
             assert!(!calls_before_retirement.contains(&"navigate"));
             assert!(factory.calls.borrow().contains(&"drop_environment"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn modeled_control_subscription_stops_at_failure_and_retires_owners() -> super::TestResult {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use pos_owner_bridge::fake::clock::FakeClock;
+        use std::path::Path;
+
+        for (failure, expected, success) in [
+            (
+                None,
+                &["require_shared_interfaces", "subscribe_view"][..],
+                true,
+            ),
+            (
+                Some("require_shared_interfaces"),
+                &["require_shared_interfaces"][..],
+                false,
+            ),
+            (
+                Some("subscribe_view"),
+                &["require_shared_interfaces", "subscribe_view"][..],
+                false,
+            ),
+        ] {
+            let factory = Factory::new(Creation::Ready, FakeClock::start());
+            let probe = Rc::new(probe());
+            let events = Rc::clone(&probe.events);
+            let mut native = super::session::Session::new(&factory, Rc::clone(&events))
+                .map_err(|error| format!("{error:?}"))?;
+            super::create_control_session(
+                &mut native,
+                &factory,
+                &probe,
+                Path::new("modeled-runtime"),
+                Path::new("modeled-folder"),
+            )?;
+            assert_eq!(
+                native.browser_pid().map_err(|error| format!("{error:?}"))?,
+                42
+            );
+            let before = factory.calls.borrow().len();
+            factory.failure.set(failure);
+            let result = super::subscribe_control_view(&mut native, &probe);
+            let calls = factory.calls.borrow()[before..].to_vec();
+            factory.failure.set(None);
+            events.event(NativeEvent::BrowserExited { pid: 42 });
+            drop(native);
+            assert_eq!(result.is_ok(), success);
+            assert_eq!(calls.as_slice(), expected);
+            assert!(factory.calls.borrow().contains(&"drop_environment"));
+            assert!(!factory.calls.borrow().contains(&"navigate"));
         }
         Ok(())
     }
