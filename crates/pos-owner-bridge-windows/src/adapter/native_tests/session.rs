@@ -164,6 +164,118 @@ mod tests {
         }
     }
 
+    // This scripted factory models host ownership and cleanup; it does not
+    // claim that the native SDK returned a particular failure or callback.
+    struct PendingOrBlockedFactory {
+        native: Rc<Factory>,
+        failing: Option<&'static str>,
+        forbidden: &'static [&'static str],
+        pumps: Cell<u8>,
+    }
+
+    impl StaPump for PendingOrBlockedFactory {
+        fn next(&self) -> NativeResult<NativePulse> {
+            assert_eq!(self.pumps.get(), 0, "modeled recovery did not progress");
+            self.pumps.set(1);
+            let calls = self.native.calls.borrow();
+            if let Some(failing) = self.failing {
+                assert!(calls.contains(&failing));
+            }
+            for forbidden in self.forbidden {
+                assert!(
+                    !calls.contains(forbidden),
+                    "released {forbidden} before recovery"
+                );
+            }
+            drop(calls);
+            if self.failing.is_some() {
+                self.native.failure.set(None);
+            } else {
+                self.native.creation.set(Creation::CallbackFailure);
+            }
+            // The keeper must retain all owners even after the pump reports quit.
+            Ok(NativePulse::Quit)
+        }
+
+        fn stop(&mut self) -> NativeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeFactory for PendingOrBlockedFactory {
+        fn session(&self) -> NativeResult<Box<dyn NativeOperations>> {
+            self.native.session()
+        }
+    }
+
+    #[test]
+    fn modeled_pending_controller_and_quit_retain_owners_until_completion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let native = Factory::new(Creation::Pending, FakeClock::start());
+        let factory = PendingOrBlockedFactory {
+            native: Rc::clone(&native),
+            failing: None,
+            forbidden: &[
+                "unsubscribe_view",
+                "unsubscribe_exit",
+                "drop_environment",
+                "destroy_window",
+            ],
+            pumps: Cell::new(0),
+        };
+        let mut session = Session::new(&factory, Rc::new(Events::default()))
+            .map_err(|error| format!("{error:?}"))?;
+        session
+            .create_controller()
+            .map_err(|error| format!("{error:?}"))?;
+        drop(session);
+        assert_eq!(factory.pumps.get(), 1);
+        let calls = native.calls.borrow();
+        assert!(!calls.contains(&"close_controller"));
+        assert!(calls.contains(&"drop_environment"));
+        assert!(calls.contains(&"destroy_window"));
+        Ok(())
+    }
+
+    #[test]
+    fn modeled_teardown_failure_retains_later_owners_until_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (failing, forbidden) in [
+            (
+                "unsubscribe_view",
+                &["unsubscribe_exit", "drop_environment", "destroy_window"][..],
+            ),
+            (
+                "unsubscribe_exit",
+                &["drop_environment", "destroy_window"][..],
+            ),
+            ("drop_environment", &["destroy_window"][..]),
+            ("destroy_window", &[][..]),
+        ] {
+            let native = Factory::new(Creation::Ready, FakeClock::start());
+            native.failure.set(Some(failing));
+            let factory = PendingOrBlockedFactory {
+                native: Rc::clone(&native),
+                failing: Some(failing),
+                forbidden,
+                pumps: Cell::new(0),
+            };
+            let session = Session::new(&factory, Rc::new(Events::default()))
+                .map_err(|error| format!("{error:?}"))?;
+            drop(session);
+            assert_eq!(factory.pumps.get(), 1, "{failing}");
+            let calls = native.calls.borrow();
+            assert_eq!(
+                calls.iter().filter(|call| **call == failing).count(),
+                2,
+                "{failing}"
+            );
+            assert!(calls.contains(&"destroy_window"));
+            assert!(!calls.contains(&"close_controller"));
+        }
+        Ok(())
+    }
+
     #[test]
     fn raw_session_retains_unknown_pid_until_its_matching_exit(
     ) -> Result<(), Box<dyn std::error::Error>> {
