@@ -337,6 +337,127 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
 mod tests {
     use super::*;
     use crate::NativeEvent;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    // Delegates to the same real fixture store shared with Surface. Only the
+    // explicitly selected list call is refused; this is a model of port error.
+    struct ListRefusal {
+        store: super::super::WindowsCleanupStore,
+        calls: Arc<AtomicUsize>,
+        fail_at: Arc<AtomicUsize>,
+    }
+
+    impl CleanupStore for ListRefusal {
+        fn write_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+            self.store.write_record(record)
+        }
+        fn delete_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+            self.store.delete_record(record)
+        }
+        fn records(&mut self) -> Result<Vec<Vec<u8>>, pos_owner_bridge::CleanupError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_at.load(Ordering::SeqCst) {
+                return Err(pos_owner_bridge::CleanupError);
+            }
+            self.store.records()
+        }
+        fn folders(&mut self) -> Result<Vec<String>, pos_owner_bridge::CleanupError> {
+            self.store.folders()
+        }
+        fn remove_folder(&mut self, folder: &str) -> Result<(), pos_owner_bridge::CleanupError> {
+            self.store.remove_folder(folder)
+        }
+    }
+
+    fn require<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(Box::new(error.to_string())),
+        }
+    }
+
+    #[test]
+    fn modeled_list_refusals_retain_quarantined_owner_until_cleanup() {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = require(super::super::FixtureRoot::new());
+        let (mut fixture, model) = require(super::super::model_tests::fixture(&root));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail_at = Arc::new(AtomicUsize::new(0));
+        let store = super::super::WindowsCleanupStore::new(ListRefusal {
+            store: fixture.store.clone(),
+            calls: Arc::clone(&calls),
+            fail_at: Arc::clone(&fail_at),
+        });
+        let mut surface = require(
+            super::super::Surface::new(
+                std::rc::Rc::clone(&fixture.factory),
+                Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
+                root.0.clone(),
+                Box::new(fixture.loopback.clone()),
+                Box::new(store.clone()),
+                Box::new(SystemClock),
+            )
+            .map_err(SurfaceError::error),
+        );
+        surface.set_deadline(fixture.deadline);
+        fixture.surface = surface;
+        fixture.store = store;
+
+        let ceremony = CeremonyId::from_bytes([240; 16]);
+        let mut driver = require(readiness::new_driver(ceremony, Instant::now()));
+        let mut refused = false;
+        let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
+        assert_eq!(
+            result,
+            Err(BridgeError::Quarantine(
+                QuarantineCode::ControllerCloseFailed
+            ))
+        );
+        assert!(refused);
+        let mut keeper = QuarantineKeeper::new();
+        assert!(keeper.finish(driver, result).driver.is_none());
+        let folder = root.0.join(pos_owner_bridge::folder_name(&ceremony));
+        let marker = folder.join("quarantine-held");
+        require(std::fs::write(&marker, []));
+        let before = calls.load(Ordering::SeqCst);
+        let polled = keeper_poll(&mut keeper, &mut fixture);
+        assert!(polled.remaining && polled.driver.is_none());
+        let keeper_lists = calls.load(Ordering::SeqCst) - before;
+        let before = calls.load(Ordering::SeqCst);
+        require(blocked(&mut keeper, &mut fixture, &folder));
+        assert_eq!(calls.load(Ordering::SeqCst) - before, keeper_lists + 2);
+        for list in 1..=2 {
+            let before = calls.load(Ordering::SeqCst);
+            fail_at.store(before + keeper_lists + list, Ordering::SeqCst);
+            assert!(blocked(&mut keeper, &mut fixture, &folder).is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), before + keeper_lists + list);
+            fail_at.store(0, Ordering::SeqCst);
+            assert!(!fixture.surface.idle());
+            assert!(marker.is_file());
+            assert_eq!(require(fixture.store.records()).len(), 1);
+            require(blocked(&mut keeper, &mut fixture, &folder));
+        }
+        require(std::fs::remove_file(&marker));
+        require(
+            fixture
+                .surface
+                .close_controller()
+                .map_err(SurfaceError::error),
+        );
+        let Some(sink) = model.sink.borrow().clone() else {
+            std::panic::resume_unwind(Box::new("missing modeled sink"));
+        };
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        retire_keeper(&mut keeper, &mut fixture);
+        assert!(fixture.surface.idle());
+        assert!(require(fixture.store.records()).is_empty());
+        drop(sink);
+        drop(fixture);
+        require(root.remove());
+    }
 
     #[test]
     fn modeled_quarantine_wipe_refusals_identify_the_failed_observation() -> TestResult {
