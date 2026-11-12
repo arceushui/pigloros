@@ -102,6 +102,10 @@ impl Surface {
         self.native.subscribe_view(sink).map_err(unavailable)?;
         settings::apply(self.native.as_ref())?;
         self.native.fit_controller().map_err(unavailable)?;
+        Ok(())
+    }
+
+    fn activate_controller(&mut self) -> Result<()> {
         self.foreground_deadline =
             Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
         self.native.show_window().map_err(unavailable)?;
@@ -123,10 +127,19 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         if !self.navigation_issued {
+            if self.foreground_deadline.is_none() {
+                if let Err(error) = self.activate_controller() {
+                    self.activation_error = Some(error);
+                    return Err(error);
+                }
+            }
             let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
             self.check_foreground_deadline(deadline)?;
             let foreground = self.native.window().map_err(unavailable)?.foreground;
             self.check_foreground_deadline(deadline)?;
+            if self.events.invalid() {
+                return Err(super::navigation_lost());
+            }
             if !foreground {
                 return Ok(Poll::Pending);
             }

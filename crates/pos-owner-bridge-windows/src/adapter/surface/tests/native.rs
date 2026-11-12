@@ -35,6 +35,7 @@ pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
     pub(super) show_delay: Cell<Duration>,
+    pub(super) reenter_on_activation: Cell<Option<&'static str>>,
     pub(super) window_delay: Cell<Duration>,
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
     pub(super) fail_during_navigation: Cell<bool>,
@@ -70,6 +71,7 @@ impl Factory {
             sink: RefCell::new(None),
             foreground: Cell::new(true),
             show_delay: Cell::new(Duration::ZERO),
+            reenter_on_activation: Cell::new(None),
             window_delay: Cell::new(Duration::ZERO),
             navigation_succeeds: Cell::new(false),
             fail_during_navigation: Cell::new(false),
@@ -303,13 +305,24 @@ impl NativeOperations for Session {
     fn show_window(&self) -> NativeResult<()> {
         self.effect("show_window")?;
         self.factory.clock.advance(self.factory.show_delay.get());
+        if self.factory.reenter_on_activation.get() == Some("show_window") {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::NewWindow);
+            }
+        }
         Ok(())
     }
     fn fit_controller(&self) -> NativeResult<()> {
         self.effect("fit_controller")
     }
     fn focus_controller(&self) -> NativeResult<()> {
-        self.effect("focus_controller")
+        self.effect("focus_controller")?;
+        if self.factory.reenter_on_activation.get() == Some("focus_controller") {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::NewWindow);
+            }
+        }
+        Ok(())
     }
     fn create_environment(
         &mut self,
