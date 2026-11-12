@@ -451,6 +451,31 @@ fn failed_native_preparation_returns_identity_before_refusing_navigation() -> Te
 }
 
 #[test]
+fn timely_foreground_survives_slow_focus_when_still_foreground() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .factory
+        .focus_delay
+        .set(std::time::Duration::from_millis(1_100));
+    fixture.factory.navigation_succeeds.set(true);
+    fixture
+        .open(&super::spec(130))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let activation: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(activation, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
 fn foreground_activation_waits_for_navigation_after_slow_record_work() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.navigation_succeeds.set(true);
