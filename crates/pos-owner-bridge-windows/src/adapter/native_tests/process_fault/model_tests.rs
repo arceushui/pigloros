@@ -990,29 +990,29 @@ fn modeled_pre_record_control_rejects_query_crossing_deadline() -> TestResult {
             .map_err(|e| e.to_string())?;
         let clock = TickingClock(FakeClock::start());
         let deadline = clock.0.now() + Duration::from_secs(seconds);
-        let shared = RefCell::new(&mut fixture.surface);
-        let mut store = super::BeforeRecordStore {
-            inner: &mut fixture.store,
-            surface: &shared,
-            inject: false,
-            target: ProcessFaultTarget::Browser,
-            presence: None,
-            deadline,
-            trace: Rc::clone(&fixture.trace),
-            handle: None,
-            failure: None,
-            reached: false,
-            written: false,
-            generation: 1,
-            posts: 0,
-            ceremony_id: selected.ceremony_id,
-        };
-        let result = store.on_write_with_clock(&bytes[..size], &clock);
-        assert_eq!(result.is_ok(), accepted);
-        assert_eq!(store.reached, accepted);
-        assert_eq!(fixture.trace.borrow().len(), usize::from(accepted));
-        drop(store);
-        drop(shared);
+        {
+            let shared = RefCell::new(&mut fixture.surface);
+            let mut store = super::BeforeRecordStore {
+                inner: &mut fixture.store,
+                surface: &shared,
+                inject: false,
+                target: ProcessFaultTarget::Browser,
+                presence: None,
+                deadline,
+                trace: Rc::clone(&fixture.trace),
+                handle: None,
+                failure: None,
+                reached: false,
+                written: false,
+                generation: 1,
+                posts: 0,
+                ceremony_id: selected.ceremony_id,
+            };
+            let result = store.on_write_with_clock(&bytes[..size], &clock);
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(store.reached, accepted);
+            assert_eq!(fixture.trace.borrow().len(), usize::from(accepted));
+        }
         fixture
             .surface
             .close_controller()
