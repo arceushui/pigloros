@@ -212,14 +212,17 @@ impl DiagnosticRing {
             stage,
             value,
         };
-        if let Ok(mut events) = self.events.try_lock() {
-            if events.len() == 256 {
-                let _evicted = events.pop_front();
-                self.overwritten.fetch_add(1, Ordering::Relaxed);
+        match self.events.try_lock() {
+            Ok(mut events) => {
+                if events.len() == 256 {
+                    let _evicted = events.pop_front();
+                    self.overwritten.fetch_add(1, Ordering::Relaxed);
+                }
+                events.push_back(event);
             }
-            events.push_back(event);
-        } else {
-            self.lost.fetch_add(1, Ordering::Relaxed);
+            Err(_) => {
+                self.lost.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
