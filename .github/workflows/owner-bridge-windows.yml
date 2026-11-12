@@ -24,7 +24,7 @@ jobs:
       - name: Run bounded fixture and record binary identity
         run: |
           set -euo pipefail
-          LIBSQLITE3_FLAGS=SQLITE_ENABLE_FILESTAT CC_ENABLE_DEBUG_OUTPUT=1 cargo test -vv --locked -p pos-store --test sqlite_runtime_facts -- --nocapture
+          LIBSQLITE3_FLAGS="SQLITE_ENABLE_FILESTAT SQLITE_ENABLE_WALSTAT" CC_ENABLE_DEBUG_OUTPUT=1 cargo test -vv --locked -p pos-store --test sqlite_runtime_facts -- --nocapture
           find "$HOME/.cargo/registry/src" -path "*/libsqlite3-sys-0.39.1/sqlite3/sqlite3.c" -exec sha256sum "{}" \; -o -path "*/libsqlite3-sys-0.39.1/build.rs" -exec sha256sum "{}" \;
           find target/debug/build -name libsqlite3.a -exec sha256sum "{}" \;
           find target/debug/deps -maxdepth 1 -type f -executable -name 'sqlite_runtime_facts-*' -print -exec sha256sum '{}' \; -exec ldd '{}' \;
