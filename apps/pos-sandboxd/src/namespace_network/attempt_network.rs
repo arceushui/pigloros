@@ -9,13 +9,14 @@
 //! Teardown is RAII. Dropping the connector removes the namespace and frees
 //! the slot. A removal that fails quarantines the slot and closes the port:
 //! every later establishment fails, naming the slot, until restart
-//! reconciliation removes the remaining state (ADR-069 section 6: an
+//! reconciliation removes the remaining state (ADR-069 §1: an
 //! ineffective property closes admission).
 
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsFd, OwnedFd};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -153,6 +154,9 @@ pub struct NamespacedLocalNetwork<C, E = HostEgress> {
     namespaces: NetworkNamespaces,
     range: NetworkRange,
     slots: Arc<Slots>,
+    /// Whether an egress probe of this port is running: at most one runs,
+    /// whoever calls it, since every probe uses the same reserved names.
+    probing: AtomicBool,
 }
 
 impl<C, E> NamespacedLocalNetwork<C, E> {
@@ -171,6 +175,7 @@ impl<C, E> NamespacedLocalNetwork<C, E> {
                 count,
                 holders: Mutex::new(Holders::default()),
             }),
+            probing: AtomicBool::new(false),
         }
     }
 }
@@ -332,7 +337,7 @@ where
 mod probe;
 
 pub(super) use probe::PROBE_HOST_LINK;
-pub use probe::{EgressProbe, EgressProbeError};
+pub use probe::{EgressProbe, EgressProbeError, InvalidEgressProbe, LocalEgressProbe};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
