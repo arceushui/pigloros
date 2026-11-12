@@ -1100,3 +1100,28 @@ fn modeled_control_observation_refuses_a_snapshot_after_the_deadline() -> TestRe
     }
     Ok(())
 }
+
+#[test]
+fn modeled_exit_cutpoint_refuses_unprepared_surface_before_authority() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for inject in [false, true] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model) = fixture(&root)?;
+        let calls = model.calls.borrow().clone();
+        let result = fixture.at_success_exit(inject, Instant::now() + Duration::from_secs(5));
+        assert!(result
+            .err()
+            .is_some_and(|error| error.to_string().starts_with(
+                "AwaitingExit retained-object status and matching SDK-event classification failed:"
+            )));
+        assert_eq!(*model.calls.borrow(), calls);
+        assert!(fixture.handle.is_none());
+        assert!(fixture.exit_reached.is_none());
+        assert!(!fixture.evidence_complete);
+        assert!(fixture.trace.borrow().is_empty());
+        let (driver, result) = cancelled_driver(&mut fixture)?;
+        fixture.retire(driver, result, None)?;
+        root.remove()?;
+    }
+    Ok(())
+}
