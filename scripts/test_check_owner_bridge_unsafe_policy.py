@@ -1573,7 +1573,8 @@ def test_owned_process_fault_authority() -> None:
     # bounded test-only recorder, not an invented event or a comment decoy.
     for relative, old, new, expected in (
         ("src/ffi/creation.rs", "result.is_ok(),", "true,", "callback invocation differs from reviewed SDK path"),
-        ("src/ffi/creation.rs", "hr.is_err() && value.is_some()", "false", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "classify_creation(hr.is_err(), value.is_some())", "classify_creation(false, value.is_some())", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "failed && present", "false", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/creation.rs", "crate::CreationCallback::NativeFailure", "crate::CreationCallback::Success", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, result);", "let _ignored = result;", "callback invocation differs from reviewed SDK path"),
