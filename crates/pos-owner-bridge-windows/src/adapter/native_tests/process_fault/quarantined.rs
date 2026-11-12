@@ -387,22 +387,20 @@ mod tests {
                             calls: Arc::clone(&calls),
                             fail_at: Arc::clone(&fail_at),
                         });
-                        let ran_surface =
-                            super::super::Surface::new(
-                                std::rc::Rc::clone(&fixture.factory),
-                                Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
-                                root.0.clone(),
-                                Box::new(fixture.loopback.clone()),
-                                Box::new(store.clone()),
-                                Box::new(SystemClock),
-                            )
-                            .ok()
-                            .map(|mut surface| {
-                                surface.set_deadline(fixture.deadline);
-                                fixture.surface = surface;
-                                fixture.store = store;
-                                let ceremony = CeremonyId::from_bytes([240; 16]);
-                                let ran_driver =
+                        let surface_result = super::super::Surface::new(
+                            std::rc::Rc::clone(&fixture.factory),
+                            Arc::new(crate::adapter::surface::tests::Runtime(root.0.clone())),
+                            root.0.clone(),
+                            Box::new(fixture.loopback.clone()),
+                            Box::new(store.clone()),
+                            Box::new(SystemClock),
+                        );
+                        let ran_surface = surface_result.ok().map(|mut surface| {
+                            surface.set_deadline(fixture.deadline);
+                            fixture.surface = surface;
+                            fixture.store = store;
+                            let ceremony = CeremonyId::from_bytes([240; 16]);
+                            let ran_driver =
                                     readiness::new_driver(ceremony, Instant::now()).ok().map(
                                         |mut driver| {
                                             let mut refused = false;
@@ -491,8 +489,8 @@ mod tests {
                                                 .is_ok_and(|records| records.is_empty()));
                                         },
                                     );
-                                assert!(ran_driver.is_some(), "create modeled driver");
-                            });
+                            assert!(ran_driver.is_some(), "create modeled driver");
+                        });
                         assert!(ran_surface.is_some(), "create modeled surface");
                         drop(fixture);
                     });
