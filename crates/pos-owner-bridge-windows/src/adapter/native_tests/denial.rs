@@ -341,3 +341,84 @@ pub(super) fn run_delivery(runtime: &Path, root: &Path) -> TestResult {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod model_tests {
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use pos_owner_bridge::fake::clock::FakeClock;
+    use pos_owner_bridge::listener::FixtureProfile;
+    use pos_owner_bridge::{CleanupStore as _, SystemClock};
+    use pos_owner_bridge_codec::CeremonyId;
+
+    use super::{
+        readiness, Fixture, SharedLoopback, Surface, TestResult, Trace, WindowsCleanupStore,
+    };
+    use crate::adapter::native_tests::FixtureRoot;
+    use crate::adapter::surface::tests::native::{Creation, Factory};
+    use crate::adapter::surface::tests::Runtime;
+    use crate::NativeFactory;
+
+    #[test]
+    fn modeled_denial_attempt_preserves_errors_after_owner_retirement() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        for (fault, expected) in [
+            ("pump", "Sta: CallFailed"),
+            ("panic_pump", "native denial driver panicked"),
+        ] {
+            let root = FixtureRoot::new()?;
+            let model = Factory::new(Creation::Ready, FakeClock::start());
+            model.failure.set(Some(fault));
+            let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
+            let store = WindowsCleanupStore::open(root.0.clone())?;
+            let loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
+            let surface = Surface::new(
+                Rc::clone(&factory),
+                Arc::new(Runtime(root.0.clone())),
+                root.0.clone(),
+                Box::new(loopback.clone()),
+                Box::new(store.clone()),
+                Box::new(SystemClock),
+            )
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+            let mut fixture = Fixture {
+                surface,
+                loopback,
+                store,
+                factory,
+                trace: Trace::new(240, Instant::now()),
+                lose_after_receipt: false,
+            };
+            let started = Instant::now();
+            fixture
+                .surface
+                .set_deadline(started + pos_owner_bridge::ceremony::timing::READINESS);
+            let mut driver = readiness::new_driver(CeremonyId::from_bytes([240; 16]), started)?;
+            let (result, failure) = fixture.attempt(&mut driver);
+            let error = failure.map(|error| error.to_string());
+            let request_clear = driver.request_clear();
+            let quarantined = fixture.retire(driver, result);
+            assert!(!quarantined, "{fault}");
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with(expected)),
+                "{fault}"
+            );
+            assert!(request_clear);
+            assert!(fixture.surface.idle());
+            assert!(fixture.store.records()?.is_empty());
+            let calls = model.calls.borrow();
+            assert!(!calls.contains(&"navigate"));
+            assert!(!calls.contains(&"create_buffers"));
+            assert!(!calls.contains(&"post"));
+            assert!(calls.contains(&"drop_environment"));
+            drop(calls);
+            drop(fixture);
+            root.remove()?;
+        }
+        Ok(())
+    }
+}
