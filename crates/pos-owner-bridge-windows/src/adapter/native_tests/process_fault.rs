@@ -4276,6 +4276,224 @@ fn native_obstructed_environment_creation_and_retirement() -> TestResult {
 type EnvironmentDriveResult =
     Result<(CeremonyResult, bool, bool, Result<Option<bool>, ()>), Box<dyn std::error::Error>>;
 
+/// Captured evidence only; this validator does not create or alter SDK observations.
+#[derive(Clone, Copy)]
+struct EnvironmentObstructionEvidence {
+    obstruct: bool,
+    outcome: Option<EnvironmentSdkOutcome>,
+    completion: Result<Option<bool>, ()>,
+    opening: EnvironmentOpeningEvidence,
+    retirement: EnvironmentRetirementEvidence,
+    wipe: EnvironmentWipeEvidence,
+    record: EnvironmentRecordEvidence,
+}
+
+#[derive(Clone, Copy)]
+struct EnvironmentOpeningEvidence {
+    driver_pending: bool,
+    active_blocked: bool,
+    attempt_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EnvironmentRetirementEvidence {
+    no_resurrection: bool,
+    abandoned_blocked: bool,
+    idle: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EnvironmentWipeEvidence {
+    wiped: bool,
+    result_failed: bool,
+    plan_wiped: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EnvironmentRecordEvidence {
+    no_record: bool,
+    retained_orphan: bool,
+}
+
+impl EnvironmentObstructionEvidence {
+    fn validate(self) -> TestResult {
+        let qualified_outcome = match self.outcome {
+            Some(EnvironmentSdkOutcome::Success) => {
+                self.opening.driver_pending
+                    && self.opening.active_blocked
+                    && matches!(self.completion, Ok(None | Some(true)))
+            }
+            Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct => {
+                self.opening.driver_pending
+                    && self.opening.active_blocked
+                    && matches!(self.completion, Ok(None | Some(false)))
+            }
+            Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct => {
+                !self.opening.driver_pending && self.completion.is_err()
+            }
+            _ => false,
+        };
+        if self.opening.attempt_failed
+            || !qualified_outcome
+            || !self.retirement.no_resurrection
+            || !self.retirement.abandoned_blocked
+            || !self.wipe.wiped
+            || !self.wipe.result_failed
+            || !self.wipe.plan_wiped
+            || !self.record.no_record
+            || !self.record.retained_orphan
+            || !self.retirement.idle
+        {
+            return Err(
+                "native environment input outcome or retained ownership was not established".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn modeled_environment_obstruction_success() -> EnvironmentObstructionEvidence {
+    EnvironmentObstructionEvidence {
+        obstruct: false,
+        outcome: Some(EnvironmentSdkOutcome::Success),
+        completion: Ok(Some(true)),
+        opening: EnvironmentOpeningEvidence {
+            driver_pending: true,
+            active_blocked: true,
+            attempt_failed: false,
+        },
+        retirement: EnvironmentRetirementEvidence {
+            no_resurrection: true,
+            abandoned_blocked: true,
+            idle: true,
+        },
+        wipe: EnvironmentWipeEvidence {
+            wiped: true,
+            result_failed: true,
+            plan_wiped: true,
+        },
+        record: EnvironmentRecordEvidence {
+            no_record: true,
+            retained_orphan: true,
+        },
+    }
+}
+
+#[test]
+fn modeled_environment_obstruction_verdict_checks_sdk_outcomes() {
+    let success = modeled_environment_obstruction_success();
+    assert!(success.validate().is_ok());
+    assert!(EnvironmentObstructionEvidence {
+        completion: Ok(None),
+        ..success
+    }
+    .validate()
+    .is_ok());
+    let failed_callback = EnvironmentObstructionEvidence {
+        obstruct: true,
+        outcome: Some(EnvironmentSdkOutcome::NativeFailure),
+        completion: Ok(Some(false)),
+        ..success
+    };
+    assert!(failed_callback.validate().is_ok());
+    assert!(EnvironmentObstructionEvidence {
+        completion: Ok(None),
+        ..failed_callback
+    }
+    .validate()
+    .is_ok());
+    let refused = EnvironmentObstructionEvidence {
+        outcome: Some(EnvironmentSdkOutcome::InitiationRefused),
+        completion: Err(()),
+        opening: EnvironmentOpeningEvidence {
+            driver_pending: false,
+            ..success.opening
+        },
+        ..failed_callback
+    };
+    assert!(refused.validate().is_ok());
+    type Change = fn(&mut EnvironmentObstructionEvidence);
+    let contradictions: [(&str, EnvironmentObstructionEvidence, Change); 12] = [
+        ("missing outcome", success, |e| e.outcome = None),
+        ("failed success completion", success, |e| {
+            e.completion = Err(())
+        }),
+        ("false success completion", success, |e| {
+            e.completion = Ok(Some(false))
+        }),
+        ("success without pending", success, |e| {
+            e.opening.driver_pending = false
+        }),
+        ("success without blocked admission", success, |e| {
+            e.opening.active_blocked = false
+        }),
+        ("unobstructed native failure", failed_callback, |e| {
+            e.obstruct = false
+        }),
+        ("failure with success completion", failed_callback, |e| {
+            e.completion = Ok(Some(true))
+        }),
+        ("failure without pending", failed_callback, |e| {
+            e.opening.driver_pending = false
+        }),
+        ("failure without blocked admission", failed_callback, |e| {
+            e.opening.active_blocked = false
+        }),
+        ("unobstructed initiation refusal", refused, |e| {
+            e.obstruct = false
+        }),
+        ("refusal with completion", refused, |e| {
+            e.completion = Ok(None)
+        }),
+        ("refusal with pending", refused, |e| {
+            e.opening.driver_pending = true
+        }),
+    ];
+    for (label, mut evidence, change) in contradictions {
+        change(&mut evidence);
+        assert_environment_obstruction_refused(evidence, label);
+    }
+}
+
+#[test]
+fn modeled_environment_obstruction_verdict_requires_retained_custody() {
+    type Change = fn(&mut EnvironmentObstructionEvidence);
+    let contradictions: [(&str, Change); 9] = [
+        ("attempt failed", |e| e.opening.attempt_failed = true),
+        ("driver resurrected", |e| {
+            e.retirement.no_resurrection = false
+        }),
+        ("abandoned admission unblocked", |e| {
+            e.retirement.abandoned_blocked = false
+        }),
+        ("request not wiped", |e| e.wipe.wiped = false),
+        ("successful ceremony result", |e| {
+            e.wipe.result_failed = false
+        }),
+        ("plan not wiped", |e| e.wipe.plan_wiped = false),
+        ("record present", |e| e.record.no_record = false),
+        ("orphan not retained", |e| e.record.retained_orphan = false),
+        ("surface not idle", |e| e.retirement.idle = false),
+    ];
+    for (label, change) in contradictions {
+        let mut evidence = modeled_environment_obstruction_success();
+        change(&mut evidence);
+        assert_environment_obstruction_refused(evidence, label);
+    }
+}
+
+fn assert_environment_obstruction_refused(evidence: EnvironmentObstructionEvidence, label: &str) {
+    assert_eq!(
+        evidence
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("native environment input outcome or retained ownership was not established"),
+        "{label}"
+    );
+}
+
 impl Fixture {
     fn drive_environment_obstruction(
         &mut self,
@@ -4367,42 +4585,39 @@ fn run_environment_obstruction(
     );
     let order = crate::Native::creation_order();
     let outcome = environment_sdk_outcome(&order);
-    let qualified_outcome = match outcome {
-        Some(EnvironmentSdkOutcome::Success) => {
-            driver_pending && active_blocked && matches!(observation, Ok(None | Some(true)))
-        }
-        Some(EnvironmentSdkOutcome::NativeFailure) if obstruct => {
-            driver_pending && active_blocked && matches!(observation, Ok(None | Some(false)))
-        }
-        Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct => {
-            !driver_pending && observation.is_err()
-        }
-        _ => false,
-    };
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
+    let evidence = EnvironmentObstructionEvidence {
+        obstruct,
+        outcome,
+        completion: observation,
+        opening: EnvironmentOpeningEvidence {
+            driver_pending,
+            active_blocked,
+            attempt_failed: failed,
+        },
+        retirement: EnvironmentRetirementEvidence {
+            no_resurrection,
+            abandoned_blocked,
+            idle,
+        },
+        wipe: EnvironmentWipeEvidence {
+            wiped,
+            result_failed,
+            plan_wiped,
+        },
+        record: EnvironmentRecordEvidence {
+            no_record,
+            retained_orphan,
+        },
+    };
     let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION fixed_ebwebview_file_requested={obstruct} obstruct={obstruct} pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} completion={observation:?} order={order:?} outcome={outcome:?} no_resurrection={no_resurrection} wiped={wiped} idle={idle} orphan={retained_orphan}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("obstructed factory still shared")?
         .stop()?;
-    if failed
-        || !qualified_outcome
-        || !no_resurrection
-        || !abandoned_blocked
-        || !wiped
-        || !result_failed
-        || !plan_wiped
-        || !no_record
-        || !retained_orphan
-        || !idle
-    {
-        return Err(
-            "native environment input outcome or retained ownership was not established".into(),
-        );
-    }
-    Ok(())
+    evidence.validate()
 }
 
 fn sdk_controller_result(
