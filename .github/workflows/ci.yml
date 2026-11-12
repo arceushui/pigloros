@@ -1,6 +1,8 @@
 name: ci
 on:
   workflow_dispatch:
+  push:
+    branches: [work/535-listener-red-nov12]
 permissions:
   contents: read
 jobs:
