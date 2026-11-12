@@ -223,11 +223,16 @@ mod tests {
             ],
             pumps: Cell::new(0),
         };
-        let mut session = Session::new(&factory, Rc::new(Events::default()))
-            .map_err(|error| format!("{error:?}"))?;
-        session
-            .create_controller()
-            .map_err(|error| format!("{error:?}"))?;
+        let session = Session::new(&factory, Rc::new(Events::default())).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            session
+        });
+        assert!(
+            session.is_ok(),
+            "session creation: {:?}",
+            session.as_ref().err()
+        );
         drop(session);
         assert_eq!(factory.pumps.get(), 1);
         let calls = native.calls.borrow();
@@ -260,8 +265,12 @@ mod tests {
                 forbidden,
                 pumps: Cell::new(0),
             };
-            let session = Session::new(&factory, Rc::new(Events::default()))
-                .map_err(|error| format!("{error:?}"))?;
+            let session = Session::new(&factory, Rc::new(Events::default()));
+            assert!(
+                session.is_ok(),
+                "session creation: {:?}",
+                session.as_ref().err()
+            );
             drop(session);
             assert_eq!(factory.pumps.get(), 1, "{failing}");
             let calls = native.calls.borrow();
