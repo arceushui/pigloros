@@ -708,3 +708,186 @@ fn mismatched_environment_identity_refuses_controller_and_retires_recordless() -
     }
     Ok(())
 }
+
+fn refused<T>() -> Result<T, pos_owner_bridge::SurfaceError> {
+    Err(super::super::unavailable(()))
+}
+
+#[test]
+fn modeled_pending_controller_parent_loss_is_refused_by_the_modeled_session() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let selected = spec(115);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    let ceremony = selected.ceremony_id;
+    assert!(fixture
+        .surface
+        .pre_environment_retention(&ceremony)
+        .is_none());
+    assert_eq!(
+        fixture.surface.controller_creation_retention(&ceremony),
+        Some(super::super::PreEnvironmentRetention::Active)
+    );
+    assert_eq!(
+        fixture.surface.lose_pending_controller_parent(&ceremony),
+        Err(())
+    );
+    assert_eq!(
+        fixture.surface.controller_creation_retention(&ceremony),
+        Some(super::super::PreEnvironmentRetention::Active)
+    );
+    assert!(!fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
+
+    fixture.surface.abandon_opening();
+    fixture.factory.creation.set(Creation::CallbackFailure);
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+    assert!(fixture.surface.idle());
+    Ok(())
+}
+
+#[test]
+fn modeled_reopen_of_a_ready_surface_is_refused_and_retires_through_its_own_exit() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let selected = spec(116);
+    fixture
+        .open(&selected)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(fixture.surface.open(&selected), Poll::Ready(refused()));
+    assert!(!fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+    assert_eq!(count(&fixture, "close_controller"), 1);
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.exit();
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+    assert!(fixture.surface.idle());
+    assert_eq!(fixture.store.removed_folders(), vec![selected.folder_name]);
+    Ok(())
+}
+
+#[test]
+fn modeled_open_refuses_a_non_idle_surface_and_an_unprotectable_folder() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let selected = spec(117);
+    let before = fixture.factory.calls.borrow().clone();
+    fixture.surface.ownership = super::super::Ownership::Window;
+    assert_eq!(fixture.surface.open(&selected), Poll::Ready(refused()));
+    fixture.surface.ownership = super::super::Ownership::Idle;
+    let root = std::mem::replace(
+        &mut fixture.surface.root,
+        std::path::PathBuf::from("relative-owner-root"),
+    );
+    assert_eq!(fixture.surface.open(&selected), Poll::Ready(refused()));
+    fixture.surface.root = root;
+    assert!(fixture.surface.idle());
+    assert_eq!(*fixture.factory.calls.borrow(), before);
+    assert!(!fixture.root.join(&selected.folder_name).exists());
+    fixture.assert_no_ceremony_data();
+    let identity = fixture
+        .open(&selected)
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    fixture.finish()
+}
+
+#[test]
+fn modeled_environment_failure_retries_each_failed_retirement_effect() -> TestResult {
+    for failure in [
+        "unsubscribe_view",
+        "unsubscribe_exit",
+        "drop_environment",
+        "destroy_window",
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture
+            .factory
+            .environment_creation
+            .set(Creation::CallbackFailure);
+        let failed = spec(118);
+        assert_eq!(fixture.open(&failed), refused(), "{failure}");
+        assert!(!fixture.surface.idle(), "{failure}");
+        fixture.factory.failure.set(Some(failure));
+        assert_eq!(fixture.surface.poll_failed_open(), refused(), "{failure}");
+        assert!(!fixture.surface.idle(), "{failure}");
+        fixture.factory.failure.set(None);
+        assert_eq!(fixture.surface.poll_failed_open(), Ok(true), "{failure}");
+        assert!(fixture.surface.idle(), "{failure}");
+        assert!(fixture.root.join(&failed.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        assert_eq!(count(&fixture, "create_controller"), 0);
+        fixture.assert_no_ceremony_data();
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_failed_controller_retirement_retries_ownership_query_and_cleanup() -> TestResult {
+    for failure in ["has_controller", "drop_environment"] {
+        let mut fixture = Fixture::new(Creation::CallbackFailure)?;
+        let failed = spec(119);
+        assert_eq!(fixture.open(&failed), refused(), "{failure}");
+        fixture.factory.failure.set(Some(failure));
+        assert_eq!(fixture.surface.poll_failed_open(), refused(), "{failure}");
+        assert!(!fixture.surface.idle(), "{failure}");
+        fixture.factory.failure.set(None);
+        assert_eq!(fixture.surface.poll_failed_open(), Ok(true), "{failure}");
+        assert!(fixture.surface.idle(), "{failure}");
+        assert!(fixture.root.join(&failed.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        fixture.assert_no_ceremony_data();
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_exited_controller_retirement_retries_a_failed_cleanup_effect() -> TestResult {
+    let mut fixture = Fixture::new(Creation::MissingView)?;
+    let failed = spec(120);
+    assert_eq!(fixture.open(&failed), refused());
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+    fixture.exit();
+    fixture.factory.failure.set(Some("unsubscribe_exit"));
+    assert_eq!(fixture.surface.poll_failed_open(), refused());
+    assert!(!fixture.surface.idle());
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.factory.failure.set(None);
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+    assert!(fixture.surface.idle());
+    assert_eq!(fixture.store.removed_folders(), vec![failed.folder_name]);
+    fixture.assert_no_ceremony_data();
+    Ok(())
+}
+
+#[test]
+fn modeled_late_identified_controller_waits_past_a_foreign_exit_for_its_own() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let selected = spec(122);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing modeled environment sink")?;
+    sink.event(NativeEvent::BrowserExited { pid: 43 });
+    fixture.surface.abandon_opening();
+    fixture.factory.creation.set(Creation::Ready);
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+    assert_eq!(
+        fixture
+            .surface
+            .identity
+            .map(|identity| identity.browser_pid),
+        Some(42)
+    );
+    assert!(!fixture.surface.idle());
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.exit();
+    assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+    assert!(fixture.surface.idle());
+    assert_eq!(fixture.store.removed_folders(), vec![selected.folder_name]);
+    fixture.assert_no_ceremony_data();
+    Ok(())
+}

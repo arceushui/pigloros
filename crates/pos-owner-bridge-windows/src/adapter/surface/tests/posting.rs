@@ -1026,3 +1026,82 @@ fn readiness_deadline_crossed_during_foreground_operations_blocks_navigation() -
     }
     Ok(())
 }
+
+#[test]
+fn window_and_resize_failures_refuse_refresh_navigation_and_posting() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .open(&super::spec(131))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture
+        .surface
+        .refresh()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    for (failure, dpi) in [("resize_window", 120), ("fit_controller", 144)] {
+        fixture.factory.dpi.set(dpi);
+        fixture.factory.failure.set(Some(failure));
+        assert_eq!(
+            fixture
+                .surface
+                .refresh()
+                .map_err(pos_owner_bridge::SurfaceError::error),
+            Err(unavailable()),
+            "{failure}"
+        );
+    }
+    fixture.factory.failure.set(Some("window"));
+    assert_eq!(
+        fixture
+            .surface
+            .refresh()
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
+    assert_eq!(
+        fixture
+            .surface
+            .navigate()
+            .map(|result| result.map_err(pos_owner_bridge::SurfaceError::error)),
+        std::task::Poll::Ready(Err(unavailable()))
+    );
+    assert_eq!(
+        fixture
+            .surface
+            .post(&guard())
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
+    assert!(posts(&fixture).is_empty());
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture.surface.idle());
+    fixture.finish()
+}
+
+#[test]
+fn readiness_deadline_crossed_by_the_final_foreground_query_blocks_navigation() -> TestResult {
+    use pos_owner_bridge::MonotonicClock as _;
+    use std::time::Duration;
+
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .open(&super::spec(132))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let deadline = fixture.clock.now() + Duration::from_millis(500);
+    fixture.surface.set_deadline(deadline);
+    // The refresh and the timely pre-focus observation each fit the budget;
+    // the final foreground query is the one that crosses the deadline.
+    fixture.factory.window_delay.set(Duration::from_millis(200));
+    assert_eq!(
+        fixture
+            .surface
+            .navigate()
+            .map(|result| result.map_err(pos_owner_bridge::SurfaceError::error)),
+        std::task::Poll::Ready(Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)))
+    );
+    assert_eq!(fixture.clock.now(), deadline + Duration::from_millis(100));
+    assert!(fixture.factory.calls.borrow().contains(&"focus_controller"));
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture.surface.idle());
+    fixture.factory.window_delay.set(Duration::ZERO);
+    fixture.finish()
+}

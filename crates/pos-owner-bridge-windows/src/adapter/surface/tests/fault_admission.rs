@@ -403,3 +403,108 @@ fn modeled_posted_injections_validate_state_generation_identity_and_seal() -> Te
     }
     Ok(())
 }
+
+#[test]
+fn pending_fault_admission_rejects_a_missing_or_displaced_folder() -> TestResult {
+    let (mut fixture, browser) = pending_fixture()?;
+    let folder = fixture
+        .surface
+        .folder
+        .take()
+        .ok_or("missing modeled folder")?;
+    assert_eq!(fixture.surface.prepare_pending_opening_browser(), Err(()));
+    let path = fixture.root.join(&folder);
+    fixture.surface.folder = Some(folder);
+    let displaced = fixture.root.join("displaced-pending-opening-folder");
+    std::fs::rename(&path, &displaced)?;
+    assert_eq!(fixture.surface.prepare_pending_opening_browser(), Err(()));
+    assert!(!fixture.surface.pending_opening_owners_retained());
+    std::fs::rename(&displaced, &path)?;
+    assert_eq!(
+        fixture.surface.prepare_pending_opening_browser(),
+        Ok(Some(browser))
+    );
+    fixture.assert_no_ceremony_data();
+    retire_pending(&mut fixture)
+}
+
+#[test]
+fn fault_events_refuse_an_exit_from_another_browser() -> TestResult {
+    let (mut fixture, browser) = pending_fixture()?;
+    let _action = fixture
+        .surface
+        .events
+        .event(NativeEvent::BrowserExited { pid: 43 });
+    fixture.surface.recordless_fault = Some(browser);
+    assert_eq!(fixture.surface.recordless_fault_event(), Err(()));
+    fixture.surface.recordless_fault = None;
+    fixture.surface.identity = Some(browser);
+    assert_eq!(
+        fixture
+            .surface
+            .posted_fault_event(ProcessFaultTarget::Browser),
+        Err(())
+    );
+    fixture.surface.identity = None;
+    fixture.assert_no_ceremony_data();
+    retire_pending(&mut fixture)
+}
+
+#[test]
+fn modeled_posted_injections_refuse_an_unreadable_reply_state() -> TestResult {
+    for point in [
+        PostedInjection::Receipt,
+        PostedInjection::Empty,
+        PostedInjection::Writing,
+        PostedInjection::Ready,
+        PostedInjection::Retry,
+        PostedInjection::Consuming,
+        PostedInjection::Releasing,
+    ] {
+        let fixture = posted_fixture(point.generation())?;
+        fixture.factory.state.set(point.state() as u32);
+        fixture.factory.failure.set(Some("load_state"));
+        assert!(point
+            .invoke(&fixture.surface, Instant::now() + Duration::from_secs(10))
+            .is_err());
+        assert!(spy_calls(&fixture).is_empty());
+        assert_eq!(fixture.store.records_now(), [vec![0x80]]);
+        assert!(!fixture.surface.idle());
+        finish_posted(fixture)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn idle_surface_refuses_every_fault_injection_exit_capture_and_finish() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    let before = fixture.factory.calls.borrow().clone();
+    let target = ProcessFaultTarget::Browser;
+    assert!(fixture.surface.inject_recordless_browser(seal()).is_err());
+    assert!(fixture
+        .surface
+        .inject_awaiting_load_fault(target, seal())
+        .is_err());
+    assert!(fixture
+        .surface
+        .inject_navigating_fault(target, seal())
+        .is_err());
+    assert!(fixture
+        .surface
+        .inject_before_record_fault(target, seal())
+        .is_err());
+    assert!(fixture
+        .surface
+        .inject_quarantined_fault(target, seal(), Rc::new(std::cell::Cell::new(true)))
+        .is_err());
+    assert!(fixture
+        .surface
+        .consume_exit_capture(Instant::now() + Duration::from_secs(10), false)
+        .is_err());
+    assert_eq!(fixture.surface.finish(), Err(super::super::unavailable(())));
+    fixture.surface.report_readiness_timing();
+    assert_eq!(*fixture.factory.calls.borrow(), before);
+    assert!(fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
+    Ok(())
+}
