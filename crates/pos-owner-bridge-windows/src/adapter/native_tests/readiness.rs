@@ -276,6 +276,17 @@ fn run_ceremony(
     let _logged = writeln!(std::io::stderr(),
         "NATIVE_G3_RESOURCE_SNAPSHOT case={number} fields=(captured_case,entries,overflow,subscriptions) snapshot={resource:?}");
     crate::Native::readiness_navigation_case(None);
+    readiness_verdict(failure, receipt, deadline, result_error, resource)
+}
+
+// Pure verdict over observations collected after the real retirement path.
+fn readiness_verdict(
+    failure: Option<Box<dyn std::error::Error>>,
+    receipt: Option<Instant>,
+    deadline: Instant,
+    result_error: Option<BridgeError>,
+    resource: Option<(Option<u64>, u8, bool, u8)>,
+) -> TestResult {
     if let Some(error) = failure {
         return Err(format!("{error}; resource snapshot={resource:?}").into());
     }
@@ -396,6 +407,163 @@ mod tests {
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::adapter::surface::tests::Runtime;
     use crate::NativeFactory;
+
+    struct QuitTwiceFactory {
+        native: Rc<Factory>,
+        pulses: std::cell::Cell<u8>,
+    }
+
+    impl crate::StaPump for QuitTwiceFactory {
+        fn next(&self) -> crate::NativeResult<crate::NativePulse> {
+            let count = self.pulses.get();
+            self.pulses.set(count.saturating_add(1));
+            Ok(if count < 2 {
+                crate::NativePulse::Quit
+            } else {
+                crate::NativePulse::Timer
+            })
+        }
+
+        fn stop(&mut self) -> crate::NativeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeFactory for QuitTwiceFactory {
+        fn session(&self) -> crate::NativeResult<Box<dyn crate::NativeOperations>> {
+            self.native.session()
+        }
+    }
+
+    #[test]
+    fn modeled_quit_retains_pending_owners_and_cancel_done_is_stable() -> TestResult {
+        use pos_owner_bridge::OwnerWebSurface as _;
+
+        let _port = crate::Native::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let model = Factory::new(Creation::Pending, FakeClock::start());
+        let scripted = Rc::new(QuitTwiceFactory {
+            native: Rc::clone(&model),
+            pulses: std::cell::Cell::new(0),
+        });
+        let factory: Rc<dyn NativeFactory> = scripted.clone();
+        let mut store = WindowsCleanupStore::open(root.0.clone())?;
+        let mut loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
+        let mut surface = Surface::new(
+            Rc::clone(&factory),
+            Arc::new(Runtime(root.0.clone())),
+            root.0.clone(),
+            Box::new(loopback.clone()),
+            Box::new(store.clone()),
+            Box::new(SystemClock),
+        )
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let started = Instant::now();
+        surface.set_deadline(started + pos_owner_bridge::ceremony::timing::READINESS);
+        let ceremony = CeremonyId::from_bytes([239; 16]);
+        let spec = pos_owner_bridge::SurfaceSpec {
+            ceremony_id: ceremony,
+            folder_name: pos_owner_bridge::folder_name(&ceremony),
+            owner_window: None,
+        };
+        assert!(surface.open(&spec).is_pending());
+        assert!(surface.open(&spec).is_pending());
+        assert!(super::pump(&surface).is_err());
+        super::pump_retaining(&surface);
+        assert_eq!(scripted.pulses.get(), 2);
+        assert!(!surface.idle());
+        assert!(surface.recordless_opening_ready());
+        assert!(store.records()?.is_empty());
+        assert!(!model.calls.borrow().contains(&"unsubscribe_exit"));
+        assert!(!model.calls.borrow().contains(&"drop_environment"));
+        model.creation.set(Creation::CallbackFailure);
+        surface.abandon_opening();
+        assert!(surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(surface.idle());
+
+        let mut driver = super::new_driver(ceremony, Instant::now())?;
+        for _ in 0..2 {
+            let error =
+                super::cancel_driver(&mut driver, &mut surface, &mut loopback, &mut store).err();
+            assert_eq!(
+                error,
+                Some(pos_owner_bridge::BridgeError::Lifecycle(
+                    pos_owner_bridge::LifecycleCode::ControllerLost
+                ))
+            );
+            assert!(driver.request_clear());
+        }
+        assert!(surface.idle());
+        assert!(store.records()?.is_empty());
+        drop(surface);
+        drop(loopback);
+        drop(store);
+        drop(factory);
+        root.remove()
+    }
+
+    #[test]
+    fn modeled_readiness_verdict_preserves_deadline_result_and_error_precedence() {
+        use pos_owner_bridge::{BridgeError, LifecycleCode, QuarantineCode};
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(15);
+        let before = Some(deadline - Duration::from_nanos(1));
+        let snapshot = Some((Some(7), 0, false, 1));
+        for code in [LifecycleCode::ControllerLost, LifecycleCode::ClientFailed] {
+            assert!(super::readiness_verdict(
+                None,
+                before,
+                deadline,
+                Some(BridgeError::Lifecycle(code)),
+                snapshot
+            )
+            .is_ok());
+        }
+        for receipt in [
+            None,
+            Some(deadline),
+            Some(deadline + Duration::from_nanos(1)),
+        ] {
+            let error = super::readiness_verdict(
+                None,
+                receipt,
+                deadline,
+                Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost)),
+                snapshot,
+            )
+            .err()
+            .map(|error| error.to_string());
+            assert!(error.as_deref().is_some_and(
+                |value| value.starts_with("packaged Get readiness/cancellation failed:")
+            ));
+        }
+        for result in [
+            None,
+            Some(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)),
+            Some(BridgeError::Quarantine(
+                QuarantineCode::ControllerCloseFailed,
+            )),
+        ] {
+            let error = super::readiness_verdict(None, before, deadline, result, snapshot)
+                .err()
+                .map(|error| error.to_string());
+            assert!(error.as_deref().is_some_and(
+                |value| value.starts_with("packaged Get readiness/cancellation failed:")
+            ));
+        }
+        let failure: Box<dyn std::error::Error> = "modeled prior failure".into();
+        let error = super::readiness_verdict(Some(failure), None, deadline, None, snapshot)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("modeled prior failure; resource snapshot=Some((Some(7), 0, false, 1))")
+        );
+    }
 
     #[test]
     fn modeled_readiness_failures_retire_before_reporting_and_release_foreground() -> TestResult {
