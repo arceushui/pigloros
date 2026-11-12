@@ -8,8 +8,9 @@ use pos_owner_bridge::ProcessIdentity;
 use pos_owner_bridge_codec::ImagePathSha256;
 
 use super::{
-    browser_candidate_from_observations, renderer_presence_from_observations,
-    verified_exit_observation, COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    browser_candidate_from_observations, check_pre_close_identity,
+    renderer_presence_from_observations, verified_exit_observation, write_exit_query_failure,
+    COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_BROWSER,
     COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
 
@@ -25,6 +26,71 @@ fn identity() -> ProcessIdentity {
 
 fn process_image() -> (ProcessIdentity, PathBuf) {
     (identity(), PathBuf::from("owned-browser"))
+}
+
+#[test]
+fn modeled_pre_close_identity_preserves_stage_and_image_failure_precedence() {
+    let expected = process_image();
+    let mut changed = expected.0;
+    changed.creation_filetime += 1;
+    let foreign = PathBuf::from("foreign-browser");
+    for (observation, second, diagnostic) in [
+        (
+            Err(()),
+            false,
+            Some("NATIVE_EXIT_QUERY stage=pre_close_first result=query_failed"),
+        ),
+        (
+            Ok((changed, foreign.clone())),
+            false,
+            Some("NATIVE_EXIT_QUERY stage=pre_close_first result=identity_mismatch"),
+        ),
+        (
+            Err(()),
+            true,
+            Some("NATIVE_EXIT_QUERY stage=pre_close_second result=query_failed"),
+        ),
+        (
+            Ok((changed, foreign.clone())),
+            true,
+            Some("NATIVE_EXIT_QUERY stage=pre_close_second result=image_mismatch"),
+        ),
+        (
+            Ok((changed, expected.1.clone())),
+            true,
+            Some("NATIVE_EXIT_QUERY stage=pre_close_second result=identity_mismatch"),
+        ),
+        (Ok((expected.0, foreign)), false, None),
+        (Ok(expected.clone()), false, None),
+        (Ok(expected.clone()), true, None),
+    ] {
+        let accepted = observation.clone();
+        let reports = RefCell::new(Vec::new());
+        let result = check_pre_close_identity(
+            observation,
+            expected.0,
+            second.then_some(expected.1.as_path()),
+            &|message| reports.borrow_mut().push(message),
+        );
+        assert_eq!(result.is_ok(), diagnostic.is_none());
+        if diagnostic.is_none() {
+            assert_eq!(result, accepted);
+        }
+        assert_eq!(
+            reports.into_inner(),
+            diagnostic.into_iter().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn modeled_exit_query_error_report_keeps_fixed_hresult_diagnostic() {
+    let mut output = Vec::new();
+    write_exit_query_failure(&mut output, -1);
+    assert_eq!(
+        output,
+        b"NATIVE_EXIT_QUERY stage=exit_code result=query_failed hresult=0xffffffff\n"
+    );
 }
 
 type Snapshot = Result<Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>, ()>;
