@@ -593,3 +593,44 @@ fn first_receipt_timestamp_follows_completed_state_read() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn retirement_race_receipt_timestamp_follows_the_winning_read() -> TestResult {
+    let mut rig = DriverRig::with_hook(
+        honest(6_000),
+        super::Hook::RaceRetire(1),
+        SurfaceConfig::default(),
+    )?;
+    let mut driver = new_driver(create_plan(&rig.clock));
+    let mut store = rig.store.clone();
+    let mut loopback = rig.loopback.clone();
+    let mut surface = DelayedOpening {
+        inner: &mut rig.surface,
+        clock: rig.clock.clone(),
+        delay: Duration::ZERO,
+        read_delay: READINESS,
+        open_pending: 0,
+        navigation_pending: 0,
+        navigation: Poll::Pending,
+        owner_observation: None,
+        mapping_delays: VecDeque::new(),
+        close_delays: VecDeque::new(),
+    };
+    let mut env = StepEnv {
+        surface: &mut surface,
+        clock: &rig.clock,
+        loopback: &mut loopback,
+        store: &mut store,
+    };
+    for _ in 0..1000 {
+        assert!(matches!(driver.step(&mut env), Step::Pending));
+        if let Some(receipt) = driver.first_receipt_at() {
+            assert_eq!(receipt, rig.clock.now());
+            assert!(receipt >= driver.t0() + READINESS);
+            assert_eq!(driver.posts(), 1);
+            return Ok(());
+        }
+        rig.clock.advance(Duration::from_millis(10));
+    }
+    Err("retirement race did not produce a receipt".into())
+}
