@@ -1737,7 +1737,9 @@ def test_owned_process_fault_authority() -> None:
         raise SystemExit("the actual shared identity observer was rejected")
     for old, new in (
         ("times.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
-        ("queried.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("queried\n        .map_err(|_| ())", "Ok::<(), ()>(())"),
+        ("absent_on_open_failure(&error).map(|()| None)", "Ok(None)"),
+        (".filter(|image| !image.is_empty())", ".filter(|_| true)"),
         ("browser_pid: pid,", "browser_pid: 1,"),
         ("digest.update(unit.to_le_bytes());", "digest.update(unit.to_be_bytes());"),
         ("PathBuf::from(OsString::from_wide(image))", 'PathBuf::from("unrelated")'),
