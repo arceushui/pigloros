@@ -1250,7 +1250,7 @@ impl Fixture {
         loop {
             // The release transition occurs inside this step. Its start is a
             // conservative lower bound for the driver's real release deadline.
-            let step_started = Instant::now();
+            let step_started = (self.number == 107).then(Instant::now);
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -2713,12 +2713,36 @@ impl Fixture {
         point: crate::RetryPoint,
         inject: bool,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
+        let mut diagnostic_next = Instant::now();
+        let mut diagnostic_posts = 0;
+        let mut max_step = Duration::ZERO;
+        let mut max_pump = Duration::ZERO;
+        let mut step_count = 0_u32;
+        let mut pump_count = 0_u32;
         loop {
+            let step_started = Instant::now();
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
                 &mut self.store,
             ));
+            if let Some(step_started) = step_started {
+                step_count = step_count.saturating_add(1);
+                max_step = max_step.max(step_started.elapsed());
+                if Instant::now() >= diagnostic_next
+                    || driver.posts() != diagnostic_posts
+                    || !matches!(&step, Step::Pending)
+                {
+                    let _logged = writeln!(std::io::stderr(),
+                        "DIAG_107 stage=step thread={:?} elapsed={:?} posts={} receipt={:?} wake={:?} reached={:?} steps={step_count} pumps={pump_count} max_step={max_step:?} max_pump={max_pump:?} {} listener={:?}",
+                        std::thread::current().id(), driver.t0().elapsed(), driver.posts(),
+                        driver.first_receipt_at().map(|time| time.saturating_duration_since(driver.t0())),
+                        driver.next_wake().map(|time| time.saturating_duration_since(driver.t0())),
+                        self.reached, self.surface.fixture_progress(), self.loopback.observation());
+                    diagnostic_posts = driver.posts();
+                    diagnostic_next = Instant::now() + Duration::from_secs(1);
+                }
+            }
             if self.reached.is_none()
                 && matches!(&step, Step::Pending)
                 && driver.posts() == point.post()
@@ -2780,7 +2804,15 @@ impl Fixture {
             match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("retry empty-reply driver ended without result".into()),
-                Step::Pending => readiness::pump(&self.surface)?,
+                Step::Pending => {
+                    let started = (self.number == 107).then(Instant::now);
+                    let result = readiness::pump(&self.surface);
+                    if let Some(started) = started {
+                        pump_count = pump_count.saturating_add(1);
+                        max_pump = max_pump.max(started.elapsed());
+                    }
+                    result?;
+                }
             }
         }
     }
@@ -2802,6 +2834,14 @@ fn run_posted_retry(
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    if number == 107 {
+        let _logged = writeln!(std::io::stderr(),
+            "DIAG_107 stage=outcome thread={:?} elapsed={:?} posts={} receipt={:?} wake={:?} reached={:?} result_error={:?} failure={:?} prior_wipe={}",
+            std::thread::current().id(), driver.t0().elapsed(), driver.posts(),
+            driver.first_receipt_at().map(|time| time.saturating_duration_since(driver.t0())),
+            driver.next_wake().map(|time| time.saturating_duration_since(driver.t0())),
+            fixture.reached, result.as_ref().err(), failure.as_ref().map(ToString::to_string), fixture.prior_native_wipe);
+    }
     let state = fixture.reached;
     let native_zeroed = fixture.prior_native_wipe
         && native_zeroing_observed(&crate::Native::take_native_zero_observations());
