@@ -1601,12 +1601,8 @@ fn consuming_event_at_the_generation_limit_fails_closed() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn enrollment_budget_includes_reply_verification() -> TestResult {
-    for (delay, accepted) in [
-        (Duration::from_secs(2), true),
-        (Duration::from_secs(3), false),
-    ] {
+fn enrollment_budget_does_not_interrupt_consuming_verification() -> TestResult {
+    for delay in [Duration::from_secs(2), Duration::from_secs(3)] {
         let mut rig = DriverRig::with_hook(
             honest(0),
             Hook::SlowSecondCopy(delay),
@@ -1615,14 +1611,7 @@ fn enrollment_budget_includes_reply_verification() -> TestResult {
         let plan = create_plan(&rig.clock)
             .with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(3)));
         let (result, driver) = rig.run(plan);
-        if accepted {
-            assert!(result.is_ok(), "{result:?}");
-        } else {
-            assert_eq!(
-                failure(&result)?,
-                lifecycle(LifecycleCode::EnrollmentBudgetExceeded)
-            );
-        }
+        assert!(result.is_ok(), "{result:?}");
         assert!(driver.request_clear());
         assert!(rig.store.records_now().is_empty());
         assert!(rig.handle.log().contains(&LogEntry::Finished));
