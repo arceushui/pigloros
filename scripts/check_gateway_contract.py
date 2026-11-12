@@ -43,8 +43,9 @@ fixtures disagree:
    served operation, parameter, response and problem type still exists; a request accepts
    everything it accepted (no new required member or parameter, no narrowed type, enumeration
    or bound); a response guarantees everything it guaranteed (no removed or no longer required
-   member, no widened type, enumeration or bound); an added member is optional; schema
-   identities and the declared handling of unknown members are unchanged; a frozen response
+   member, no widened type, enumeration or bound); an added member is optional; the `Problem`
+   `code` enumeration is the open problem registry, which may gain codes but never lose one (a
+   client handles an unknown code by its HTTP status and `retryable`); schema identities and the declared handling of unknown members are unchanged; a frozen response
    header stays; a frozen security scheme is unchanged; a frozen served limit moves only in its
    direction; and every frozen example under `compatibility/examples/` is still valid. Every
    served operation is frozen, and parameters are declared per operation with a `schema`.
@@ -57,7 +58,8 @@ Every problem body must use a status its registry entry permits.
 
 `--freeze` first checks the contract against an existing baseline, then appends every served
 operation, optional addition to a frozen one, component, security scheme, served limit, problem
-type and example the baseline does not hold yet; it never rewrites a frozen keyword.
+type (to the frozen registry and the frozen `Problem` `code` enumeration) and example the
+baseline does not hold yet; it never rewrites a frozen keyword.
 
 Requires the hash-pinned `jsonschema` of `requirements-pinned-dependencies.txt`.
 
@@ -108,6 +110,7 @@ MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
 DRAFT_OWNER = re.compile(r"^#30[2-9]$")
 ENVELOPE_ID = SCHEMA_ID_PREFIX + "resource-envelope"
 ADMISSION_ID = SCHEMA_ID_PREFIX + "admission-receipt"
+PROBLEM_ID = SCHEMA_ID_PREFIX + "problem"
 LIMIT_MEMBERS = {
     "value", "unit", "scope", "origin", "source", "surface", "direction", "enforced_by"
 }
@@ -754,7 +757,8 @@ class Compatibility:
 
     A request schema must keep accepting every value it accepted; a response schema must keep
     guaranteeing every property it guaranteed. A schema reached from both directions therefore
-    keeps its constraints exactly. Members may be added only as optional members.
+    keeps its constraints exactly. Members may be added only as optional members. The one
+    response enumeration that may widen is the `Problem` `code` of the open problem registry.
     """
 
     def __init__(self, baseline: Contract, current: Contract) -> None:
@@ -910,7 +914,10 @@ class Compatibility:
         for name, schema in before.items():
             if name not in after:
                 raise ContractError(f"{where}: the frozen member {name} was removed")
-            self.schema(f"{where}/{name}", schema, after[name], direction)
+            if base.get("$id") == PROBLEM_ID and name == "code":
+                self.problem_code(f"{where}/{name}", schema, after[name], direction)
+            else:
+                self.schema(f"{where}/{name}", schema, after[name], direction)
         added = sorted((set(after) & required_after) - set(before))
         if added:
             raise ContractError(f"{where}: the added member {added[0]} is required")
@@ -920,6 +927,22 @@ class Compatibility:
         if direction == RESPONSE and required_before - required_after:
             name = sorted(required_before - required_after)[0]
             raise ContractError(f"{where}: the response member {name} is no longer guaranteed")
+
+    def problem_code(self, where: str, base: dict, current: dict, direction: str) -> None:
+        """`Problem.code` is the open problem registry: it may gain codes, never lose one.
+
+        A client handles an unknown code by its HTTP status and `retryable`. Every keyword other
+        than the enumeration is compared as usual; the registry check keeps each frozen code's
+        type, title and statuses.
+        """
+        after = current.get("enum")
+        if not isinstance(after, list) or any(code not in after for code in base["enum"]):
+            raise ContractError(f"{where}: a frozen problem code was removed")
+        self.schema(where, without_enum(base), without_enum(current), direction)
+
+
+def without_enum(schema: dict) -> dict:
+    return {keyword: value for keyword, value in schema.items() if keyword != "enum"}
 
 
 def schema_of(where: str, declaration: dict) -> object:
@@ -1032,6 +1055,7 @@ EXTENSIBLE = {
     "paths", "components", "schemas", "parameters", "responses", "securitySchemes",
     "properties", "headers", "x-pigloros-limits",
 }
+FROZEN_PROBLEM_CODES = "baseline/components/schemas/Problem/properties/code/enum"
 BASELINE_COMMENT = (
     "Not a schema: the frozen v1 baseline of the Gateway contract (#1314). Every served "
     "operation, the components it reaches, its security schemes, the served limits and the "
@@ -1134,6 +1158,11 @@ def freeze(contract: Contract, baseline: dict | None) -> dict:
             if name not in section:
                 section[name] = copy.deepcopy(components[kind][name])
                 missing = True
+    frozen_codes = frozen["components"]["schemas"]["Problem"]["properties"]["code"]["enum"]
+    frozen_codes.extend(
+        code for code in contract.schemas["Problem"]["properties"]["code"]["enum"]
+        if code not in frozen_codes
+    )
     limits = frozen.setdefault("x-pigloros-limits", {})
     for name, limit in contract.document["x-pigloros-limits"].items():
         if limit["surface"] == "served" and name not in limits:
@@ -1152,8 +1181,8 @@ def check_appended(old: object, new: object, where: str = "baseline", key: str =
     """`new` is `old` with entries appended only where `freeze` appends them.
 
     An extensible map may gain entries, a node may gain extensible keys (and a path item new
-    methods), `parameters` and `problem_types` lists may gain trailing items; everything else,
-    including every frozen value, is unchanged.
+    methods), `parameters` and `problem_types` lists and the `Problem` `code` enumeration may
+    gain trailing items; everything else, including every frozen value, is unchanged.
     """
     if isinstance(old, dict) and isinstance(new, dict):
         for name, value in old.items():
@@ -1173,7 +1202,7 @@ def check_appended(old: object, new: object, where: str = "baseline", key: str =
             raise ContractError(f"{where}: {extra} was added to a frozen entry")
         return
     if isinstance(old, list) and isinstance(new, list):
-        appendable = key in ("parameters", "problem_types")
+        appendable = key in ("parameters", "problem_types") or where == FROZEN_PROBLEM_CODES
         if len(new) < len(old) or (len(new) != len(old) and not appendable):
             raise ContractError(f"{where}: a frozen list was changed")
         for index, item in enumerate(old):

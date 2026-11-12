@@ -1,5 +1,5 @@
 {
-  "$comment": "Not a schema: the closed RFC 9457 problem-type registry of the PiglorOS Gateway v1 contract (#301). Validated by scripts/check_gateway_contract.py.",
+  "$comment": "Not a schema: the open RFC 9457 problem-type registry of the PiglorOS Gateway v1 contract (#301). A later v1 revision may add an entry but never removes or renames one; a client handles an unknown code by its HTTP status and retryable. Validated by scripts/check_gateway_contract.py.",
   "registry": "urn:pigloros:gateway:v1:problem-types",
   "contract_version": "1.0.0-draft",
   "media_type": "application/problem+json",

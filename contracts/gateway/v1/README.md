@@ -7,7 +7,7 @@ crate or database.
 | File | What it is |
 |------|------------|
 | [`openapi.json`](openapi.json) | The canonical description: OpenAPI 3.1.1 with the JSON Schema 2020-12 dialect. |
-| [`problem-types.json`](problem-types.json) | The closed RFC 9457 problem-type registry: every failure `code`, its `type` URN, `title` and permitted HTTP statuses. |
+| [`problem-types.json`](problem-types.json) | The open RFC 9457 problem-type registry: every failure `code`, its `type` URN, `title` and permitted HTTP statuses. A later v1 revision may add a problem type (rule 5). |
 | [`examples/`](examples/) | Golden request and response pairs, positive and fail-closed, for every operation. |
 | [`compatibility/baseline.json`](compatibility/baseline.json) | The frozen v1 baseline: every served operation, the components it reaches and the problem registry as published. |
 | [`compatibility/examples/`](compatibility/examples/) | The frozen golden examples that stay valid for the whole compatibility window. |
@@ -55,7 +55,8 @@ Every failure body has `type` (`urn:pigloros:gateway:v1:problem:<code>`), `title
 `instance` is the matched route template (for example `/v1/timelines/{timeline_id}/events`), so
 it never echoes an identifier; a request no route matches carries its request path. A protected
 lookup answers `not-found-or-unavailable` and never reveals whether the resource exists.
-`retryable: true` means an identical retry may succeed.
+`retryable: true` means an identical retry may succeed. The registry is open: a client handles a
+`code` it does not know by its HTTP status and `retryable` and never fails on it (rule 5).
 
 ## Idempotency
 
@@ -105,15 +106,20 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    a later v1 revision may add optional ones.
 5. **Additive changes only within v1.** Within v1 a change may add an optional member, an
    optional parameter, a response, a response header or an operation, or accept more request
-   values. Removing a member, parameter, response, response header, security scheme or
+   values, and may add a problem type to `problem-types.json` (a new `Problem` `code`). The
+   problem registry is open: a client MUST handle a `code` it does not know by its HTTP status
+   and `retryable`, never fail on it, and MUST NOT assume the registry it was built against is
+   complete. A registered `code` is never removed or renamed, its `type` and `title` never
+   change and none of its statuses is withdrawn within v1. Every other response enumeration is
+   closed. Removing a member, parameter, response, response header, security scheme or
    operation, making a member, parameter or response header required in a request (or no longer
    guaranteed in a response), narrowing what a request accepts, widening what a response
-   returns (a type, an enumeration value or a bound), moving a served limit against its
-   direction, or changing a schema `$id`, its declared unknown-member handling or any other
-   keyword requires a new major that runs in parallel, with an explicit migration and retirement
-   decision. The comparison is deliberately conservative: `oneOf`/`anyOf`/`allOf`/`prefixItems`
-   keep their shape and `pattern`, `format` and `default` stay identical even where a change
-   would be harmless.
+   returns (a type, an enumeration value other than a new problem `code`, or a bound), moving a
+   served limit against its direction, or changing a schema `$id`, its declared unknown-member
+   handling or any other keyword requires a new major that runs in parallel, with an explicit
+   migration and retirement decision. The comparison is deliberately conservative:
+   `oneOf`/`anyOf`/`allOf`/`prefixItems` keep their shape and `pattern`, `format` and `default`
+   stay identical even where a change would be harmless.
 6. **Compatibility window.** The served operations frozen in `compatibility/baseline.json` stay
    supported through Wave 10 after Wave 9 acceptance, and every example under
    `compatibility/examples/` stays valid for that window, including the fail-closed ones: a
@@ -123,12 +129,12 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
 `scripts/check_gateway_contract.py` enforces rules 1, 4 (the declaration), 5 and 6: it compares
 the contract with the frozen baseline (requests must keep accepting what they accepted, responses
 must keep guaranteeing what they guaranteed, a schema reached from both keeps its constraints
-exactly) and validates the frozen examples, so a breaking change to a v1 schema fails CI. CI
-runs it with `--append-only origin/main`, which also fails when `compatibility/` lost or changed
-anything since the merge base with `main`: a pull request cannot loosen the baseline together
-with the contract. `servers` and `info.version` are not frozen: a client must not hard-code the
-server URL, and the description's revision label is not part of the wire contract. The
-golden examples `unsupported-version-api-major`, `not-found-unrouted-path`,
+exactly, and the `Problem` `code` enumeration may only gain codes) and validates the frozen
+examples, so a breaking change to a v1 schema fails CI. CI runs it with
+`--append-only origin/main`, which also fails when `compatibility/` lost or changed anything
+since the merge base with `main`: a pull request cannot loosen the baseline together with the
+contract. `servers` and `info.version` are not frozen: a client must not hard-code the server
+URL, and the description's revision label is not part of the wire contract. The golden examples `unsupported-version-api-major`, `not-found-unrouted-path`,
 `unknown-required-schema-event-type`, `unsupported-version-legacy-event-type`,
 `draft-scenario-room-unsupported-schema-version`, `draft-decision-preview-incompatible-profile`,
 `draft-replay-incompatible-profile` and `compatible-unknown-optional-member-ignored` are the
@@ -144,8 +150,9 @@ negotiation and unknown-member cases.
   `python3 scripts/check_gateway_contract.py --freeze`. It first checks the contract against the
   existing baseline, then appends the newly served operations, the optional additions to frozen
   ones, the components and security schemes they reach, the served limits, any new problem type
-  and the golden examples of served operations. It never rewrites a frozen keyword, and the
-  append-only check accepts exactly those additions. Do not edit `compatibility/` by hand.
+  (to the frozen registry and the frozen `Problem` `code` enumeration) and the golden examples
+  of served operations. It never rewrites a frozen keyword, and the append-only check accepts
+  exactly those additions. Do not edit `compatibility/` by hand.
 - Parameters are declared on each operation (not on the path item), each with a `schema`.
 - A golden example is `{name, operation_id, request, request_valid, response}`. An example of a
   request no route serves has a null `operation_id` and names its `method` and query-free
