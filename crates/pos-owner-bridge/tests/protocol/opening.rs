@@ -790,9 +790,7 @@ fn assert_consumption_outcome(
     if budget || offset_ms < 0 {
         assert!(outcome.is_ok(), "{stage} {challenge} {budget}: {outcome:?}");
     } else {
-        let expected = if budget {
-            LifecycleCode::EnrollmentBudgetExceeded
-        } else if challenge {
+        let expected = if challenge {
             LifecycleCode::ChallengeExpired
         } else {
             LifecycleCode::InteractionTimeout
