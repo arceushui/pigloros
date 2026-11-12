@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use super::assets::{Response, BAD_REQUEST_RESPONSE, NOT_FOUND_RESPONSE};
 use super::ledger::ServedLedger;
 use super::ListenerTimeouts;
+use crate::{MonotonicClock, SystemClock};
 
 /// The stack buffer of every connection and the header block limit.
 pub(super) const REQUEST_BUFFER_BYTES: usize = 8_192;
@@ -55,9 +56,9 @@ pub(super) enum SilentReason {
 }
 
 /// The remaining time until `deadline`, or `None` when it has passed.
-fn remaining(deadline: Instant) -> Option<Duration> {
+fn remaining(deadline: Instant, clock: &impl MonotonicClock) -> Option<Duration> {
     deadline
-        .checked_duration_since(Instant::now())
+        .checked_duration_since(clock.now())
         .filter(|left| !left.is_zero())
 }
 
@@ -84,13 +85,14 @@ pub(super) fn read_request<S: TimedRead>(
     buffer: &mut [u8; REQUEST_BUFFER_BYTES],
     accepted_at: Instant,
     timeouts: ListenerTimeouts,
+    clock: &impl MonotonicClock,
     mut first_byte: impl FnMut(),
     #[cfg(feature = "test-support")] mut silent: impl FnMut(SilentReason),
 ) -> ReadOutcome {
     let mut deadline = accepted_at + timeouts.first_byte;
     let mut filled = 0;
     loop {
-        let Some(left) = remaining(deadline) else {
+        let Some(left) = remaining(deadline, clock) else {
             #[cfg(feature = "test-support")]
             silent(SilentReason::Timeout);
             return ReadOutcome::Silent;
@@ -119,7 +121,7 @@ pub(super) fn read_request<S: TimedRead>(
         };
         if filled == 0 {
             first_byte();
-            deadline = Instant::now() + timeouts.header;
+            deadline = clock.now() + timeouts.header;
         }
         filled += received;
         if buffer.get(..filled).is_some_and(header_end) {
@@ -213,6 +215,7 @@ pub(super) fn serve_connection(
         &mut buffer,
         accepted_at,
         context.timeouts,
+        &SystemClock,
         || {
             #[cfg(feature = "test-support")]
             context
