@@ -1,8 +1,20 @@
 # piglor-gateway
 
-Wave 6 local-first HTTP Gateway foundation ([ADR-014](../../docs/adr/ADR-014-gateway-mvp.md) / Redmine #69). This is a transport component, not the product MVP.
+The local-first HTTP Gateway: the only public application boundary of PiglorOS (ADR-022). Its
+canonical, language-neutral contract is [Gateway v1](../../contracts/gateway/v1/README.md): an
+OpenAPI 3.1.1 description, JSON Schema 2020-12 schemas, an RFC 9457 problem registry, golden
+examples, and a frozen compatibility baseline. A client needs only that contract, never this
+crate's Rust source.
 
-The Wave 9 external-client MVP target will use this documented HTTP boundary to create or select Timelines, submit authenticated `world.action.v1` proposals, and poll committed Events. This foundation is not the product MVP: the default Gateway process has no host-bound authority adapter, so action submission fails closed until a host configures one. `GatewayAuthenticationAdapter` implementations establish minimized `AuthenticatedPrincipalResultV1` evidence; `GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry, and revocation state. WebSocket, public client decision-preview contracts, and Replay/Fork routes remain deferred.
+This process is not the product MVP. It serves Timeline creation, Event polling, authenticated
+`world.action.v1` proposals, Society Signals and the public Prediction Ledger. The default
+process has no host-bound authority adapter, so action submission fails closed until a host
+configures one: `GatewayAuthenticationAdapter` implementations establish minimized
+`AuthenticatedPrincipalResultV1` evidence, and `GatewayAuthorization` evaluates the pinned
+Principal, consent, capability, delegation, expiry and revocation state. The Wave 9 resource
+families (session, Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections,
+ensembles, Replays, evidence, exports, consent revocation and erasure) are Draft operations of the
+contract that their owner tickets (#302 to #309) will serve. WebSocket streaming remains deferred.
 
 ## Run
 
@@ -51,21 +63,13 @@ non-loopback listener is spectator-only.
 
 ## HTTP API
 
-The canonical, language-neutral contract is
-[`contracts/gateway/v1/openapi.json`](../../contracts/gateway/v1/openapi.json) (OpenAPI 3.1.1,
-JSON Schema 2020-12) with its RFC 9457 problem-type registry
-[`problem-types.json`](../../contracts/gateway/v1/problem-types.json) and golden
-[`examples/`](../../contracts/gateway/v1/examples/). It is Draft until Wave 9 acceptance (#301).
-`scripts/check_gateway_contract.py` fails CI when the description, the examples, or the served
-responses recorded by the gateway-client-conformance fixtures disagree. The table below is a
-summary of the served routes; the contract wins.
-
-The contract also describes the Wave 9 resource families (session, Scenario Room revisions,
-Preferences, OptionSpecs, Decision Previews and simulated actions, Projections, ensembles,
-Replays, preview evidence, exports, consent revocation and erasure) as Draft operations
-(`x-pigloros-status: draft`, owner `x-pigloros-owner` #302 to #309). This Gateway does not
-serve them: only their golden examples validate, and a served-response fixture that reaches one
-fails the check. Their normative request and response limits are in `x-pigloros-limits`.
+Read the [contract guide](../../contracts/gateway/v1/README.md) first: it is the client
+documentation for the description, schemas and their `$id`s, the problem registry, media types,
+`Idempotency-Key`, cursors, the compatibility window and version negotiation.
+`scripts/check_gateway_contract.py` fails CI when the description, the golden examples, the
+served responses recorded by the gateway-client-conformance fixtures, or the frozen v1 baseline
+disagree. The table below summarizes the served routes; the contract wins. `/` and `/ledger`
+are HTML conveniences outside the JSON contract.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
@@ -77,6 +81,8 @@ fails the check. Their normative request and response limits are in `x-pigloros-
 | `GET` | `/v1/timelines/:id/events?from_seq=0&limit=100` | — | `{ "events": [EventView], "next_from_seq", "next_cursor" }` |
 | `POST` | `/v1/timelines/:id/actions` (header `Idempotency-Key`) | `{ "entity_id", "capability", "payload", "event_type"? }` | `EventView` |
 | `POST` | `/v1/timelines/:id/signals` | `{ "entity_id", "dimension", "value", ... }` | `EventView` |
+| `POST` | `/v1/ledger/predictions` | `NewPrediction` | `201` `{ "prediction_id" }` when Ledger writes are enabled |
+| `POST` | `/v1/bridges/owntracks` | OwnTracks `location` (Basic authentication) | `[]`, only when the OwnTracks bridge is configured |
 
 - **Actions:** `event_type` defaults to `world.action.v1`; `capability` must be exactly `world.action.v1.submit`. Legacy `world.action` and `world.action.submit` are unsupported. The JSON payload requires `actor_entity_id`, `body_entity_id`, `action_kind` (`impulse` or `target_velocity`), `params` (exactly two JSON float numbers ordered X, Z, in metres per second), `action_scope` (0), `catalogue_version`, and `tick`. Unknown payload fields, integers, strings, extra components, nonfinite values, and binary32 overflow are rejected. The Gateway rounds each finite source to binary32 before storing the shortest exact canonical CBOR float encoding; raw proposed actions must already contain that normalized pair. `impulse` adds the pair to horizontal velocity, while `target_velocity` sets it; vertical Y velocity is unchanged, and position advances over the pinned timestep. The pair is never rounded at the 100 mm position/sensor floor. The WAC1 array remains bounded to 4,096 bytes. A host-bound Gateway authorizer must allow the Principal/entity operation at the current authority fence before any domain approval; the World approver then checks actor identity, the known body ID, and the pinned actuator catalogue, and its approved draft stays tentative. The Gateway commits it only through atomic host admission (ADR-021): inside one host-owned store command it rechecks authorization, persists the Principal's authority chain, and the store compares that chain, the erasure generation, the observed Logical Head, and the remaining Event budget at its commit serialization point. The response is the committed Event named by the authoritative admission receipt. Every action carries an `Idempotency-Key` header of 1 to 128 visible ASCII characters; without one it is `400` `invalid-request`. An exact retry under the same key returns `200` with the original committed Event without re-running approval, a different request under the same key is `409` `idempotency-conflict`, and an action whose observed head moved is `409` `append-conflict`; a rejected action is never retried by the Gateway. The default production Gateway has no authority adapter and therefore fails closed with `401` until the host wires authentication, authority state, and a World body catalogue.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
@@ -85,7 +91,7 @@ fails the check. Their normative request and response limits are in `x-pigloros-
 - **Fork traversal bound:** one poll traverses at most 64 parent links. Imported deeper chains and corrupt ancestry cycles fail with a `413` problem before an unbounded ancestry collection can grow. The bound does not change shallow Fork pagination, including Timelines exposing 10,001 logical Events.
 - **Timeline bound:** one Gateway process accepts at most 64 **root** Timelines. Forks and identity-preserving imported children do not consume root capacity. Quota checks use a bounded scalar store seam that stops at quota + 1 and never lists or clones Timeline metadata.
 - **Event bound:** each Timeline accepts at most 10,000 **owned** Events. A Fork's inherited parent Events remain readable but do not consume its own ceiling. This bounds incremental storage per Timeline without discouraging Forks.
-- **Errors:** every failure, including malformed JSON bodies, unknown paths (`404`) and unserved methods (`405`), is an RFC 9457 `application/problem+json` body with `type`, `title`, `status`, `detail`, `instance` (the matched route template, or the request path when nothing routes it), `code`, `schema_id` and `retryable`. `code` is one of the closed families of `problem-types.json`, for example `invalid-request` (`400`: bad id, type, query, page or body), `not-found-or-unavailable` (`404`: unknown Timeline, never enumerating), `resource-limit-exceeded` (`413`, `429`, `507`), `unauthenticated` (`401`), `unauthorized` (`403`), `idempotency-conflict` and `append-conflict` (`409`), `admission-rejected` (`422`: World domain validation), `temporarily-unavailable` (`503`, `504`) and `internal-safe-failure` (`500`, whose `detail` is a fixed safe text). `detail` wording is not part of the contract.
+- **Errors:** every failure, including malformed JSON bodies, unknown paths and unserved methods (`405`), is an RFC 9457 `application/problem+json` body whose `code` is one of the closed families of `problem-types.json` (see the [contract guide](../../contracts/gateway/v1/README.md#problems)). A path under another API major such as `/v2/...` is `400` `unsupported-version`; any other unrouted path is `404` `not-found-or-unavailable`. `detail` wording is not part of the contract.
 - **Body limit:** 1 MiB (`MAX_HTTP_BODY_BYTES`); returns a `413` `resource-limit-exceeded` problem when exceeded.
 - **Public listener:** on a non-loopback bind, only the four public Ledger routes
   above are registered. All Timeline and prediction-registration routes return the `404`
@@ -97,9 +103,9 @@ Rust callers should start with `Gateway::read_events_page` (or
 cursor binds its Timeline and, on a host-owned Gateway, its inventory generation;
 continuation after a generation change returns `StaleEventCursor`.
 `next_from_seq` is a sequence position for a separate fresh read, not a
-generation-bound continuation. The deprecated `read_events_from` compatibility
-method succeeds only when the result fits in one bounded page and returns an
-explicit error instead of silently truncating a longer Timeline.
+generation-bound continuation. `read_events_from` succeeds only when the result
+fits in one bounded page and returns an explicit error instead of silently
+truncating a longer Timeline.
 
 ### EventView
 

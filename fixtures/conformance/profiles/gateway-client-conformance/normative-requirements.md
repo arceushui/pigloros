@@ -123,3 +123,31 @@ Event per `201` response of the signals or actions route. The other counters are
   `unauthorized` problem, with no fallback and nothing committed.
 - **independent-evaluation:** the digests of a health exchange and of a created Timeline with
   its empty page.
+
+## 7. Compatibility and version negotiation
+
+These rules bind the Gateway and every client of the v1 contract for the compatibility window;
+`contracts/gateway/v1/README.md` states them in full and `scripts/check_gateway_contract.py`
+enforces them against the frozen baseline `contracts/gateway/v1/compatibility/`.
+
+- **Window:** the served operations frozen in the baseline stay supported through Wave 10 after
+  Wave 9 acceptance, and every frozen golden example, positive or fail-closed, stays valid. A
+  breaking change runs as a parallel new major with an explicit migration and retirement
+  decision; the baseline only gains entries.
+- **Additive fields:** within v1 a change may add only optional members, optional parameters,
+  responses, response headers and operations, or accept more request values. Removing or newly
+  requiring a member, narrowing what a request accepts, widening what a response returns, or
+  changing a schema identity is a new major. A served limit moves only in its declared
+  direction: a `request` limit may grow, a `response` limit may shrink, a `both` limit is fixed.
+- **Unknown members:** an open request object ignores an unknown member; a closed one
+  (`additionalProperties: false`, such as the `world.action.v1` payload) rejects it; a
+  schema-less value such as `EventView.payload` is preserved verbatim. Response schemas are
+  closed for drift detection, and a client ignores unknown response members.
+- **Unknown versions fail closed:** a request naming an unsupported schema or Event version
+  (`world.action`, `world.action.v2`) is the `400` `unsupported-version` problem with no upcast
+  or fallback, and an execution profile the deployment cannot serve is the `409`
+  `incompatible-profile` problem.
+- **API major:** the major is the first path segment. A request under any other major
+  (`/v<digits>/...` other than `/v1/...`) is the `400` `unsupported-version` problem whose
+  `instance` is the request path; any other unrouted path is the `404`
+  `not-found-or-unavailable` problem. A client falls back only after this explicit answer.
