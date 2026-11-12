@@ -32,10 +32,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::modeled_environment_obstruction_verdict_ --include-ignored --nocapture --test-threads=1
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::process_fault::modeled_ --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Surface model tests failed' }
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-clean --no-report -- adapter::native_tests::process_fault::modeled_pre_environment_verdict_ --include-ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Pre-environment model test failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --output-path "$env:RUNNER_TEMP/environment-verdict.lcov"
           if ($LASTEXITCODE -ne 0) { throw 'LCOV export failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --output-path "$env:RUNNER_TEMP/environment-verdict.json"
