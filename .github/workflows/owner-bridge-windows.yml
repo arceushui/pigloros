@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::controls::tests::modeled_control_view_setup_stops_at_the_first_failure --exact --include-ignored --nocapture --test-threads=1
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --lib --no-report -- adapter::native_tests::controls::tests::modeled_control_ --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw 'Surface model tests failed' }
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --output-path "$env:RUNNER_TEMP/control-prepare.lcov"
           if ($LASTEXITCODE -ne 0) { throw 'LCOV export failed' }
