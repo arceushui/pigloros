@@ -121,12 +121,11 @@ impl NativeOperations for Session {
         &self,
         authority: &crate::FaultAuthority,
     ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
-        if !self.preload_fault_owners_retained()
-            || self.window.is_none()
-            || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-        {
-            return Err(());
-        }
+        require_owned_browser(
+            || self.preload_fault_owners_retained() && self.window.is_some(),
+            || self.browser_pid().map_err(|_| ()),
+            || authority.browser().browser_pid,
+        )?;
         let environment = self.environment_ref().map_err(|_| ())?;
         self.denials.expect_browser(authority.browser().browser_pid);
         super::process_fault::retain_exit_browser(&environment.raw, authority)
@@ -155,12 +154,11 @@ impl NativeOperations for Session {
         }
         match authority.lifecycle() {
             crate::ProcessFaultLifecycle::Quarantined => {
-                if !self.preload_fault_owners_retained()
-                    || self.window.is_none()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.preload_fault_owners_retained() && self.window.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::PostedReceipt
             | crate::ProcessFaultLifecycle::PostedEmpty
@@ -169,21 +167,20 @@ impl NativeOperations for Session {
             | crate::ProcessFaultLifecycle::PostedConsuming
             | crate::ProcessFaultLifecycle::PostedRetry(_)
             | crate::ProcessFaultLifecycle::ReleasingSuccess => {
-                if self.controller.is_none()
-                    || self.view.is_none()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.controller.is_some() && self.view.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::AwaitingLoad
             | crate::ProcessFaultLifecycle::Navigating
             | crate::ProcessFaultLifecycle::BeforeRecord => {
-                if !self.preload_fault_owners_retained()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.preload_fault_owners_retained(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
             crate::ProcessFaultLifecycle::PendingOpening => {
@@ -600,6 +597,18 @@ impl NativeOperations for Session {
 }
 
 #[cfg(test)]
+fn require_owned_browser(
+    owners: impl FnOnce() -> bool,
+    browser: impl FnOnce() -> Result<u32, ()>,
+    expected: impl FnOnce() -> u32,
+) -> Result<(), ()> {
+    if !owners() || browser()? != expected() {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn pending_candidate_checked(
     mut owners: impl FnMut() -> bool,
     mut callback: impl FnMut() -> Option<bool>,
@@ -639,6 +648,46 @@ mod pending_candidate_tests {
 
     use pos_owner_bridge::ProcessIdentity;
     use pos_owner_bridge_codec::ImagePathSha256;
+
+    #[test]
+    fn modeled_owned_browser_check_refuses_early_without_extra_reads() {
+        for (owners, pid, expected_pid, result, expected_calls) in [
+            (false, Ok(7), 7, Err(()), &["owners"][..]),
+            (true, Err(()), 7, Err(()), &["owners", "browser"][..]),
+            (
+                true,
+                Ok(8),
+                7,
+                Err(()),
+                &["owners", "browser", "expected"][..],
+            ),
+            (
+                true,
+                Ok(7),
+                7,
+                Ok(()),
+                &["owners", "browser", "expected"][..],
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let observed = super::require_owned_browser(
+                || {
+                    calls.borrow_mut().push("owners");
+                    owners
+                },
+                || {
+                    calls.borrow_mut().push("browser");
+                    pid
+                },
+                || {
+                    calls.borrow_mut().push("expected");
+                    expected_pid
+                },
+            );
+            assert_eq!(observed, result);
+            assert_eq!(calls.into_inner(), expected_calls);
+        }
+    }
     use std::cell::RefCell;
 
     #[test]
