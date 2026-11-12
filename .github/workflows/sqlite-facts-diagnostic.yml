@@ -1,0 +1,30 @@
+name: sqlite-facts-diagnostic
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  sqlite-facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: '1.97.1'
+      - name: Capture source, compiler and dependency features
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD:Cargo.lock HEAD:crates/pos-store/tests/sqlite_runtime_facts.rs
+          uname -a
+          rustc -Vv
+          cc --version | head -n 1
+          cargo tree --locked -p pos-store -e features -i libsqlite3-sys
+          sha256sum Cargo.lock
+      - name: Run bounded fixture and record binary identity
+        run: |
+          set -euo pipefail
+          CC_ENABLE_DEBUG_OUTPUT=1 cargo test -vv --locked -p pos-store --test sqlite_runtime_facts -- --nocapture
+          find "$HOME/.cargo/registry/src" -path "*/libsqlite3-sys-0.39.1/sqlite3/sqlite3.c" -exec sha256sum "{}" \; -o -path "*/libsqlite3-sys-0.39.1/build.rs" -exec sha256sum "{}" \;
+          find target/debug/build -name libsqlite3.a -exec sha256sum "{}" \;
+          find target/debug/deps -maxdepth 1 -type f -executable -name 'sqlite_runtime_facts-*' -print -exec sha256sum '{}' \; -exec ldd '{}' \;
