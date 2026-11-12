@@ -36,13 +36,24 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let root = root.join(format!("readiness-{worker}"));
         let loopback = loopback.clone();
         let foreground = Arc::clone(&foreground);
+        worker_stage(worker, "diagnostic-spawn-enter");
         workers.push(thread::spawn(move || {
             run_worker(&path, root, loopback, &foreground, worker)
                 .map_err(|error| error.to_string())
         }));
+        worker_stage(worker, "diagnostic-spawn-return");
     }
     // Every creating STA retires its accepted owners before its join completes.
-    let results: Vec<_> = workers.into_iter().map(thread::JoinHandle::join).collect();
+    let results: Vec<_> = workers
+        .into_iter()
+        .enumerate()
+        .map(|(worker, handle)| {
+            worker_stage(worker, "diagnostic-join-enter");
+            let result = handle.join();
+            worker_stage(worker, "diagnostic-join-return");
+            result
+        })
+        .collect();
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
         let result =
@@ -68,6 +79,7 @@ fn run_worker(
     foreground: &Foreground,
     worker: usize,
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    worker_stage(worker, "diagnostic-worker-enter");
     crate::create_private_directory(&root)?;
     let runtime = Arc::new(crate::verify_fixed_runtime(runtime_path, &root)?);
     let factory = Rc::new(crate::Native::owner_factory()?);

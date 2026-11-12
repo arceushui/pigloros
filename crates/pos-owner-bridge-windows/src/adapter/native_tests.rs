@@ -160,6 +160,101 @@ fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestRe
     Ok(())
 }
 
+thread_local! { static DIAG_LIFECYCLE_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
+
+struct DiagnosticLifecycle;
+impl DiagnosticLifecycle {
+    fn begin() -> Self {
+        DIAG_LIFECYCLE_ACTIVE.with(|active| active.set(true));
+        Self
+    }
+}
+impl Drop for DiagnosticLifecycle {
+    fn drop(&mut self) {
+        DIAG_LIFECYCLE_ACTIVE.with(|active| active.set(false));
+    }
+}
+
+fn diagnostic_stage<T>(stage: &str, action: impl FnOnce() -> T) -> T {
+    use std::io::Write as _;
+    let thread = std::thread::current().id();
+    let _logged = writeln!(
+        std::io::stderr(),
+        "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} event=enter"
+    );
+    let result = action();
+    let _logged = writeln!(
+        std::io::stderr(),
+        "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} event=return"
+    );
+    result
+}
+
+fn diagnostic_pump(factory: &dyn StaPump, stage: &str) -> NativeResult<NativePulse> {
+    if !DIAG_LIFECYCLE_ACTIVE.with(Cell::get) {
+        return factory.next();
+    }
+    use std::cell::Cell;
+    use std::io::Write as _;
+    thread_local! { static COUNT: Cell<u32> = const { Cell::new(0) }; }
+    let count = COUNT.with(|count| {
+        let old = count.get();
+        count.set(old.saturating_add(1));
+        old
+    });
+    let thread = std::thread::current().id();
+    if count < 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} pump={count} event=enter"
+        );
+    } else if count == 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} event=pump-truncated"
+        );
+    }
+    let result = factory.next();
+    if count < 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} pump={count} event=return"
+        );
+    }
+    result
+}
+
+fn diagnostic_loop<T>(stage: &str, action: impl FnOnce() -> T) -> T {
+    use std::cell::Cell;
+    use std::io::Write as _;
+    thread_local! { static COUNT: Cell<u32> = const { Cell::new(0) }; }
+    let count = COUNT.with(|count| {
+        let old = count.get();
+        count.set(old.saturating_add(1));
+        old
+    });
+    let thread = std::thread::current().id();
+    if count < 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} call={count} event=enter"
+        );
+    } else if count == 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} event=call-truncated"
+        );
+    }
+    let result = action();
+    if count < 4096 {
+        let _logged = writeln!(
+            std::io::stderr(),
+            "DIAG_5AFD test=lifecycle thread={thread:?} stage={stage} call={count} event=return"
+        );
+    }
+    result
+}
+
 fn pump_until(
     factory: &dyn StaPump,
     stage: &str,
@@ -172,7 +267,7 @@ fn pump_until(
                 format!("native fixture deadline expired while waiting for {stage}").into(),
             );
         }
-        if factory.next()? == NativePulse::Quit {
+        if diagnostic_pump(factory, stage)? == NativePulse::Quit {
             return Err(format!("native fixture received quit while waiting for {stage}").into());
         }
     }
@@ -434,102 +529,155 @@ impl crate::Native {
     }
 
     pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
-        let _port = Self::fixed_port_fixture();
-        let root = FixtureRoot::new()?;
+        let _diagnostic = DiagnosticLifecycle::begin();
+        let _port = diagnostic_stage("fixed-port", Self::fixed_port_fixture);
+        let root = diagnostic_stage("fixture-root", FixtureRoot::new)?;
         let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by this native fixture")?;
-        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+        let runtime = diagnostic_stage("verify-runtime", || {
+            crate::verify_fixed_runtime(&runtime_path, &root.0)
+        })?;
         let folder = root.0.join("01010101010101010101010101010101");
-        crate::create_private_directory(&folder)?;
-        let mut listener = LoopbackListener::start(
-            Box::new(crate::WindowsLoopbackBinder::default()),
-            ListenerConfig::adr(),
-        )?;
-        let mut factory = Self::owner_factory()?;
+        diagnostic_stage("create-folder", || crate::create_private_directory(&folder))?;
+        let mut listener = diagnostic_stage("listener-start", || {
+            LoopbackListener::start(
+                Box::new(crate::WindowsLoopbackBinder::default()),
+                ListenerConfig::adr(),
+            )
+        })?;
+        let mut factory = diagnostic_stage("factory-create", Self::owner_factory)?;
         let events = Rc::new(Events::default());
-        let mut native = session::Session::new(&factory, Rc::clone(&events))?;
-        empty_session(native.as_mut());
-        native.create_window(None, 480, 640)?;
-        assert!(native.create_window(None, 480, 640).is_err());
-        let window = native.window()?;
+        let mut native = diagnostic_stage("session-create", || {
+            session::Session::new(&factory, Rc::clone(&events))
+        })?;
+        diagnostic_stage("empty-session-before", || empty_session(native.as_mut()));
+        diagnostic_stage("window-create", || native.create_window(None, 480, 640))?;
+        assert!(diagnostic_stage("window-create-duplicate", || native
+            .create_window(None, 480, 640))
+        .is_err());
+        let window = diagnostic_stage("window-snapshot", || native.window())?;
         assert!(window.exists);
         assert!(window.dpi > 0);
-        native.resize_window(480, 640, window.dpi)?;
+        diagnostic_stage("window-resize", || {
+            native.resize_window(480, 640, window.dpi)
+        })?;
         let sink: Rc<dyn EventSink> = events.clone();
-        native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
-        assert!(native.pending());
+        diagnostic_stage("environment-create", || {
+            native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
+        })?;
+        assert!(diagnostic_stage("environment-pending-first", || native.pending()));
         let closed = crate::NativeError {
             operation: crate::Operation::Controller,
             failure: crate::Failure::Closed,
         };
-        assert_eq!(native.destroy_window(), Err(closed));
-        assert!(native.pending());
-        assert!(native.window()?.exists);
-        assert!(!native.has_controller()?);
-        completion(&factory, "environment creation", || {
-            native.environment_completion()
+        assert_eq!(
+            diagnostic_stage("destroy-window-pending-environment", || native
+                .destroy_window()),
+            Err(closed)
+        );
+        assert!(diagnostic_stage("environment-pending-second", || native.pending()));
+        assert!(diagnostic_stage("window-before-environment", || native.window())?.exists);
+        assert!(!diagnostic_stage("controller-before-environment", || {
+            native.has_controller()
+        })?);
+        diagnostic_stage("environment-completion", || {
+            completion(&factory, "environment creation", || {
+                native.environment_completion()
+            })
         })?;
-        let snapshot = native.environment()?;
+        let snapshot = diagnostic_stage("environment-snapshot", || native.environment())?;
         assert_eq!(snapshot.version.as_str(), "153.0.4234.48");
         assert_eq!(
             snapshot.folder.as_path().canonicalize()?,
             folder.canonicalize()?
         );
-        super::settings::verify_options(&snapshot)
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        diagnostic_stage("environment-options", || {
+            super::settings::verify_options(&snapshot)
+        })
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
         let sink: Rc<dyn EventSink> = events.clone();
-        assert!(native
-            .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
-            .is_err());
-        native.create_controller()?;
-        completion(&factory, "controller creation", || {
-            native.controller_completion()
+        assert!(diagnostic_stage("environment-create-duplicate", || native
+            .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink))
+        .is_err());
+        diagnostic_stage("controller-create", || native.create_controller())?;
+        diagnostic_stage("controller-completion", || {
+            completion(&factory, "controller creation", || {
+                native.controller_completion()
+            })
         })?;
-        assert_eq!(native.destroy_window(), Err(closed));
-        assert!(native.has_controller()?);
-        assert!(native.window()?.exists);
-        assert!(native.create_controller().is_err());
-        let identity = runtime.browser_identity(native.browser_pid()?)?;
+        assert_eq!(
+            diagnostic_stage("destroy-window-pending-controller", || native
+                .destroy_window()),
+            Err(closed)
+        );
+        assert!(diagnostic_stage("controller-present", || native.has_controller())?);
+        assert!(diagnostic_stage("window-with-controller", || native.window())?.exists);
+        assert!(
+            diagnostic_stage("controller-create-duplicate", || native.create_controller()).is_err()
+        );
+        let identity = diagnostic_stage(
+            "browser-identity",
+            || -> Result<_, Box<dyn std::error::Error>> {
+                Ok(runtime.browser_identity(native.browser_pid()?)?)
+            },
+        )?;
         events.expect_browser(identity.browser_pid);
-        native.require_shared_interfaces()?;
+        diagnostic_stage("shared-interfaces", || native.require_shared_interfaces())?;
         let sink: Rc<dyn EventSink> = events.clone();
-        native.subscribe_view(sink)?;
-        super::settings::apply(native.as_ref()).map_err(pos_owner_bridge::SurfaceError::error)?;
-        native.fit_controller()?;
-        native.show_window()?;
-        native.focus_controller()?;
-        listener.begin_navigation();
-        events.begin();
-        native.navigate_owner()?;
-        pump_until(&factory, "owner document completion", || {
-            events.loaded().is_some()
+        diagnostic_stage("subscribe-view", || native.subscribe_view(sink))?;
+        diagnostic_stage("settings-apply", || super::settings::apply(native.as_ref()))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        diagnostic_stage("fit-controller", || native.fit_controller())?;
+        diagnostic_stage("show-window", || native.show_window())?;
+        diagnostic_stage("focus-controller", || native.focus_controller())?;
+        diagnostic_stage("listener-begin-navigation", || listener.begin_navigation());
+        diagnostic_stage("events-begin", || events.begin());
+        diagnostic_stage("navigate-owner", || native.navigate_owner())?;
+        diagnostic_stage("document-completion", || {
+            pump_until(&factory, "owner document completion", || {
+                events.loaded().is_some()
+            })
         })?;
         assert!(!events.invalid());
-        assert_eq!(listener.served().count, 1);
-        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
-        exercise_unacknowledged_buffers(&factory, native.as_mut())?;
-        exercise_packaged_get_receipt(&factory, native.as_mut())?;
-        native.unsubscribe_view()?;
-        native.unsubscribe_view()?;
-        native.close_controller()?;
-        native.close_controller()?;
-        pump_until(&factory, "browser exit", || {
-            events.exited() == Some(identity.browser_pid)
+        assert_eq!(
+            diagnostic_stage("listener-served", || listener.served()).count,
+            1
+        );
+        assert_eq!(
+            diagnostic_stage("owner-source", || native.source())?.as_str(),
+            crate::OWNER_URL
+        );
+        diagnostic_stage("unacknowledged-buffers", || {
+            exercise_unacknowledged_buffers(&factory, native.as_mut())
         })?;
-        assert!(native.drop_environment().is_err()); // Exit subscription still owned.
-        native.unsubscribe_exit()?;
-        native.unsubscribe_exit()?;
-        native.drop_environment()?;
-        native.destroy_window()?;
-        native.destroy_window()?;
-        empty_session(native.as_mut());
-        drop(native);
-        factory.stop()?;
-        listener.shutdown();
-        drop(listener);
-        readiness::run(&runtime_path, &root.0)?;
-        root.remove()?;
+        diagnostic_stage("packaged-get", || {
+            exercise_packaged_get_receipt(&factory, native.as_mut())
+        })?;
+        diagnostic_stage("unsubscribe-view-first", || native.unsubscribe_view())?;
+        diagnostic_stage("unsubscribe-view-second", || native.unsubscribe_view())?;
+        diagnostic_stage("close-controller-first", || native.close_controller())?;
+        diagnostic_stage("close-controller-second", || native.close_controller())?;
+        diagnostic_stage("browser-exit", || {
+            pump_until(&factory, "browser exit", || {
+                events.exited() == Some(identity.browser_pid)
+            })
+        })?;
+        assert!(
+            diagnostic_stage("drop-environment-with-exit", || native.drop_environment()).is_err()
+        ); // Exit subscription still owned.
+        diagnostic_stage("unsubscribe-exit-first", || native.unsubscribe_exit())?;
+        diagnostic_stage("unsubscribe-exit-second", || native.unsubscribe_exit())?;
+        diagnostic_stage("drop-environment", || native.drop_environment())?;
+        diagnostic_stage("destroy-window-first", || native.destroy_window())?;
+        diagnostic_stage("destroy-window-second", || native.destroy_window())?;
+        diagnostic_stage("empty-session-after", || empty_session(native.as_mut()));
+        diagnostic_stage("drop-native", || drop(native));
+        diagnostic_stage("factory-stop", || factory.stop())?;
+        diagnostic_stage("listener-shutdown", || listener.shutdown());
+        diagnostic_stage("drop-listener", || drop(listener));
+        diagnostic_stage("readiness-run", || readiness::run(&runtime_path, &root.0))?;
+        diagnostic_stage("remove-root", || root.remove())?;
         Ok(())
     }
 }
@@ -555,9 +703,11 @@ fn exercise_packaged_get_receipt(
     // no authenticator result is needed or accepted by this fixture.
     let mut retired = false;
     for _ in 0..8 {
-        let state = native.load_state()?;
+        let state = diagnostic_stage("cancel-load-state", || native.load_state())?;
         assert!([1, 2, 6, 7].contains(&state));
-        if native.compare_exchange(state, ControlState::ReleaseRequested as u32)? {
+        if diagnostic_stage("cancel-compare-exchange", || {
+            native.compare_exchange(state, ControlState::ReleaseRequested as u32)
+        })? {
             retired = true;
             break;
         }
@@ -567,13 +717,19 @@ fn exercise_packaged_get_receipt(
         "packaged Get state did not retire within the fixed CAS bound"
     );
     let deadline = Instant::now() + RELEASE_WINDOW;
-    while native.load_state()? != ControlState::Releasing as u32 && Instant::now() < deadline {
-        if factory.next()? == NativePulse::Quit {
+    while diagnostic_loop("release-load-state", || native.load_state())?
+        != ControlState::Releasing as u32
+        && Instant::now() < deadline
+    {
+        if diagnostic_pump(factory, "packaged-release")? == NativePulse::Quit {
             return Err("native fixture quit while cancelling the synthetic Get".into());
         }
     }
-    assert_eq!(native.load_state()?, ControlState::Releasing as u32);
-    native.close_buffers()?;
+    assert_eq!(
+        diagnostic_stage("release-final-state", || native.load_state())?,
+        ControlState::Releasing as u32
+    );
+    diagnostic_stage("release-close-buffers", || native.close_buffers())?;
     Ok(())
 }
 
@@ -598,26 +754,40 @@ fn receive_packaged_get(
         let reply = OwnerBridgeControlV1::new_reply(CeremonyKind::Get, generation, id)
             .map_err(|error| error.to_string())?
             .encode();
-        native.create_buffers(CeremonyKind::Get, request.as_bytes(), &reply)?;
-        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
-        native.post(BufferSlot::Request)?;
-        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
-        native.post(BufferSlot::Reply)?;
+        diagnostic_stage("get-create-buffers", || {
+            native.create_buffers(CeremonyKind::Get, request.as_bytes(), &reply)
+        })?;
+        assert_eq!(
+            diagnostic_stage("get-source-request", || native.source())?.as_str(),
+            crate::OWNER_URL
+        );
+        diagnostic_stage("get-post-request", || native.post(BufferSlot::Request))?;
+        assert_eq!(
+            diagnostic_stage("get-source-reply", || native.source())?.as_str(),
+            crate::OWNER_URL
+        );
+        diagnostic_stage("get-post-reply", || native.post(BufferSlot::Reply))?;
         let deadline = Instant::now() + Duration::from_millis(millis);
-        while native.load_state()? == ControlState::Empty as u32 && Instant::now() < deadline {
-            if factory.next()? == NativePulse::Quit {
+        while diagnostic_loop("get-load-state", || native.load_state())?
+            == ControlState::Empty as u32
+            && Instant::now() < deadline
+        {
+            if diagnostic_pump(factory, "get-receipt")? == NativePulse::Quit {
                 return Err("native fixture quit before the packaged page accepted a pair".into());
             }
         }
-        if native.load_state()? != ControlState::Empty as u32
-            || !native.compare_exchange(
-                ControlState::Empty as u32,
-                ControlState::ReleaseRequested as u32,
-            )?
+        if diagnostic_stage("get-final-state", || native.load_state())?
+            != ControlState::Empty as u32
+            || !diagnostic_stage("get-retire-empty", || {
+                native.compare_exchange(
+                    ControlState::Empty as u32,
+                    ControlState::ReleaseRequested as u32,
+                )
+            })?
         {
             return Ok(());
         }
-        native.close_buffers()?;
+        diagnostic_stage("get-close-buffers", || native.close_buffers())?;
     }
     Err("packaged page never accepted a Get pair within eight posts".into())
 }
@@ -637,42 +807,69 @@ fn exercise_unacknowledged_buffers(
     let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)
         .map_err(|error| error.to_string())?
         .encode();
-    assert!(native
-        .create_buffers(
+    assert!(
+        diagnostic_stage("unack-short-buffers", || native.create_buffers(
             CeremonyKind::Create,
             &request[..request.len() - 1],
             &reply_header
-        )
-        .is_err());
-    native.create_buffers(CeremonyKind::Create, &request, &reply_header)?;
-    assert!(native
-        .create_buffers(CeremonyKind::Create, &request, &reply_header)
-        .is_err());
-    assert_eq!(native.load_state()?, ControlState::Empty as u32);
-    assert!(native.compare_exchange(ControlState::Empty as u32, ControlState::Writing as u32)?);
-    assert!(!native.compare_exchange(ControlState::Empty as u32, ControlState::Failed as u32)?);
-    assert!(native.compare_exchange(ControlState::Writing as u32, ControlState::Empty as u32)?);
+        ))
+        .is_err()
+    );
+    diagnostic_stage("unack-create-buffers", || {
+        native.create_buffers(CeremonyKind::Create, &request, &reply_header)
+    })?;
+    assert!(
+        diagnostic_stage("unack-duplicate-buffers", || native.create_buffers(
+            CeremonyKind::Create,
+            &request,
+            &reply_header
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        diagnostic_stage("unack-initial-state", || native.load_state())?,
+        ControlState::Empty as u32
+    );
+    assert!(diagnostic_stage("unack-empty-writing", || native
+        .compare_exchange(
+            ControlState::Empty as u32,
+            ControlState::Writing as u32
+        ))?);
+    assert!(!diagnostic_stage("unack-empty-failed", || native
+        .compare_exchange(
+            ControlState::Empty as u32,
+            ControlState::Failed as u32
+        ))?);
+    assert!(diagnostic_stage("unack-writing-empty", || native
+        .compare_exchange(
+            ControlState::Writing as u32,
+            ControlState::Empty as u32
+        ))?);
     let mut copied = ReplyImage::zeroed();
-    native.copy_reply(&mut copied)?;
+    diagnostic_stage("unack-copy-reply", || native.copy_reply(&mut copied))?;
     assert_eq!(&copied.as_bytes()[..64], &reply_header);
-    native.post(BufferSlot::Request)?;
-    native.post(BufferSlot::Reply)?;
+    diagnostic_stage("unack-post-request", || native.post(BufferSlot::Request))?;
+    diagnostic_stage("unack-post-reply", || native.post(BufferSlot::Reply))?;
     // The packaged page releases a malformed pair without accepting it or
     // invoking WebAuthn. Retire it through the same EMPTY CAS and fixed release
     // window used when a page never acknowledges; do not invent a page write.
-    assert!(native.compare_exchange(
-        ControlState::Empty as u32,
-        ControlState::ReleaseRequested as u32
-    )?);
+    assert!(diagnostic_stage("unack-release-requested", || native
+        .compare_exchange(
+            ControlState::Empty as u32,
+            ControlState::ReleaseRequested as u32
+        ))?);
     let release_deadline = Instant::now() + RELEASE_WINDOW;
     while Instant::now() < release_deadline {
-        assert_eq!(native.load_state()?, ControlState::ReleaseRequested as u32);
-        if factory.next()? == NativePulse::Quit {
+        assert_eq!(
+            diagnostic_loop("unack-load-state", || native.load_state())?,
+            ControlState::ReleaseRequested as u32
+        );
+        if diagnostic_pump(factory, "unacknowledged-release")? == NativePulse::Quit {
             return Err("native fixture received quit during unacknowledged release".into());
         }
     }
-    native.close_buffers()?;
-    native.close_buffers()?;
-    assert!(native.load_state().is_err());
+    diagnostic_stage("unack-close-first", || native.close_buffers())?;
+    diagnostic_stage("unack-close-second", || native.close_buffers())?;
+    assert!(diagnostic_stage("unack-final-state", || native.load_state()).is_err());
     Ok(())
 }

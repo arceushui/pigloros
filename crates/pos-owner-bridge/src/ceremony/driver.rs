@@ -811,6 +811,17 @@ impl CeremonyDriver {
     }
 
     fn fail(&mut self, env: &mut StepEnv<'_>, now: Instant, error: BridgeError) -> Step {
+        #[cfg(feature = "test-support")]
+        {
+            use std::io::Write as _;
+            let _logged = writeln!(
+                std::io::stderr(),
+                "DIAG_5AFD_DRIVER_FAILURE thread={:?} elapsed={:?} posts={} error={error:?}",
+                std::thread::current().id(),
+                now.saturating_duration_since(self.plan.t0),
+                self.posts,
+            );
+        }
         self.outcome = Err(error);
         self.slots.wipe_ceremony();
         if self.identity.is_none() {

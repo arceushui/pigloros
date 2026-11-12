@@ -1761,6 +1761,17 @@ fn run_success_exit(
         fixture.drive_success_exit(&mut driver, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let _logged = writeln!(
+        std::io::stderr(),
+        "DIAG_5AFD test=process-fault thread={:?} case={number} result_error={:?} failure={:?} reached={:?} complete={} posts={} receipt={:?}",
+        std::thread::current().id(),
+        result.as_ref().err(),
+        failure.as_ref().map(ToString::to_string),
+        fixture.exit_reached,
+        fixture.evidence_complete,
+        driver.posts(),
+        driver.first_receipt_at().map(|time| time.saturating_duration_since(driver.t0())),
+    );
     let verified = result.is_ok() && has_synthetic_success_prf(&driver) && driver.request_clear();
     let reached = fixture.exit_reached;
     let complete = fixture.evidence_complete;
