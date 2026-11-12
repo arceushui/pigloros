@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_control_view_setup_stops_at_the_first_failure() -> super::TestResult {
+    fn modeled_control_view_setup_stops_at_the_first_failure() {
         use crate::adapter::surface::tests::native::{Creation, Factory};
         use crate::NativeFactory as _;
         use pos_owner_bridge::fake::clock::FakeClock;
@@ -515,11 +515,10 @@ mod tests {
             assert_eq!(model.calls.borrow().as_slice(), expected, "{failure:?}");
             assert!(!model.calls.borrow().contains(&"navigate"));
         }
-        Ok(())
     }
 
     #[test]
-    fn modeled_control_creation_stops_at_failure_and_retires_owners() -> super::TestResult {
+    fn modeled_control_creation_stops_at_failure_and_retires_owners() {
         use crate::adapter::surface::tests::native::{Creation, Factory};
         use pos_owner_bridge::fake::clock::FakeClock;
         use std::path::Path;
@@ -600,11 +599,10 @@ mod tests {
                 "session creation: {session_result:?}"
             );
         }
-        Ok(())
     }
 
     #[test]
-    fn modeled_control_subscription_stops_at_failure_and_retires_owners() -> super::TestResult {
+    fn modeled_control_subscription_stops_at_failure_and_retires_owners() {
         use crate::adapter::surface::tests::native::{Creation, Factory};
         use pos_owner_bridge::fake::clock::FakeClock;
         use std::path::Path;
@@ -657,7 +655,6 @@ mod tests {
                 "session creation: {session_result:?}"
             );
         }
-        Ok(())
     }
 
     fn probe() -> Probe {

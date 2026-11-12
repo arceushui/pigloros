@@ -362,7 +362,7 @@ mod model_tests {
     use crate::NativeFactory;
 
     #[test]
-    fn modeled_denial_attempt_preserves_errors_after_owner_retirement() -> TestResult {
+    fn modeled_denial_attempt_preserves_errors_after_owner_retirement() {
         let _port = crate::Native::fixed_port_fixture();
         for (fault, expected) in [
             ("pump", "Sta: CallFailed"),
@@ -459,6 +459,5 @@ mod model_tests {
             });
             assert!(result.is_ok(), "fixture root: {result:?}");
         }
-        Ok(())
     }
 }
