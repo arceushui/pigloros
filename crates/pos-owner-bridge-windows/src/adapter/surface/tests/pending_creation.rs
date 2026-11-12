@@ -430,14 +430,17 @@ fn modeled_failed_open_retains_its_folder_and_retries_each_cleanup_refusal() {
         "drop_environment",
         "destroy_window",
     ];
-    for (creation, observes_exit) in [
-        (Creation::SynchronousFailure, false),
-        (Creation::MissingView, true),
+    for (creation, startup_failure, observes_exit) in [
+        (Creation::Ready, Some("create_window"), false),
+        (Creation::Ready, Some("create_environment"), false),
+        (Creation::SynchronousFailure, None, false),
+        (Creation::MissingView, None, true),
     ] {
         for (index, failure) in operations.iter().enumerate() {
             let result = Fixture::new(creation).map(|mut fixture| {
                 let selected = spec(126);
                 let competing = spec(127);
+                fixture.factory.failure.set(startup_failure);
                 assert!(fixture.open(&selected).is_err());
                 if observes_exit {
                     assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
@@ -489,6 +492,65 @@ fn modeled_failed_open_retains_its_folder_and_retries_each_cleanup_refusal() {
             assert!(result.is_ok(), "modeled fixture: {result:?}");
         }
     }
+}
+
+#[test]
+fn modeled_controller_presence_refusal_preserves_failed_open_for_retry() {
+    let result = Fixture::new(Creation::SynchronousFailure).map(|mut fixture| {
+        let selected = spec(128);
+        assert!(fixture.open(&selected).is_err());
+        let before = fixture.factory.calls.borrow().clone();
+        fixture.factory.failure.set(Some("has_controller"));
+        assert!(fixture.surface.poll_failed_open().is_err());
+        assert!(!fixture.surface.idle());
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        competing_open_is_refused(&mut fixture, &spec(129));
+        assert_eq!(*fixture.factory.calls.borrow(), before);
+        fixture.assert_no_ceremony_data();
+        fixture.factory.failure.set(None);
+        assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+        assert!(fixture.surface.idle());
+        assert!(fixture.root.join(&selected.folder_name).is_dir());
+        assert!(fixture.store.removed_folders().is_empty());
+        fixture.assert_no_ceremony_data();
+    });
+    assert!(result.is_ok(), "modeled fixture: {result:?}");
+}
+
+#[test]
+fn modeled_late_controller_close_refusal_retains_owners_until_retry_and_exit() {
+    let result = Fixture::new(Creation::Pending).map(|mut fixture| {
+        let selected = spec(130);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        fixture.surface.abandon_opening();
+        fixture.factory.creation.set(Creation::Ready);
+        fixture.factory.failure.set(Some("close_controller"));
+        for _ in 0..2 {
+            let before = fixture.factory.calls.borrow().len();
+            assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+            assert_eq!(
+                &fixture.factory.calls.borrow()[before..],
+                &["unsubscribe_view", "close_controller"],
+            );
+            assert!(!fixture.surface.idle());
+            assert!(fixture.root.join(&selected.folder_name).is_dir());
+            assert!(fixture.store.removed_folders().is_empty());
+            competing_open_is_refused(&mut fixture, &spec(131));
+            fixture.assert_no_ceremony_data();
+        }
+        fixture.factory.failure.set(None);
+        assert_eq!(fixture.surface.poll_failed_open(), Ok(false));
+        assert!(!fixture.surface.idle());
+        assert!(fixture.store.removed_folders().is_empty());
+        fixture.exit();
+        assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
+        assert!(fixture.surface.idle());
+        assert_eq!(fixture.store.removed_folders(), [selected.folder_name]);
+        fixture.assert_no_ceremony_data();
+    });
+    assert!(result.is_ok(), "modeled fixture: {result:?}");
 }
 
 #[test]
