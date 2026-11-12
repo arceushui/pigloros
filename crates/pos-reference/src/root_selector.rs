@@ -2151,7 +2151,8 @@ mod tests {
         use super::*;
         use crate::selector::installation::tests::{
             admitted_state_with_image, admitted_state_with_partitions, gpt_fixture, gpt_partitions,
-            remove_artifact, replace_image_file, root_selector_fixture_from_state,
+            refresh_header_crc, refresh_table_crc, remove_artifact, replace_image_file,
+            root_selector_fixture_from_state,
         };
 
         fn service(
@@ -2387,38 +2388,6 @@ mod tests {
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
             assert_eq!(service.transport.0.borrow().is_none(), accepted);
             Ok(())
-        }
-
-        fn refresh_header_crc(image: &mut [u8], offset: usize, sector: usize) -> TestResult {
-            let size = usize::try_from(u32::from_le_bytes(
-                image[offset + 12..offset + 16].try_into()?,
-            ))?
-            .min(sector);
-            image[offset + 16..offset + 20].fill(0);
-            let mut crc = flate2::Crc::new();
-            crc.update(&image[offset..offset + size]);
-            image[offset + 16..offset + 20].copy_from_slice(&crc.sum().to_le_bytes());
-            Ok(())
-        }
-
-        pub(super) fn refresh_table_crc(
-            image: &mut [u8],
-            header: usize,
-            sector: usize,
-        ) -> TestResult {
-            let entries = usize::try_from(u64::from_le_bytes(
-                image[header + 72..header + 80].try_into()?,
-            ))? * sector;
-            let count = usize::try_from(u32::from_le_bytes(
-                image[header + 80..header + 84].try_into()?,
-            ))?;
-            let size = usize::try_from(u32::from_le_bytes(
-                image[header + 84..header + 88].try_into()?,
-            ))?;
-            let mut crc = flate2::Crc::new();
-            crc.update(&image[entries..entries + count * size]);
-            image[header + 88..header + 92].copy_from_slice(&crc.sum().to_le_bytes());
-            refresh_header_crc(image, header, sector)
         }
 
         #[test]
