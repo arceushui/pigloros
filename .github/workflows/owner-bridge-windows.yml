@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 30
     env:
       RUSTC_BOOTSTRAP: '1'
-      SOURCE_SHA: 9b640d2356b51ffbba5dae8cfd948c222b184019
+      SOURCE_SHA: 20bc9abc5b2689788e4586da209faf0e92b9ede8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
