@@ -100,12 +100,10 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
+        self.verify_fault_environment()?;
         let browser = self.native.recordless_browser_candidate()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.recordless_controller_completion() != Some(true)
+        self.verify_fault_identity(browser)?;
+        if self.native.recordless_controller_completion() != Some(true)
             || self.events.exited().is_some()
         {
             return Err(());
