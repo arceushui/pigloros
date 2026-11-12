@@ -1312,7 +1312,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "603ff4232148e36d7b068d1f9c930b26c75d09f0cbb9621a41071d6ee31be925":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "38c55d3383251c928050917693775b2fa14028c6217e578350c616396c0c6d0f":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1582,9 +1582,9 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '18d2119775698a7155c8c0eb340136f7c678a67b49fe4df71f991e27ece12c55',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': '4c03680a5295d3d118967556d97b9e0d006a0d3c0bec5a99741752aea70db12f',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '480108d45bae573b95db34fe4f9d5154f66de904986f94a396415982f87f90c6',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '3d4a94b50fce9cf1322e83b608570c9299d19fc4012f04c9fb3f86dc5f2a3516',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '7962ac1d7d406fa60ec72bf0626780f5e0c60f2a7b6715368f63445e39d14c54',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '1fc463501f4590c17e1e6f50bea051cabe5cdfa3e90e1585c6d70275718b78a5',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'a510a6cfa3b90c208ba32d8941a3a0deb0379b7c0d08b4230237dfe84442cf32',
     'crates/pos-owner-bridge-windows/src/adapter/host.rs': '4b36b2618d257d2769eacea9acd3b264d0f4a68f060842520dc357f036d2e84a',
