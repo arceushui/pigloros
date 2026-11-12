@@ -1534,7 +1534,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         lib: "0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
         prefix + "adapter/native_tests.rs": "7bafd164a4aebd4988a70131a9a5400ac307337c2b95bee1b039ea004c03c438",
-        "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
+        "crates/pos-owner-bridge/src/ceremony/plan.rs": "bb0cbe0ced177ac33833c89cffaa68f2e30ddd4af0e07e875c67283b6e9cb3e6",
     }
     for path, digest in complete_sources.items():
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
