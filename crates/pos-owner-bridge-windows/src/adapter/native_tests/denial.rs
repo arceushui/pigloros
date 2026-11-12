@@ -119,13 +119,22 @@ impl Fixture {
     }
 
     fn finish(mut self) -> TestResult {
-        assert!(self.store.records()?.is_empty());
-        assert!(self.store.folders()?.is_empty());
+        self.store
+            .records()
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|records| {
+                assert!(records.is_empty());
+                drop(records);
+                self.store
+                    .folders()
+                    .map_err(Box::<dyn std::error::Error>::from)
+            })
+            .map(|folders| assert!(folders.is_empty()))?;
         drop(self.surface);
         Rc::get_mut(&mut self.factory)
-            .ok_or("native fixture factory still shared")?
-            .stop()?;
-        Ok(())
+            .ok_or("native fixture factory still shared")
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|factory| factory.stop().map_err(Box::<dyn std::error::Error>::from))
     }
 }
 

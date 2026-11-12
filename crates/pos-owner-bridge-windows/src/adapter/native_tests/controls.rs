@@ -206,9 +206,16 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         });
         let mut native = session::Session::new(&factory, events)?;
         create_control_session(&mut native, &factory, &probe, runtime.root(), &folder)?;
-        let identity = runtime.browser_identity(native.browser_pid()?)?;
-        subscribe_control_view(&mut native, &probe)?;
-        prepare_control_view(native.as_ref())?;
+        let identity = native
+            .browser_pid()
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|pid| {
+                runtime
+                    .browser_identity(pid)
+                    .map_err(Box::<dyn std::error::Error>::from)
+            })?;
+        subscribe_control_view(&mut native, &probe)
+            .and_then(|()| prepare_control_view(native.as_ref()))?;
         listener.begin_navigation();
         probe.events.begin();
         native.navigate_owner()?;
@@ -237,17 +244,23 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
                 factory.next()?;
             }
         }
-        native.unsubscribe_view()?;
-        let before_exit = crate::Native::control_observations();
-        native.close_controller()?;
-        pump_until(&factory, "control own browser exit", || {
-            probe.events.exited() == Some(identity.browser_pid)
-        })?;
+        let before_exit = native
+            .unsubscribe_view()
+            .map(|()| crate::Native::control_observations())?;
+        native
+            .close_controller()
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|()| {
+                pump_until(&factory, "control own browser exit", || {
+                    probe.events.exited() == Some(identity.browser_pid)
+                })
+            })?;
         let after_exit = crate::Native::control_observations();
         assert_control_retired(&probe, &listener, &before_exit, &after_exit, case, armed);
-        native.unsubscribe_exit()?;
-        native.drop_environment()?;
-        native.destroy_window()?;
+        native
+            .unsubscribe_exit()
+            .and_then(|()| native.drop_environment())
+            .and_then(|()| native.destroy_window())?;
         drop(native);
         listener.shutdown();
     }
