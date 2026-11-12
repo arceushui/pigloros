@@ -317,7 +317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 229
+line = 233
 function = "close_object"
 operation = "object.Close()"
 invariant = "a live owned STA interface; all atomic borrows ended before this call and no pointer access is attempted after it, including on error."
@@ -325,7 +325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 279
+line = 283
 function = "post_request"
 operation = "view.PostSharedBufferToScript( &self.request.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; pointer/COM owners remain on this STA. Request access is read-only."
@@ -333,7 +333,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 292
+line = 296
 function = "post_reply"
 operation = "view.PostSharedBufferToScript( &self.reply.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; this is the reply buffer's sole allowed read/write exposure."

@@ -63,6 +63,11 @@ fn local_machine_text(subkey: PCWSTR, name: PCWSTR) -> Result<String, ()> {
     }
     .ok()
     .map_err(|_| ())?;
+    decode_registry_text(&buffer, bytes)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn decode_registry_text(buffer: &[u16], bytes: u32) -> Result<String, ()> {
     if !bytes.is_multiple_of(2) {
         return Err(());
     }
@@ -72,6 +77,31 @@ fn local_machine_text(subkey: PCWSTR, name: PCWSTR) -> Result<String, ()> {
         return Err(());
     }
     String::from_utf16(text).map_err(|_| ())
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use super::decode_registry_text;
+
+    #[test]
+    fn modeled_registry_text_requires_bounded_single_terminated_utf16() {
+        assert_eq!(
+            decode_registry_text(&[49, 50, 51, 0], 8),
+            Ok("123".to_owned())
+        );
+        for (buffer, bytes) in [
+            (&[0_u16][..], 0),
+            (&[49, 0][..], 3),
+            (&[49, 0][..], 6),
+            (&[49, 50][..], 4),
+            (&[49, 0, 50, 0][..], 8),
+            (&[0xd800, 0][..], 4),
+        ] {
+            assert_eq!(decode_registry_text(buffer, bytes), Err(()));
+        }
+    }
 }
 
 impl crate::Native {

@@ -215,6 +215,10 @@ fn observe_mapping(object: &ICoreWebView2SharedBuffer, capacity: u32) -> Result<
     // SAFETY: the live buffer owns the mapping; initialized output receives a
     // borrowed pointer used only while that interface is held and not closed.
     unsafe { object.Buffer(&raw mut pointer) }.map_err(|_| unavailable())?;
+    admit_mapping(size, capacity, pointer)
+}
+
+fn admit_mapping(size: u64, capacity: u32, pointer: *mut u8) -> Result<NonNull<u8>> {
     if size != u64::from(capacity) || capacity < 64 || !capacity.is_multiple_of(8) {
         return Err(unavailable());
     }
@@ -413,6 +417,31 @@ const fn valid_aligned_offset(capacity: usize, offset: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[repr(align(64))]
+    struct Aligned([u8; 128]);
+
+    #[test]
+    fn modeled_mapping_metadata_refuses_invalid_size_and_alignment() {
+        let mut storage = Aligned([0; 128]);
+        let pointer = storage.0.as_mut_ptr();
+        assert_eq!(
+            super::admit_mapping(64, 64, pointer).map(|p| p.as_ptr()),
+            Ok(pointer)
+        );
+        for (size, capacity, pointer) in [
+            (63, 64, pointer),
+            (56, 56, pointer),
+            (65, 65, pointer),
+            (64, 64, std::ptr::null_mut()),
+            (64, 64, pointer.wrapping_add(1)),
+        ] {
+            assert_eq!(
+                super::admit_mapping(size, capacity, pointer),
+                Err(super::unavailable())
+            );
+        }
+    }
+
     #[test]
     fn aligned_offsets_include_end_but_reject_unaligned_and_out_of_bounds() {
         for offset in [0, 8, 56, 64] {
