@@ -761,15 +761,13 @@ impl CeremonyDriver {
     }
 
     fn consume_deadline_error(&self, now: Instant) -> Option<BridgeError> {
-        self.budget_failure(now).or_else(|| {
-            if self.interaction_over(now) {
-                Some(lifecycle(LifecycleCode::InteractionTimeout))
-            } else if expired(now, self.plan.t0, CHALLENGE_TTL) {
-                Some(lifecycle(LifecycleCode::ChallengeExpired))
-            } else {
-                None
-            }
-        })
+        if self.interaction_over(now) {
+            Some(lifecycle(LifecycleCode::InteractionTimeout))
+        } else if expired(now, self.plan.t0, CHALLENGE_TTL) {
+            Some(lifecycle(LifecycleCode::ChallengeExpired))
+        } else {
+            None
+        }
     }
 
     fn verify_reply(&mut self, env: &StepEnv<'_>) -> Result<Verified, BridgeError> {
@@ -790,13 +788,6 @@ impl CeremonyDriver {
             .unwrap_or_default();
         let verified = parse_and_verify(&self.plan, payload, &mut slots.prf)?;
         let verified_at = env.clock.now();
-        if self
-            .plan
-            .budget
-            .is_some_and(|budget| expired(verified_at, budget.start(), budget.limit()))
-        {
-            return Err(lifecycle(LifecycleCode::EnrollmentBudgetExceeded));
-        }
         if expired(verified_at, self.plan.t0, CHALLENGE_TTL) {
             return Err(lifecycle(LifecycleCode::ChallengeExpired));
         }

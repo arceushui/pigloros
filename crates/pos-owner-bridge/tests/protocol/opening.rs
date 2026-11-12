@@ -787,8 +787,8 @@ fn assert_consumption_outcome(
 ) {
     use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
     use pos_owner_bridge_codec::ControlState;
-    if offset_ms < 0 {
-        assert!(outcome.is_ok(), "{stage} {challenge}: {outcome:?}");
+    if budget || offset_ms < 0 {
+        assert!(outcome.is_ok(), "{stage} {challenge} {budget}: {outcome:?}");
     } else {
         let expected = if budget {
             LifecycleCode::EnrollmentBudgetExceeded
@@ -807,10 +807,10 @@ fn assert_consumption_outcome(
     let consume = log.iter().filter(|entry| matches!(entry, LogEntry::Cas { actor: Actor::Host, current, new, won: true, .. } if *current == ControlState::Ready as u32 && *new == ControlState::Consuming as u32)).count();
     assert_eq!(
         consume,
-        usize::from(stage == "cas" || offset_ms < 0),
+        usize::from(budget || stage == "cas" || offset_ms < 0),
         "{stage} {offset_ms}"
     );
-    if offset_ms >= 0 {
+    if !budget && offset_ms >= 0 {
         assert!(!log
             .iter()
             .any(|entry| matches!(entry, LogEntry::HostCopy { .. })));
@@ -818,4 +818,37 @@ fn assert_consumption_outcome(
     assert!(log.contains(&LogEntry::ControllerClosed));
     assert!(log.contains(&LogEntry::Finished));
     assert!(rig.store.records_now().is_empty());
+}
+
+#[test]
+fn enrollment_budget_expired_at_posted_step_start_refuses_consumption() -> TestResult {
+    use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
+    use pos_owner_bridge_codec::ControlState;
+
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    let plan = create_plan(&rig.clock)
+        .with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(3)));
+    let mut driver = new_driver(plan);
+    for _ in 0..1000 {
+        assert!(matches!(driver.step(&mut rig.env()), Step::Pending));
+        if driver.first_receipt_at().is_some() {
+            break;
+        }
+        rig.clock.advance(Duration::from_millis(10));
+    }
+    assert!(driver.first_receipt_at().is_some());
+    let deadline = driver.t0() + Duration::from_secs(3);
+    rig.clock
+        .advance(deadline.saturating_duration_since(rig.clock.now()));
+    let result = rig.step_to_end(&mut driver);
+    assert!(matches!(
+        result,
+        Err(BridgeError::Lifecycle(
+            LifecycleCode::EnrollmentBudgetExceeded
+        ))
+    ));
+    assert!(!rig.handle.log().iter().any(|entry| matches!(entry, LogEntry::Cas { actor: Actor::Host, current, new, .. } if *current == ControlState::Ready as u32 && *new == ControlState::Consuming as u32)));
+    assert!(rig.handle.log().contains(&LogEntry::Finished));
+    assert!(rig.store.records_now().is_empty());
+    Ok(())
 }
