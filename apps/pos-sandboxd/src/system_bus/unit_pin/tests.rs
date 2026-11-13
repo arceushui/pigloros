@@ -316,6 +316,21 @@ async fn the_release_evidence_is_the_activation_and_the_cgroup_before_release() 
 }
 
 #[tokio::test]
+async fn the_execute_port_reads_the_same_evidence_through_the_bound_cgroup() -> TestResult {
+    use crate::{UnitCgroup, UnitHost};
+
+    let fixture = Fixture::new(&["active"]).await?;
+    let (activated, resources) =
+        UnitHost::release_evidence(&fixture.transport, &fixture.started, &fixture.cgroup).await?;
+    assert_eq!(activated, resources.activated_monotonic_ns());
+    // The kernel observation reads `cgroup.procs` through this descriptor.
+    let held = rustix::fs::fstat(UnitCgroup::directory(&fixture.cgroup))?;
+    let (device, inode) = UnitCgroup::identity(&fixture.cgroup);
+    assert_eq!((held.st_dev, held.st_ino), (device, inode));
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unset_activation_is_missing_evidence() -> TestResult {
     let fixture = Fixture::new(&["active"]).await?;
     fixture.set(|bus| bus.activated_us = 0)?;

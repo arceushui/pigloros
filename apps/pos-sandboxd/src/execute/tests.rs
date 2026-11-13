@@ -1850,6 +1850,20 @@ mod release_evidence {
     }
 
     #[tokio::test]
+    async fn a_watchdog_deadline_already_past_releases_nothing() -> TestResult {
+        // Activated a minute ago under a thirty-second watchdog: systemd has
+        // stopped the unit already, so no release may be attempted.
+        let mut scenario = Scenario::new()?;
+        let minute = 60 * NANOSECONDS_PER_SECOND;
+        scenario.host.activated =
+            Some(monotonic_now_ns().saturating_sub(u64::try_from(minute).unwrap_or_default()));
+        let failed = scenario.fails().await?;
+        assert!(matches!(failed.error, ExecuteError::ReleaseTimeout));
+        assert!(failed.evidence.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_later_activation_moves_the_release_deadline_with_it() -> TestResult {
         let mut scenario = Scenario::new()?;
         let hour = 3_600 * NANOSECONDS_PER_SECOND;
