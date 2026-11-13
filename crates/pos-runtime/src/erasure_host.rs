@@ -4710,17 +4710,21 @@ const fn map_world_replay_verification_error(
 
 const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
-        CoreError::ModeBindingStale => ErasureHostErrorV1::ModeBindingStale,
-        containment => map_containment_error(containment),
+        CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
+        CoreError::ErasureContainmentUnavailable | CoreError::ModeBindingStale => {
+            unavailable_store_error(error)
+        }
+        _ => ErasureHostErrorV1::AdapterFailure,
     }
 }
 
-/// The host error of a store refusal other than a stale mode binding.
-const fn map_containment_error(error: &CoreError) -> ErasureHostErrorV1 {
-    match error {
-        CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
-        CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
-        _ => ErasureHostErrorV1::AdapterFailure,
+/// A store that cannot serve this write: its erasure containment is
+/// unavailable, or the adapter's Gateway mode-binding epoch is stale.
+const fn unavailable_store_error(error: &CoreError) -> ErasureHostErrorV1 {
+    if matches!(error, CoreError::ModeBindingStale) {
+        ErasureHostErrorV1::ModeBindingStale
+    } else {
+        ErasureHostErrorV1::RecoveryUnavailable
     }
 }
 
