@@ -887,18 +887,18 @@ mod tests {
     mod native_api;
 
     #[test]
-    fn nonce_lock_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::Native::exercise_native_lock()
+    fn nonce_lock_native() {
+        crate::Native::exercise_native_lock();
     }
 
     #[test]
-    fn windows_store_file_identity_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::Native::exercise_store_file_identity()
+    fn windows_store_file_identity_native() {
+        crate::Native::exercise_store_file_identity();
     }
 
     #[test]
-    fn windows_nonce_ledger_storage_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::Native::exercise_ledger_storage()
+    fn windows_nonce_ledger_storage_native() {
+        crate::Native::exercise_ledger_storage();
     }
 
     impl crate::Native {

@@ -1475,7 +1475,7 @@ def test_ledger_creation_boundary() -> None:
     for old, new in [
         ("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path)"),
         ("create_private_ledger_file(&temporary_path)", "other_creator(&temporary_path)"),
-        ("let previous = self.open_existing(LEDGER)?;", "let previous = self.open_existing(TEMPORARY)?;"),
+        ("self.open_existing(LEDGER))\n            .and_then(|previous| {", "self.open_existing(TEMPORARY))\n            .and_then(|previous| {"),
         ("_guard: &'guard WindowsSubjectEncryptorLock", "_guard: &'guard ()"),
         ("#[cfg(test)]\nmod native_tests", "#[cfg(feature = \"test-support\")]\nmod native_tests"),
     ]:
@@ -1486,14 +1486,24 @@ def test_ledger_creation_boundary() -> None:
     assert caller_errors(adapter_source.replace("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path) /* create_private_ledger_file(&temporary_path) */", 1))
     executable_decoy = '''
     impl WindowsNonceLedger<'_> {
-        fn unused_correct_sequence(&self) -> Result<(), ()> {
-            self.admit_directory()?;
-            let previous = self.open_existing(LEDGER)?;
+        fn unused_correct_sequence(&self, bytes: &[u8]) -> Result<(), ()> {
+            if bytes.len() > LIMIT {
+                return Err(());
+            }
+            let ledger_path = self.path.join(LEDGER);
             let temporary_path = self.path.join(TEMPORARY);
-            let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
-            self.validate_file(&temporary, &temporary_path)?;
-            let _ = (&previous, &mut temporary);
-            Ok(())
+            self.admit_directory()
+                .and_then(|()| self.open_existing(LEDGER))
+                .and_then(|previous| {
+                    crate::Native::create_private_ledger_file(&temporary_path)
+                        .and_then(|temporary| {
+                            self.validate_file(&temporary, &temporary_path)
+                                .map(|()| temporary)
+                        })
+                        .map(|temporary| {
+                            let _ = (&previous, &temporary, &ledger_path);
+                        })
+                })
         }
     }
     '''
@@ -1501,13 +1511,21 @@ def test_ledger_creation_boundary() -> None:
     decoy_source = wrong_real_path.replace("mod native_tests {\n    use super::*;", "mod native_tests {\n    use super::*;\n" + executable_decoy, 1)
     assert decoy_source != wrong_real_path
     assert any("held-guard admitted staging path" in error for error in caller_errors(decoy_source))
-    real_sequence = '''self.admit_directory()?;
-        let previous = self.open_existing(LEDGER)?;
-        let temporary_path = self.path.join(TEMPORARY);
-        let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
-        self.validate_file(&temporary, &temporary_path)?;'''
-    assert real_sequence in adapter_source
-    inactive_sequence = adapter_source.replace(real_sequence, "if false { " + real_sequence + " }", 1)
+    sequence_head = '''self.admit_directory()
+            .and_then(|()| self.open_existing(LEDGER))
+            .and_then(|previous| {'''
+    sequence_tail = ".and_then(|()| after(CommitStage::ReadBack))"
+    assert adapter_source.count(sequence_head) == 1 and adapter_source.count(sequence_tail) == 1
+    sequence_begin = adapter_source.index(sequence_head)
+    sequence_end = adapter_source.index(sequence_tail) + len(sequence_tail)
+    assert sequence_begin < sequence_end
+    real_sequence = adapter_source[sequence_begin:sequence_end]
+    assert "create_private_ledger_file(&temporary_path)" in real_sequence
+    inactive_sequence = (
+        adapter_source[:sequence_begin]
+        + "if false { return " + real_sequence + "; }\n        Err(())"
+        + adapter_source[sequence_end:]
+    )
     assert any("held-guard admitted staging path" in error for error in caller_errors(inactive_sequence))
     for old, new in [
         ("fn replace_observing(\n", "#[cfg(test)]\n    fn replace_observing(\n"),
@@ -1520,8 +1538,12 @@ def test_ledger_creation_boundary() -> None:
         ('join("PiglorOS")', 'join("Other")'),
         ('"subject-nonce-ledger.v1.tmp"', '"different.tmp"'),
         ('"subject-nonce-ledger.v1"', '"different-primary"'),
-        ("require_dos_path(&path)?;", "let _ = &path;"),
-        ("crate::Native::require_private_file(file)?;", "let _ = file;"),
+        ("require_dos_path(&path)\n", "Ok::<(), ()>(())\n"),
+        (".and_then(|()| admit_or_create_directory(&path).ok().ok_or(()))\n", "\n"),
+        (".and_then(|()| crate::Native::require_private_file(file))\n", "\n"),
+        (".and_then(|links| (links == 1).then_some(()).ok_or(()))\n", "\n"),
+        ("if is_absent(path) {\n        crate::create_private_directory(path)", "if is_absent(path) {\n        Ok(())"),
+        (".and_then(|same| same.then_some(()).ok_or(()))", ".map(|_same| ())"),
         ("const REPARSE_POINT: u32 = 0x400;", "const REPARSE_POINT: u32 = 0;"),
     ]:
         assert old in adapter_source, old

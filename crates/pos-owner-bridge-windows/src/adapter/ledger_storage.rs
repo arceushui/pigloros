@@ -57,26 +57,25 @@ impl WindowsSubjectEncryptorLock {
 impl<'guard> WindowsNonceLedger<'guard> {
     fn open(guard: &'guard WindowsSubjectEncryptorLock) -> Result<Self, ()> {
         let path = guard.test_directory.join("PiglorOS");
-        require_dos_path(&path)?;
-        match fs::symlink_metadata(&path) {
-            Ok(_) => crate::verify_private_directory(&path).map_err(|_| ())?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                crate::create_private_directory(&path).map_err(|_| ())?;
-            }
-            Err(_) => return Err(()),
-        }
-        crate::Native::cleanup_path_ntfs(&path)?;
-        let directory = open_directory(&path)?;
-        let volume = crate::Native::cleanup_file_volume(&directory)?;
-        let store = Self {
-            _guard: guard,
-            directory,
-            path,
-            volume,
-        };
-        store.admit_directory()?;
-        store.remove_stale_temporary()?;
-        Ok(store)
+        require_dos_path(&path)
+            .and_then(|()| admit_or_create_directory(&path).ok().ok_or(()))
+            .and_then(|()| crate::Native::cleanup_path_ntfs(&path))
+            .and_then(|()| open_directory(&path))
+            .and_then(|directory| {
+                crate::Native::cleanup_file_volume(&directory).map(|volume| (directory, volume))
+            })
+            .and_then(|(directory, volume)| {
+                let store = Self {
+                    _guard: guard,
+                    directory,
+                    path,
+                    volume,
+                };
+                store
+                    .admit_directory()
+                    .and_then(|()| store.remove_stale_temporary())
+                    .map(|()| store)
+            })
     }
 
     /// Read bounded raw bytes from an existing ledger file.
@@ -89,9 +88,9 @@ impl<'guard> WindowsNonceLedger<'guard> {
     }
 
     fn read(&self) -> Result<Vec<u8>, ()> {
-        self.admit_directory()?;
-        let file = self.open_existing(LEDGER)?;
-        read_bounded(file)
+        self.admit_directory()
+            .and_then(|()| self.open_existing(LEDGER))
+            .and_then(read_bounded)
     }
 
     /// Replace an existing ledger with bounded raw bytes.
@@ -116,97 +115,126 @@ impl<'guard> WindowsNonceLedger<'guard> {
         if bytes.len() > LIMIT {
             return Err(());
         }
-        self.admit_directory()?;
-        let previous = self.open_existing(LEDGER)?;
+        let ledger_path = self.path.join(LEDGER);
         let temporary_path = self.path.join(TEMPORARY);
-        let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
-        self.validate_file(&temporary, &temporary_path)?;
-        after(CommitStage::Created)?;
-        temporary.write_all(bytes).map_err(|_| ())?;
-        after(CommitStage::Written)?;
-        temporary.sync_all().map_err(|_| ())?;
-        after(CommitStage::FileSynced)?;
-        self.admit_directory()?;
-        after(CommitStage::DirectoryChecked)?;
-        Self::same_name(&previous, &self.path.join(LEDGER))?;
-        after(CommitStage::LedgerChecked)?;
-        Self::same_name(&temporary, &temporary_path)?;
-        after(CommitStage::TemporaryChecked)?;
-        drop(previous);
-        drop(temporary);
-        crate::Native::replace_ledger(&temporary_path, &self.path.join(LEDGER))?;
-        after(CommitStage::Renamed)?;
-        self.admit_directory()?;
-        let observed = self.open_existing(LEDGER)?;
-        if read_bounded(observed)? != bytes {
-            return Err(());
-        }
-        after(CommitStage::ReadBack)?;
-        Ok(())
+        self.admit_directory()
+            .and_then(|()| self.open_existing(LEDGER))
+            .and_then(|previous| {
+                // Both handles stay open across the rechecks and close before
+                // the move, whether this closure succeeds or refuses.
+                crate::Native::create_private_ledger_file(&temporary_path)
+                    .and_then(|temporary| {
+                        self.validate_file(&temporary, &temporary_path)
+                            .map(|()| temporary)
+                    })
+                    .and_then(|temporary| after(CommitStage::Created).map(|()| temporary))
+                    .and_then(|mut temporary| {
+                        temporary
+                            .write_all(bytes)
+                            .ok()
+                            .ok_or(())
+                            .map(|()| temporary)
+                    })
+                    .and_then(|temporary| after(CommitStage::Written).map(|()| temporary))
+                    .and_then(|temporary| temporary.sync_all().ok().ok_or(()).map(|()| temporary))
+                    .and_then(|temporary| after(CommitStage::FileSynced).map(|()| temporary))
+                    .and_then(|temporary| {
+                        self.admit_directory()
+                            .and_then(|()| after(CommitStage::DirectoryChecked))
+                            .and_then(|()| Self::same_name(&previous, &ledger_path))
+                            .and_then(|()| after(CommitStage::LedgerChecked))
+                            .and_then(|()| Self::same_name(&temporary, &temporary_path))
+                            .and_then(|()| after(CommitStage::TemporaryChecked))
+                    })
+            })
+            .and_then(|()| crate::Native::replace_ledger(&temporary_path, &ledger_path))
+            .and_then(|()| after(CommitStage::Renamed))
+            .and_then(|()| self.admit_directory())
+            .and_then(|()| self.open_existing(LEDGER))
+            .and_then(read_bounded)
+            .and_then(|observed| if observed == bytes { Ok(()) } else { Err(()) })
+            .and_then(|()| after(CommitStage::ReadBack))
     }
 
     fn admit_directory(&self) -> Result<(), ()> {
-        crate::verify_private_directory(&self.path).map_err(|_| ())?;
-        if crate::Native::cleanup_file_volume(&self.directory)? != self.volume {
-            return Err(());
-        }
-        let reopened = open_directory(&self.path)?;
-        if crate::Native::file_identity(&self.directory)?
-            != crate::Native::file_identity(&reopened)?
-        {
-            return Err(());
-        }
-        Ok(())
+        crate::verify_private_directory(&self.path)
+            .ok()
+            .ok_or(())
+            .and_then(|()| crate::Native::cleanup_file_volume(&self.directory))
+            .and_then(|volume| (volume == self.volume).then_some(()).ok_or(()))
+            .and_then(|()| open_directory(&self.path))
+            .and_then(|reopened| same_identity(&self.directory, &reopened))
     }
 
     fn validate_file(&self, file: &File, path: &Path) -> Result<(), ()> {
-        let metadata = file.metadata().map_err(|_| ())?;
-        if !metadata.is_file() || metadata.file_attributes() & REPARSE_POINT != 0 {
-            return Err(());
-        }
-        crate::Native::require_private_file(file)?;
-        if crate::Native::file_link_count(file)? != 1
-            || crate::Native::cleanup_file_volume(file)? != self.volume
-        {
-            return Err(());
-        }
-        Self::same_name(file, path)
+        file.metadata()
+            .ok()
+            .ok_or(())
+            .and_then(|metadata| {
+                (metadata.is_file() && metadata.file_attributes() & REPARSE_POINT == 0)
+                    .then_some(())
+                    .ok_or(())
+            })
+            .and_then(|()| crate::Native::require_private_file(file))
+            .and_then(|()| crate::Native::file_link_count(file))
+            .and_then(|links| (links == 1).then_some(()).ok_or(()))
+            .and_then(|()| crate::Native::cleanup_file_volume(file))
+            .and_then(|volume| (volume == self.volume).then_some(()).ok_or(()))
+            .and_then(|()| Self::same_name(file, path))
     }
 
     fn same_name(file: &File, path: &Path) -> Result<(), ()> {
-        let reopened = open_file(path)?;
-        if crate::Native::file_identity(file)? != crate::Native::file_identity(&reopened)? {
-            return Err(());
-        }
-        Ok(())
+        open_file(path).and_then(|reopened| same_identity(file, &reopened))
     }
 
     fn open_existing(&self, name: &str) -> Result<File, ()> {
         let path = self.path.join(name);
-        let file = open_file(&path)?;
-        self.validate_file(&file, &path)?;
-        Ok(file)
+        open_file(&path).and_then(|file| self.validate_file(&file, &path).map(|()| file))
     }
 
     fn remove_stale_temporary(&self) -> Result<(), ()> {
         let path = self.path.join(TEMPORARY);
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(()),
-            Ok(_) => {
-                let primary = self.open_existing(LEDGER)?;
-                let temporary = self.open_existing(TEMPORARY)?;
-                read_bounded(primary.try_clone().map_err(|_| ())?)?;
-                read_bounded(temporary.try_clone().map_err(|_| ())?)?;
-                self.admit_directory()?;
-                Self::same_name(&primary, &self.path.join(LEDGER))?;
-                Self::same_name(&temporary, &path)?;
-                drop(primary);
-                drop(temporary);
-                fs::remove_file(path).map_err(|_| ())
-            }
+        // An unreadable slot takes the same guarded recovery as a present
+        // one: nothing is removed unless every recovery check admits it.
+        if is_absent(&path) {
+            Ok(())
+        } else {
+            self.recover_stale_temporary(&path)
         }
     }
+
+    fn recover_stale_temporary(&self, path: &Path) -> Result<(), ()> {
+        self.open_existing(LEDGER)
+            .and_then(|primary| {
+                self.open_existing(TEMPORARY)
+                    .map(|temporary| (primary, temporary))
+            })
+            .and_then(|(primary, temporary)| {
+                // Both handles close before the removal below.
+                read_bounded_copy(&primary)
+                    .and_then(|_primary_bytes| read_bounded_copy(&temporary))
+                    .and_then(|_temporary_bytes| self.admit_directory())
+                    .and_then(|()| Self::same_name(&primary, &self.path.join(LEDGER)))
+                    .and_then(|()| Self::same_name(&temporary, path))
+            })
+            .and_then(|()| fs::remove_file(path).ok().ok_or(()))
+    }
+}
+
+/// Admit an existing private directory, or create it when it is absent.
+///
+/// Any other observation is left to the verification, which admits nothing
+/// but an existing private directory.
+fn admit_or_create_directory(path: &Path) -> Result<(), BridgeError> {
+    if is_absent(path) {
+        crate::create_private_directory(path)
+    } else {
+        crate::verify_private_directory(path)
+    }
+}
+
+fn is_absent(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
 fn open_directory(path: &Path) -> Result<File, ()> {
@@ -215,7 +243,8 @@ fn open_directory(path: &Path) -> Result<File, ()> {
         .share_mode(SHARE_ALL)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
-        .map_err(|_| ())
+        .ok()
+        .ok_or(())
 }
 
 fn require_dos_path(path: &Path) -> Result<(), ()> {
@@ -237,18 +266,32 @@ fn open_file(path: &Path) -> Result<File, ()> {
         .share_mode(SHARE_ALL)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0)
         .open(path)
-        .map_err(|_| ())
+        .ok()
+        .ok_or(())
+}
+
+fn same_identity(left: &File, right: &File) -> Result<(), ()> {
+    crate::Native::file_identity(left)
+        .and_then(|first| crate::Native::file_identity(right).map(|second| first == second))
+        .and_then(|same| same.then_some(()).ok_or(()))
 }
 
 fn read_bounded(file: File) -> Result<Vec<u8>, ()> {
     let mut bytes = Vec::new();
-    file.take((LIMIT + 1) as u64)
+    let read = file
+        .take((LIMIT + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    if bytes.len() > LIMIT {
-        return Err(());
-    }
-    Ok(bytes)
+        .ok()
+        .ok_or(());
+    read.and(if bytes.len() > LIMIT {
+        Err(())
+    } else {
+        Ok(bytes)
+    })
+}
+
+fn read_bounded_copy(file: &File) -> Result<Vec<u8>, ()> {
+    file.try_clone().ok().ok_or(()).and_then(read_bounded)
 }
 
 const fn unavailable() -> BridgeError {
@@ -257,8 +300,8 @@ const fn unavailable() -> BridgeError {
 
 #[cfg(test)]
 impl crate::Native {
-    pub(crate) fn exercise_ledger_storage() -> Result<(), Box<dyn std::error::Error>> {
-        native_tests::exercise()
+    pub(crate) fn exercise_ledger_storage() {
+        native_tests::exercise();
     }
 }
 
@@ -277,7 +320,9 @@ mod native_tests {
         SubjectStoreFileIdV1,
     };
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    use super::super::nonce_ledger::Probe;
+    use crate::adapter::native_tests::pass;
+
     const PROBE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_PROBE";
     const CONTROL: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_CONTROL";
     const BASE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_BASE";
@@ -293,140 +338,121 @@ mod native_tests {
         ("readback", CommitStage::ReadBack),
     ];
 
-    struct Fixture(PathBuf, bool);
+    struct Fixture(PathBuf);
     impl Drop for Fixture {
         fn drop(&mut self) {
-            if !self.1 {
-                let _removed = fs::remove_dir_all(&self.0);
-            }
+            let _removed = fs::remove_dir_all(&self.0);
         }
     }
 
-    pub(super) fn exercise() -> TestResult {
-        let _serial = super::super::nonce_ledger::NONCE_TEST_LOCK
-            .lock()
-            .map_err(|_| "nonce test lock poisoned")?;
+    pub(super) fn exercise() {
+        let _serial = pass(super::super::nonce_ledger::NONCE_TEST_LOCK.lock());
         if let Ok(requested) = std::env::var(PROBE) {
-            return run_probe(&requested);
+            run_probe(&requested);
+            return;
         }
         let base = std::env::temp_dir().join(format!(
             "piglor-nonce-ledger-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            pass(SystemTime::now().duration_since(UNIX_EPOCH)).as_nanos()
         ));
-        fs::create_dir(&base)?;
-        let mut fixture = Fixture(base, false);
-        raw_boundaries(&fixture.0)?;
-        crash_stages(&mut fixture)?;
-        checked_fixture(&fixture.0)
+        pass(fs::create_dir(&base));
+        let fixture = Fixture(base);
+        raw_boundaries(&fixture.0);
+        crash_stages(&fixture.0);
+        checked_fixture(&fixture.0);
     }
 
-    fn run_probe(requested: &str) -> TestResult {
-        let base = PathBuf::from(std::env::var_os(BASE).ok_or("missing probe base")?);
-        let marker = PathBuf::from(std::env::var_os(MARKER).ok_or("missing probe marker")?);
-        let selected = STAGES
-            .iter()
-            .find_map(|(name, stage)| (*name == requested).then_some(*stage))
-            .ok_or("unknown probe stage")?;
-        let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
-        let ledger = guard.open_nonce_ledger()?;
+    fn run_probe(requested: &str) {
+        let base = PathBuf::from(pass(std::env::var_os(BASE).ok_or("missing probe base")));
+        let marker = PathBuf::from(pass(std::env::var_os(MARKER).ok_or("missing probe marker")));
+        let selected = pass(
+            STAGES
+                .iter()
+                .find_map(|(name, stage)| (*name == requested).then_some(*stage))
+                .ok_or("unknown probe stage"),
+        );
+        let guard = pass(WindowsSubjectEncryptorLock::acquire(&base));
+        let ledger = pass(guard.open_nonce_ledger());
         let control = std::env::var_os(CONTROL).is_some();
         let mut saw_eof = false;
         let result = ledger.replace_observing(b"candidate", |stage| {
             if stage == selected {
-                fs::write(&marker, requested.as_bytes()).map_err(|_| ())?;
+                pass(fs::write(&marker, requested.as_bytes()));
                 let mut line = String::new();
-                let bytes = io::stdin().read_line(&mut line).map_err(|_| ())?;
-                saw_eof = bytes == 0;
+                saw_eof = pass(io::stdin().read_line(&mut line)) == 0;
                 return Err(());
             }
             Ok(())
         });
-        if control && saw_eof && result == Err(()) {
-            Ok(())
-        } else {
-            Err("storage probe returned without interruption".into())
-        }
+        assert!(
+            control && saw_eof && result == Err(()),
+            "storage probe returned without interruption"
+        );
     }
 
-    fn raw_boundaries(base: &Path) -> TestResult {
+    fn raw_boundaries(base: &Path) {
         assert_path_admission();
-        let guard = WindowsSubjectEncryptorLock::acquire(base).map_err(|_| "raw fixture lock")?;
-        let mut ledger = guard
-            .open_nonce_ledger()
-            .map_err(|_| "open initial raw directory")?;
+        let guard = pass(WindowsSubjectEncryptorLock::acquire(base));
+        let mut ledger = pass(guard.open_nonce_ledger());
         let path = base.join("PiglorOS").join(LEDGER);
-        recovery_requires_admitted_primary(&guard, base, &path)?;
+        recovery_requires_admitted_primary(&guard, base, &path);
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"missing"),
             Err(unavailable())
         );
         assert!(!path.exists());
-        let mut initial = crate::Native::create_private_ledger_file(&path)
-            .map_err(|()| "create initial test file")?;
+        let mut initial = pass(crate::Native::create_private_ledger_file(&path));
         assert!(crate::Native::fixture_handle_not_inheritable(&initial));
-        initial.write_all(b"untrusted bytes")?;
+        pass(initial.write_all(b"untrusted bytes"));
         assert!(crate::Native::create_private_ledger_file(&path).is_err());
         drop(initial);
-        assert_eq!(
-            ledger
-                .read_nonce_ledger_bytes()
-                .map_err(|_| "read initial raw file")?,
-            b"untrusted bytes"
-        );
-        raw_untrusted_values(&ledger)?;
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), b"untrusted bytes");
+        raw_untrusted_values(&ledger);
         let limit = vec![0x5a; LIMIT];
-        ledger
-            .replace_nonce_ledger_bytes(&limit)
-            .map_err(|_| "replace raw file at byte limit")?;
-        assert_eq!(
-            ledger
-                .read_nonce_ledger_bytes()
-                .map_err(|_| "read raw file at byte limit")?,
-            limit
-        );
-        fs::write(&path, vec![0x5a; LIMIT + 1])?;
+        pass(ledger.replace_nonce_ledger_bytes(&limit));
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), limit);
+        pass(fs::write(&path, vec![0x5a; LIMIT + 1]));
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
-        fs::write(&path, &limit)?;
+        pass(fs::write(&path, &limit));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(&vec![0x5a; LIMIT + 1]),
             Err(unavailable())
         );
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, limit);
-        ledger.replace_nonce_ledger_bytes(b"replacement")?;
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"replacement");
-        let held = OpenOptions::new().read(true).share_mode(0).open(&path)?;
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), limit);
+        pass(ledger.replace_nonce_ledger_bytes(b"replacement"));
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), b"replacement");
+        let held = pass(OpenOptions::new().read(true).share_mode(0).open(&path));
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         drop(held);
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"replacement");
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), b"replacement");
         let hardlink = base.join("PiglorOS").join("hardlink");
-        fs::hard_link(&path, &hardlink)?;
+        pass(fs::hard_link(&path, &hardlink));
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
-        fs::remove_file(hardlink)?;
-        retained_old_image(&guard, &ledger, base, &path)?;
-        refuse_occupied_temporary(&ledger, base)?;
-        refuse_replaced_directory(&ledger, base)?;
+        pass(fs::remove_file(hardlink));
+        retained_old_image(&guard, &ledger, base, &path);
+        refuse_occupied_temporary(&ledger, base);
+        refuse_replaced_directory(&ledger, base);
         drop(ledger);
-        refuse_reparse_files(&guard, base, &path)?;
+        refuse_reparse_files(&guard, base, &path);
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        let mut stale = crate::Native::create_private_ledger_file(&temporary)
-            .map_err(|()| "create stale test file")?;
-        stale.write_all(b"stale")?;
+        let mut stale = pass(crate::Native::create_private_ledger_file(&temporary));
+        pass(stale.write_all(b"stale"));
         drop(stale);
         let unrelated = base.join("PiglorOS").join("unrelated.tmp");
-        fs::write(&unrelated, b"retained")?;
+        pass(fs::write(&unrelated, b"retained"));
         let temporary_alias = base.join("PiglorOS").join("stale-alias");
-        fs::hard_link(&temporary, &temporary_alias)?;
+        pass(fs::hard_link(&temporary, &temporary_alias));
         assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
         assert!(temporary.exists());
-        fs::remove_file(temporary_alias)?;
-        ledger = guard.open_nonce_ledger()?;
+        pass(fs::remove_file(temporary_alias));
+        ledger = pass(guard.open_nonce_ledger());
         assert!(!temporary.exists());
-        assert_eq!(fs::read(&unrelated)?, b"retained");
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"replacement");
+        assert_eq!(pass(fs::read(&unrelated)), b"retained");
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), b"replacement");
         for (_, failure) in STAGES {
-            ledger.replace_nonce_ledger_bytes(b"old")?;
+            pass(ledger.replace_nonce_ledger_bytes(b"old"));
             assert!(ledger
                 .replace_observing(b"candidate", |stage| {
                     if stage == failure {
@@ -437,182 +463,170 @@ mod native_tests {
                 })
                 .is_err());
             drop(ledger);
-            ledger = guard.open_nonce_ledger()?;
-            assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
+            ledger = pass(guard.open_nonce_ledger());
+            assert_eq!(
+                pass(ledger.read_nonce_ledger_bytes()),
+                expected_after(failure)
+            );
         }
-        refuse_changed_ledger(&guard, ledger, base)?;
-        refuse_directory_swap_after_rename(&guard, base)?;
-        refuse_staging_swap(&guard, base)?;
-        Ok(())
+        refuse_changed_ledger(&guard, ledger, base);
+        refuse_directory_swap_after_rename(&guard, base);
+        refuse_staging_swap(&guard, base);
     }
 
-    fn refuse_staging_swap(guard: &WindowsSubjectEncryptorLock, base: &Path) -> TestResult {
-        let ledger = guard.open_nonce_ledger()?;
-        ledger.replace_nonce_ledger_bytes(b"original before staging")?;
+    fn refuse_staging_swap(guard: &WindowsSubjectEncryptorLock, base: &Path) {
+        let ledger = pass(guard.open_nonce_ledger());
+        pass(ledger.replace_nonce_ledger_bytes(b"original before staging"));
         let directory = base.join("PiglorOS");
         let temporary = directory.join(TEMPORARY);
         let backup = directory.join("staging-observed-backup");
-        let mut swap_failure = None;
         let mut saw_stage = false;
         let result = ledger.replace_observing(b"staged candidate", |stage| {
             if stage == CommitStage::LedgerChecked {
                 saw_stage = true;
-                if let Err(error) = fs::rename(&temporary, &backup) {
-                    swap_failure = Some(format!("rename staging file: {error}"));
-                    return Err(());
-                }
-                let replacement = crate::Native::create_private_ledger_file(&temporary)
-                    .and_then(|mut file| file.write_all(b"substitute").map_err(|_| ()));
-                if replacement.is_err() {
-                    swap_failure = Some("create or write substitute staging file".to_owned());
-                    return Err(());
-                }
+                pass(fs::rename(&temporary, &backup));
+                let mut substitute = pass(crate::Native::create_private_ledger_file(&temporary));
+                pass(substitute.write_all(b"substitute"));
             }
             Ok(())
         });
         assert!(saw_stage, "replacement failed before staging swap");
-        assert!(swap_failure.is_none(), "{swap_failure:?}");
         assert_eq!(result, Err(()));
         assert_eq!(
-            ledger.read_nonce_ledger_bytes()?,
+            pass(ledger.read_nonce_ledger_bytes()),
             b"original before staging"
         );
-        assert_eq!(fs::read(&backup)?, b"staged candidate");
-        assert_eq!(fs::read(&temporary)?, b"substitute");
+        assert_eq!(pass(fs::read(&backup)), b"staged candidate");
+        assert_eq!(pass(fs::read(&temporary)), b"substitute");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
         drop(ledger);
-        fs::remove_file(&temporary)?;
-        fs::rename(&backup, &temporary)?;
-        let recovered = guard.open_nonce_ledger()?;
+        pass(fs::remove_file(&temporary));
+        pass(fs::rename(&backup, &temporary));
+        let recovered = pass(guard.open_nonce_ledger());
         assert_eq!(
-            recovered.read_nonce_ledger_bytes()?,
+            pass(recovered.read_nonce_ledger_bytes()),
             b"original before staging"
         );
         assert!(!temporary.exists());
-        Ok(())
     }
 
-    fn refuse_directory_swap_after_rename(
-        guard: &WindowsSubjectEncryptorLock,
-        base: &Path,
-    ) -> TestResult {
-        let ledger = guard.open_nonce_ledger()?;
-        ledger.replace_nonce_ledger_bytes(b"original directory")?;
+    fn refuse_directory_swap_after_rename(guard: &WindowsSubjectEncryptorLock, base: &Path) {
+        let ledger = pass(guard.open_nonce_ledger());
+        pass(ledger.replace_nonce_ledger_bytes(b"original directory"));
         let path = base.join("PiglorOS");
         let moved = base.join("moved-after-rename");
-        let mut swap_failure = None;
         let mut saw_stage = false;
         let result = ledger.replace_observing(b"committed candidate", |stage| {
             if stage == CommitStage::Renamed {
                 saw_stage = true;
-                if let Err(error) = fs::rename(&path, &moved) {
-                    swap_failure = Some(format!("rename directory: {error}"));
-                    return Err(());
-                }
-                if let Err(error) = crate::create_private_directory(&path) {
-                    swap_failure = Some(format!("create replacement directory: {error:?}"));
-                    return Err(());
-                }
+                pass(fs::rename(&path, &moved));
+                pass(crate::create_private_directory(&path));
             }
             Ok(())
         });
         assert!(saw_stage, "replacement failed before directory swap");
-        assert!(swap_failure.is_none(), "{swap_failure:?}");
         assert_eq!(result, Err(()));
-        assert_eq!(fs::read(moved.join(LEDGER))?, b"committed candidate");
-        assert_eq!(fs::read_dir(&path)?.count(), 0);
+        assert_eq!(pass(fs::read(moved.join(LEDGER))), b"committed candidate");
+        assert_eq!(pass(fs::read_dir(&path)).count(), 0);
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
         drop(ledger);
-        fs::remove_dir(&path)?;
-        fs::rename(&moved, &path)?;
-        let recovered = guard.open_nonce_ledger()?;
-        assert_eq!(recovered.read_nonce_ledger_bytes()?, b"committed candidate");
-        Ok(())
+        pass(fs::remove_dir(&path));
+        pass(fs::rename(&moved, &path));
+        let recovered = pass(guard.open_nonce_ledger());
+        assert_eq!(
+            pass(recovered.read_nonce_ledger_bytes()),
+            b"committed candidate"
+        );
     }
 
     fn refuse_changed_ledger(
         guard: &WindowsSubjectEncryptorLock,
         ledger: WindowsNonceLedger<'_>,
         base: &Path,
-    ) -> TestResult {
+    ) {
         let path = base.join("PiglorOS").join(LEDGER);
         let backup = base.join("PiglorOS").join("ledger-observed-backup");
-        ledger.replace_nonce_ledger_bytes(b"original")?;
+        pass(ledger.replace_nonce_ledger_bytes(b"original"));
+        let mut saw_stage = false;
         let result = ledger.replace_observing(b"candidate", |stage| {
             if stage == CommitStage::Created {
-                fs::rename(&path, &backup).map_err(|_| ())?;
-                let mut replacement = crate::Native::create_private_ledger_file(&path)?;
-                replacement.write_all(b"substituted").map_err(|_| ())?;
+                saw_stage = true;
+                pass(fs::rename(&path, &backup));
+                let mut replacement = pass(crate::Native::create_private_ledger_file(&path));
+                pass(replacement.write_all(b"substituted"));
             }
             Ok(())
         });
+        assert!(saw_stage, "replacement failed before ledger substitution");
         assert_eq!(result, Err(()));
-        assert_eq!(fs::read(&path)?, b"substituted");
-        assert_eq!(fs::read(&backup)?, b"original");
+        assert_eq!(pass(fs::read(&path)), b"substituted");
+        assert_eq!(pass(fs::read(&backup)), b"original");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
         drop(ledger);
-        fs::remove_file(&path)?;
-        fs::rename(&backup, &path)?;
-        let ledger = guard.open_nonce_ledger()?;
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"original");
+        pass(fs::remove_file(&path));
+        pass(fs::rename(&backup, &path));
+        let ledger = pass(guard.open_nonce_ledger());
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), b"original");
 
+        let mut saw_stage = false;
         let result = ledger.replace_observing(b"candidate", |stage| {
             if stage == CommitStage::Renamed {
-                fs::write(&path, b"changed after rename").map_err(|_| ())?;
+                saw_stage = true;
+                pass(fs::write(&path, b"changed after rename"));
             }
             Ok(())
         });
+        assert!(saw_stage, "replacement failed before readback change");
         assert_eq!(result, Err(()));
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"changed after rename");
+        assert_eq!(
+            pass(ledger.read_nonce_ledger_bytes()),
+            b"changed after rename"
+        );
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
-        Ok(())
     }
 
     fn recovery_requires_admitted_primary(
         guard: &WindowsSubjectEncryptorLock,
         base: &Path,
         primary: &Path,
-    ) -> TestResult {
+    ) {
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        let mut staged = crate::Native::create_private_ledger_file(&temporary)
-            .map_err(|()| "create recovery staging fixture")?;
-        staged.write_all(b"staged")?;
+        let mut staged = pass(crate::Native::create_private_ledger_file(&temporary));
+        pass(staged.write_all(b"staged"));
         drop(staged);
         assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
         assert!(!primary.exists());
-        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert_eq!(pass(fs::read(&temporary)), b"staged");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
 
-        let mut file = crate::Native::create_private_ledger_file(primary)
-            .map_err(|()| "create recovery primary fixture")?;
-        file.write_all(b"primary")?;
+        let mut file = pass(crate::Native::create_private_ledger_file(primary));
+        pass(file.write_all(b"primary"));
         drop(file);
         let alias = base.join("PiglorOS").join("primary-alias");
-        fs::hard_link(primary, &alias)?;
+        pass(fs::hard_link(primary, &alias));
         assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
-        assert_eq!(fs::read(primary)?, b"primary");
-        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert_eq!(pass(fs::read(primary)), b"primary");
+        assert_eq!(pass(fs::read(&temporary)), b"staged");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
-        fs::remove_file(alias)?;
+        pass(fs::remove_file(alias));
 
-        let held = OpenOptions::new().read(true).share_mode(0).open(primary)?;
+        let held = pass(OpenOptions::new().read(true).share_mode(0).open(primary));
         assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
         drop(held);
-        assert_eq!(fs::read(primary)?, b"primary");
-        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert_eq!(pass(fs::read(primary)), b"primary");
+        assert_eq!(pass(fs::read(&temporary)), b"staged");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
-        fs::write(primary, vec![0x5a; LIMIT + 1])?;
+        pass(fs::write(primary, vec![0x5a; LIMIT + 1]));
         assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
-        assert_eq!(fs::read(primary)?, vec![0x5a; LIMIT + 1]);
-        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert_eq!(pass(fs::read(primary)), vec![0x5a; LIMIT + 1]);
+        assert_eq!(pass(fs::read(&temporary)), b"staged");
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
-        fs::write(primary, b"primary")?;
-        let recovered = guard.open_nonce_ledger()?;
-        assert_eq!(recovered.read_nonce_ledger_bytes()?, b"primary");
+        pass(fs::write(primary, b"primary"));
+        let recovered = pass(guard.open_nonce_ledger());
+        assert_eq!(pass(recovered.read_nonce_ledger_bytes()), b"primary");
         assert!(!temporary.exists());
         drop(recovered);
-        fs::remove_file(primary)?;
-        Ok(())
+        pass(fs::remove_file(primary));
     }
 
     fn assert_path_admission() {
@@ -639,112 +653,103 @@ mod native_tests {
         ledger: &WindowsNonceLedger<'_>,
         base: &Path,
         path: &Path,
-    ) -> TestResult {
+    ) {
         use std::io::Read as _;
 
-        let mut held = File::open(path)?;
-        let old_identity = crate::Native::file_identity(&held).map_err(|()| "old file identity")?;
-        let before = ledger.read_nonce_ledger_bytes()?;
+        let mut held = pass(File::open(path));
+        let old_identity = pass(crate::Native::file_identity(&held));
+        let before = pass(ledger.read_nonce_ledger_bytes());
         let candidate = b"candidate while old file is held";
         let result = ledger.replace_nonce_ledger_bytes(candidate);
         let mut old_bytes = Vec::new();
-        held.read_to_end(&mut old_bytes)?;
+        pass(held.read_to_end(&mut old_bytes));
         assert_eq!(old_bytes, before);
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
         if result.is_ok() {
-            let new_file = File::open(path)?;
-            let new_identity =
-                crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;
+            let new_file = pass(File::open(path));
+            let new_identity = pass(crate::Native::file_identity(&new_file));
             assert_ne!(old_identity, new_identity);
-            assert_eq!(ledger.read_nonce_ledger_bytes()?, candidate);
+            assert_eq!(pass(ledger.read_nonce_ledger_bytes()), candidate);
             drop(new_file);
             drop(held);
-            ledger.replace_nonce_ledger_bytes(&before)?;
+            pass(ledger.replace_nonce_ledger_bytes(&before));
         } else {
             assert_eq!(result, Err(unavailable()));
-            assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
+            assert_eq!(pass(ledger.read_nonce_ledger_bytes()), before);
             let temporary = base.join("PiglorOS").join(TEMPORARY);
-            assert_eq!(fs::read(&temporary)?, candidate);
+            assert_eq!(pass(fs::read(&temporary)), candidate);
             drop(held);
-            let recovered = guard.open_nonce_ledger()?;
+            let recovered = pass(guard.open_nonce_ledger());
             assert!(!temporary.exists());
-            assert_eq!(recovered.read_nonce_ledger_bytes()?, before);
+            assert_eq!(pass(recovered.read_nonce_ledger_bytes()), before);
             let later = b"later independent raw commit";
-            recovered.replace_nonce_ledger_bytes(later)?;
-            assert_eq!(recovered.read_nonce_ledger_bytes()?, later);
-            recovered.replace_nonce_ledger_bytes(&before)?;
+            pass(recovered.replace_nonce_ledger_bytes(later));
+            assert_eq!(pass(recovered.read_nonce_ledger_bytes()), later);
+            pass(recovered.replace_nonce_ledger_bytes(&before));
         }
-        Ok(())
     }
 
-    fn raw_untrusted_values(ledger: &WindowsNonceLedger<'_>) -> TestResult {
+    fn raw_untrusted_values(ledger: &WindowsNonceLedger<'_>) {
         for bytes in [b"".as_slice(), b"not SNL1", b"\x83\x44SNL1\x02\x80"] {
-            ledger.replace_nonce_ledger_bytes(bytes)?;
-            let read = ledger.read_nonce_ledger_bytes()?;
+            pass(ledger.replace_nonce_ledger_bytes(bytes));
+            let read = pass(ledger.read_nonce_ledger_bytes());
             assert_eq!(read, bytes);
             assert!(SubjectNonceLedgerV1::from_bytes(&read).is_err());
         }
-        Ok(())
     }
 
-    fn refuse_occupied_temporary(ledger: &WindowsNonceLedger<'_>, base: &Path) -> TestResult {
+    fn refuse_occupied_temporary(ledger: &WindowsNonceLedger<'_>, base: &Path) {
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        let mut occupied = crate::Native::create_private_ledger_file(&temporary)
-            .map_err(|()| "create occupied staging fixture")?;
-        occupied.write_all(b"occupied")?;
-        let before = ledger.read_nonce_ledger_bytes()?;
+        let mut occupied = pass(crate::Native::create_private_ledger_file(&temporary));
+        pass(occupied.write_all(b"occupied"));
+        let before = pass(ledger.read_nonce_ledger_bytes());
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"refused"),
             Err(unavailable())
         );
-        assert_eq!(fs::read(&temporary)?, b"occupied");
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
+        assert_eq!(pass(fs::read(&temporary)), b"occupied");
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), before);
         drop(occupied);
-        fs::remove_file(temporary)?;
-        Ok(())
+        pass(fs::remove_file(temporary));
     }
 
-    fn refuse_replaced_directory(ledger: &WindowsNonceLedger<'_>, base: &Path) -> TestResult {
+    fn refuse_replaced_directory(ledger: &WindowsNonceLedger<'_>, base: &Path) {
         let path = base.join("PiglorOS");
         let moved = base.join("moved-ledger-directory");
-        let before = ledger.read_nonce_ledger_bytes()?;
-        fs::rename(&path, &moved)?;
-        crate::create_private_directory(&path).map_err(|_| "create replacement directory")?;
+        let before = pass(ledger.read_nonce_ledger_bytes());
+        pass(fs::rename(&path, &moved));
+        pass(crate::create_private_directory(&path));
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"refused"),
             Err(unavailable())
         );
-        fs::remove_dir(&path)?;
-        fs::rename(moved, &path)?;
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
-        Ok(())
+        pass(fs::remove_dir(&path));
+        pass(fs::rename(moved, &path));
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), before);
     }
 
-    fn refuse_reparse_files(
-        guard: &WindowsSubjectEncryptorLock,
-        base: &Path,
-        path: &Path,
-    ) -> TestResult {
+    fn refuse_reparse_files(guard: &WindowsSubjectEncryptorLock, base: &Path, path: &Path) {
         let backup = base.join("PiglorOS").join("ledger-fixture-backup");
-        fs::rename(path, &backup)?;
-        symlink_file(&backup, path)?;
-        let ledger = guard.open_nonce_ledger()?;
+        pass(fs::rename(path, &backup));
+        pass(symlink_file(&backup, path));
+        let ledger = pass(guard.open_nonce_ledger());
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"refused"),
             Err(unavailable())
         );
         drop(ledger);
-        assert!(fs::symlink_metadata(path)?.file_type().is_symlink());
-        fs::remove_file(path)?;
-        fs::rename(&backup, path)?;
+        assert!(pass(fs::symlink_metadata(path)).file_type().is_symlink());
+        pass(fs::remove_file(path));
+        pass(fs::rename(&backup, path));
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        symlink_file(path, &temporary)?;
+        pass(symlink_file(path, &temporary));
         assert!(guard.open_nonce_ledger().is_err());
-        assert!(fs::symlink_metadata(&temporary)?.file_type().is_symlink());
-        fs::remove_file(temporary)?;
-        Ok(())
+        assert!(pass(fs::symlink_metadata(&temporary))
+            .file_type()
+            .is_symlink());
+        pass(fs::remove_file(temporary));
     }
 
     fn expected_after(stage: CommitStage) -> &'static [u8] {
@@ -755,132 +760,119 @@ mod native_tests {
         }
     }
 
-    fn crash_stages(fixture: &mut Fixture) -> TestResult {
-        let base = fixture.0.clone();
+    fn crash_stages(base: &Path) {
         for (name, stage) in STAGES {
             for control in [false, true] {
-                let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
-                let ledger = guard.open_nonce_ledger()?;
-                ledger.replace_nonce_ledger_bytes(b"old")?;
+                let guard = pass(WindowsSubjectEncryptorLock::acquire(base));
+                let ledger = pass(guard.open_nonce_ledger());
+                pass(ledger.replace_nonce_ledger_bytes(b"old"));
                 drop(ledger);
                 drop(guard);
                 let marker = base.join(format!("probe-{name}"));
-                let mut command = Command::new(std::env::current_exe()?);
+                let mut command = Command::new(pass(std::env::current_exe()));
                 if control {
                     command.env(CONTROL, "1");
                 }
-                let mut child = command
-                    .args([
-                        "--exact",
-                        "tests::windows_nonce_ledger_storage_native",
-                        "--nocapture",
-                        "--test-threads=1",
-                    ])
-                    .env(PROBE, name)
-                    .env(BASE, &base)
-                    .env(MARKER, &marker)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(if control {
-                        Stdio::inherit()
-                    } else {
-                        Stdio::null()
-                    })
-                    .spawn()?;
+                let mut probe = Probe(pass(
+                    command
+                        .args([
+                            "--exact",
+                            "tests::windows_nonce_ledger_storage_native",
+                            "--nocapture",
+                            "--test-threads=1",
+                        ])
+                        .env(PROBE, name)
+                        .env(BASE, base)
+                        .env(MARKER, &marker)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(if control {
+                            Stdio::inherit()
+                        } else {
+                            Stdio::null()
+                        })
+                        .spawn(),
+                ));
                 let deadline = Instant::now() + Duration::from_secs(30);
-                let mut retired = false;
-                let result = (|| -> TestResult {
-                    loop {
-                        match fs::read(&marker) {
-                            Ok(bytes) if bytes == name.as_bytes() => break,
-                            Ok(bytes) if name.as_bytes().starts_with(&bytes) => {}
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                            Ok(_) => return Err("storage probe marker mismatch".into()),
-                            Err(error) => return Err(error.into()),
-                        }
-                        if child.try_wait()?.is_some() {
-                            retired = true;
-                            return Err("storage probe exited before its checkpoint".into());
-                        }
-                        if Instant::now() >= deadline {
-                            return Err("storage probe exceeded its deadline".into());
-                        }
-                        std::thread::sleep(Duration::from_millis(5));
+                loop {
+                    let observed = fs::read(&marker).unwrap_or_default();
+                    assert!(
+                        name.as_bytes().starts_with(&observed),
+                        "storage probe marker mismatch"
+                    );
+                    if observed == name.as_bytes() {
+                        break;
                     }
-                    if control {
-                        drop(child.stdin.take());
-                    } else {
-                        child.kill()?;
-                    }
-                    loop {
-                        if let Some(status) = child.try_wait()? {
-                            retired = true;
-                            if control && !status.success() {
-                                return Err("storage control did not exit successfully".into());
-                            }
-                            if !control && status.success() {
-                                return Err("storage crash probe unexpectedly succeeded".into());
-                            }
-                            break;
-                        }
-                        if Instant::now() >= deadline {
-                            return Err("storage probe exceeded its deadline".into());
-                        }
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Ok(())
-                })();
-                if !retired {
-                    let killed = child.kill();
-                    drop(child.stdin.take());
-                    let waited = if killed.is_ok() {
-                        child.wait().map(|_| true)
-                    } else {
-                        child.try_wait().map(|status| status.is_some())
-                    };
-                    if !matches!(&waited, Ok(true)) {
-                        fixture.1 = true;
-                        let _diagnostic = writeln!(
-                            io::stderr(),
-                            "storage probe could not be retired: kill={killed:?}, wait={waited:?}"
-                        );
-                    }
+                    assert!(
+                        pass(probe.0.try_wait()).is_none(),
+                        "storage probe exited before its checkpoint"
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "storage probe exceeded its deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                result?;
-                fs::remove_file(marker)?;
-                let guard = WindowsSubjectEncryptorLock::acquire(&base)?;
-                let ledger = guard.open_nonce_ledger()?;
-                assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(stage));
+                if control {
+                    drop(probe.0.stdin.take());
+                } else {
+                    pass(probe.0.kill());
+                }
+                let status = loop {
+                    if let Some(status) = pass(probe.0.try_wait()) {
+                        break status;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "storage probe exceeded its deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                assert_eq!(
+                    status.success(),
+                    control,
+                    "only the storage control probe exits successfully"
+                );
+                drop(probe);
+                pass(fs::remove_file(marker));
+                let guard = pass(WindowsSubjectEncryptorLock::acquire(base));
+                let ledger = pass(guard.open_nonce_ledger());
+                assert_eq!(
+                    pass(ledger.read_nonce_ledger_bytes()),
+                    expected_after(stage)
+                );
             }
         }
-        Ok(())
     }
 
-    fn checked_fixture(base: &Path) -> TestResult {
-        let guard = WindowsSubjectEncryptorLock::acquire(base)?;
-        let mut ledger = guard.open_nonce_ledger()?;
+    fn checked_fixture(base: &Path) {
+        let guard = pass(WindowsSubjectEncryptorLock::acquire(base));
+        let mut ledger = pass(guard.open_nonce_ledger());
         let path = base.join("PiglorOS").join(LEDGER);
         let store_path = base.join("PiglorOS").join("fixture-store.db");
-        let mut fixture_store = crate::Native::create_private_ledger_file(&store_path)
-            .map_err(|()| "create fixture store")?;
-        fixture_store.write_all(b"fixture store")?;
+        let mut fixture_store = pass(crate::Native::create_private_ledger_file(&store_path));
+        pass(fixture_store.write_all(b"fixture store"));
         drop(fixture_store);
-        let store_file = File::open(&store_path)?;
-        let store_id = super::super::store_file_identity::store_file_id(&store_file)?;
+        let store_file = pass(File::open(&store_path));
+        let store_id = pass(super::super::store_file_identity::store_file_id(
+            &store_file,
+        ));
         let expected_row = SubjectNonceLedgerRowV1 {
             owner_id: "subject:000102030405060708090a0b0c0d0e0f".to_owned(),
             epoch: 1,
             root_material_digest: [0x33; 32],
             store_file_id: SubjectStoreFileIdV1::Windows {
-                volume_serial: u32::try_from(store_id[0])?,
+                volume_serial: pass(u32::try_from(store_id[0])),
                 file_index: store_id[1],
             },
             data_next: 1,
             bootstrap_next: 1,
         };
-        let initial = SubjectNonceLedgerV1::new([expected_row.clone()])?;
-        ledger.replace_nonce_ledger_bytes(initial.as_bytes())?;
-        let parsed = SubjectNonceLedgerV1::from_bytes(&ledger.read_nonce_ledger_bytes()?)?;
+        let initial = pass(SubjectNonceLedgerV1::new([expected_row.clone()]));
+        pass(ledger.replace_nonce_ledger_bytes(initial.as_bytes()));
+        let parsed = pass(SubjectNonceLedgerV1::from_bytes(&pass(
+            ledger.read_nonce_ledger_bytes(),
+        )));
         assert_eq!(parsed.rows().next(), Some(&expected_row));
         let wrong_root = SubjectNonceLedgerRowV1 {
             root_material_digest: [0x44; 32],
@@ -890,7 +882,7 @@ mod native_tests {
             parsed.advance_counter(&wrong_root, SubjectKeyUseV1::Data),
             Err(SubjectNonceLedgerErrorV1::RowMismatch)
         );
-        let candidate = parsed.advance_counter(&expected_row, SubjectKeyUseV1::Data)?;
+        let candidate = pass(parsed.advance_counter(&expected_row, SubjectKeyUseV1::Data));
         assert!(ledger
             .replace_observing(candidate.as_bytes(), |stage| {
                 if stage == CommitStage::Renamed {
@@ -901,37 +893,34 @@ mod native_tests {
             })
             .is_err());
         drop(ledger);
-        ledger = guard.open_nonce_ledger()?;
-        let recovered = SubjectNonceLedgerV1::from_bytes(&ledger.read_nonce_ledger_bytes()?)?;
+        ledger = pass(guard.open_nonce_ledger());
+        let recovered = pass(SubjectNonceLedgerV1::from_bytes(&pass(
+            ledger.read_nonce_ledger_bytes(),
+        )));
         assert_eq!(recovered, candidate);
-        let successor_row = recovered
-            .rows()
-            .next()
-            .ok_or("missing fixture row")?
-            .clone();
+        let successor_row = pass(recovered.rows().next().ok_or("missing fixture row")).clone();
         assert_eq!(successor_row.data_next, 2);
-        let successor = recovered.advance_counter(&successor_row, SubjectKeyUseV1::Data)?;
-        ledger.replace_nonce_ledger_bytes(successor.as_bytes())?;
-        let committed = SubjectNonceLedgerV1::from_bytes(&ledger.read_nonce_ledger_bytes()?)?;
+        let successor = pass(recovered.advance_counter(&successor_row, SubjectKeyUseV1::Data));
+        pass(ledger.replace_nonce_ledger_bytes(successor.as_bytes()));
+        let committed = pass(SubjectNonceLedgerV1::from_bytes(&pass(
+            ledger.read_nonce_ledger_bytes(),
+        )));
         assert_eq!(
-            committed
-                .rows()
-                .next()
-                .ok_or("missing committed row")?
-                .data_next,
+            pass(committed.rows().next().ok_or("missing committed row")).data_next,
             3
         );
         drop(store_file);
-        let output = Command::new("icacls.exe")
-            .arg(&path)
-            .args(["/grant", "*S-1-1-0:(R)"])
-            .output()?;
+        let output = pass(
+            Command::new("icacls.exe")
+                .arg(&path)
+                .args(["/grant", "*S-1-1-0:(R)"])
+                .output(),
+        );
         assert!(output.status.success());
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"refused"),
             Err(unavailable())
         );
-        Ok(())
     }
 }

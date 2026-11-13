@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 
 #[cfg(test)]
+use crate::adapter::native_tests::{pass, pass_unwind};
+
+#[cfg(test)]
 pub(super) static NONCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Test-support access to the per-user named encryptor lock.
@@ -54,63 +57,35 @@ const fn unavailable() -> BridgeError {
     BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable)
 }
 
+/// Retires its probe process on every exit, so a failed assertion never
+/// leaves a probe holding the lock or the fixture directory.
+#[cfg(test)]
+pub(super) struct Probe(pub(super) std::process::Child);
+
+#[cfg(test)]
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _killed = self.0.kill();
+        let _waited = self.0.wait();
+    }
+}
+
+#[cfg(test)]
+const CASE: &str = "PIGLOROS_WINDOWS_NONCE_LOCK_CASE";
+#[cfg(test)]
+const MARKER: &str = "WINDOWS_NONCE_LOCK_PROBE_EXECUTED";
+
 #[cfg(test)]
 impl crate::Native {
-    pub(crate) fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::{self, Write as _};
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
-
-        const CASE: &str = "PIGLOROS_WINDOWS_NONCE_LOCK_CASE";
-        const MARKER: &str = "WINDOWS_NONCE_LOCK_PROBE_EXECUTED";
-        let _serial = NONCE_TEST_LOCK
-            .lock()
-            .map_err(|_| "nonce test lock poisoned")?;
+    pub(crate) fn exercise_native_lock() {
+        let _serial = pass(NONCE_TEST_LOCK.lock());
         let directory = std::env::temp_dir();
         if let Ok(case) = std::env::var(CASE) {
-            return exercise_lock_probe_case(&case, &directory, MARKER);
+            exercise_lock_probe_case(&case, &directory);
+            return;
         }
-        let probe = |case: &str| -> Result<(), Box<dyn std::error::Error>> {
-            let mut child = Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "tests::nonce_lock_native",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(CASE, case)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
-            let observed = (|| -> Result<(), Box<dyn std::error::Error>> {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while child.try_wait()?.is_none() {
-                    if Instant::now() >= deadline {
-                        return Err("nonce lock probe exceeded its deadline".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(())
-            })();
-            if let Err(error) = observed {
-                if let Err(cleanup) = retire_child(&mut child) {
-                    let _diagnostic =
-                        writeln!(io::stderr(), "nonce lock probe cleanup failed: {cleanup}");
-                }
-                return Err(error);
-            }
-            let output = child.wait_with_output()?;
-            assert!(output.status.success(), "{output:?}");
-            let markers = String::from_utf8_lossy(&output.stdout)
-                .matches(MARKER)
-                .count();
-            assert_eq!(markers, if case == "hold" { 2 } else { 1 });
-            Ok(())
-        };
-        crate::SubjectMutex::exercise_security_refusals().map_err(|()| unavailable())?;
-        let foreign =
-            crate::SubjectMutex::create_wrong_acl_fixture().map_err(|()| unavailable())?;
+        pass(crate::SubjectMutex::exercise_security_refusals());
+        let foreign = pass(crate::SubjectMutex::create_wrong_acl_fixture());
         assert_eq!(
             WindowsSubjectEncryptorLock::acquire(&directory).err(),
             Some(unavailable())
@@ -120,147 +95,136 @@ impl crate::Native {
             WindowsSubjectEncryptorLock::acquire(Path::new("relative")).err(),
             Some(unavailable())
         );
-        let guard = WindowsSubjectEncryptorLock::acquire(&directory)?;
+        let guard = pass(WindowsSubjectEncryptorLock::acquire(&directory));
         assert_eq!(
             WindowsSubjectEncryptorLock::acquire(&directory).err(),
             Some(unavailable())
         );
         let other_directory = directory.clone();
         assert_eq!(
-            std::thread::spawn(
-                move || WindowsSubjectEncryptorLock::acquire(&other_directory).err()
-            )
-            .join()
-            .map_err(|_| "nonce lock contender panicked")?,
+            pass_unwind(
+                std::thread::spawn(
+                    move || WindowsSubjectEncryptorLock::acquire(&other_directory).err()
+                )
+                .join()
+            ),
             Some(unavailable())
         );
-        probe("denied")?;
-        let retained = crate::SubjectMutex::retain_second_handle().map_err(|()| unavailable())?;
+        run_lock_probe("denied");
+        let retained = pass(crate::SubjectMutex::retain_second_handle());
         drop(guard);
-        probe("acquire")?;
-        probe("hold")?;
-        probe("acquire")?;
+        run_lock_probe("acquire");
+        run_lock_probe("hold");
+        run_lock_probe("acquire");
         drop(retained);
 
-        exercise_abandonment(&directory)
+        exercise_abandonment(&directory);
     }
 }
 
 #[cfg(test)]
-fn exercise_lock_probe_case(
-    case: &str,
-    directory: &Path,
-    marker: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, Write as _};
-
-    match case {
-        "acquire" => {
-            let guard = WindowsSubjectEncryptorLock::acquire(directory)?;
-            assert!(!format!("{guard:?}").is_empty());
-        }
-        "denied" => assert_eq!(
-            WindowsSubjectEncryptorLock::acquire(directory).err(),
-            Some(unavailable())
-        ),
-        "hold" => {
-            let _guard = WindowsSubjectEncryptorLock::acquire(directory)?;
-            writeln!(io::stdout(), "{marker}")?;
-            io::stdout().flush()?;
-            let mut line = String::new();
-            assert_eq!(io::stdin().read_line(&mut line)?, 0);
-        }
-        _ => return Err("unknown nonce lock probe".into()),
-    }
-    writeln!(io::stdout(), "{marker}")?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn exercise_abandonment(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, BufRead as _, Write as _};
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    const CASE: &str = "PIGLOROS_WINDOWS_NONCE_LOCK_CASE";
-    const MARKER: &str = "WINDOWS_NONCE_LOCK_PROBE_EXECUTED";
-    let mut child = Command::new(std::env::current_exe()?)
+fn lock_probe_command(case: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(pass(std::env::current_exe()));
+    command
         .args([
             "--exact",
             "tests::nonce_lock_native",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(CASE, "hold")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut reader = None;
-    let observed = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let output = child.stdout.take().ok_or("missing child stdout")?;
-        let (sender, receiver) = std::sync::mpsc::channel();
-        reader = Some(std::thread::spawn(move || {
-            let mut output = io::BufReader::new(output);
-            let result = (|| -> io::Result<bool> {
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    if output.read_line(&mut line)? == 0 {
-                        return Ok(false);
-                    }
-                    if line.contains(MARKER) {
-                        return Ok(true);
-                    }
-                }
-            })();
-            let _sent = sender.send(result);
-        }));
-        if !matches!(receiver.recv_timeout(Duration::from_secs(30)), Ok(Ok(true))) {
-            return Err("abandoned lock probe failed to become ready".into());
-        }
-        crate::SubjectMutex::retain_second_handle().map_err(|()| unavailable().into())
-    })();
-    let retired = retire_child(&mut child);
-    let joined = reader.map_or(Ok(()), |reader| {
-        reader.join().map_err(|_| "nonce lock reader panicked")
-    });
-    if observed.is_err() {
-        if let Err(cleanup) = &retired {
-            let _diagnostic = writeln!(
-                io::stderr(),
-                "abandoned lock probe cleanup failed: {cleanup}"
-            );
-        }
-        if let Err(cleanup) = &joined {
-            let _diagnostic = writeln!(
-                io::stderr(),
-                "abandoned lock probe reader cleanup failed: {cleanup}"
-            );
-        }
-    }
-    let retained = observed?;
-    retired?;
-    joined?;
-    let guard = WindowsSubjectEncryptorLock::acquire(directory)?;
-    assert!(guard.mutex.was_abandoned());
-    drop(guard);
-    drop(retained);
-    Ok(())
+        .env(CASE, case)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
 }
 
 #[cfg(test)]
-fn retire_child(child: &mut std::process::Child) -> std::io::Result<()> {
-    let observed = child.try_wait();
-    let killed = if matches!(observed, Ok(Some(_))) {
-        Ok(())
-    } else {
-        child.kill()
+fn run_lock_probe(case: &str) {
+    use std::io::Read as _;
+    use std::time::{Duration, Instant};
+
+    let mut probe = Probe(pass(
+        lock_probe_command(case)
+            .stdin(std::process::Stdio::null())
+            .spawn(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = pass(probe.0.try_wait()) {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nonce lock probe exceeded its deadline"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     };
-    drop(child.stdin.take());
-    let waited = child.wait();
-    observed
-        .map(|_| ())
-        .and(killed)
-        .and_then(|()| waited.map(|_| ()))
+    let mut output = String::new();
+    let mut diagnostics = String::new();
+    pass(pass(probe.0.stdout.take().ok_or("missing probe stdout")).read_to_string(&mut output));
+    pass(
+        pass(probe.0.stderr.take().ok_or("missing probe stderr")).read_to_string(&mut diagnostics),
+    );
+    assert!(status.success(), "{status:?}: {output} {diagnostics}");
+    assert_eq!(
+        output.matches(MARKER).count(),
+        if case == "hold" { 2 } else { 1 }
+    );
+}
+
+#[cfg(test)]
+fn exercise_lock_probe_case(case: &str, directory: &Path) {
+    use std::io::{self, Write as _};
+
+    if case == "denied" {
+        assert_eq!(
+            WindowsSubjectEncryptorLock::acquire(directory).err(),
+            Some(unavailable())
+        );
+    } else {
+        let hold = case == "hold";
+        assert!(hold || case == "acquire", "unknown nonce lock probe");
+        let guard = pass(WindowsSubjectEncryptorLock::acquire(directory));
+        assert!(!format!("{guard:?}").is_empty());
+        if hold {
+            pass(writeln!(io::stdout(), "{MARKER}"));
+            pass(io::stdout().flush());
+            let mut line = String::new();
+            assert_eq!(pass(io::stdin().read_line(&mut line)), 0);
+        }
+    }
+    pass(writeln!(io::stdout(), "{MARKER}"));
+}
+
+#[cfg(test)]
+fn exercise_abandonment(directory: &Path) {
+    use std::io::{self, BufRead as _};
+    use std::time::Duration;
+
+    let mut probe = Probe(pass(
+        lock_probe_command("hold")
+            .stdin(std::process::Stdio::piped())
+            .spawn(),
+    ));
+    let output = pass(probe.0.stdout.take().ok_or("missing probe stdout"));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let ready = io::BufReader::new(output)
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line.contains(MARKER));
+        let _sent = sender.send(ready);
+    });
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(30)),
+        Ok(true),
+        "abandoned lock probe failed to become ready"
+    );
+    let retained = pass(crate::SubjectMutex::retain_second_handle());
+    drop(probe);
+    pass_unwind(reader.join());
+    let guard = pass(WindowsSubjectEncryptorLock::acquire(directory));
+    assert!(guard.mutex.was_abandoned());
+    drop(guard);
+    drop(retained);
 }

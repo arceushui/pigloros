@@ -461,22 +461,26 @@ LEDGER_CREATOR_BODY = r'''
 LEDGER_OPEN_BODY = r'''
 {
  let path = guard.test_directory.join("PiglorOS");
- require_dos_path(&path)?;
- match fs::symlink_metadata(&path) {
-  Ok(_) => crate::verify_private_directory(&path).map_err(|_| ())?,
-  Err(error) if error.kind() == io::ErrorKind::NotFound => {
-   crate::create_private_directory(&path).map_err(|_| ())?;
-  }
-  Err(_) => return Err(()),
+ require_dos_path(&path)
+ .and_then(|()| admit_or_create_directory(&path).ok().ok_or(()))
+ .and_then(|()| crate::Native::cleanup_path_ntfs(&path))
+ .and_then(|()| open_directory(&path))
+ .and_then(|directory| {
+ crate::Native::cleanup_file_volume(&directory).map(|volume| (directory, volume))
+ })
+ .and_then(|(directory, volume)| {
+ let store = Self {
+ _guard: guard,
+ directory,
+ path,
+ volume,
+ };
+ store
+ .admit_directory()
+ .and_then(|()| store.remove_stale_temporary())
+ .map(|()| store)
+ })
  }
- crate::Native::cleanup_path_ntfs(&path)?;
- let directory = open_directory(&path)?;
- let volume = crate::Native::cleanup_file_volume(&directory)?;
- let store = Self { _guard: guard, directory, path, volume, };
- store.admit_directory()?;
- store.remove_stale_temporary()?;
- Ok(store)
-}
 '''
 
 LEDGER_GUARD_ACQUIRE_BODY = r'''
@@ -487,33 +491,99 @@ LEDGER_GUARD_ACQUIRE_BODY = r'''
 '''
 
 LEDGER_ADMISSION_BODIES = {
-    "admit_directory": r'''{ crate::verify_private_directory(&self.path).map_err(|_| ())?;
-      if crate::Native::cleanup_file_volume(&self.directory)? != self.volume { return Err(()); }
-      let reopened = open_directory(&self.path)?;
-      if crate::Native::file_identity(&self.directory)? != crate::Native::file_identity(&reopened)? { return Err(()); }
-      Ok(()) }''',
-    "validate_file": r'''{ let metadata = file.metadata().map_err(|_| ())?;
-      if !metadata.is_file() || metadata.file_attributes() & REPARSE_POINT != 0 { return Err(()); }
-      crate::Native::require_private_file(file)?;
-      if crate::Native::file_link_count(file)? != 1 || crate::Native::cleanup_file_volume(file)? != self.volume { return Err(()); }
-      Self::same_name(file, path) }''',
-    "same_name": r'''{ let reopened = open_file(path)?;
-      if crate::Native::file_identity(file)? != crate::Native::file_identity(&reopened)? { return Err(()); }
-      Ok(()) }''',
-    "open_existing": r'''{ let path = self.path.join(name); let file = open_file(&path)?;
-      self.validate_file(&file, &path)?; Ok(file) }''',
-    "open_directory": r'''{ OpenOptions::new().read(true).share_mode(SHARE_ALL)
-      .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0).open(path).map_err(|_| ()) }''',
-    "open_file": r'''{ OpenOptions::new().read(true).write(true).share_mode(SHARE_ALL)
-      .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0).open(path).map_err(|_| ()) }''',
-    "read_bounded": r'''{ let mut bytes = Vec::new(); file.take((LIMIT + 1) as u64).read_to_end(&mut bytes).map_err(|_| ())?;
-      if bytes.len() > LIMIT { return Err(()); } Ok(bytes) }''',
-    "require_dos_path": r'''{ let mut components = path.components();
+    "admit_directory": r'''{
+      crate::verify_private_directory(&self.path)
+      .ok()
+      .ok_or(())
+      .and_then(|()| crate::Native::cleanup_file_volume(&self.directory))
+      .and_then(|volume| (volume == self.volume).then_some(()).ok_or(()))
+      .and_then(|()| open_directory(&self.path))
+      .and_then(|reopened| same_identity(&self.directory, &reopened))
+      }''',
+    "validate_file": r'''{
+      file.metadata()
+      .ok()
+      .ok_or(())
+      .and_then(|metadata| {
+      (metadata.is_file() && metadata.file_attributes() & REPARSE_POINT == 0)
+      .then_some(())
+      .ok_or(())
+      })
+      .and_then(|()| crate::Native::require_private_file(file))
+      .and_then(|()| crate::Native::file_link_count(file))
+      .and_then(|links| (links == 1).then_some(()).ok_or(()))
+      .and_then(|()| crate::Native::cleanup_file_volume(file))
+      .and_then(|volume| (volume == self.volume).then_some(()).ok_or(()))
+      .and_then(|()| Self::same_name(file, path))
+      }''',
+    "same_name": r'''{
+      open_file(path).and_then(|reopened| same_identity(file, &reopened))
+      }''',
+    "open_existing": r'''{
+      let path = self.path.join(name);
+      open_file(&path).and_then(|file| self.validate_file(&file, &path).map(|()| file))
+      }''',
+    "admit_or_create_directory": r'''{
+      if is_absent(path) {
+      crate::create_private_directory(path)
+      } else {
+      crate::verify_private_directory(path)
+      }
+      }''',
+    "is_absent": r'''{
+      fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+      }''',
+    "open_directory": r'''{
+      OpenOptions::new()
+      .read(true)
+      .share_mode(SHARE_ALL)
+      .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+      .open(path)
+      .ok()
+      .ok_or(())
+      }''',
+    "open_file": r'''{
+      OpenOptions::new()
+      .read(true)
+      .write(true)
+      .share_mode(SHARE_ALL)
+      .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0)
+      .open(path)
+      .ok()
+      .ok_or(())
+      }''',
+    "same_identity": r'''{
+      crate::Native::file_identity(left)
+      .and_then(|first| crate::Native::file_identity(right).map(|second| first == second))
+      .and_then(|same| same.then_some(()).ok_or(()))
+      }''',
+    "read_bounded": r'''{
+      let mut bytes = Vec::new();
+      let read = file
+      .take((LIMIT + 1) as u64)
+      .read_to_end(&mut bytes)
+      .ok()
+      .ok_or(());
+      read.and(if bytes.len() > LIMIT {
+      Err(())
+      } else {
+      Ok(bytes)
+      })
+      }''',
+    "read_bounded_copy": r'''{
+      file.try_clone().ok().ok_or(()).and_then(read_bounded)
+      }''',
+    "require_dos_path": r'''{
+      let mut components = path.components();
       if !matches!(components.next(), Some(Component::Prefix(prefix))
-       if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
-       || components.next() != Some(Component::RootDir)
-       || components.any(|component| !matches!(component, Component::Normal(_))) { return Err(()); }
-      Ok(()) }''',
+      if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+      || components.next() != Some(Component::RootDir)
+      || components.any(|component| !matches!(component, Component::Normal(_)))
+      {
+      return Err(());
+      }
+      Ok(())
+      }''',
 }
 
 
@@ -642,11 +712,16 @@ def _check_ledger_creator_calls(relative: str, label: str, code: str, attributes
     elif relative == "src/adapter/ledger_storage.rs" and active_replacement is not None:
         compact = _normalized(code[active_replacement[0] : active_replacement[1] + 1])
         required = _normalized('''{ if bytes.len() > LIMIT { return Err(()); }
-            self.admit_directory()?;
-            let previous = self.open_existing(LEDGER)?;
+            let ledger_path = self.path.join(LEDGER);
             let temporary_path = self.path.join(TEMPORARY);
-            let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
-            self.validate_file(&temporary, &temporary_path)?;''')
+            self.admit_directory()
+                .and_then(|()| self.open_existing(LEDGER))
+                .and_then(|previous| {
+                    crate::Native::create_private_ledger_file(&temporary_path)
+                        .and_then(|temporary| {
+                            self.validate_file(&temporary, &temporary_path)
+                                .map(|()| temporary)
+                        })''')
         owner = _normalized("pub struct WindowsNonceLedger<'guard> { _guard: &'guard WindowsSubjectEncryptorLock, directory: File, path: PathBuf, volume: u32, }")
         if production_calls != 1 or not compact.startswith(required) or owner not in _normalized(code):
             found.append(f"{label}: ADR-132 creator must use the held-guard admitted staging path")
@@ -1791,7 +1866,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "b5f9240ad3c7b18199991e3ea1d6f6e1a8d26cad96acf052d03a898b0f539f1d",
+        lib: "d6a96b6a83647cd1b19c01cfb1209a2ab10b51761718418f4c0ba53febd4f315",
         prefix + "ffi/mod.rs": "192d401a70e2e106bec3894fba45eeab9d84baa7e3481192489028bc1f9c4090",
         prefix + "adapter/native_tests.rs": "a816745c20a3a63f13929c7d172f8a38435ee5d984e0a68c9cb6aedf5055ecdb",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "bb0cbe0ced177ac33833c89cffaa68f2e30ddd4af0e07e875c67283b6e9cb3e6",
@@ -1868,7 +1943,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'cf9f1cb7a28dea1bce36c1c939bd0f901177e3f84dc0b020d450c43d2b4359e7',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '71f6f8d17899bb398948fada325cb478cd7e71e532c38ac305f83dc686a0ddf9',
     'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'cbf00676ab0b7589051f9a6db3502ab240c8e0177e9cd0efb3f916dfcbdcaf6e',
-    'crates/pos-owner-bridge-windows/src/lib.rs': 'b5f9240ad3c7b18199991e3ea1d6f6e1a8d26cad96acf052d03a898b0f539f1d',
+    'crates/pos-owner-bridge-windows/src/lib.rs': 'd6a96b6a83647cd1b19c01cfb1209a2ab10b51761718418f4c0ba53febd4f315',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '88fbe08686eba330d9b3624bdb1ed5406efe331f5caabc67babf74b3ef98ae0e',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': 'a816745c20a3a63f13929c7d172f8a38435ee5d984e0a68c9cb6aedf5055ecdb',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',

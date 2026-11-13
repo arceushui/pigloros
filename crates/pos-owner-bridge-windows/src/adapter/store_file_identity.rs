@@ -22,28 +22,36 @@ pub fn store_file_id(file: &File) -> Result<[u64; 2], BridgeError> {
 }
 
 fn candidate(file: &File) -> Result<[u64; 2], ()> {
-    let metadata = file.metadata().map_err(|_| ())?;
-    if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
-        return Err(());
-    }
-    crate::Native::require_private_file(file)?;
-    let volume = crate::Native::cleanup_file_volume(file)?;
-    let (observed_volume, index) = crate::Native::file_identity(file)?;
-    if observed_volume != volume {
-        return Err(());
-    }
-    Ok([u64::from(volume), index])
+    file.metadata()
+        .ok()
+        .ok_or(())
+        .and_then(|metadata| {
+            (metadata.is_file() && metadata.file_attributes() & 0x400 == 0)
+                .then_some(())
+                .ok_or(())
+        })
+        .and_then(|()| crate::Native::require_private_file(file))
+        .and_then(|()| crate::Native::cleanup_file_volume(file))
+        .and_then(|volume| {
+            crate::Native::file_identity(file).and_then(|(observed_volume, index)| {
+                (observed_volume == volume)
+                    .then_some([u64::from(volume), index])
+                    .ok_or(())
+            })
+        })
 }
 
 #[cfg(test)]
 impl crate::Native {
-    pub(crate) fn exercise_store_file_identity() -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn exercise_store_file_identity() {
         use std::fs::{self, OpenOptions};
         use std::os::windows::fs::OpenOptionsExt;
         use std::path::PathBuf;
         use std::process::Command;
         use std::time::{SystemTime, UNIX_EPOCH};
         use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+        use crate::adapter::native_tests::pass;
 
         struct Fixture(PathBuf);
         impl Drop for Fixture {
@@ -54,56 +62,39 @@ impl crate::Native {
         let path = std::env::temp_dir().join(format!(
             "piglor-store-id-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            pass(SystemTime::now().duration_since(UNIX_EPOCH)).as_nanos()
         ));
-        fs::create_dir(&path)?;
+        pass(fs::create_dir(&path));
         let fixture = Fixture(path);
         let private = fixture.0.join("private");
-        crate::create_private_directory(&private)
-            .map_err(|_| "create private fixture directory")?;
-        Self::exercise_default_owner_refusal(&private)?;
+        pass(crate::create_private_directory(&private));
+        Self::exercise_default_owner_refusal(&private);
         let original = private.join("store.db");
-        let file =
-            Self::create_private_ledger_file(&original).map_err(|()| "create identity fixture")?;
-        Self::diagnose_private_file(&file)?;
-        Self::cleanup_file_volume(&file).map_err(|()| "original file NTFS admission")?;
-        Self::file_identity(&file).map_err(|()| "original file identity observation")?;
-        let identity = store_file_id(&file).map_err(|_| "original candidate identity")?;
-        assert_eq!(
-            store_file_id(&file.try_clone()?).map_err(|_| "cloned handle identity")?,
-            identity
-        );
+        let file = pass(Self::create_private_ledger_file(&original));
+        pass(Self::diagnose_private_file(&file));
+        pass(Self::cleanup_file_volume(&file));
+        pass(Self::file_identity(&file));
+        let identity = pass(store_file_id(&file));
+        assert_eq!(pass(store_file_id(&pass(file.try_clone()))), identity);
         let alias = private.join("alias.db");
-        fs::hard_link(&original, &alias)?;
-        assert_eq!(
-            store_file_id(&File::open(&alias)?).map_err(|_| "hardlink identity")?,
-            identity
-        );
+        pass(fs::hard_link(&original, &alias));
+        assert_eq!(pass(store_file_id(&pass(File::open(&alias)))), identity);
         let copied = private.join("copy.db");
-        let copied_file =
-            Self::create_private_ledger_file(&copied).map_err(|()| "create copy fixture")?;
+        let copied_file = pass(Self::create_private_ledger_file(&copied));
         drop(copied_file);
-        fs::write(&copied, fs::read(&original)?)?;
-        assert_ne!(
-            store_file_id(&File::open(&copied)?).map_err(|_| "copied file identity")?,
-            identity
-        );
+        pass(fs::write(&copied, pass(fs::read(&original))));
+        assert_ne!(pass(store_file_id(&pass(File::open(&copied)))), identity);
         let moved = private.join("moved.db");
-        fs::rename(&original, &moved)?;
-        let replacement = Self::create_private_ledger_file(&original)
-            .map_err(|()| "create replacement fixture")?;
-        assert_eq!(
-            store_file_id(&file).map_err(|_| "moved handle identity")?,
-            identity
+        pass(fs::rename(&original, &moved));
+        let replacement = pass(Self::create_private_ledger_file(&original));
+        assert_eq!(pass(store_file_id(&file)), identity);
+        assert_ne!(pass(store_file_id(&replacement)), identity);
+        let directory = pass(
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+                .open(&private),
         );
-        assert_ne!(
-            store_file_id(&replacement).map_err(|_| "replacement file identity")?,
-            identity
-        );
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
-            .open(&private)?;
         assert_eq!(
             store_file_id(&directory),
             Err(BridgeError::Unavailable(
@@ -111,7 +102,7 @@ impl crate::Native {
             ))
         );
         drop(directory);
-        let device = File::open("NUL")?;
+        let device = pass(File::open("NUL"));
         assert_eq!(
             store_file_id(&device),
             Err(BridgeError::Unavailable(
@@ -119,10 +110,12 @@ impl crate::Native {
             ))
         );
         drop(device);
-        let result = Command::new("icacls.exe")
-            .arg(&moved)
-            .args(["/grant", "*S-1-1-0:(R)"])
-            .output()?;
+        let result = pass(
+            Command::new("icacls.exe")
+                .arg(&moved)
+                .args(["/grant", "*S-1-1-0:(R)"])
+                .output(),
+        );
         assert!(result.status.success());
         assert_eq!(
             store_file_id(&file),
@@ -132,44 +125,47 @@ impl crate::Native {
         );
         drop(replacement);
         drop(file);
-        Ok(())
     }
 
-    fn exercise_default_owner_refusal(
-        private: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// A default-created file is refused wherever the host's token default
+    /// owner differs from the process user.
+    ///
+    /// A host without that mismatch reports the case as unqualified instead
+    /// of claiming the refusal.
+    fn exercise_default_owner_refusal(private: &std::path::Path) {
         use std::io::Write as _;
 
+        use crate::adapter::native_tests::pass;
+
         let path = private.join("default-owner-fixture.db");
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let wrong_owner = match Self::diagnose_private_file(&file) {
-            Ok(()) => false,
-            Err(detail) => {
-                let actual = detail
-                    .split_once("actual=O:")
-                    .and_then(|(_, tail)| tail.split_once("D:"))
-                    .ok_or("default fixture security observation failed")?
-                    .0;
-                let expected = detail
-                    .split_once("expected=[\"O:")
-                    .and_then(|(_, tail)| tail.split_once("D:"))
-                    .ok_or("default fixture expected owner unavailable")?
-                    .0;
-                actual != expected
-            }
-        };
-        if wrong_owner {
-            assert!(store_file_id(&file).is_err());
-            writeln!(std::io::stderr(), "SNL1_WRONG_OWNER_CASE=qualified")?;
-        } else {
-            writeln!(std::io::stderr(), "SNL1_WRONG_OWNER_CASE=unqualified")?;
-        }
+        let file = pass(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path),
+        );
+        let wrong_owner = Self::diagnose_private_file(&file)
+            .err()
+            .is_some_and(|detail| {
+                let owner = |label: &str| {
+                    pass(
+                        detail
+                            .split_once(label)
+                            .and_then(|(_, tail)| tail.split_once("D:"))
+                            .ok_or("default fixture owner observation failed"),
+                    )
+                    .0
+                };
+                owner("actual=O:") != owner("expected=[\"O:")
+            });
+        assert!(!wrong_owner || store_file_id(&file).is_err());
+        pass(writeln!(
+            std::io::stderr(),
+            "SNL1_WRONG_OWNER_CASE={}",
+            ["unqualified", "qualified"][usize::from(wrong_owner)]
+        ));
         drop(file);
-        std::fs::remove_file(path)?;
-        Ok(())
+        pass(std::fs::remove_file(path));
     }
 }
