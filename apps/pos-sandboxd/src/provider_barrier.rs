@@ -334,13 +334,15 @@ where
     /// observation: then its KOE1 digest.
     fn observed_again(&self, root: &CheckedRoot) -> Result<[u8; 32], RecheckRefusal> {
         let again = self.observe(root).map_err(RecheckRefusal::Observation)?;
-        self.frozen
+        let digest = self
+            .frozen
             .borrow()
             .as_ref()
             .zip(self.ready.get())
             .filter(|(frozen, _)| frozen.observation() == again.observation())
             .map(|(frozen, ready)| self.check.observed.digest(ready, frozen.observation()))
-            .ok_or(RecheckRefusal::ObservationChanged)
+            .ok_or(RecheckRefusal::ObservationChanged);
+        digest
     }
 
     /// One kernel observation of the unit under `root`. Runs under

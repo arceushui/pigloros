@@ -495,18 +495,21 @@ where
         }
     }
 
-    async fn finish<'a>(
+    fn finish<'a>(
         &'a self,
         progress: &'a mut AttemptProgress<SystemdVerifiedStart>,
         directory: PreparedAttemptDirectory,
         cgroup: Option<crate::BoundAttemptCgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> Result<CompletedAttemptCleanup, AttemptCleanupError> {
+    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
+    {
         let unit = directory.intent().unit_name().clone();
         let settle_by = deadlines.shutdown().grace();
-        conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
-        finish_with(self.transport, directory, cgroup, root, deadlines).await
+        async move {
+            conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
+            finish_with(self.transport, directory, cgroup, root, deadlines).await
+        }
     }
 }
 
