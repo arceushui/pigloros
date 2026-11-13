@@ -686,6 +686,7 @@ impl GatewayAuthorization {
     }
 
     /// Whether any suppression count is still waiting for a marker.
+    #[cfg(test)]
     pub(crate) fn denial_markers_pending(&self) -> bool {
         self.budget().has_pending()
     }
@@ -1020,6 +1021,7 @@ impl DenialRecordBudget {
     }
 
     /// Whether any count waits for a marker.
+    #[cfg(test)]
     const fn has_pending(&self) -> bool {
         self.pending_principal > 0 || self.pending_host > 0
     }
