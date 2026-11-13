@@ -631,12 +631,40 @@ impl GatewayAuthorizationDecision {
     }
 }
 
+/// The trusted source a host recomposes its pinned authority from (#1361).
+///
+/// A host whose authorizer names a source reads the source's recorded chain
+/// from its store before each protected decision; when the store is ahead of
+/// the pinned chain (a revocation recorded by another writer), the host
+/// recomposes the view and the registry that attests it together, so a
+/// revocation is current (owner decision D10 on #302) and is answered
+/// `revoked` (D3).
+pub trait GatewayAuthoritySourceV1: Send + Sync {
+    /// The leaf grant the store records this host's authority under.
+    fn leaf_grant_id(&self) -> Hash;
+
+    /// The view and attesting registry of one recorded chain, or `None`
+    /// when the source cannot reproduce that chain exactly.
+    fn recompose(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)>;
+}
+
+/// The authority a host decides with: one recorded chain and the registry
+/// that attests it, always replaced together.
+struct PinnedAuthorityV1 {
+    view: AuthorityViewV1,
+    registry: AuthorityRegistrySnapshotV1,
+}
+
 /// Host-owned authority evaluator used by Gateway protected seams.
 #[derive(Clone)]
 pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
-    authority: Arc<RwLock<Arc<AuthorityViewV1>>>,
-    registry: AuthorityRegistrySnapshotV1,
+    authority: Arc<RwLock<Arc<PinnedAuthorityV1>>>,
+    registry_digest: Hash,
+    source: Option<Arc<dyn GatewayAuthoritySourceV1>>,
     persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
     commit_lock: Arc<AsyncRwLock<()>>,
@@ -670,9 +698,13 @@ impl GatewayAuthorization {
     ) -> Self {
         Self {
             adapter,
-            authority: Arc::new(RwLock::new(Arc::new(authority))),
             persistence: AuthorityPersistenceHostV1::new(&registry),
-            registry,
+            registry_digest: registry.registry_digest(),
+            authority: Arc::new(RwLock::new(Arc::new(PinnedAuthorityV1 {
+                view: authority,
+                registry,
+            }))),
+            source: None,
             revocation_state_current,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
@@ -695,18 +727,18 @@ impl GatewayAuthorization {
             .and_then(|authenticated| {
                 self.authority
                     .read()
-                    .map(|view| Arc::clone(&view))
+                    .map(|pinned| Arc::clone(&pinned))
                     .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
-                    .and_then(|view| {
-                        let authority = view.authority();
-                        core_request(&request, &authenticated, authority, &self.registry)
+                    .and_then(|pinned| {
+                        let authority = pinned.view.authority();
+                        core_request(&request, &authenticated, authority, &pinned.registry)
                             .map_err(|_| GatewayAuthorizationError::RequestUnavailable)
                             .map(|core_request| {
                                 let (decision, expiry) =
                                     AuthorityEvaluatorV1::authorize_with_expiry(
                                         &core_request,
                                         authority.chain(),
-                                        &self.registry,
+                                        &pinned.registry,
                                     );
                                 GatewayAuthorizationDecision {
                                     request,
@@ -896,22 +928,119 @@ impl GatewayAuthorization {
     /// Replace the pinned authority snapshot at a host-controlled fence.
     ///
     /// The same commit lock used by Gateway appends prevents an update from
-    /// racing a final authorization check and append.
+    /// racing a final authorization check and append. An authorizer with a
+    /// [`GatewayAuthoritySourceV1`] rebuilds the attesting registry with the
+    /// view through that source, exactly as a store refresh does, so a
+    /// revocation learned here is answered `revoked`.
     ///
     /// # Errors
     /// Returns [`GatewayAuthorizationError::AuthorityUnavailable`] when the
-    /// host authority lock is poisoned and cannot be replaced safely.
+    /// host authority lock is poisoned and cannot be replaced safely, or the
+    /// source cannot reproduce `authority` under this host's registry digest.
     pub async fn replace_authority(
         &self,
         authority: AuthorityViewV1,
     ) -> Result<(), GatewayAuthorizationError> {
         let _guard = self.commit_lock.write().await;
+        self.pinned_for(authority)
+            .and_then(|pinned| self.install(pinned))
+    }
+
+    /// Attach the source this host recomposes its authority from.
+    #[must_use]
+    pub fn with_source(mut self, source: Arc<dyn GatewayAuthoritySourceV1>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// The leaf grant this host's source records its authority under.
+    pub(crate) fn source_leaf(&self) -> Option<Hash> {
+        self.source
+            .as_ref()
+            .map(|source| GatewayAuthoritySourceV1::leaf_grant_id(source.as_ref()))
+    }
+
+    /// Whether the store's `persisted` chain is ahead of the pinned one: a
+    /// later revocation epoch or Timeline position another writer recorded.
+    /// A chain this host learned first (through [`Self::replace_authority`])
+    /// is never rolled back by an older record.
+    pub(crate) fn is_behind(&self, persisted: &PersistedAuthorityV1) -> bool {
+        let pinned = self.pinned();
+        let current = pinned.view.authority();
+        (persisted.revocation_epoch(), persisted.head_position())
+            > (current.revocation_epoch(), current.head_position())
+    }
+
+    /// Recompose the pinned view and registry from the store's `persisted`
+    /// chain under the commit-fence write guard, so no decision or admitted
+    /// operation interleaves.
+    pub(crate) async fn refresh(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Result<(), GatewayAuthorizationError> {
+        let _guard = self.commit_lock.write().await;
+        self.recomposed(persisted)
+            .and_then(|pinned| self.install(pinned))
+    }
+
+    /// The source's view and registry for `persisted`, under this host's
+    /// unchanged registry digest.
+    fn recomposed(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Result<PinnedAuthorityV1, GatewayAuthorizationError> {
+        self.source
+            .as_ref()
+            .and_then(|source| source.recompose(persisted))
+            .filter(|(_, registry)| registry.registry_digest() == self.registry_digest)
+            .map(|(view, registry)| PinnedAuthorityV1 { view, registry })
+            .ok_or(GatewayAuthorizationError::AuthorityUnavailable)
+    }
+
+    /// The pinned authority of a replacement view: rebuilt through the
+    /// source when there is one, else with the current registry.
+    fn pinned_for(
+        &self,
+        view: AuthorityViewV1,
+    ) -> Result<PinnedAuthorityV1, GatewayAuthorizationError> {
+        if self.source.is_none() {
+            return Ok(PinnedAuthorityV1 {
+                registry: self.pinned().registry.clone(),
+                view,
+            });
+        }
+        self.recomposed(view.authority()).and_then(|pinned| {
+            (pinned.view == view)
+                .then_some(pinned)
+                .ok_or(GatewayAuthorizationError::AuthorityUnavailable)
+        })
+    }
+
+    /// Swap in a complete pinned authority.
+    fn install(&self, pinned: PinnedAuthorityV1) -> Result<(), GatewayAuthorizationError> {
         self.authority
             .write()
             .map(|mut current| {
-                *current = Arc::new(authority);
+                *current = Arc::new(pinned);
             })
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
+    }
+
+    /// The current pinned authority; replacement only swaps a complete
+    /// snapshot, so a poisoned lock still holds a whole one.
+    fn pinned(&self) -> Arc<PinnedAuthorityV1> {
+        Arc::clone(
+            &self
+                .authority
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// The registry the host currently decides with.
+    #[cfg(test)]
+    pub(crate) fn registry_for_test(&self) -> AuthorityRegistrySnapshotV1 {
+        self.pinned().registry.clone()
     }
 
     /// Retain one accepted action's minimized authorization audit.
@@ -982,26 +1111,16 @@ impl GatewayAuthorization {
         &self,
         store: &mut dyn AuthorityPersistencePortV1,
     ) -> Result<(Hash, PersistedAuthorityV1), AuthorityPersistenceErrorV1> {
-        // Replacement only swaps a complete snapshot, so a poisoned lock
-        // still holds a whole view; only its shared handle is cloned.
-        let view = Arc::clone(
-            &self
-                .authority
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let pinned = self.pinned();
         self.persistence
-            .persist_authority(store, &view)
+            .persist_authority(store, &pinned.view)
             .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
     /// The pinned authority registry digest and revocation-freshness claim
     /// that select this host's execution profile.
     pub(crate) const fn execution_profile(&self) -> (Hash, bool) {
-        (
-            self.registry.registry_digest(),
-            self.revocation_state_current,
-        )
+        (self.registry_digest, self.revocation_state_current)
     }
 }
 
@@ -1703,7 +1822,7 @@ mod tests {
         GatewayAuthorization::new(
             adapter,
             fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.authorization.registry_for_test(),
         )
     }
 
@@ -2142,7 +2261,7 @@ mod tests {
                 fixture.authenticated.clone(),
             )),
             fixture.authority.clone(),
-            fixture.authorization.registry,
+            fixture.authorization.registry_for_test(),
             false,
         );
         let pending = denied(&stale, request);
@@ -2233,7 +2352,7 @@ mod tests {
         let mut foreign = pos_store::memory::MemoryStore::new();
         foreign
             .bind_authority_persistence(
-                AuthorityPersistenceHostV1::new(&fixture.authorization.registry)
+                AuthorityPersistenceHostV1::new(&fixture.authorization.registry_for_test())
                     .persistence_binding(),
             )
             .test_ok();

@@ -359,7 +359,7 @@ async fn host_owned_gateway_covers_store_boundary(
         StoreConfig::Memory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
+    let gateway = Gateway::unprotected_for_harness(host)?;
     let timeline = gateway.create_timeline("shared-gate").await?;
     assert!(gateway
         .read_events_page(&timeline.id().to_string(), 0, 1)
@@ -415,7 +415,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
             .ok_or("recovered AccessFrozen state was not persisted")?;
         assert_eq!(history[0].lifecycle(), ErasureLifecycleV1::AccessFrozen);
     }
-    let gateway = Gateway::new_with_erasure_host(recovered)?;
+    let gateway = Gateway::unprotected_for_harness(recovered)?;
     let response = router(AppState {
         gateway: gateway.clone(),
         ledger_view: piglor_ledger::LedgerView::default(),
@@ -466,7 +466,7 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         StoreConfig::Memory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let geo_gateway = Gateway::new_with_erasure_host(geo_host)?;
+    let geo_gateway = Gateway::unprotected_for_harness(geo_host)?;
     geo_gateway.shutdown().await?;
     drop(geo_gateway);
 
@@ -486,7 +486,8 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
         StoreConfig::SqliteInMemory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
-    let owntracks_gateway = Gateway::new_with_owntracks_erasure_host(owntracks_host, &owner_key)?;
+    let owntracks_gateway =
+        piglor_gateway::local_principal::local_gateway(owntracks_host, Some(&owner_key))?;
     owntracks_gateway.shutdown().await?;
     drop(owntracks_gateway);
     Ok(())

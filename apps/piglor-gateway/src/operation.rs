@@ -5,25 +5,30 @@
 //! entity of the `x-piglor-actor-entity` header, never a credential: owner
 //! decision D1 on #302 makes loopback reachability the Local trust boundary),
 //! and authorizes it against the host-pinned Principal before it mutates or
-//! looks anything up. The returned [`GatewayOperationPermitV1`] holds the
-//! authority commit fence until the route drops it, so a replacement of the
-//! authority snapshot (a revocation) waits for the admitted operation and
-//! takes effect before the next one.
+//! looks anything up. Before each decision the host compares the authority
+//! its store records with the pinned one and, when the store is ahead (a
+//! revocation recorded by another writer), recomposes the view and its
+//! registry together (owner decisions D3 and D10 on #302). The returned
+//! [`GatewayOperationPermitV1`] holds the authority commit fence, and
+//! [`OperationAuthority::run`] runs the admitted mutation as a detached task
+//! that owns the permit until the mutation completes, even when the request
+//! is cancelled; so a revocation waits for every operation admitted before
+//! it and takes effect before the next one.
 //!
 //! A denial is answered only after its evidence is recorded, exactly as the
 //! action and read seams answer theirs. A Gateway without an authorizer whose
 //! composition requires one (an unprovisioned host) answers every protected
 //! operation `401 unauthenticated`.
 
-use std::{convert::Infallible, future::Future, marker::PhantomData};
+use std::{convert::Infallible, future::Future, marker::PhantomData, sync::Arc};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use pos_core::{EntityId, TimelineId, WallTime};
 use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::{
-    Gateway, GatewayAuthorizationDecision, GatewayAuthorizationRequest, GatewayError,
-    GatewayOperationV1,
+    Gateway, GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
+    GatewayAuthorizationRequest, GatewayError, GatewayOperationV1,
 };
 
 /// The header that names the acting entity of a protected operation.
@@ -63,6 +68,7 @@ impl OperationSpecV1 for CreatePredictionOperation {
 /// [`Self::authorize`].
 pub struct OperationAuthority<O> {
     actor_entity_id: Option<EntityId>,
+    acting_entity_id: Option<EntityId>,
     operation: PhantomData<fn() -> O>,
 }
 
@@ -79,12 +85,35 @@ where
                 .get(ACTOR_ENTITY_HEADER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| crate::parse_entity_id(value).ok()),
+            acting_entity_id: None,
             operation: PhantomData,
         })
     }
 }
 
+impl<O> OperationAuthority<O> {
+    /// The authority inputs of a request by `actor_entity_id`.
+    #[cfg(test)]
+    pub(crate) const fn for_test(actor_entity_id: Option<EntityId>) -> Self {
+        Self {
+            actor_entity_id,
+            acting_entity_id: None,
+            operation: PhantomData,
+        }
+    }
+}
+
 impl<O: OperationSpecV1> OperationAuthority<O> {
+    /// Bind the entity the operation's payload acts as. It must be the
+    /// header actor: any other entity is bound into the decision as a
+    /// participant no grant covers, so the operation is a recorded
+    /// `403 unauthorized` denial.
+    #[must_use]
+    pub const fn acting_as(mut self, entity: Option<EntityId>) -> Self {
+        self.acting_entity_id = entity;
+        self
+    }
+
     /// Authorize the operation on `gateway`, bound to `target_timeline` when
     /// it names one.
     ///
@@ -97,26 +126,66 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         target_timeline: Option<TimelineId>,
     ) -> Result<GatewayOperationPermitV1, GatewayError> {
         gateway
-            .authorize_operation(O::OPERATION, self.actor_entity_id, target_timeline)
+            .authorize_operation(
+                O::OPERATION,
+                self.actor_entity_id,
+                target_timeline,
+                self.acting_entity_id,
+            )
             .await
     }
 
-    /// Authorize the operation, then run `operation` under the permit, so
-    /// no authority replacement lands while it runs.
+    /// Authorize the operation, then run `operation` on its own task, which
+    /// owns the permit until the mutation completes.
+    ///
+    /// A request cancelled after the decision does not release the fence
+    /// early: the mutation either commits before a later revocation lands
+    /// or is never started.
     ///
     /// # Errors
     /// Returns the failures of [`Self::authorize`], before `operation` is
-    /// polled, or the error of `operation`.
-    pub async fn run<T>(
+    /// started, or the error of `operation`.
+    pub async fn run<T, F, Fut>(
         self,
         gateway: &Gateway,
         target_timeline: Option<TimelineId>,
-        operation: impl Future<Output = Result<T, GatewayError>>,
-    ) -> Result<T, GatewayError> {
+        operation: F,
+    ) -> Result<T, GatewayError>
+    where
+        F: FnOnce(Gateway) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, GatewayError>> + Send + 'static,
+        T: Send + 'static,
+    {
         let permit = self.authorize(gateway, target_timeline).await?;
-        let output = operation.await;
-        drop(permit);
-        output
+        let gateway = gateway.clone();
+        tokio::spawn(async move {
+            let output = operation(gateway).await;
+            drop(permit);
+            output
+        })
+        .await
+        .unwrap_or(Err(GatewayError::StoreExecutorUnhealthy))
+    }
+}
+
+/// The authority commit fence held over one protected decision, taken after
+/// the host brought its pinned authority current with its store.
+pub(crate) struct AuthorityFence {
+    _guard: OwnedRwLockReadGuard<()>,
+    stale: Option<GatewayAuthorizationError>,
+}
+
+impl AuthorityFence {
+    /// Decide `request`, or fail closed when the store's authority could not
+    /// be read or recomposed.
+    pub(crate) fn authorize(
+        &self,
+        authorization: &GatewayAuthorization,
+        request: GatewayAuthorizationRequest,
+    ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
+        self.stale
+            .clone()
+            .map_or_else(|| authorization.authorize(request), Err)
     }
 }
 
@@ -127,7 +196,7 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
 #[must_use = "dropping the permit releases the authority fence before the operation runs"]
 pub struct GatewayOperationPermitV1 {
     decision: Option<GatewayAuthorizationDecision>,
-    _fence: Option<OwnedRwLockReadGuard<()>>,
+    _fence: Option<AuthorityFence>,
 }
 
 impl GatewayOperationPermitV1 {
@@ -141,7 +210,9 @@ impl GatewayOperationPermitV1 {
 
 impl Gateway {
     /// Authorize one protected `operation` by `actor_entity_id` against the
-    /// host-pinned Principal, before any lookup or mutation.
+    /// host-pinned Principal, before any lookup or mutation. An
+    /// `acting_entity_id` other than the actor is bound as a participant no
+    /// grant covers, so the operation is denied.
     ///
     /// A Gateway composition that protects nothing admits it without a
     /// decision. Otherwise the decision is taken under the authority commit
@@ -157,6 +228,7 @@ impl Gateway {
         operation: GatewayOperationV1,
         actor_entity_id: Option<EntityId>,
         target_timeline: Option<TimelineId>,
+        acting_entity_id: Option<EntityId>,
     ) -> Result<GatewayOperationPermitV1, GatewayError> {
         if !self.has_authorization() {
             return Ok(GatewayOperationPermitV1 {
@@ -168,13 +240,15 @@ impl Gateway {
         else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
-        let fence = authorization.commit_fence().await;
-        match authorization.authorize(GatewayAuthorizationRequest::operation(
+        let mut request = GatewayAuthorizationRequest::operation(
             actor,
             operation,
             target_timeline,
             WallTime::now(),
-        )) {
+        );
+        request.participant_id = acting_entity_id.filter(|entity| *entity != actor);
+        let fence = self.current_fence(authorization).await;
+        match fence.authorize(authorization, request) {
             Ok(decision) => Ok(GatewayOperationPermitV1 {
                 decision: Some(decision),
                 _fence: Some(fence),
@@ -185,6 +259,37 @@ impl Gateway {
                 drop(fence);
                 Err(self.authorization_failure(authorization, error).await)
             }
+        }
+    }
+
+    /// Take the authority commit fence for one decision, after bringing the
+    /// pinned authority current with the host store.
+    pub(crate) async fn current_fence(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+    ) -> AuthorityFence {
+        let stale = self.bring_current(authorization).await.err();
+        AuthorityFence {
+            _guard: authorization.commit_fence().await,
+            stale,
+        }
+    }
+
+    /// Reload the chain the store records for the authorizer's source and
+    /// recompose the pinned authority when the store is ahead of it.
+    async fn bring_current(
+        &self,
+        authorization: &GatewayAuthorization,
+    ) -> Result<(), GatewayAuthorizationError> {
+        let Some(leaf) = authorization.source_leaf() else {
+            return Ok(());
+        };
+        match self.store.load_authority(leaf).await {
+            Ok(Ok(persisted)) if authorization.is_behind(&persisted) => {
+                authorization.refresh(&persisted).await
+            }
+            Ok(Ok(_)) => Ok(()),
+            _ => Err(GatewayAuthorizationError::AuthorityUnavailable),
         }
     }
 }

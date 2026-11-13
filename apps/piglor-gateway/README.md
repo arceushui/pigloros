@@ -59,8 +59,16 @@ systemctl start piglor-gateway-local-principal-provision.service
 
 Provisioning records one root capability grant in the database's authority records; the authority
 registry snapshot and the Principal's evidence are derived from that record. An exact retry is
-unchanged, and a different document for a provisioned database is refused. `serve` only reads the
-record. A revocation recorded for the grant is answered `403 revoked`.
+unchanged. `serve` only reads the record: before each protected decision it compares the record
+with the authority it holds and, when another writer recorded a revocation, rebuilds the
+authority from the record, so the next request is answered `403 revoked`. A signal's `entity_id`
+must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
+host answers every protected route `401` before reading the request body.
+
+**One Principal per database.** A database holds exactly one Local Principal, and rotation or a
+changed grant is not supported yet. Provisioning a different document is refused with
+`a different Local Principal`. To recover, provision the original document again (an exact retry
+succeeds), or stop the Gateway, create a new database and provision the new document into it.
 
 ### Separate deterministic experiment host
 

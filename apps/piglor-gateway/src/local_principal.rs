@@ -39,9 +39,9 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, Hash, PersistedAuthorityV1,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, Hash,
+    PersistedAuthorityV1, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use serde::Deserialize;
@@ -49,8 +49,8 @@ use thiserror::Error;
 use ulid::Ulid;
 
 use crate::{
-    startup::erasure_host_failure, Gateway, GatewayAuthorization, GatewayOperationV1,
-    LocalAuthenticationAdapter, OwnTracksOwnerKey,
+    startup::erasure_host_failure, Gateway, GatewayAuthoritySourceV1, GatewayAuthorization,
+    GatewayOperationV1, LocalAuthenticationAdapter, OwnTracksOwnerKey,
 };
 
 /// The one systemd credential `provision-local-principal` reads.
@@ -69,11 +69,23 @@ pub enum LocalPrincipalErrorV1 {
     #[error("Local Principal provisioning document is invalid")]
     Invalid,
     /// The store already holds a different Local Principal.
-    #[error("a different Local Principal is already provisioned in this store")]
+    #[error(
+        "this store already holds a different Local Principal; a store holds exactly one \
+         Principal and rotation is not supported, so provision the original document again \
+         (an exact retry succeeds) or create a new store and provision it"
+    )]
     Conflict,
-    /// The store's authority records cannot be read, written or recomposed.
+    /// The store's authority records cannot be read or written.
     #[error("Local Principal authority is unavailable")]
     Unavailable,
+    /// The store records a Local Principal this host cannot recompose
+    /// exactly: the authority record is corrupt or conflicts with its
+    /// Timeline. Startup fails; the host is never treated as unprovisioned.
+    #[error(
+        "the store's Local Principal authority record is unreadable or conflicts with its \
+         authority Timeline; restore the store from a backup"
+    )]
+    Corrupt,
 }
 
 /// The operator's TOML provisioning document.
@@ -257,9 +269,11 @@ pub fn provision_local_principal_from_credentials(
 /// Reading never writes the store.
 ///
 /// # Errors
-/// Returns [`LocalPrincipalErrorV1::Unavailable`] when the authority records
+/// Returns [`LocalPrincipalErrorV1::Corrupt`] when the authority records
 /// cannot be read, or hold a Local Principal record this host cannot
-/// recompose exactly.
+/// recompose exactly. Only a store that records no Local Principal grant (a
+/// store resolves no chain for an absent leaf, and it validates every
+/// recorded grant's chain on write) is unprovisioned.
 pub fn load_local_principal<S>(
     store: &S,
 ) -> Result<Option<GatewayAuthorization>, LocalPrincipalErrorV1>
@@ -269,10 +283,10 @@ where
     match store.load_authority(local_principal_grant_id()) {
         // The store resolves no chain for an absent leaf grant.
         Err(AuthorityPersistenceErrorV1::Conflict) => Ok(None),
-        Err(_) => Err(LocalPrincipalErrorV1::Unavailable),
+        Err(_) => Err(LocalPrincipalErrorV1::Corrupt),
         Ok(persisted) => compose(&persisted)
             .map(Some)
-            .ok_or(LocalPrincipalErrorV1::Unavailable),
+            .ok_or(LocalPrincipalErrorV1::Corrupt),
     }
 }
 
@@ -307,20 +321,58 @@ pub fn local_gateway(
 ) -> io::Result<Gateway> {
     load_host_local_principal(&mut host).and_then(|authorization| {
         match (owntracks_owner_key, host) {
-            (Some(owner_key), host) => Gateway::new_with_owntracks_erasure_host(host, owner_key),
-            (None, host) => Gateway::new_with_erasure_host(host),
+            (Some(owner_key), host) => {
+                Gateway::new_with_owntracks_erasure_host(host, owner_key, authorization)
+            }
+            (None, host) => Gateway::new_with_erasure_host(host, authorization),
         }
-        .map(|gateway| gateway.require_authorization(authorization))
         .map_err(io::Error::other)
     })
 }
 
-/// Recompose the authorizer of one recorded Local Principal chain.
+/// The source a Local Principal authorizer recomposes itself from: the
+/// store's record under the one Local Principal grant identity.
+struct LocalPrincipalSourceV1;
+
+impl GatewayAuthoritySourceV1 for LocalPrincipalSourceV1 {
+    fn leaf_grant_id(&self) -> Hash {
+        local_principal_grant_id()
+    }
+
+    fn recompose(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)> {
+        recompose(persisted).map(|(view, registry, _)| (view, registry))
+    }
+}
+
+/// The authorizer of one recorded Local Principal chain, which brings
+/// itself current with the store's record before each decision.
+fn compose(persisted: &PersistedAuthorityV1) -> Option<GatewayAuthorization> {
+    recompose(persisted).map(|(view, registry, evidence)| {
+        GatewayAuthorization::new(
+            Arc::new(LocalAuthenticationAdapter::new(evidence)),
+            view,
+            registry,
+        )
+        .with_source(Arc::new(LocalPrincipalSourceV1))
+    })
+}
+
+/// Recompose the view, attesting registry and pinned evidence of one
+/// recorded Local Principal chain.
 ///
 /// The record is the as-issued root grant plus the revocations the store
 /// holds on its authority Timeline; a chain this host cannot reproduce
 /// exactly is refused, never merged.
-fn compose(persisted: &PersistedAuthorityV1) -> Option<GatewayAuthorization> {
+fn recompose(
+    persisted: &PersistedAuthorityV1,
+) -> Option<(
+    AuthorityViewV1,
+    AuthorityRegistrySnapshotV1,
+    AuthenticatedPrincipalResultV1,
+)> {
     persisted
         .chain()
         .grants()
@@ -348,13 +400,7 @@ fn compose(persisted: &PersistedAuthorityV1) -> Option<GatewayAuthorization> {
                 .and_then(|()| state.view(grant.grant_id()))
                 .ok()
                 .filter(|view| view.authority() == persisted)
-                .map(|view| {
-                    GatewayAuthorization::new(
-                        Arc::new(LocalAuthenticationAdapter::new(evidence)),
-                        view,
-                        registry,
-                    )
-                })
+                .map(|view| (view, registry, evidence))
         })
 }
 
@@ -516,7 +562,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        operation::ACTOR_ENTITY_HEADER,
+        operation::{CreateTimelineOperation, OperationAuthority, ACTOR_ENTITY_HEADER},
         router,
         startup::{open_recovered_erasure_host, GatewayHostStoreV1},
         AppState, GatewayError, LedgerWriteMode,
@@ -606,15 +652,113 @@ mod tests {
         )?)
     }
 
-    fn served(authorization: Option<GatewayAuthorization>) -> TestResult<(Gateway, Router)> {
-        let gateway =
-            Gateway::new_with_erasure_host(memory_host()?)?.require_authorization(authorization);
-        let app = router(AppState {
-            gateway: gateway.clone(),
+    fn app_of(gateway: Gateway) -> Router {
+        router(AppState {
+            gateway,
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
-        });
-        Ok((gateway, app))
+        })
+    }
+
+    /// An in-memory Gateway that requires `authorization`; `None` is an
+    /// unprovisioned host.
+    fn served(authorization: Option<GatewayAuthorization>) -> TestResult<(Gateway, Router)> {
+        let gateway = Gateway::new_with_erasure_host(memory_host()?, authorization)?;
+        Ok((gateway.clone(), app_of(gateway)))
+    }
+
+    fn sqlite_path(directory: &tempfile::TempDir) -> TestResult<String> {
+        Ok(directory
+            .path()
+            .join("gateway.db")
+            .to_str()
+            .ok_or("temporary path is not UTF-8")?
+            .to_owned())
+    }
+
+    fn sqlite_host(path: &str) -> TestResult<ErasureExecutionHostV1> {
+        Ok(open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: path.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?)
+    }
+
+    /// A SQLite store provisioned with one Local Principal and served by the
+    /// production composition.
+    struct Served {
+        _directory: tempfile::TempDir,
+        path: String,
+        gateway: Gateway,
+        app: Router,
+    }
+
+    impl Served {
+        fn authorization(&self) -> TestResult<Arc<GatewayAuthorization>> {
+            Ok(self
+                .gateway
+                .authorization
+                .clone()
+                .ok_or("a provisioned host has an authorizer")?)
+        }
+    }
+
+    fn served_store(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
+        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        Ok(Served {
+            _directory: directory,
+            path,
+            app: app_of(gateway.clone()),
+            gateway,
+        })
+    }
+
+    /// Record the revocation of the Local Principal's grant, as an offline
+    /// writer would, through a separate adapter of the store.
+    fn record_revocation(path: &str, provision: &LocalPrincipalProvisionV1) -> TestResult {
+        let host = AuthorityPersistenceHostV1::new(&provision.registry);
+        let mut store = SqliteStore::open(path)?;
+        store.bind_authority_persistence(host.persistence_binding())?;
+        let revocation = revocation(&provision.grant)?;
+        store.revoke_capability_grant(
+            host.authorize_revocation(&provision.grant, &revocation)?,
+            &revocation,
+        )?;
+        Ok(())
+    }
+
+    /// A copy of `grant` with another identity, issuance and epoch.
+    fn reissued(
+        grant: &CapabilityGrantV1,
+        grant_id: Hash,
+        issuance: u64,
+        revocation_epoch: u64,
+    ) -> TestResult<CapabilityGrantV1> {
+        Ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id,
+            grantor: grant.grantor().clone(),
+            grantee: grant.grantee().clone(),
+            trust_domain: grant.trust_domain().to_owned(),
+            scope: grant.scope().clone(),
+            valid_from_position: Seq::from_u64(issuance),
+            valid_until_position: grant.valid_until_position(),
+            parent_grant_id: None,
+            delegation_depth: 0,
+            max_delegation_depth: 0,
+            permitted_delegate_classes: Vec::new(),
+            consent_references: Vec::new(),
+            policy_revision: grant.policy_revision(),
+            issuance_timeline: grant.issuance_timeline(),
+            issuance_seq: Seq::from_u64(issuance),
+            revocation_epoch,
+            revocation_fence: None,
+            authority_registry_digest: grant.authority_registry_digest(),
+        })?)
     }
 
     async fn send(
@@ -824,28 +968,23 @@ mod tests {
         let served = served_provision()?;
         // Nothing is provisioned implicitly.
         assert!(load_local_principal(&SqliteStore::open(&path)?)?.is_none());
-        let mut store = SqliteStore::open(&path)?;
         assert_eq!(
-            provision_local_principal(&mut store, &served)?,
+            provision_local_principal(&mut SqliteStore::open(&path)?, &served)?,
             AuthorityCommitOutcomeV1::Committed
         );
-        // One adapter instance is bound to the host that provisioned it.
-        assert_eq!(
-            provision_local_principal(&mut store, &served),
-            Err(LocalPrincipalErrorV1::Unavailable)
-        );
-        drop(store);
         assert_eq!(
             provision_local_principal(&mut SqliteStore::open(&path)?, &served)?,
             AuthorityCommitOutcomeV1::Unchanged
         );
-        assert_eq!(
-            provision_local_principal(
-                &mut SqliteStore::open(&path)?,
-                &provision([GatewayOperationV1::CREATE_TIMELINE])?
-            ),
-            Err(LocalPrincipalErrorV1::Conflict)
+        let conflict = provision_local_principal(
+            &mut SqliteStore::open(&path)?,
+            &provision([GatewayOperationV1::CREATE_TIMELINE])?,
         );
+        assert_eq!(conflict, Err(LocalPrincipalErrorV1::Conflict));
+        // The refusal says how to recover.
+        assert!(LocalPrincipalErrorV1::Conflict
+            .to_string()
+            .contains("create a new store"));
         assert!(load_local_principal(&SqliteStore::open(&path)?)?.is_some());
         Ok(())
     }
@@ -907,7 +1046,7 @@ mod tests {
         );
         assert_eq!(
             load_local_principal(&FailingStore(AuthorityPersistenceErrorV1::InvalidRecord)).err(),
-            Some(LocalPrincipalErrorV1::Unavailable)
+            Some(LocalPrincipalErrorV1::Corrupt)
         );
         Ok(())
     }
@@ -949,9 +1088,33 @@ mod tests {
             Err(GatewayError::AuthorizationUnavailable)
         ));
         assert!(gateway
-            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None)
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
             .await
             .is_err());
+        // The host refuses before any body is read: a malformed or an
+        // oversized body is still `401`.
+        for body in [
+            Body::from("{"),
+            Body::from(vec![b' '; crate::MAX_HTTP_BODY_BYTES + 1]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/timelines")
+                        .header("content-type", "application/json")
+                        .header(ACTOR_ENTITY_HEADER, actor.to_string())
+                        .body(body)?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Unprotected routes still answer.
+        assert_eq!(
+            send(&app, "GET", "/health", None, None).await?.0,
+            StatusCode::OK
+        );
         gateway.shutdown().await?;
         drop(gateway);
         Ok(())
@@ -959,7 +1122,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_provisioned_principal_is_admitted_only_for_its_grants() -> TestResult {
-        let (gateway, app) = served(Some(loaded(&served_provision()?)?))?;
+        let Served {
+            _directory,
+            gateway,
+            app,
+            ..
+        } = served_store(&served_provision()?)?;
         let actor = actor()?;
         let (status, created) = create(&app, Some(actor)).await?;
         assert_eq!(status, StatusCode::CREATED);
@@ -977,6 +1145,17 @@ mod tests {
         let signals = format!("/v1/timelines/{timeline}/signals");
         let (status, _) = send(&app, "POST", &signals, Some(actor), Some(signal(actor))).await?;
         assert_eq!(status, StatusCode::CREATED);
+        // A signal acts as its own entity, which must be the header actor.
+        let (status, problem) = send(
+            &app,
+            "POST",
+            &signals,
+            Some(actor),
+            Some(signal(EntityId::new())),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "unauthorized");
         let (status, _) = send(
             &app,
             "POST",
@@ -1007,7 +1186,7 @@ mod tests {
         }
 
         let permit = gateway
-            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None)
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
             .await?;
         assert_eq!(
             permit
@@ -1023,9 +1202,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_unprotected_composition_admits_without_a_decision() -> TestResult {
-        let gateway = Gateway::new_with_erasure_host(memory_host()?)?;
+        let gateway = Gateway::unprotected_for_harness(memory_host()?)?;
         let permit = gateway
-            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, None, None)
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, None, None, None)
             .await?;
         assert!(permit.decision().is_none());
         drop(permit);
@@ -1037,15 +1216,21 @@ mod tests {
     #[tokio::test]
     async fn a_revocation_takes_effect_before_the_next_mutation() -> TestResult {
         let provision = served_provision()?;
-        let authorization = loaded(&provision)?;
-        let (gateway, app) = served(Some(authorization.clone()))?;
+        let served = served_store(&provision)?;
+        let authorization = served.authorization()?;
+        let Served {
+            _directory,
+            gateway,
+            app,
+            ..
+        } = served;
         let actor = actor()?;
         assert_eq!(create(&app, Some(actor)).await?.0, StatusCode::CREATED);
 
         // An admitted operation holds the authority fence: the replacement
         // waits for it and never lands under it.
         let permit = gateway
-            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None)
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
             .await?;
         let revoked = revoked_view(&provision)?;
         let replacing = authorization.clone();
@@ -1055,30 +1240,156 @@ mod tests {
         drop(permit);
         replacement.await??;
 
-        // The next mutation is denied and commits nothing.
+        // The next mutation is denied as revoked and commits nothing; the
+        // older store record never rolls the revocation back.
         let (status, problem) = create(&app, Some(actor)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(problem["code"], "unauthorized");
+        assert_eq!(problem["code"], "revoked");
         gateway.shutdown().await?;
         drop(gateway);
         Ok(())
     }
 
     #[tokio::test]
+    async fn a_revocation_recorded_while_serving_is_current_at_the_next_decision() -> TestResult {
+        let provision = served_provision()?;
+        let served = served_store(&provision)?;
+        let actor = actor()?;
+        assert_eq!(
+            create(&served.app, Some(actor)).await?.0,
+            StatusCode::CREATED
+        );
+        record_revocation(&served.path, &provision)?;
+        let (status, problem) = create(&served.app, Some(actor)).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "revoked");
+        served.gateway.shutdown().await?;
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_keeps_its_admitted_mutation_ahead_of_a_revocation() -> TestResult {
+        let provision = served_provision()?;
+        let served = served_store(&provision)?;
+        let authorization = served.authorization()?;
+        let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut request = Box::pin(
+            OperationAuthority::<CreateTimelineOperation>::for_test(Some(actor()?)).run(
+                &served.gateway,
+                None,
+                move |gateway| async move {
+                    drop(started.send(()));
+                    drop(release_rx.await);
+                    gateway.create_timeline("admitted").await
+                },
+            ),
+        );
+        tokio::select! {
+            _ = &mut request => return Err("the admitted mutation waits for its release".into()),
+            admitted = started_rx => admitted?,
+        }
+        // The client goes away after the decision; the mutation keeps the
+        // fence, so the revocation lands only after it completes.
+        drop(request);
+        let revoked = revoked_view(&provision)?;
+        let replacement =
+            tokio::spawn(async move { authorization.replace_authority(revoked).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!replacement.is_finished());
+        drop(release.send(()));
+        replacement.await??;
+        let (status, problem) = create(&served.app, Some(actor()?)).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "revoked");
+        served.gateway.shutdown().await?;
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_authorizer_without_a_readable_store_fails_closed() -> TestResult {
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            pos_store::open_store(StoreConfig::Memory)?,
+            std::iter::empty(),
+            loaded(&served_provision()?)?,
+        );
+        assert!(matches!(
+            gateway
+                .authorize_operation(
+                    GatewayOperationV1::CREATE_TIMELINE,
+                    Some(actor()?),
+                    None,
+                    None
+                )
+                .await,
+            Err(GatewayError::AuthorizationUnavailable)
+        ));
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_authority_record_fails_startup() -> TestResult {
+        let provision = served_provision()?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        // A foreign grant revoked on the Local Principal's authority
+        // Timeline before a Local Principal grant was recorded after it.
+        let foreign = reissued(&provision.grant, Hash::from_bytes([9; 32]), 1, 0)?;
+        let local = reissued(&provision.grant, local_principal_grant_id(), 3, 1)?;
+        let mut bindings = vec![foreign.binding_digest()?, local.binding_digest()?];
+        bindings.sort_unstable();
+        let registry = AuthorityRegistrySnapshotV1::try_new(
+            provision.grant.authority_registry_digest(),
+            vec![Hash::from_bytes([1; 32])],
+            bindings,
+            Vec::new(),
+        )?;
+        let host = AuthorityPersistenceHostV1::new(&registry);
+        let mut store = SqliteStore::open(&path)?;
+        store.bind_authority_persistence(host.persistence_binding())?;
+        store.issue_capability_grant(host.authorize_grant(&foreign)?, &foreign)?;
+        let revoked = revocation(&foreign)?;
+        store.revoke_capability_grant(host.authorize_revocation(&foreign, &revoked)?, &revoked)?;
+        store.issue_capability_grant(host.authorize_grant(&local)?, &local)?;
+        assert_eq!(
+            load_local_principal(&store).err(),
+            Some(LocalPrincipalErrorV1::Corrupt)
+        );
+        drop(store);
+        let error = local_gateway(sqlite_host(&path)?, None)
+            .err()
+            .ok_or("a conflicting record never serves")?;
+        assert!(error.to_string().contains("restore the store"));
+        Ok(())
+    }
+
+    #[test]
+    fn binary_compositions_never_reach_the_harness_constructor() {
+        let production =
+            |source: &'static str| source.split("\nmod tests {").next().unwrap_or(source);
+        for source in [
+            include_str!("main.rs"),
+            include_str!("startup.rs"),
+            production(include_str!("local_principal.rs")),
+            production(include_str!("local_fork_service.rs")),
+        ] {
+            assert!(!source.contains("unprotected_for_harness"));
+        }
+    }
+
+    #[tokio::test]
     async fn a_recorded_revocation_is_answered_revoked() -> TestResult {
         let provision = served_provision()?;
-        let host = AuthorityPersistenceHostV1::new(&provision.registry);
-        let mut store = MemoryStore::new();
-        store.bind_authority_persistence(host.persistence_binding())?;
-        store.issue_capability_grant(host.authorize_grant(&provision.grant)?, &provision.grant)?;
-        let revocation = revocation(&provision.grant)?;
-        store.revoke_capability_grant(
-            host.authorize_revocation(&provision.grant, &revocation)?,
-            &revocation,
-        )?;
-        let authorization =
-            load_local_principal(&store)?.ok_or("a revoked Principal is still recorded")?;
-        let (gateway, app) = served(Some(authorization))?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
+        record_revocation(&path, &provision)?;
+        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        let app = app_of(gateway.clone());
         let (status, problem) = create(&app, Some(actor()?)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(problem["code"], "revoked");

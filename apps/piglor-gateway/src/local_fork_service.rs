@@ -235,11 +235,13 @@ fn open_with_credentials(
     // HTTP route of this Gateway; an unprovisioned store answers them `401`.
     let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host)
         .and_then(|authorization| {
-            Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
-                .map(|(gateway, submitter)| {
-                    (gateway.require_authorization(authorization), submitter)
-                })
-                .map_err(io::Error::other)
+            Gateway::new_with_fork_admission_erasure_host(
+                host,
+                owntracks_owner_key,
+                slot,
+                authorization,
+            )
+            .map_err(io::Error::other)
         })?;
     let coordinator = LocalForkAdmissionCoordinatorV1::new(
         credentials,

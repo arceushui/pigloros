@@ -2,21 +2,24 @@
 //! per sub-case, its exchanges sent as raw HTTP requests through the public `router` and
 //! `spectator_router` of that Gateway, with no socket.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
 use piglor_gateway::local_principal::{
-    load_local_principal, provision_local_principal, LocalPrincipalProvisionV1,
+    local_gateway, provision_local_principal, LocalPrincipalProvisionV1,
 };
+use piglor_gateway::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 use piglor_gateway::{
-    router, spectator_router, AppState, Gateway, GatewayAuthorization, GatewayOperationV1,
-    LedgerWriteMode,
+    router, spectator_router, AppState, Gateway, GatewayOperationV1, LedgerWriteMode,
 };
 use piglor_ledger::LedgerView;
 use pos_core::{EntityId, ErasureRecoveryLimitsV1, PrincipalRefV1};
 use pos_reference::evaluator::ResourceUsage;
-use pos_runtime::ErasureExecutionHostV1;
-use pos_store::{memory::MemoryStore, StoreConfig};
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_store::{sqlite::SqliteStore, StoreConfig};
 use serde_json::{json, Map, Value};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
@@ -121,11 +124,11 @@ fn run_subcase(
         events: 0,
     };
     // The Gateway schedules its maintenance on the runtime it is built in.
-    let gateway = {
+    let composed = {
         let _context = runtime.enter();
         compose(subcase.composition)
     };
-    gateway.map_or(unavailable, |gateway| {
+    composed.map_or(unavailable, |(gateway, _store)| {
         runtime.block_on(exchange_all(gateway, subcase, capabilities, independent))
     })
 }
@@ -142,31 +145,39 @@ fn host() -> Option<ErasureExecutionHostV1> {
     .ok()
 }
 
-/// The Gateway of a composition (requirements section 3).
+/// The Gateway of a composition (requirements section 3), with the store file it serves when
+/// it has one.
 ///
-/// `open` is the unprotected in-process Gateway. `authorized` is the production serve
-/// composition (#1361): the Local Principal is provisioned with the production
-/// `provision_local_principal` into a store and recomposed from it with
-/// `load_local_principal`, and every protected operation requires it.
-fn compose(composition: CompositionV2) -> Option<Gateway> {
+/// `open` is the unprotected in-process harness Gateway. `authorized` is the production serve
+/// composition (#1361): a fixture Local Principal document is provisioned into a fresh SQLite
+/// store with the production `provision_local_principal`, and the Gateway is composed over that
+/// store by `local_gateway`, which requires the recorded Principal for every protected
+/// operation.
+fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
     match composition {
-        CompositionV2::Open => host().and_then(|host| Gateway::new_with_erasure_host(host).ok()),
-        CompositionV2::Authorized => {
-            fixture_authorization()
-                .zip(host())
-                .and_then(|(authorization, host)| {
-                    Gateway::new_with_erasure_host(host)
-                        .ok()
-                        .map(|gateway| gateway.require_authorization(Some(authorization)))
-                })
-        }
+        CompositionV2::Open => host()
+            .and_then(|host| Gateway::unprotected_for_harness(host).ok())
+            .map(|gateway| (gateway, None)),
+        CompositionV2::Authorized => provisioned_store().and_then(|store| {
+            open_recovered_erasure_host(
+                StoreConfig::Sqlite {
+                    path: store.path_text(),
+                },
+                GatewayHostStoreV1::Standard,
+                &ErasureCoordinatorCompositionV1::closed(),
+            )
+            .and_then(|host| local_gateway(host, None))
+            .ok()
+            .map(|gateway| (gateway, Some(store)))
+        }),
     }
 }
 
-/// The fixture Local Principal of the `authorized` composition: it may create Timelines and
-/// read their Events as the fixture actor, and holds no action or signal grant. Only its
-/// document is fixture data; it is provisioned and recomposed by the production path.
-fn fixture_authorization() -> Option<GatewayAuthorization> {
+/// A fresh SQLite store holding the fixture Local Principal of the `authorized` composition:
+/// it may create Timelines and read their Events as the fixture actor, and holds no action or
+/// signal grant. Only its document is fixture data.
+fn provisioned_store() -> Option<ScratchStore> {
+    let store = ScratchStore::new();
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
@@ -182,11 +193,45 @@ fn fixture_authorization() -> Option<GatewayAuthorization> {
             .ok()
         })
         .and_then(|provision| {
-            let mut store = MemoryStore::new();
-            provision_local_principal(&mut store, &provision)
+            SqliteStore::open(&store.path_text())
                 .ok()
-                .and_then(|_| load_local_principal(&store).ok().flatten())
+                .and_then(|mut opened| provision_local_principal(&mut opened, &provision).ok())
         })
+        .map(|_| store)
+}
+
+/// One sub-case's SQLite file in the temporary directory, removed with its journal files when
+/// the sub-case ends.
+struct ScratchStore {
+    path: PathBuf,
+}
+
+impl ScratchStore {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "pos-gateway-conformance-{}-{unique}-{}.sqlite",
+                std::process::id(),
+                Ulid::new()
+            )),
+        }
+    }
+
+    fn path_text(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for ScratchStore {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.path.clone().into_os_string();
+            path.push(suffix);
+            drop(std::fs::remove_file(path));
+        }
+    }
 }
 
 /// The header that carries the idempotency key of every request.

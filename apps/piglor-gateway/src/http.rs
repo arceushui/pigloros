@@ -15,7 +15,7 @@ use crate::{
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, FromRequestParts, RawQuery, State},
+    extract::{DefaultBodyLimit, FromRequestParts, MatchedPath, RawQuery, Request, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
         request::Parts,
@@ -163,8 +163,39 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
         .fallback(not_routed)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_unprovisioned,
+        ))
         .layer(middleware::from_fn(problem_instance))
         .with_state(state)
+}
+
+/// The protected loopback routes, by method and route template.
+const PROTECTED_ROUTES: [(&str, &str); 5] = [
+    ("POST", "/v1/ledger/predictions"),
+    ("POST", "/v1/timelines"),
+    ("GET", "/v1/timelines/{timeline_id}/events"),
+    ("POST", "/v1/timelines/{timeline_id}/actions"),
+    ("POST", "/v1/timelines/{timeline_id}/signals"),
+];
+
+/// Answer every protected route of an unprovisioned host `401` before its
+/// body is read (D1 on #302): no malformed or oversized body reaches a
+/// handler the host could never authorize.
+async fn reject_unprovisioned(
+    State(state): State<AppState>,
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    let protected = request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|path| PROTECTED_ROUTES.contains(&(request.method().as_str(), path.as_str())));
+    if protected && state.gateway.is_unprovisioned() {
+        return GatewayError::AuthorizationUnavailable.into_response();
+    }
+    next.run(request).await
 }
 
 fn spectator_routes() -> Router<AppState> {
@@ -223,12 +254,11 @@ async fn create_timeline(
     authority: OperationAuthority<CreateTimelineOperation>,
     ContractJson(body): ContractJson<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let name = body.name;
     let tl = authority
-        .run(
-            &state.gateway,
-            None,
-            state.gateway.create_timeline(&body.name),
-        )
+        .run(&state.gateway, None, move |gateway| async move {
+            gateway.create_timeline(&name).await
+        })
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -576,15 +606,15 @@ async fn post_signal(
     ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let entity_id = body.entity_id.clone();
+    let signal = body.into_signal();
     // A malformed Timeline ID binds no target and is refused by the append.
+    // The signal acts as its own entity, which must be the header actor.
+    let target = crate::parse_timeline_id(&id).ok();
     let event = authority
-        .run(
-            &state.gateway,
-            crate::parse_timeline_id(&id).ok(),
-            state
-                .gateway
-                .append_signal(&id, &entity_id, &body.into_signal()),
-        )
+        .acting_as(crate::parse_entity_id(&entity_id).ok())
+        .run(&state.gateway, target, move |gateway| async move {
+            gateway.append_signal(&id, &entity_id, &signal).await
+        })
         .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
@@ -594,12 +624,11 @@ async fn post_ledger_prediction(
     authority: OperationAuthority<CreatePredictionOperation>,
     ContractJson(body): ContractJson<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let ledger_write = state.ledger_write.clone();
     let prediction_id = authority
-        .run(
-            &state.gateway,
-            None,
-            register_prediction(&state.ledger_write, body),
-        )
+        .run(&state.gateway, None, move |_gateway| async move {
+            register_prediction(&ledger_write, body).await
+        })
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -944,7 +973,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway.create_timeline(name).await.test_ok();
         let app = router(AppState {
             gateway: gateway.clone(),
@@ -1160,7 +1189,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gw = Gateway::new_with_erasure_host(host).test_ok();
+        let gw = Gateway::unprotected_for_harness(host).test_ok();
         spectator_router(AppState {
             gateway: gw,
             ledger_view: LedgerView::default(),
@@ -1435,7 +1464,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let (status, json) = json_request(
             router(AppState {
                 gateway,
@@ -1479,7 +1508,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         gateway.shutdown().await.test_ok();
         let (status, json) = json_request(
             router(AppState {

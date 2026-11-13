@@ -61,8 +61,11 @@ lookup answers `not-found-or-unavailable` and never reveals whether the resource
 Every loopback operation except `/health` and the public Ledger reads is protected by the host's
 Local Principal (#1361): loopback reachability is the trust boundary, there is no credential
 scheme, and a request names the entity it acts as in the optional `x-piglor-actor-entity` header,
-which the Principal's grant must cover. A host without a provisioned Local Principal, or a request
-without a valid actor, is `401 unauthenticated`. An authority decision precedes any protected
+which the Principal's grant must cover; a Society Signal's `entity_id` must be that entity. A
+host without a provisioned Local Principal answers every protected operation
+`401 unauthenticated` before reading its body, and so does a request without a valid actor. A
+denied createPrediction is `403 unauthorized` or `403 revoked`, like a write while Ledger writes
+are disabled. An authority decision precedes any protected
 lookup, so a caller without a read grant receives the same answer for an unknown Timeline as for
 an existing one. A missing Principal, or
 authentication evidence outside its validity window, is `401 unauthenticated`; a missing grant

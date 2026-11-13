@@ -25,9 +25,9 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   are the same execution.
 - The `authorized` composition is the production serve composition (#1361): a fixture Local
   Principal document, which lets one actor create Timelines and read their Events and grants no
-  action or signal, is provisioned and recomposed through the production Local Principal path,
-  and the Gateway requires it for every protected operation. No production authority is sourced
-  from the fixture document (ADR-108).
+  action or signal, is provisioned into a fresh SQLite store and served by the production
+  `local_gateway` composition, which requires it for every protected operation. No production
+  authority is sourced from the fixture document (ADR-108).
 - Observations are normalized as the profile text states: ULID `id` members, cursors and error
   messages become placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per

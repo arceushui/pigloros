@@ -590,7 +590,7 @@
             "schema": {
               "$ref": "#/components/schemas/Ulid"
             },
-            "description": "The acting entity; required when the host binds an authorizer (the Local Principal's grant must cover it)."
+            "description": "The acting entity; required when the host binds an authorizer (the Local Principal's grant must cover it). The signal's `entity_id` must be this entity."
           }
         ],
         "requestBody": {
@@ -625,7 +625,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` (no grant covers the actor and operation) or `revoked`.",
+            "description": "`unauthorized` (no grant covers the actor and operation, or the signal's `entity_id` is not the `x-piglor-actor-entity` actor) or `revoked`.",
             "content": {
               "application/problem+json": {
                 "schema": {
