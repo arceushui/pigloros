@@ -1435,9 +1435,14 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    /// A fresh store bound to the Local mode, as the first `serve` leaves it.
     fn initialize_database(path: &std::path::Path) {
-        test_ok(pos_store::sqlite::SqliteStore::open(
+        let mut store = test_ok(pos_store::sqlite::SqliteStore::open(
             &path.display().to_string(),
+        ));
+        test_ok(crate::mode_profile::bind_test_store(
+            &mut store,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
         ));
     }
 

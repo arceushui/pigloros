@@ -6376,9 +6376,8 @@ mod tests {
     }
 
     /// ADR-134 §7: a bound mode that selects no registration profile (the
-    /// Air-Gapped execution-mode profile field 9 until #1372) fails closed before the factory
-    /// runs, and a selected profile without an installed EPF1 (Local
-    /// `live-local-v1` until #461) fails closed before any registry mutation.
+    /// Air-Gapped execution-mode profile field 9 until #1372) fails closed
+    /// before the factory runs or the registry changes.
     #[test]
     fn production_registration_follows_the_bound_mode_selection_and_fails_closed() {
         let selected = fixture_catalogue_entry();
@@ -6396,10 +6395,6 @@ mod tests {
             )
         );
         assert_eq!(configuration.builds.get(), 0);
-        assert!(registry
-            .register_from_host_catalogue_entry(&selected, &configuration, Some("live-local-v1"))
-            .is_err());
-        assert_eq!(configuration.builds.get(), 1);
         assert!(registry.is_empty());
         assert!(registry.approver_map.is_empty());
     }
