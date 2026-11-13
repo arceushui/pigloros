@@ -121,6 +121,11 @@ def merge(linux, native, receipt, workspace, checkout):
             omitted += 1
             continue
         path = windows_path(filename)
+        # llvm-cov may anchor that same virtual prefix at the workspace root.
+        if path.is_relative_to(native_root) and re.match(
+                r"^rustc/[0-9a-f]{40}/library/", path.relative_to(native_root).as_posix()):
+            omitted += 1
+            continue
         if path.is_relative_to(shim_root / "src"):
             relative = pathlib.PurePosixPath(path.relative_to(native_root).as_posix())
             target = source_path(workspace, relative)
