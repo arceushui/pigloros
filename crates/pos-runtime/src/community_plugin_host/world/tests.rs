@@ -1,7 +1,7 @@
 //! R8-W2: the evaluation world, with a fake member and a fake Driver that stages one draft, on
 //! the shared signed-release test world (installed at second 50 and Tick 5).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
@@ -15,8 +15,6 @@ use pos_plugin_publisher::test_support::{
 };
 use pos_plugin_release::{ContentValidationV1, LocalOciPublisherV1};
 use pos_store::plugin_trust_registry::PluginTrustCommitOutcomeV1;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use super::*;
 use crate::community_plugin_host::{
