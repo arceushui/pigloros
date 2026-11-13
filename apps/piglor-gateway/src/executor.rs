@@ -1002,7 +1002,31 @@ pub(crate) struct StoreExecutor {
     control: Arc<ExecutorControl>,
 }
 
+/// A handle that does not keep its executor alive: a background task holds
+/// it so that a Gateway dropped without a shutdown releases the worker's
+/// command channel instead of waiting on the task.
+#[derive(Clone)]
+pub(crate) struct WeakStoreExecutor {
+    control: std::sync::Weak<ExecutorControl>,
+}
+
+impl WeakStoreExecutor {
+    /// The executor, while any strong handle still owns it.
+    pub(crate) fn upgrade(&self) -> Option<StoreExecutor> {
+        self.control
+            .upgrade()
+            .map(|control| StoreExecutor { control })
+    }
+}
+
 impl StoreExecutor {
+    /// A handle that does not keep this executor alive.
+    pub(crate) fn downgrade(&self) -> WeakStoreExecutor {
+        WeakStoreExecutor {
+            control: Arc::downgrade(&self.control),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
         drop(

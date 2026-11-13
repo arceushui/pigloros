@@ -690,6 +690,15 @@ impl GatewayAuthorization {
         self.budget().has_pending()
     }
 
+    /// Whether a handed-out count still awaits its settlement.
+    #[cfg(test)]
+    pub(crate) fn denial_markers_in_flight(&self) -> bool {
+        let budget = self.budget();
+        let in_flight = budget.in_flight_principal > 0 || budget.in_flight_host > 0;
+        drop(budget);
+        in_flight
+    }
+
     fn budget(&self) -> std::sync::MutexGuard<'_, DenialRecordBudget> {
         self.denial_budget
             .lock()

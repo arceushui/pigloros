@@ -1486,8 +1486,8 @@ async fn a_flood_then_silence_is_counted_when_the_window_expires() -> TestResult
     // flush at the window's end; running it with an expired deadline makes
     // the expiry deterministic instead of waiting on the wall clock.
     crate::flush_expired_denial_window(
-        fixture.gateway.store.clone(),
-        Arc::new(fixture.authorization.clone()),
+        &fixture.gateway.store.downgrade(),
+        &Arc::new(fixture.authorization.clone()),
         std::time::Instant::now(),
     )
     .await;
@@ -1557,8 +1557,8 @@ async fn a_window_flush_the_store_refuses_retries_once_and_keeps_the_count() -> 
     assert!(authorization.denial_markers_pending());
 
     crate::flush_expired_denial_window(
-        gateway.store.clone(),
-        Arc::new(authorization.clone()),
+        &gateway.store.downgrade(),
+        &Arc::new(authorization.clone()),
         std::time::Instant::now(),
     )
     .await;
@@ -1604,7 +1604,7 @@ async fn a_disconnect_mid_write_neither_strands_nor_duplicates_a_count() -> Test
     assert!(disconnected.is_err());
     // The handed-out count is in flight, not pending and not lost.
     assert!(!fixture.authorization.denial_markers_pending());
-    drop(release.send(()));
+    assert!(release.send(()).is_ok());
 
     // The detached write still commits (the shutdown drains it) and settles
     // the marker exactly once; nothing is pending for the shutdown flush.
@@ -1627,5 +1627,142 @@ async fn a_disconnect_mid_write_neither_strands_nor_duplicates_a_count() -> Test
     );
     // Every admitted denial, the disconnected one included, was recorded.
     assert_eq!(records.len(), usize::try_from(limit)? + 2);
+    Ok(())
+}
+
+/// Wait, in real time, until the authorizer has settled every handed-out
+/// suppression count.
+async fn settled(authorization: &GatewayAuthorization) -> TestResult {
+    for _ in 0..500 {
+        if !authorization.denial_markers_in_flight() && !authorization.denial_markers_pending() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("suppression counts were not settled".into())
+}
+
+#[tokio::test]
+async fn the_window_timer_records_a_flood_followed_by_silence_by_itself() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let config = sqlite_config(&directory, "timer.sqlite")?;
+    let actor = EntityId::new();
+    // A paused Tokio clock would also move every executor deadline, which
+    // the store worker measures on the system clock, so the timer runs in
+    // real time on a short window instead. The flood takes milliseconds, far
+    // inside the window; the outcome checks below would fail if it did not.
+    let window = std::time::Duration::from_secs(3);
+    let fixture = fixture_with(
+        host(&config)?,
+        test_authorization_for(actor).with_denial_window(window),
+        actor,
+        EntityId::new(),
+    )
+    .await?;
+    let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
+    let outcomes = deny_reads(&fixture, limit + 2).await?;
+    let limit_index = usize::try_from(limit)?;
+    assert!(outcomes[..limit_index]
+        .iter()
+        .all(|outcome| matches!(outcome, GatewayError::AuthorizationDenied(_))));
+    assert!(outcomes[limit_index..]
+        .iter()
+        .all(|outcome| matches!(outcome, GatewayError::DenialRecordLimitReached { .. })));
+    assert!(fixture.authorization.denial_markers_pending());
+
+    // No flush is called here: only the timer armed by the first suppression
+    // can write the marker, at the window's end.
+    tokio::time::sleep(window).await;
+    settled(&fixture.authorization).await?;
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+
+    let records = denials_after_restart(&config)?;
+    assert_eq!(records.len(), limit_index + 1);
+    assert_eq!(
+        records[limit_index].1,
+        AuthorizationDenialEvidenceV1::Suppressed(
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 2)
+                .ok_or("marker")?
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_suppression_during_a_committed_flush_does_not_trigger_a_retry() -> TestResult {
+    let fixture = fixture(&StoreConfig::Memory).await?;
+    let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
+    deny_reads(&fixture, limit + 1).await?;
+    let authorization = Arc::new(fixture.authorization.clone());
+    let release = fixture
+        .gateway
+        .store
+        .block_worker_for_test()
+        .map_err(|error| format!("{error:?}"))?;
+
+    // The flush hands out its marker and waits on the blocked worker; a new
+    // suppression arrives meanwhile, then the worker is released.
+    let (flushed, suppressed) = tokio::join!(
+        crate::flush_denial_markers(&fixture.gateway.store, &authorization),
+        async {
+            let outcome = deny_reads(&fixture, 1).await;
+            assert!(release.send(()).is_ok());
+            outcome
+        }
+    );
+
+    assert!(flushed, "every marker this flush handed out committed");
+    assert!(matches!(
+        suppressed?.as_slice(),
+        [GatewayError::DenialRecordLimitReached { .. }]
+    ));
+    // The later suppression is pending for its own marker.
+    assert_eq!(
+        authorization.take_denial_markers().markers(),
+        &[
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 1)
+                .ok_or("marker")?
+        ]
+    );
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_window_timer_outliving_its_gateway_writes_nothing() -> TestResult {
+    let actor = EntityId::new();
+    let authorization = test_authorization_for(actor);
+    let gateway = Gateway::new_with_world_bodies_and_authorization(
+        Box::new(pos_store::memory::MemoryStore::new()),
+        [],
+        authorization.clone(),
+    );
+    let timeline = gateway.create_timeline("dropped-gateway").await?.id();
+    for _ in 0..=crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
+        assert!(gateway
+            .read_events_page_authorized(
+                &timeline.to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(EntityId::new(), timeline, 0, 1, WallTime::now()),
+            )
+            .await
+            .is_err());
+    }
+    let store = gateway.store.downgrade();
+    // Dropped without a shutdown: the weak timer handle keeps nothing alive.
+    drop(gateway);
+    assert!(store.upgrade().is_none());
+
+    crate::flush_expired_denial_window(
+        &store,
+        &Arc::new(authorization.clone()),
+        std::time::Instant::now(),
+    )
+    .await;
+    assert!(authorization.denial_markers_pending());
+    assert!(!authorization.denial_markers_in_flight());
     Ok(())
 }
