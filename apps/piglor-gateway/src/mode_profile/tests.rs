@@ -370,7 +370,7 @@ fn startup_predicates_enforce_d6_in_both_modes() {
         (Local, grants(owntracks.clone(), &[OwnTracks]), Ok(())),
         (
             Local,
-            grants(owntracks_spectator.clone(), &[OwnTracks, PublicReadOnly]),
+            grants(owntracks_spectator, &[OwnTracks, PublicReadOnly]),
             Err(E::OwnTracksRequiresLoopback),
         ),
         (Local, network_ledger.clone(), Err(E::NetworkLedgerSource)),

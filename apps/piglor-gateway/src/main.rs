@@ -1808,16 +1808,18 @@ mod erasure_gate_coverage_tests {
         let owner_key = directory.path().join("owner.key");
         let spectator: SocketAddr = "0.0.0.0:0".parse()?;
         let loopback: SocketAddr = "127.0.0.1:0".parse()?;
-        let mut air_gapped_spectator = local_request(spectator, Some(&sqlite_path), None);
+        let mut air_gapped_spectator = local_request(spectator, Some(sqlite_path.as_str()), None);
         air_gapped_spectator.profile = GatewayModeProfileIdV1::AirGapped;
         let mut air_gapped_owntracks =
-            local_request(loopback, Some(&sqlite_path), Some(&owner_key));
+            local_request(loopback, Some(sqlite_path.as_str()), Some(&owner_key));
         air_gapped_owntracks.profile = GatewayModeProfileIdV1::AirGapped;
-        let mut ungranted_spectator = local_request(spectator, Some(&sqlite_path), None);
+        let mut ungranted_spectator = local_request(spectator, Some(sqlite_path.as_str()), None);
         ungranted_spectator.network_grants.clear();
-        let mut ungranted_owntracks = local_request(loopback, Some(&sqlite_path), Some(&owner_key));
+        let mut ungranted_owntracks =
+            local_request(loopback, Some(sqlite_path.as_str()), Some(&owner_key));
         ungranted_owntracks.network_grants.clear();
-        let spectator_owntracks = local_request(spectator, Some(&sqlite_path), Some(&owner_key));
+        let spectator_owntracks =
+            local_request(spectator, Some(sqlite_path.as_str()), Some(&owner_key));
         for request in [
             air_gapped_spectator,
             air_gapped_owntracks,
@@ -1846,7 +1848,7 @@ mod erasure_gate_coverage_tests {
             assert!(!owner_key.exists());
         }
         let network_ledger = serve_request(
-            &local_request(loopback, Some(&sqlite_path), None),
+            &local_request(loopback, Some(sqlite_path.as_str()), None),
             None,
             std::future::pending(),
             LedgerEnvironment {
