@@ -35,6 +35,42 @@ use pos_store::plugin_trust_registry::{
 // ---------------------------------------------------------------------------
 
 #[test]
+fn genuine_registry_fixtures_have_content_proofs_bound_to_their_manifests() -> TestResult {
+    for fixture in [release_one(), release_two(), release_three()] {
+        let bundle = fixture.content_bundle()?;
+        let projection =
+            pos_crypto::plugin_execution::PluginExecutionProjectionV1::from_verified_bundle(
+                &bundle,
+            )?;
+        let proof = pos_plugin_content::validate_plugin_bundle_content_v1(&bundle)?;
+        assert_eq!(proof.pmf1_digest(), projection.pmf1_digest());
+        assert_eq!(proof.release_digest(), projection.release_digest());
+    }
+    let mut h = Harness::<Store>::open()?;
+    let material = h.env.genesis()?;
+    let fixture = release_one();
+    let bundle = fixture.content_bundle()?;
+    let projection = fixture.content_projection()?;
+    let signature = fixture.release_proof()?;
+    let content = pos_plugin_content::validate_plugin_bundle_content_v1(&bundle)?;
+    let receipt = h.store.admit(
+        &h.env.anchor,
+        &material.tps1,
+        &material.evidence,
+        &projection,
+        (&signature, &content),
+        TrustEvaluationPointV1::new(trusted(UTC)?, TICK),
+        activation(h.timeline, 1),
+    )?;
+    assert_eq!(receipt.decision().pmf1_digest(), content.pmf1_digest());
+    assert_eq!(
+        receipt.decision().release_digest(),
+        content.release_digest()
+    );
+    Ok(())
+}
+
+#[test]
 fn utc_second_floors_microseconds_at_the_boundaries() -> TestResult {
     let sample = |micros: u64| {
         TrustedUtcSecondV1::from_source(&mut ScriptedTrustedWallSourceV1::from_micros([micros]))
@@ -239,7 +275,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
@@ -251,7 +287,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
@@ -397,7 +433,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
@@ -409,7 +445,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                &one.release_proof()?,
+                (&one.release_proof()?, &one.content_proof()?),
                 TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
@@ -435,24 +471,45 @@ fn release_chain_allows_first_same_content_and_direct_successor_only() -> TestRe
     assert_eq!(h.store.active_release("scope", "plugin-a")?, None);
     let first = h.admit(&genesis, &release_one(), 1)??;
     assert_eq!(first.outcome(), PluginTrustCommitOutcomeV1::Committed);
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
-    assert_eq!(h.active("plugin-a")?.release_digest(), [0x11; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_one().pmf1_digest()?
+    );
+    assert_eq!(
+        h.active("plugin-a")?.release_digest(),
+        release_one().release_digest()?
+    );
 
     // Rule 2: the same content re-signed under a later publisher key epoch.
     h.admit(&genesis, &resigned, 2)??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x02; 32]);
-    assert_eq!(h.active("plugin-a")?.release_digest(), [0x11; 32]);
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), resigned.pmf1_digest()?);
+    assert_eq!(
+        h.active("plugin-a")?.release_digest(),
+        release_one().release_digest()?
+    );
 
     // Rule 3: the direct successor of the active release.
     h.admit(&genesis, &release_two(), 3)??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
-    assert_eq!(h.active("plugin-a")?.release_digest(), [0x12; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_two().pmf1_digest()?
+    );
+    assert_eq!(
+        h.active("plugin-a")?.release_digest(),
+        release_two().release_digest()?
+    );
 
     let rows = h.ledger()?;
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[1].previous_active_pmf1_digest(), None);
-    assert_eq!(rows[2].previous_active_pmf1_digest(), Some([0x01; 32]));
-    assert_eq!(rows[3].previous_active_pmf1_digest(), Some([0x02; 32]));
+    assert_eq!(
+        rows[2].previous_active_pmf1_digest(),
+        Some(release_one().pmf1_digest()?)
+    );
+    assert_eq!(
+        rows[3].previous_active_pmf1_digest(),
+        Some(resigned.pmf1_digest()?)
+    );
     Ok(())
 }
 
@@ -468,7 +525,10 @@ fn release_chain_rejects_a_never_seen_older_release_and_a_sibling_fork() -> Test
     for manifest in [&older, &sibling, &unlinked_successor] {
         h.assert_admit_denied(&genesis, manifest, RegistryError::ReleaseChainViolation)?;
     }
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_two().pmf1_digest()?
+    );
     Ok(())
 }
 
@@ -485,8 +545,14 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         &ManifestSpec::new("plugin-b", 0x21, 0x31, None),
         3,
     )??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
-    assert_eq!(h.active("plugin-b")?.pmf1_digest(), [0x21; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_two().pmf1_digest()?
+    );
+    assert_eq!(
+        h.active("plugin-b")?.pmf1_digest(),
+        ManifestSpec::new("plugin-b", 0x21, 0x31, None).pmf1_digest()?
+    );
     assert_eq!(h.active("plugin-b")?.plugin_id(), "plugin-b");
 
     // Another scope has its own pointers and decisions, even for the same PMF1 digest.
@@ -499,7 +565,10 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &release_one().projection()?,
-        &release_one().release_proof()?,
+        (
+            &release_one().release_proof()?,
+            &release_one().content_proof()?,
+        ),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 9),
     )?;
@@ -508,14 +577,15 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         .store
         .active_release("scope-two", "plugin-a")?
         .ok_or("no pointer")?;
-    assert_eq!(in_two.pmf1_digest(), [0x01; 32]);
+    assert_eq!(in_two.pmf1_digest(), release_one().pmf1_digest()?);
     assert_eq!(in_two.scope(), "scope-two");
     assert!(h
         .store
-        .retained_release_decision("scope", [0x03; 32])?
+        .retained_release_decision("scope", release_two().pmf1_digest()?)?
         .is_some());
     assert_eq!(
-        h.store.retained_release_decision("scope-two", [0x03; 32])?,
+        h.store
+            .retained_release_decision("scope-two", release_two().pmf1_digest()?)?,
         None
     );
     assert_eq!(h.store.ledger("scope-two")?.len(), 2);
@@ -543,7 +613,7 @@ fn the_disclosed_chain_deadlock_needs_a_publisher_relink() -> TestResult {
     let revoked = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![two.release_digest()],
+            revoked_artifacts: vec![two.release_digest()?],
             ..Spec::default()
         },
         &tps_after(&genesis),
@@ -691,7 +761,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -703,7 +773,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -735,7 +805,10 @@ fn an_unbound_fail_closed_erasure_gate_refuses_the_activation_fence() -> TestRes
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -781,7 +854,10 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
@@ -958,6 +1034,9 @@ fn readmitting_a_rolled_back_release_returns_its_original_receipt() -> TestResul
     assert_eq!(after.active, before.active);
     assert_eq!(after.events, before.events);
     assert_eq!(after.ledger, before.ledger);
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_one().pmf1_digest()?
+    );
     Ok(())
 }

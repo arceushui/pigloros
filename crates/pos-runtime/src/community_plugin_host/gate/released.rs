@@ -36,6 +36,7 @@ pub struct GatedCommunityReleaseV1 {
     tps1_digest: [u8; 32],
     utc_second: i64,
     tick: u64,
+    content_validation: ContentValidationV1,
 }
 
 impl GatedCommunityReleaseV1 {
@@ -46,6 +47,7 @@ impl GatedCommunityReleaseV1 {
         tps1_digest: [u8; 32],
         utc_second: i64,
         tick: u64,
+        content_validation: ContentValidationV1,
     ) -> Self {
         Self {
             component_digest: component_digest_v1(&component),
@@ -54,6 +56,7 @@ impl GatedCommunityReleaseV1 {
             tps1_digest,
             utc_second,
             tick,
+            content_validation,
         }
     }
 
@@ -62,7 +65,14 @@ impl GatedCommunityReleaseV1 {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn for_test(execution: PluginExecutionProjectionV1, component: Vec<u8>) -> Self {
-        Self::new(execution, component, [0x33; 32], 0, 0)
+        Self::new(
+            execution,
+            component,
+            [0x33; 32],
+            0,
+            0,
+            ContentValidationV1::NotPerformed,
+        )
     }
 
     /// The exact PMF1 Plugin ID.
@@ -138,11 +148,10 @@ impl GatedCommunityReleaseV1 {
 
     /// What was checked about the release content.
     ///
-    /// The registry stores no install receipt, so until #574 the fact is the constant
-    /// `NotPerformed`.
+    /// Successful signed gates report their freshly checked content fact.
     #[must_use]
     pub const fn content_validation(&self) -> ContentValidationV1 {
-        ContentValidationV1::NotPerformed
+        self.content_validation
     }
 }
 

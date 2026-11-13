@@ -43,6 +43,28 @@ fn outcome(result: Result1, launched: bool) -> CommunityPluginSubjectOutcomeV1 {
     }
 }
 
+#[test]
+fn pob2_encodes_both_content_validation_facts() {
+    let mut record = outcome(
+        Result1::Refused {
+            error: "InvalidManifest",
+            basis: None,
+            class: "PreExecutionRejection",
+        },
+        false,
+    );
+    let not_performed = outcome_bytes_of(&record);
+    record.content_validation = ContentValidationV1::BasicPackageV1;
+    let basic_package = outcome_bytes_of(&record);
+    assert_eq!(
+        &not_performed[..16],
+        &[0x8b, 0x64, b'P', b'O', b'B', b'2', 2, 0x61, b'p', 0xf6, 0xf6, 0xf6, 0xf6, 5, 0, 0]
+    );
+    assert_eq!(basic_package[15], 1);
+    assert_eq!(&basic_package[..15], &not_performed[..15]);
+    assert_eq!(&basic_package[16..], &not_performed[16..]);
+}
+
 /// The metering of the outcomes of [`committed()`].
 const METERING: MeteringV1 = MeteringV1 {
     startup_fuel: 1,
@@ -1033,6 +1055,54 @@ fn found_by(fake: &mut Fake, marker: &str) -> Result<Found, Box<dyn std::error::
     Ok((scan.found, record.matched))
 }
 
+// From the predecessor #893 golden, before the POB2 producer migration.
+const HISTORICAL_HEX: &str = "8b64504f4231026170f6f6f6f600000081664e6f7452756e";
+const HISTORICAL_BLAKE3: &str = "3ebf809ae8a23bd46133852fde36fa87cbf9ff1daaffbf99707642d777f2f149";
+
+/// Resolve the historical bytes through the existing digest-addressed composite.
+fn historical_outcome_piece() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let historical = hex::decode(HISTORICAL_HEX).ok_or("historical POB1 hex")?;
+    let composite = crate::test_support::composite(&[&historical])?;
+    let pieces = PiecesV1::from_bytes(&composite)?;
+    let digest = *blake3::hash(&historical).as_bytes();
+    let archived = pieces.get(&digest).ok_or("historical outcome piece")?;
+    assert_eq!(archived, historical);
+    Ok(archived.to_vec())
+}
+
+/// Inspect historical field meanings only in the test, without an upcaster.
+fn check_historical_outcome_fields(retained: &[u8]) -> TestResult {
+    let value: ciborium::value::Value = ciborium::from_reader(retained)?;
+    let fields = value.as_array().ok_or("historical POB1 array")?;
+    assert_eq!(fields.len(), 11);
+    assert_eq!(fields[0], ciborium::value::Value::Text("POB1".to_owned()));
+    assert_eq!(fields[1], ciborium::value::Value::Integer(2_u8.into()));
+    assert_eq!(fields[9], ciborium::value::Value::Integer(0_u8.into()));
+    // R13 code 0 means the content check was not performed.
+    Ok(())
+}
+
+/// The original R13 `NotRun` POB1 v2 golden remains opaque outcome evidence when scanned.
+#[test]
+fn historical_pob1_outcome_is_scanned_without_reencoding() -> TestResult {
+    let historical = historical_outcome_piece()?;
+    let mut fake = Fake {
+        outcome: historical.clone(),
+        ..Fake::default()
+    };
+    assert_eq!(found_by(&mut fake, "POB1")?.0, [ScanSource::Outcome]);
+    let retained = fake.outcome_bytes();
+    assert_eq!(retained, historical);
+    assert_eq!(hex::encode(&retained), HISTORICAL_HEX);
+    assert_eq!(
+        hex::encode(blake3::hash(&retained).as_bytes()),
+        HISTORICAL_BLAKE3
+    );
+
+    check_historical_outcome_fields(&retained)?;
+    Ok(())
+}
+
 #[test]
 fn a_scan_finds_the_marker_in_the_source_that_holds_it() -> TestResult {
     let mut events = Fake {
@@ -1608,7 +1678,7 @@ fn the_outcome_record_encoding_has_a_golden() {
     };
     assert_eq!(
         hex::encode(&outcome_bytes_of(&not_run)),
-        "8b64504f4231026170f6f6f6f600000081664e6f7452756e"
+        "8b64504f4232026170f6f6f6f600000081664e6f7452756e"
     );
 }
 
@@ -1628,7 +1698,7 @@ fn a_trapped_result_encodes_its_trap_class_and_host_class() {
     assert_eq!(
         hex::encode(&outcome_bytes_of(&record)),
         concat!(
-            "8b64504f4231026170f6f6f6f60000008367547261707065646b756e72656163",
+            "8b64504f4232026170f6f6f6f60000008367547261707065646b756e72656163",
             "6861626c656b4f7065726174696f6e616c",
         )
     );
@@ -1669,7 +1739,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
         output_usage: Some(output_usage),
     };
     let golden = concat!(
-        "8b64504f42310261705820010101010101010101010101010101010101010101",
+        "8b64504f42320261705820010101010101010101010101010101010101010101",
         "0101010101010101010101582002020202020202020202020202020202020202",
         "0202020202020202020202020258200303030303030303030303030303030303",
         "0303030303030303030303030303035820040404040404040404040404040404",
@@ -1696,7 +1766,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
     assert_eq!(
         hex::encode(&outcome_bytes_of(&record)),
         concat!(
-            "8b64504f4231026170f658200202020202020202020202020202020202020202",
+            "8b64504f4232026170f658200202020202020202020202020202020202020202",
             "020202020202020202020202f6f619012c00008466537461676564f6f6f6",
         )
     );
@@ -1709,7 +1779,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "PreExecutionRejection",
             },
             concat!(
-                "8b64504f4231026170f6f6f6f600000084675265667573656473417274696661",
+                "8b64504f4232026170f6f6f6f600000084675265667573656473417274696661",
                 "6374547275737444656e696564694e6f74416374697665755072654578656375",
                 "74696f6e52656a656374696f6e",
             ),
@@ -1721,7 +1791,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "PreExecutionRejection",
             },
             concat!(
-                "8b64504f4231026170f6f6f6f60000008467526566757365646f496e636f6d70",
+                "8b64504f4232026170f6f6f6f60000008467526566757365646f496e636f6d70",
                 "617469626c65416269f675507265457865637574696f6e52656a656374696f6e",
             ),
         ),
@@ -1731,13 +1801,13 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "Authoritative",
             },
             concat!(
-                "8b64504f4231026170f6f6f6f600000083664661696c65646d4675656c457868",
+                "8b64504f4232026170f6f6f6f600000083664661696c65646d4675656c457868",
                 "6175737465646d417574686f7269746174697665",
             ),
         ),
         (
             Result1::Discarded,
-            "8b64504f4231026170f6f6f6f60000008169446973636172646564",
+            "8b64504f4232026170f6f6f6f60000008169446973636172646564",
         ),
     ];
     for (result, expected) in cases {

@@ -79,6 +79,9 @@ pub enum PluginTrustPolicyRegistryErrorV1 {
     /// digest, or public key than the registry's own authorization of the projection.
     #[error("release proof does not bind the authorized release and key")]
     ReleaseProofMismatch,
+    /// Content proof names a different complete PMF1 or release.
+    #[error("content proof does not match the authorized release")]
+    ContentProofMismatch,
     /// A pure TPS1 bridge check failed.
     #[error("TPS1 bridge: {0}")]
     Bridge(#[from] PluginTrustBridgeErrorV1),
