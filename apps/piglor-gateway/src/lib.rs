@@ -3268,12 +3268,8 @@ impl Gateway {
             Ok(batch) => batch,
             Err(suppression) => {
                 self.schedule_denial_flush(authorization, suppression.flush_at);
-                let retry_after = suppression.retry_after;
                 return GatewayError::DenialRecordLimitReached {
-                    retry_after_seconds: retry_after
-                        .as_secs()
-                        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
-                        .max(1),
+                    retry_after_seconds: whole_retry_seconds(suppression.retry_after),
                 };
             }
         };
@@ -3582,6 +3578,15 @@ impl Gateway {
             authorization: None,
         }
     }
+}
+
+/// Whole seconds until a retry may succeed: a partial second rounds up, and
+/// a retry is never advertised sooner than one second.
+fn whole_retry_seconds(retry_after: std::time::Duration) -> u64 {
+    retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1)
 }
 
 /// Pause before the one retry of a failed window flush.

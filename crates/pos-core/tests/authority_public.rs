@@ -2602,3 +2602,37 @@ fn a_suppression_marker_counts_a_closed_window_without_naming_anyone() {
         );
     }
 }
+
+#[test]
+fn consent_is_valid_from_its_first_instant_and_expired_just_before_it() {
+    let principal = principal(1);
+    let actor = entity(10);
+    let grant = root_grant(principal.clone(), vec![actor]);
+    let at_time = request(principal.clone(), actor).at_time();
+    let starting = |valid_from: WallTime| {
+        let mut consent = consent_draft_for(8, actor);
+        consent.valid_from = valid_from;
+        let mut draft = request_draft(authenticated(principal.clone()), actor);
+        draft.consent = ConsentEvidenceV1::Resolved {
+            grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
+        };
+        let request = ok(AuthorizationRequestV1::try_from_draft(draft));
+        (
+            decision_for(&request, std::slice::from_ref(&grant)).outcome(),
+            expiry_for(&request, std::slice::from_ref(&grant)),
+        )
+    };
+    let micros = at_time.as_micros();
+    assert_eq!(
+        starting(WallTime::from_micros(micros - 1)),
+        (AuthorizationOutcomeV1::Active, None)
+    );
+    assert_eq!(starting(at_time), (AuthorizationOutcomeV1::Active, None));
+    assert_eq!(
+        starting(WallTime::from_micros(micros + 1)),
+        (
+            AuthorizationOutcomeV1::Expired,
+            Some(AuthorizationExpiryV1::Consent)
+        )
+    );
+}
