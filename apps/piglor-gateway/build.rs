@@ -8,8 +8,8 @@
 
 use std::{env, error::Error, fmt::Write as _, fs, path::PathBuf};
 
-/// The crate's own GMP1 codec and declaration compiler, shared with the
-/// crate's tests.
+// The crate's own GMP1 codec and declaration compiler, shared with the
+// crate's tests.
 #[path = "src/mode_profile/compiler.rs"]
 pub mod compiler;
 

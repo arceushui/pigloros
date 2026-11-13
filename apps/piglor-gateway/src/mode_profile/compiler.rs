@@ -1,6 +1,7 @@
-//! The build script's root of the crate's GMP1 codec and declaration
-//! compiler (`build.rs` loads this file; the crate itself compiles the same
-//! two modules under `mode_profile`).
+//! Build-time root of the GMP1 codec.
+//!
+//! `build.rs` loads this file; the crate itself compiles the same two
+//! modules under `mode_profile`.
 
 mod declaration;
 mod gmp1;
