@@ -5,8 +5,8 @@
 //! dedicated OS thread.
 use crate::{
     authorization::{
-        DenialEvidenceBatch, GatewayAuthorization, GatewayAuthorizationDecision,
-        GatewayAuthorizationError, RecordedAuthorityDenial,
+        DenialEvidenceBatch, DenialEvidenceReceipt, GatewayAuthorization,
+        GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
     AdmittedAction, EventNotice,
 };
@@ -1479,7 +1479,7 @@ impl StoreExecutor {
         &self,
         authorization: Arc<GatewayAuthorization>,
         batch: DenialEvidenceBatch,
-    ) -> Result<Option<RecordedAuthorityDenial>, StoreExecutorError> {
+    ) -> Result<DenialEvidenceReceipt, StoreExecutorError> {
         submit!(self, |reply| Command::Action(Box::new(
             DenialEvidenceCommand {
                 authorization,
@@ -2213,14 +2213,14 @@ impl WorkerCommandV1 for PurgeActionReceiptsCommand {
 /// Append one batch of denial evidence to the host's authority store.
 ///
 /// It runs as its own Write-class command, after the caller released the
-/// commit fence, so an authority replacement never waits behind it. A failed
-/// write records nothing durable for the denial and replies `None`: the
-/// denial is then not answered. Only the test-only `Generic` and `Gateway`
-/// stores lack the authority ports; production always runs on `Host`.
+/// commit fence, so an authority replacement never waits behind it. The
+/// receipt names exactly what committed; a host fault commits nothing. Only
+/// the test-only `Generic` and `Gateway` stores lack the authority ports;
+/// production always runs on `Host`.
 struct DenialEvidenceCommand {
     authorization: Arc<GatewayAuthorization>,
     batch: DenialEvidenceBatch,
-    reply: oneshot::Sender<Result<Option<RecordedAuthorityDenial>, StoreExecutorError>>,
+    reply: oneshot::Sender<Result<DenialEvidenceReceipt, StoreExecutorError>>,
 }
 
 impl WorkerCommandV1 for DenialEvidenceCommand {
@@ -2230,7 +2230,7 @@ impl WorkerCommandV1 for DenialEvidenceCommand {
             batch,
             reply,
         } = *self;
-        let recorded = match &mut state.store {
+        let receipt = match &mut state.store {
             ExecutorStore::Host(host, _) => host
                 .command_sender()
                 .and_then(|mut sender| {
@@ -2238,13 +2238,13 @@ impl WorkerCommandV1 for DenialEvidenceCommand {
                         authorization.record_denial(ports, &batch)
                     })
                 })
-                .ok()
-                .and_then(Result::ok)
-                .flatten(),
+                .unwrap_or_default(),
             #[cfg(test)]
-            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                DenialEvidenceReceipt::default()
+            }
         };
-        drop(reply.send(Ok(recorded)));
+        drop(reply.send(Ok(receipt)));
     }
 
     fn expire_unrun(self: Box<Self>) {

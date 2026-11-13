@@ -33,11 +33,12 @@ pub mod problem;
 pub mod startup;
 
 pub use authorization::{
-    AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
-    GatewayAuthenticationRequest, GatewayAuthorityDenial, GatewayAuthorization,
-    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
-    GatewayAuthorizationRequest, GatewayAuthorizationTarget, LocalAuthenticationAdapter,
-    PendingAuthorityDenial, RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
+    AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
+    GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
+    GatewayAuthorityDenial, GatewayAuthorization, GatewayAuthorizationAudit,
+    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
+    GatewayAuthorizationTarget, LocalAuthenticationAdapter, PendingAuthorityDenial,
+    RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
     MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
@@ -2648,16 +2649,9 @@ impl Gateway {
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
         if let Some(authorization) = &self.authorization {
-            // Record the open denial-record window's suppression count once;
-            // a store that cannot take it any more loses only that count.
-            drop(
-                self.store
-                    .record_denial_evidence(
-                        Arc::clone(authorization),
-                        authorization.close_denial_window(),
-                    )
-                    .await,
-            );
+            // Record the unrecorded suppression counts once before the
+            // store stops; a count the store cannot take stays pending.
+            self.flush_denial_markers(authorization).await;
         }
         self.store.shutdown().await.map_err(Into::into)
     }
@@ -3261,23 +3255,71 @@ impl Gateway {
     ) -> GatewayError {
         let batch = match authorization.admit_denial_record(pending) {
             Ok(batch) => batch,
-            Err(retry_after) => {
+            Err(suppression) => {
+                self.schedule_denial_flush(authorization, suppression.flush_at);
+                let retry_after = suppression.retry_after;
                 return GatewayError::DenialRecordLimitReached {
                     retry_after_seconds: retry_after
                         .as_secs()
                         .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
                         .max(1),
-                }
+                };
             }
         };
-        match self
-            .store
-            .record_denial_evidence(Arc::clone(authorization), batch)
-            .await
-        {
+        match self.write_denial_evidence(authorization, batch).await {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
             Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
             Err(error) => error.into(),
+        }
+    }
+
+    /// Write one batch of denial evidence and settle its markers: a marker
+    /// whose record committed is acknowledged, every other handed-out count
+    /// (store fault, full log, dropped or unknown command) stays pending for
+    /// a later marker.
+    async fn write_denial_evidence(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        batch: DenialEvidenceBatch,
+    ) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
+        let handed_out = batch.markers().to_vec();
+        let receipt = self
+            .store
+            .record_denial_evidence(Arc::clone(authorization), batch)
+            .await;
+        authorization.settle_denial_markers(
+            &handed_out,
+            receipt
+                .as_ref()
+                .map_or(&[][..], DenialEvidenceReceipt::committed),
+        );
+        receipt.map(|receipt| receipt.denial())
+    }
+
+    /// Record every unrecorded suppression count as markers; nothing is
+    /// written when no count is pending.
+    async fn flush_denial_markers(&self, authorization: &Arc<GatewayAuthorization>) {
+        let batch = authorization.take_denial_markers();
+        if !batch.is_empty() {
+            drop(self.write_denial_evidence(authorization, batch).await);
+        }
+    }
+
+    /// Flush a saturated window's markers when it expires, so a flood
+    /// followed by silence still leaves its count. One timer is armed per
+    /// window, at its first suppression, and its write is not rate-limited.
+    fn schedule_denial_flush(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        flush_at: Option<std::time::Instant>,
+    ) {
+        if let Some(deadline) = flush_at {
+            let gateway = self.clone();
+            let authorization = Arc::clone(authorization);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                gateway.flush_denial_markers(&authorization).await;
+            });
         }
     }
 

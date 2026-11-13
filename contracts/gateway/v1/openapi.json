@@ -321,7 +321,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current minute; the denial is neither recorded nor answered as a denial.",
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
             "headers": {
               "Retry-After": {
                 "schema": {
@@ -461,7 +461,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current minute; the denial is neither recorded nor answered as a denial.",
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
             "headers": {
               "Retry-After": {
                 "schema": {

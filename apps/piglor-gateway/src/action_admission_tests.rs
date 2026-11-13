@@ -1439,3 +1439,96 @@ async fn a_denial_whose_store_command_cannot_run_is_answered_with_the_store_erro
     drop(fixture);
     Ok(())
 }
+
+/// Deny `count` reads by one outside actor; the pinned Principal is the same
+/// for every actor, so its denial-record bound applies to all of them.
+async fn deny_reads(fixture: &Fixture, count: u32) -> TestResult<Vec<GatewayError>> {
+    let mut outcomes = Vec::new();
+    for _ in 0..count {
+        outcomes.push(
+            fixture
+                .gateway
+                .read_events_page_authorized(
+                    &fixture.timeline.to_string(),
+                    0,
+                    1,
+                    GatewayAuthorizationRequest::read(
+                        EntityId::new(),
+                        fixture.timeline,
+                        0,
+                        1,
+                        WallTime::now(),
+                    ),
+                )
+                .await
+                .err()
+                .ok_or("a read by an outside actor is denied")?,
+        );
+    }
+    Ok(outcomes)
+}
+
+#[tokio::test]
+async fn a_flood_then_silence_is_counted_when_the_window_expires() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let config = sqlite_config(&directory, "silence.sqlite")?;
+    let actor = EntityId::new();
+    let window = std::time::Duration::from_secs(3);
+    let fixture = fixture_with(
+        host(&config)?,
+        test_authorization_for(actor).with_denial_window(window),
+        actor,
+        EntityId::new(),
+    )
+    .await?;
+    let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
+    let outcomes = deny_reads(&fixture, limit + 2).await?;
+    assert!(outcomes[..usize::try_from(limit)?]
+        .iter()
+        .all(|outcome| matches!(outcome, GatewayError::AuthorizationDenied(_))));
+    assert!(outcomes[usize::try_from(limit)?..]
+        .iter()
+        .all(|outcome| matches!(outcome, GatewayError::DenialRecordLimitReached { .. })));
+
+    // No further denial arrives; the window's own timer records its count.
+    tokio::time::sleep(window + std::time::Duration::from_secs(1)).await;
+    assert!(fixture.authorization.take_denial_markers().is_empty());
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+
+    let records = denials_after_restart(&config)?;
+    assert_eq!(records.len(), usize::try_from(limit)? + 1);
+    assert_eq!(
+        records[usize::try_from(limit)?].1,
+        AuthorizationDenialEvidenceV1::Suppressed(
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 2)
+                .ok_or("marker")?
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_shutdown_flush_the_store_cannot_take_keeps_the_count_pending() -> TestResult {
+    let fixture = fixture(&StoreConfig::Memory).await?;
+    let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
+    deny_reads(&fixture, limit + 1).await?;
+    fixture
+        .gateway
+        .store
+        .shutdown()
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+
+    // The flush meets a closed executor, so its count stays pending.
+    drop(fixture.gateway.shutdown().await);
+    assert_eq!(
+        fixture.authorization.take_denial_markers().markers(),
+        &[
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 1)
+                .ok_or("marker")?
+        ]
+    );
+    drop(fixture);
+    Ok(())
+}
