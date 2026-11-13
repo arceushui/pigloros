@@ -31,6 +31,10 @@ fn settings(view: &ICoreWebView2) -> NativeResult<ICoreWebView2Settings> {
     unsafe { view.Settings() }.map_err(failed)
 }
 
+fn typed_settings<T: Interface>(view: &ICoreWebView2) -> NativeResult<T> {
+    settings(view)?.cast().map_err(missing)
+}
+
 pub(super) fn set_bool(
     view: &ICoreWebView2,
     controller: &ICoreWebView2Controller,
@@ -38,87 +42,82 @@ pub(super) fn set_bool(
     value: bool,
 ) -> NativeResult<()> {
     match property {
-        BoolProperty::Script => {
-            let property = settings(view)?;
+        BoolProperty::Script => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsScriptEnabled(value) }
-        }
-        BoolProperty::WebMessage => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::WebMessage => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsWebMessageEnabled(value) }
-        }
-        BoolProperty::ScriptDialogs => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::ScriptDialogs => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetAreDefaultScriptDialogsEnabled(value) }
-        }
-        BoolProperty::StatusBar => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::StatusBar => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsStatusBarEnabled(value) }
-        }
-        BoolProperty::DevTools => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::DevTools => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetAreDevToolsEnabled(value) }
-        }
-        BoolProperty::ContextMenus => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::ContextMenus => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetAreDefaultContextMenusEnabled(value) }
-        }
-        BoolProperty::HostObjects => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::HostObjects => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetAreHostObjectsAllowed(value) }
-        }
-        BoolProperty::Zoom => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::Zoom => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsZoomControlEnabled(value) }
-        }
-        BoolProperty::BuiltInErrorPage => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::BuiltInErrorPage => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsBuiltInErrorPageEnabled(value) }
-        }
+        }),
         BoolProperty::BrowserAccelerators => {
-            let property: ICoreWebView2Settings3 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
-            unsafe { property.SetAreBrowserAcceleratorKeysEnabled(value) }
+            typed_settings::<ICoreWebView2Settings3>(view).map(|property| {
+                // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
+                unsafe { property.SetAreBrowserAcceleratorKeysEnabled(value) }
+            })
         }
         BoolProperty::PasswordAutosave => {
-            let property: ICoreWebView2Settings4 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
-            unsafe { property.SetIsPasswordAutosaveEnabled(value) }
+            typed_settings::<ICoreWebView2Settings4>(view).map(|property| {
+                // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
+                unsafe { property.SetIsPasswordAutosaveEnabled(value) }
+            })
         }
-        BoolProperty::Autofill => {
-            let property: ICoreWebView2Settings4 = settings(view)?.cast().map_err(missing)?;
+        BoolProperty::Autofill => typed_settings::<ICoreWebView2Settings4>(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsGeneralAutofillEnabled(value) }
-        }
-        BoolProperty::PinchZoom => {
-            let property: ICoreWebView2Settings5 = settings(view)?.cast().map_err(missing)?;
+        }),
+        BoolProperty::PinchZoom => typed_settings::<ICoreWebView2Settings5>(view).map(|property| {
             // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
             unsafe { property.SetIsPinchZoomEnabled(value) }
-        }
+        }),
         BoolProperty::SwipeNavigation => {
-            let property: ICoreWebView2Settings6 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
-            unsafe { property.SetIsSwipeNavigationEnabled(value) }
+            typed_settings::<ICoreWebView2Settings6>(view).map(|property| {
+                // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
+                unsafe { property.SetIsSwipeNavigationEnabled(value) }
+            })
         }
         BoolProperty::ReputationChecking => {
-            let property: ICoreWebView2Settings8 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
-            unsafe { property.SetIsReputationCheckingRequired(value) }
+            typed_settings::<ICoreWebView2Settings8>(view).map(|property| {
+                // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
+                unsafe { property.SetIsReputationCheckingRequired(value) }
+            })
         }
-        BoolProperty::ExternalDrop => {
-            let property: ICoreWebView2Controller4 = controller.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
-            unsafe { property.SetAllowExternalDrop(value) }
-        }
-    }
+        BoolProperty::ExternalDrop => controller
+            .cast::<ICoreWebView2Controller4>()
+            .map_err(missing)
+            .map(|property| {
+                // SAFETY: live same-STA typed interface; the bool is supplied by the safe policy.
+                unsafe { property.SetAllowExternalDrop(value) }
+            }),
+    }?
     .map_err(failed)
 }
 
@@ -129,87 +128,82 @@ pub(super) fn get_bool(
 ) -> NativeResult<bool> {
     let mut value = BOOL::default();
     match property {
-        BoolProperty::Script => {
-            let property = settings(view)?;
+        BoolProperty::Script => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsScriptEnabled(&raw mut value) }
-        }
-        BoolProperty::WebMessage => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::WebMessage => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsWebMessageEnabled(&raw mut value) }
-        }
-        BoolProperty::ScriptDialogs => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::ScriptDialogs => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.AreDefaultScriptDialogsEnabled(&raw mut value) }
-        }
-        BoolProperty::StatusBar => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::StatusBar => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsStatusBarEnabled(&raw mut value) }
-        }
-        BoolProperty::DevTools => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::DevTools => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.AreDevToolsEnabled(&raw mut value) }
-        }
-        BoolProperty::ContextMenus => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::ContextMenus => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.AreDefaultContextMenusEnabled(&raw mut value) }
-        }
-        BoolProperty::HostObjects => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::HostObjects => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.AreHostObjectsAllowed(&raw mut value) }
-        }
-        BoolProperty::Zoom => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::Zoom => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsZoomControlEnabled(&raw mut value) }
-        }
-        BoolProperty::BuiltInErrorPage => {
-            let property = settings(view)?;
+        }),
+        BoolProperty::BuiltInErrorPage => settings(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsBuiltInErrorPageEnabled(&raw mut value) }
-        }
+        }),
         BoolProperty::BrowserAccelerators => {
-            let property: ICoreWebView2Settings3 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
-            unsafe { property.AreBrowserAcceleratorKeysEnabled(&raw mut value) }
+            typed_settings::<ICoreWebView2Settings3>(view).map(|property| {
+                // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
+                unsafe { property.AreBrowserAcceleratorKeysEnabled(&raw mut value) }
+            })
         }
         BoolProperty::PasswordAutosave => {
-            let property: ICoreWebView2Settings4 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
-            unsafe { property.IsPasswordAutosaveEnabled(&raw mut value) }
+            typed_settings::<ICoreWebView2Settings4>(view).map(|property| {
+                // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
+                unsafe { property.IsPasswordAutosaveEnabled(&raw mut value) }
+            })
         }
-        BoolProperty::Autofill => {
-            let property: ICoreWebView2Settings4 = settings(view)?.cast().map_err(missing)?;
+        BoolProperty::Autofill => typed_settings::<ICoreWebView2Settings4>(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsGeneralAutofillEnabled(&raw mut value) }
-        }
-        BoolProperty::PinchZoom => {
-            let property: ICoreWebView2Settings5 = settings(view)?.cast().map_err(missing)?;
+        }),
+        BoolProperty::PinchZoom => typed_settings::<ICoreWebView2Settings5>(view).map(|property| {
             // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
             unsafe { property.IsPinchZoomEnabled(&raw mut value) }
-        }
+        }),
         BoolProperty::SwipeNavigation => {
-            let property: ICoreWebView2Settings6 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
-            unsafe { property.IsSwipeNavigationEnabled(&raw mut value) }
+            typed_settings::<ICoreWebView2Settings6>(view).map(|property| {
+                // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
+                unsafe { property.IsSwipeNavigationEnabled(&raw mut value) }
+            })
         }
         BoolProperty::ReputationChecking => {
-            let property: ICoreWebView2Settings8 = settings(view)?.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
-            unsafe { property.IsReputationCheckingRequired(&raw mut value) }
+            typed_settings::<ICoreWebView2Settings8>(view).map(|property| {
+                // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
+                unsafe { property.IsReputationCheckingRequired(&raw mut value) }
+            })
         }
-        BoolProperty::ExternalDrop => {
-            let property: ICoreWebView2Controller4 = controller.cast().map_err(missing)?;
-            // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
-            unsafe { property.AllowExternalDrop(&raw mut value) }
-        }
-    }
+        BoolProperty::ExternalDrop => controller
+            .cast::<ICoreWebView2Controller4>()
+            .map_err(missing)
+            .map(|property| {
+                // SAFETY: live same-STA typed interface and initialized uniquely writable BOOL.
+                unsafe { property.AllowExternalDrop(&raw mut value) }
+            }),
+    }?
     .map_err(failed)?;
     Ok(value.as_bool())
 }

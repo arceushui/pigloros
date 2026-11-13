@@ -189,6 +189,32 @@ impl Surface {
             return Err(());
         }
         let browser = self.identity.ok_or(())?;
+        self.exit_boundary_owners(browser)?;
+        let ceremony = self.exit_boundary_record(browser, deadline)?;
+        let code = self.exit_boundary_code(browser, ceremony, deadline)?;
+        if Instant::now() >= deadline
+            || (self.events.exited().is_some()
+                && !self.events.matching_exit_at_boundary(browser.browser_pid))
+        {
+            return Err(());
+        }
+        let state = crate::ProcessExitState {
+            generation: 1,
+            record_count: 1,
+        };
+        match (self.events.exited(), code) {
+            (None, None) => Ok(ExitBoundary::ActiveStatus(state)),
+            (None, Some(0)) => Ok(ExitBoundary::ObjectExitedAwaitingSdk(state)),
+            (Some(_), Some(0)) => Ok(ExitBoundary::AlreadyExited(state)),
+            _ => Err(()),
+        }
+    }
+
+    /// The controller close has completed and only the exit-phase owners remain.
+    fn exit_boundary_owners(
+        &self,
+        browser: pos_owner_bridge::ProcessIdentity,
+    ) -> std::result::Result<(), ()> {
         if !self.exit_fault_phase_reached()
             || self.close != CloseState::Idle
             || self.failed_open
@@ -211,6 +237,15 @@ impl Surface {
         }) {
             return Err(());
         }
+        Ok(())
+    }
+
+    /// The one durable record still names this ceremony, folder and browser.
+    fn exit_boundary_record(
+        &mut self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        deadline: Instant,
+    ) -> std::result::Result<pos_owner_bridge_codec::CeremonyId, ()> {
         let (spec, folder) = self
             .opening_spec
             .as_ref()
@@ -238,6 +273,16 @@ impl Surface {
         {
             return Err(());
         }
+        Ok(spec.ceremony_id)
+    }
+
+    /// The exit code of the handle retained before the controller close, if it has one.
+    fn exit_boundary_code(
+        &self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        ceremony: pos_owner_bridge_codec::CeremonyId,
+        deadline: Instant,
+    ) -> std::result::Result<Option<u32>, ()> {
         let (capture, handle) = self
             .exit_capture
             .as_ref()
@@ -245,29 +290,13 @@ impl Surface {
             .ok_or(())?;
         if capture.consumed
             || capture.deadline != deadline
-            || capture.ceremony != spec.ceremony_id
+            || capture.ceremony != ceremony
             || handle.identity() != browser
         {
             return Err(());
         }
         self.native.retained_exit_membership(handle.as_ref())?;
-        let code = handle.observe()?;
-        if Instant::now() >= deadline
-            || (self.events.exited().is_some()
-                && !self.events.matching_exit_at_boundary(browser.browser_pid))
-        {
-            return Err(());
-        }
-        let state = crate::ProcessExitState {
-            generation: 1,
-            record_count: 1,
-        };
-        match (self.events.exited(), code) {
-            (None, None) => Ok(ExitBoundary::ActiveStatus(state)),
-            (None, Some(0)) => Ok(ExitBoundary::ObjectExitedAwaitingSdk(state)),
-            (Some(_), Some(0)) => Ok(ExitBoundary::AlreadyExited(state)),
-            _ => Err(()),
-        }
+        handle.observe()
     }
 
     pub(in crate::adapter) fn consume_exit_capture(

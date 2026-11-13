@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 375
+line = 404
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 380
+line = 409
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 440
+line = 469
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 452
+line = 481
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 481
+line = 510
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 542
+line = 571
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -877,7 +877,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 44
+line = 47
 function = "set_bool"
 operation = "property.SetIsScriptEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -885,7 +885,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 49
+line = 51
 function = "set_bool"
 operation = "property.SetIsWebMessageEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -893,7 +893,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 54
+line = 55
 function = "set_bool"
 operation = "property.SetAreDefaultScriptDialogsEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -909,7 +909,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 64
+line = 63
 function = "set_bool"
 operation = "property.SetAreDevToolsEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -917,7 +917,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 69
+line = 67
 function = "set_bool"
 operation = "property.SetAreDefaultContextMenusEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -925,7 +925,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 74
+line = 71
 function = "set_bool"
 operation = "property.SetAreHostObjectsAllowed(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -933,7 +933,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 79
+line = 75
 function = "set_bool"
 operation = "property.SetIsZoomControlEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -941,7 +941,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 84
+line = 79
 function = "set_bool"
 operation = "property.SetIsBuiltInErrorPageEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -949,7 +949,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 89
+line = 84
 function = "set_bool"
 operation = "property.SetAreBrowserAcceleratorKeysEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -957,7 +957,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 94
+line = 90
 function = "set_bool"
 operation = "property.SetIsPasswordAutosaveEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -965,7 +965,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 99
+line = 95
 function = "set_bool"
 operation = "property.SetIsGeneralAutofillEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -973,7 +973,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 104
+line = 99
 function = "set_bool"
 operation = "property.SetIsPinchZoomEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -981,7 +981,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 109
+line = 104
 function = "set_bool"
 operation = "property.SetIsSwipeNavigationEnabled(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -989,7 +989,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 114
+line = 110
 function = "set_bool"
 operation = "property.SetIsReputationCheckingRequired(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -997,7 +997,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 119
+line = 118
 function = "set_bool"
 operation = "property.SetAllowExternalDrop(value)"
 invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
@@ -1005,7 +1005,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 135
+line = 133
 function = "get_bool"
 operation = "property.IsScriptEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1013,7 +1013,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 140
+line = 137
 function = "get_bool"
 operation = "property.IsWebMessageEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1021,7 +1021,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 145
+line = 141
 function = "get_bool"
 operation = "property.AreDefaultScriptDialogsEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1029,7 +1029,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 150
+line = 145
 function = "get_bool"
 operation = "property.IsStatusBarEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1037,7 +1037,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 155
+line = 149
 function = "get_bool"
 operation = "property.AreDevToolsEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1045,7 +1045,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 160
+line = 153
 function = "get_bool"
 operation = "property.AreDefaultContextMenusEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1053,7 +1053,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 165
+line = 157
 function = "get_bool"
 operation = "property.AreHostObjectsAllowed(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1061,7 +1061,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 170
+line = 161
 function = "get_bool"
 operation = "property.IsZoomControlEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1069,7 +1069,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 175
+line = 165
 function = "get_bool"
 operation = "property.IsBuiltInErrorPageEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1077,7 +1077,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 180
+line = 170
 function = "get_bool"
 operation = "property.AreBrowserAcceleratorKeysEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1085,7 +1085,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 185
+line = 176
 function = "get_bool"
 operation = "property.IsPasswordAutosaveEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1093,7 +1093,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 190
+line = 181
 function = "get_bool"
 operation = "property.IsGeneralAutofillEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1101,7 +1101,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 195
+line = 185
 function = "get_bool"
 operation = "property.IsPinchZoomEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1109,7 +1109,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 200
+line = 190
 function = "get_bool"
 operation = "property.IsSwipeNavigationEnabled(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1117,7 +1117,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 205
+line = 196
 function = "get_bool"
 operation = "property.IsReputationCheckingRequired(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1125,7 +1125,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 210
+line = 204
 function = "get_bool"
 operation = "property.AllowExternalDrop(&raw mut value)"
 invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
@@ -1133,7 +1133,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 222
+line = 216
 function = "options"
 operation = "options.SetAdditionalBrowserArguments(w!( ))"
 invariant = "live unshared STA options and static empty browser arguments."
@@ -1141,7 +1141,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 225
+line = 219
 function = "options"
 operation = "exclusive.SetExclusiveUserDataFolderAccess(required.exclusive_folder)"
 invariant = "live typed STA options; value is selected by the safe environment policy."
@@ -1149,7 +1149,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 229
+line = 223
 function = "options"
 operation = "crash.SetIsCustomCrashReportingEnabled(required.custom_crash_reporting)"
 invariant = "live typed STA options and caller-selected bounded boolean."
@@ -1157,7 +1157,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 233
+line = 227
 function = "options"
 operation = "extensions.SetAreBrowserExtensionsEnabled(required.extensions)"
 invariant = "live typed STA options and caller-selected bounded boolean."
@@ -1165,7 +1165,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 248
+line = 242
 function = "observe_options"
 operation = "options.AdditionalBrowserArguments(out)"
 invariant = "live STA options and helper-owned initialized string output."
@@ -1173,7 +1173,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 253
+line = 247
 function = "observe_options"
 operation = "exclusive.ExclusiveUserDataFolderAccess(out)"
 invariant = "live typed STA options and helper-owned initialized BOOL output."
@@ -1181,7 +1181,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 258
+line = 252
 function = "observe_options"
 operation = "crash.IsCustomCrashReportingEnabled(out)"
 invariant = "live typed STA options and helper-owned initialized BOOL output."
@@ -1189,7 +1189,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/settings.rs"
-line = 263
+line = 257
 function = "observe_options"
 operation = "extensions.AreBrowserExtensionsEnabled(out)"
 invariant = "live typed STA options and helper-owned initialized BOOL output."

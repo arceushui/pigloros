@@ -211,6 +211,30 @@ pub(super) fn respond<W: Write>(
     }
 }
 
+/// Count why one read ended without a complete header.
+#[cfg(feature = "test-support")]
+fn observe_silent(context: &ServeContext, reason: SilentReason) {
+    use std::sync::atomic::Ordering;
+    let observations = &context.observations;
+    let counter = match reason {
+        SilentReason::Eof => &observations.silent_eof,
+        SilentReason::Timeout => &observations.silent_timeout,
+        SilentReason::Other => &observations.silent_error,
+    };
+    counter.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Count how reading one request ended.
+#[cfg(feature = "test-support")]
+fn observe_outcome(context: &ServeContext, outcome: ReadOutcome) {
+    let counter = match outcome {
+        ReadOutcome::Silent => &context.observations.silent,
+        ReadOutcome::Complete(_) => &context.observations.complete,
+        ReadOutcome::TooLarge => &context.observations.too_large,
+    };
+    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Serve one accepted connection to completion, then close it.
 pub(super) fn serve_connection(
     mut stream: TcpStream,
@@ -231,26 +255,10 @@ pub(super) fn serve_connection(
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         },
         #[cfg(feature = "test-support")]
-        |reason| {
-            use std::sync::atomic::Ordering;
-            let observations = &context.observations;
-            let counter = match reason {
-                SilentReason::Eof => &observations.silent_eof,
-                SilentReason::Timeout => &observations.silent_timeout,
-                SilentReason::Other => &observations.silent_error,
-            };
-            counter.fetch_add(1, Ordering::SeqCst);
-        },
+        |reason| observe_silent(context, reason),
     );
     #[cfg(feature = "test-support")]
-    {
-        let counter = match outcome {
-            ReadOutcome::Silent => &context.observations.silent,
-            ReadOutcome::Complete(_) => &context.observations.complete,
-            ReadOutcome::TooLarge => &context.observations.too_large,
-        };
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
+    observe_outcome(context, outcome);
     let admitted = match outcome {
         ReadOutcome::Silent => return,
         ReadOutcome::TooLarge => None,
