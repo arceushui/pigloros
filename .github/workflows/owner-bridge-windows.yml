@@ -54,6 +54,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }
           cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored
           if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }
+      - name: Quiesce background servicing before native fixtures (diagnostic)
+        shell: pwsh
+        run: |
+          foreach ($name in 'wuauserv', 'UsoSvc', 'BITS', 'DoSvc', 'DiagTrack', 'SysMain', 'WSearch', 'TrustedInstaller', 'InstallService') {
+            try {
+              $service = Get-Service -Name $name -ErrorAction Stop
+              $before = $service.Status
+              Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
+              Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+              Write-Output "HOST_QUIESCE service=$name before=$before after=$((Get-Service -Name $name).Status)"
+            } catch { Write-Output "HOST_QUIESCE service=$name absent" }
+          }
       - name: Start host load observer (diagnostic)
         shell: pwsh
         run: |
@@ -76,6 +88,9 @@ jobs:
             $top = ($rows | Sort-Object Delta -Descending | Select-Object -First 6 | ForEach-Object { "$($_.Name):$($_.Id):$($_.Delta)ms" }) -join ' '
             try { $q = (Get-Counter '\PhysicalDisk(_Total)\Avg. Disk Queue Length','\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples | ForEach-Object { [math]::Round($_.CookedValue, 1) }; $load = "diskq=$($q[0]) cpu=$($q[1])" } catch { $load = 'load=unknown' }
             "HOST time=$now $load top=$top" | Add-Content $out
+            foreach ($r in @($rows | Where-Object { $_.Name -eq 'svchost' -and $_.Delta -ge 1000 })) {
+              try { $svc = (Get-CimInstance Win32_Service -Filter "ProcessId=$($r.Id)" | ForEach-Object { $_.Name }) -join ','; "HOST svchost pid=$($r.Id) delta=$($r.Delta)ms services=$svc" | Add-Content $out } catch {}
+            }
             Start-Sleep -Seconds 4
           }
           '@
