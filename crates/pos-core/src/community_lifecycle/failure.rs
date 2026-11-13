@@ -304,40 +304,74 @@ fn encode_scalar_failure(out: &mut Vec<u8>, code: u8, value: u64) {
     encode_head(out, 0, value);
 }
 
-fn encode_host(out: &mut Vec<u8>, error: Host) {
+/// The closed ADR-129 host-failure code of every host error.
+const fn host_code(error: Host) -> u8 {
     match error {
-        Host::InvalidManifest => out.extend_from_slice(&[0x81, 0]),
+        Host::InvalidManifest => 0,
+        Host::ArtifactTrustDenied { .. } => 1,
+        Host::ArtifactRevoked { .. } => 2,
+        Host::IncompatibleAbi => 3,
+        Host::MissingFeature { .. } => 4,
+        Host::CapabilityDenied { .. } => 5,
+        Host::InvalidInvocation => 6,
+        Host::InvalidGuestOutput => 7,
+        Host::UnsupportedSchema => 8,
+        Host::StateMigrationFailed => 9,
+        Host::GuestDeclaredFailure => 10,
+        Host::ComponentTrap { .. } => 11,
+        Host::WorkerCrashed => 12,
+        Host::FuelExhausted => 13,
+        Host::MemoryLimitExceeded => 14,
+        Host::HostCallLimitExceeded => 15,
+        Host::OutputLimitExceeded => 16,
+        Host::DeterministicDeadlineExceeded => 17,
+        Host::OperationalWatchdogStop => 18,
+        Host::AtomicCommitFailed { .. } => 19,
+        Host::InvalidBundleContent { .. } => 20,
+    }
+}
+
+fn encode_host(out: &mut Vec<u8>, error: Host) {
+    let code = host_code(error);
+    match error {
         Host::ArtifactTrustDenied { basis } => {
-            encode_scalar_failure(out, 1, u64::from(denial_code(basis)));
+            encode_scalar_failure(out, code, u64::from(denial_code(basis)));
         }
         Host::ArtifactRevoked { basis } => {
-            encode_scalar_failure(out, 2, u64::from(revocation_code(basis)));
+            encode_scalar_failure(out, code, u64::from(revocation_code(basis)));
         }
-        Host::IncompatibleAbi => out.extend_from_slice(&[0x81, 3]),
-        Host::MissingFeature { index } => encode_scalar_failure(out, 4, index as u64),
-        Host::CapabilityDenied { index } => encode_scalar_failure(out, 5, index as u64),
-        Host::InvalidInvocation => out.extend_from_slice(&[0x81, 6]),
-        Host::InvalidGuestOutput => out.extend_from_slice(&[0x81, 7]),
-        Host::UnsupportedSchema => out.extend_from_slice(&[0x81, 8]),
-        Host::StateMigrationFailed => out.extend_from_slice(&[0x81, 9]),
-        Host::GuestDeclaredFailure => out.extend_from_slice(&[0x81, 10]),
+        Host::MissingFeature { index } | Host::CapabilityDenied { index } => {
+            encode_scalar_failure(out, code, index as u64);
+        }
         Host::ComponentTrap {
             class,
             reproduction,
-        } => out.extend_from_slice(&[0x83, 11, trap_code(class), reproduction_code(reproduction)]),
-        Host::WorkerCrashed => out.extend_from_slice(&[0x81, 12]),
-        Host::FuelExhausted => out.extend_from_slice(&[0x81, 13]),
-        Host::MemoryLimitExceeded => out.extend_from_slice(&[0x81, 14]),
-        Host::HostCallLimitExceeded => out.extend_from_slice(&[0x81, 15]),
-        Host::OutputLimitExceeded => out.extend_from_slice(&[0x81, 16]),
-        Host::DeterministicDeadlineExceeded => out.extend_from_slice(&[0x81, 17]),
-        Host::OperationalWatchdogStop => out.extend_from_slice(&[0x81, 18]),
+        } => out.extend_from_slice(&[
+            0x83,
+            code,
+            trap_code(class),
+            reproduction_code(reproduction),
+        ]),
         Host::AtomicCommitFailed { failure } => {
-            encode_scalar_failure(out, 19, u64::from(atomic_code(failure)));
+            encode_scalar_failure(out, code, u64::from(atomic_code(failure)));
         }
         Host::InvalidBundleContent { reason } => {
-            encode_scalar_failure(out, 20, u64::from(content_reason_code(reason)));
+            encode_scalar_failure(out, code, u64::from(content_reason_code(reason)));
         }
+        Host::InvalidManifest
+        | Host::IncompatibleAbi
+        | Host::InvalidInvocation
+        | Host::InvalidGuestOutput
+        | Host::UnsupportedSchema
+        | Host::StateMigrationFailed
+        | Host::GuestDeclaredFailure
+        | Host::WorkerCrashed
+        | Host::FuelExhausted
+        | Host::MemoryLimitExceeded
+        | Host::HostCallLimitExceeded
+        | Host::OutputLimitExceeded
+        | Host::DeterministicDeadlineExceeded
+        | Host::OperationalWatchdogStop => out.extend_from_slice(&[0x81, code]),
     }
 }
 
