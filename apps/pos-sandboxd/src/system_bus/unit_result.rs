@@ -226,12 +226,20 @@ pub enum SystemdUnitResultError {
         source: Box<zbus::Error>,
     },
     /// The unit had not settled, so its result could still change.
+    ///
+    /// Each `InvocationID` is validated as its snapshot is read, before this
+    /// check, so a malformed ID is reported as `InvocationIdMalformed` even
+    /// for an unsettled unit. `NotSettled` therefore does not imply that the
+    /// ID was well formed or matched.
     #[error("systemd unit is {active_state:?}, not inactive or failed")]
     NotSettled { active_state: String },
     /// `ActiveState` or `InvocationID` changed while the result was read.
     #[error("systemd unit state changed while its result was read")]
     StateChanged,
     /// The unit's `InvocationID` is not exactly 16 bytes, or is all zero.
+    ///
+    /// This takes precedence over `NotSettled`, `StateChanged` and
+    /// `InvocationMismatch`.
     #[error("systemd returned a malformed InvocationID")]
     InvocationIdMalformed,
     /// The unit is running a different invocation than the attempt started.
@@ -262,6 +270,11 @@ struct UnitState {
 }
 
 impl UnitState {
+    /// Check, in order: a settled `ActiveState`, an identical state in both
+    /// snapshots, and the attempt's `InvocationID`.
+    ///
+    /// `InvocationMismatch` is reported only when both snapshots carry the
+    /// same ID; an ID that changes between them is `StateChanged`.
     fn settled(
         self,
         after: &Self,
@@ -396,6 +409,12 @@ impl SystemdTransientUnitTransport {
     /// property, an unsettled or changing unit, a malformed or different
     /// `InvocationID`, an unknown `Result` or `ExecMainCode`, an out-of-range
     /// status, or a `Result` that contradicts the main exit.
+    ///
+    /// A malformed `InvocationID` is detected while each snapshot is read, so
+    /// it wins over `NotSettled`: an unsettled unit with a zero ID reports
+    /// `InvocationIdMalformed`, and `NotSettled` does not imply a valid ID.
+    /// `InvocationMismatch` needs the same ID in both snapshots; an ID that
+    /// changes between them is `StateChanged`.
     pub async fn read_unit_result(
         &self,
         started: &SystemdVerifiedStart,
@@ -931,6 +950,29 @@ mod tests {
             read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await??;
         assert_eq!(observed.active_state(), "inactive");
         assert_eq!(observed.invocation_id(), INVOCATION);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_malformed_invocation_id_wins_over_an_unsettled_state() -> TestResult {
+        for (state, raw) in [("activating", vec![0; 16]), ("active", Vec::new())] {
+            let unit = UnitFixture::new(vec![(state.to_owned(), raw)]);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(observed, Err(SystemdUnitResultError::InvocationIdMalformed)),
+                "{state}: {observed:?}"
+            );
+        }
+        let unit = UnitFixture::new(vec![
+            ("failed".to_owned(), INVOCATION.to_vec()),
+            ("failed".to_owned(), vec![0x22; 16]),
+        ]);
+        let observed = read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+        assert!(
+            matches!(observed, Err(SystemdUnitResultError::StateChanged)),
+            "{observed:?}"
+        );
         Ok(())
     }
 
