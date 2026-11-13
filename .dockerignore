@@ -7,4 +7,5 @@
 !plugins/
 !apps/
 !fixtures/
+!contracts/gateway/v1/execution-mode-profiles.json
 !third-party-notices/

@@ -218,7 +218,8 @@ fn hosted_store_error(error: pos_core::ErasureHostErrorV1) -> ExperimentError {
         }
         pos_core::ErasureHostErrorV1::AuthorizationDenied
         | pos_core::ErasureHostErrorV1::Conflict
-        | pos_core::ErasureHostErrorV1::AdapterFailure => {
+        | pos_core::ErasureHostErrorV1::AdapterFailure
+        | pos_core::ErasureHostErrorV1::ModeBindingStale => {
             pos_core::CoreError::Storage("erasure host rejected experiment startup".to_owned())
         }
     };
@@ -9444,6 +9445,7 @@ mod coverage_entrypoints {
             pos_core::ErasureHostErrorV1::AuthorizationDenied,
             pos_core::ErasureHostErrorV1::Conflict,
             pos_core::ErasureHostErrorV1::AdapterFailure,
+            pos_core::ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(matches!(
                 hosted_store_error(error),

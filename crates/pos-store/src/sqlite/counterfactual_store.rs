@@ -1346,6 +1346,7 @@ impl SqliteStore {
                     Self::append_one_in_transaction(
                         &self.conn,
                         self.hasher.as_ref(),
+                        self.mode_binding_epoch,
                         fork,
                         draft.clone(),
                     )

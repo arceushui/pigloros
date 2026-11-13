@@ -18,11 +18,17 @@
         "digest": "0303030303030303030303030303030303030303030303030303030303030303",
         "origin": "host-derived"
       },
-      "execution_profile": {
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
         "mode": "local",
-        "profile_id": "deterministic-local-v1",
-        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
-        "network": "denied"
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
       },
       "availability": {
         "state": "available",

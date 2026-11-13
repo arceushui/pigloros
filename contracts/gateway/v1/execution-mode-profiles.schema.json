@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pigloros:gateway:v1:declaration:execution-mode-profiles",
+  "title": "Gateway execution-mode profile declaration (GMD1)",
+  "description": "The public, reviewed declaration of the Gateway execution-mode profiles (GMP1, ADR-134 §3). `piglor-gateway`'s build script compiles it into canonical GMP1 records; clients recompute `mode_profile_digest` from it. It is closed at every level. `profiles` is sorted by identifier bytes (checked by scripts/check_gateway_contract.py) and holds exactly the two v1 profiles. Each string enumeration maps one to one onto a GMP1 tag: mode local=1, air-gapped=2; ingress loopback-http=1, public-read-only=2, fork-admission-socket=3; startup predicates linux=1, listeners-within-ingress=2, network-features-granted=3, no-network-ledger-source=4, store-mode-binding=5; revocation freshness current-by-construction=1, observed-persisted=2. A change of meaning requires an amendment of ADR-134; any byte change bumps `semantic_version` and sets `previous_mode_profile_digest` to the replaced digest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "magic",
+    "version",
+    "lifecycle",
+    "authority_kind",
+    "profiles"
+  ],
+  "properties": {
+    "magic": {
+      "const": "GMD1"
+    },
+    "version": {
+      "const": 1
+    },
+    "lifecycle": {
+      "const": "Reviewed"
+    },
+    "authority_kind": {
+      "const": "gateway-execution-mode-only"
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode_profile_id",
+        "semantic_version",
+        "mode",
+        "network_allowed",
+        "ingress",
+        "startup_predicates",
+        "revocation_freshness",
+        "registration_profile_id",
+        "previous_mode_profile_digest"
+      ],
+      "properties": {
+        "mode_profile_id": {
+          "enum": [
+            "gateway-mode-air-gapped-v1",
+            "gateway-mode-local-v1"
+          ]
+        },
+        "semantic_version": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 29,
+          "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$"
+        },
+        "mode": {
+          "enum": [
+            "local",
+            "air-gapped"
+          ]
+        },
+        "network_allowed": {
+          "type": "boolean"
+        },
+        "ingress": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "loopback-http",
+              "public-read-only",
+              "fork-admission-socket"
+            ]
+          }
+        },
+        "startup_predicates": {
+          "const": [
+            "linux",
+            "listeners-within-ingress",
+            "network-features-granted",
+            "no-network-ledger-source",
+            "store-mode-binding"
+          ]
+        },
+        "revocation_freshness": {
+          "enum": [
+            "current-by-construction",
+            "observed-persisted"
+          ]
+        },
+        "registration_profile_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "live-local-v1"
+              ]
+            }
+          ]
+        },
+        "previous_mode_profile_digest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode_profile_id": {
+                "const": "gateway-mode-local-v1"
+              }
+            },
+            "required": [
+              "mode_profile_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "local"
+              },
+              "network_allowed": {
+                "const": true
+              },
+              "ingress": {
+                "const": [
+                  "loopback-http",
+                  "public-read-only",
+                  "fork-admission-socket"
+                ]
+              },
+              "revocation_freshness": {
+                "const": "observed-persisted"
+              },
+              "registration_profile_id": {
+                "const": "live-local-v1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode_profile_id": {
+                "const": "gateway-mode-air-gapped-v1"
+              }
+            },
+            "required": [
+              "mode_profile_id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "air-gapped"
+              },
+              "network_allowed": {
+                "const": false
+              },
+              "ingress": {
+                "const": [
+                  "loopback-http",
+                  "fork-admission-socket"
+                ]
+              },
+              "revocation_freshness": {
+                "const": "current-by-construction"
+              },
+              "registration_profile_id": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

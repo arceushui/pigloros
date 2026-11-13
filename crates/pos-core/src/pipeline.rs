@@ -4,7 +4,7 @@
 //! while giving both paths one admission basis. They carry no append capability;
 //! only committed [`Event`] values can produce a [`PipelineCommitReceiptV1`].
 
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU64};
 
 use crate::{
     AppendIdentity, Event, EventDraft, EventId, FactualTickDependenciesV1, Hash, Seq, TimelineId,
@@ -580,6 +580,7 @@ pub struct PipelineCommitReceiptV1 {
     timeline_id: TimelineId,
     draft_batch_digest: Hash,
     committed_events: Vec<CommittedPipelineEventV1>,
+    mode_binding_epoch: Option<NonZeroU64>,
 }
 
 impl PipelineCommitReceiptV1 {
@@ -675,7 +676,25 @@ impl PipelineCommitReceiptV1 {
                     seq: event.seq,
                 })
                 .collect(),
+            mode_binding_epoch: None,
         })
+    }
+
+    /// Attach the Gateway mode-binding epoch the store recorded for this
+    /// commit (ADR-134 §8). The adapter resolves it from its permanent
+    /// commit-epoch evidence, so a recovered receipt carries the epoch of its
+    /// original commit; an unbound store records none.
+    #[must_use]
+    pub const fn with_mode_binding_epoch(mut self, epoch: Option<NonZeroU64>) -> Self {
+        self.mode_binding_epoch = epoch;
+        self
+    }
+
+    /// The Gateway mode-binding epoch recorded for this commit, if the store
+    /// was bound when it committed.
+    #[must_use]
+    pub const fn mode_binding_epoch(&self) -> Option<NonZeroU64> {
+        self.mode_binding_epoch
     }
 
     #[must_use]
@@ -718,6 +737,9 @@ pub enum PipelineOutcomeV1 {
     InvalidDependencyDeclaration,
     /// The Timeline's recorded dependency set accepts no further Tick.
     DependencySetExhausted,
+    /// The admitting adapter's attached Gateway mode-binding epoch is stale
+    /// (ADR-134 §8); nothing was committed.
+    ModeBindingStale,
 }
 
 fn invalid_draft(draft: &EventDraft) -> bool {

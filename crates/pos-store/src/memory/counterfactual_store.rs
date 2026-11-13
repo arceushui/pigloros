@@ -267,6 +267,8 @@ struct ForkEntriesV1<'s> {
     fork_event_origins: &'s mut HashMap<EventId, EventOriginRecordV1>,
     hasher: &'s dyn Hasher,
     key_registry: Option<&'s pos_core::KeyRegistryStateV1>,
+    /// The Gateway mode-binding epochs each staged append compares.
+    mode: super::gateway_mode_binding::MemoryModeAppendV1,
 }
 
 impl ForkEntriesV1<'_> {
@@ -287,6 +289,7 @@ impl ForkEntriesV1<'_> {
             timeline: self.timeline.timeline.clone(),
             events: Vec::new(),
             chain_head: self.timeline.chain_head,
+            commit_epochs: Vec::new(),
         };
         drafts
             .drafts()
@@ -297,6 +300,7 @@ impl ForkEntriesV1<'_> {
                     draft,
                     self.hasher,
                     self.key_registry,
+                    self.mode,
                 )
                 .map(drop)
             })
@@ -322,6 +326,7 @@ impl ForkEntriesV1<'_> {
         self.timeline.chain_head = staged.chain_head;
         self.timeline.timeline.head = staged.timeline.head;
         self.timeline.events.extend(staged.events);
+        self.timeline.commit_epochs.extend(staged.commit_epochs);
         self.install_provenance(provenance);
     }
 
@@ -472,6 +477,7 @@ impl MemoryStore {
         fork: TimelineId,
     ) -> Result<ForkEntriesV1<'_>, CounterfactualStoreErrorV1> {
         self.ensure_visible_fork(fork)?;
+        let mode = self.mode_binding.append_mode();
         let Self {
             ref mut timelines,
             ref mut counterfactual_forks,
@@ -495,6 +501,7 @@ impl MemoryStore {
                 fork_event_origins,
                 hasher,
                 key_registry: key_registry.as_ref(),
+                mode,
             })
             .ok_or(CounterfactualStoreErrorV1::ForkNotFound)
     }

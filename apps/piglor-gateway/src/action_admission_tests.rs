@@ -807,6 +807,10 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
             PipelineOutcomeV1::DependencySetExhausted,
             "timeline dependency set is exhausted",
         ),
+        (
+            PipelineOutcomeV1::ModeBindingStale,
+            "gateway mode binding is stale",
+        ),
     ];
     for (outcome, expected) in cases {
         let error = crate::action_command_error(
@@ -944,6 +948,7 @@ fn only_a_store_revocation_or_expiry_is_an_authority_denial_at_the_commit_fence(
         PipelineOutcomeV1::AdmissionConflict,
         PipelineOutcomeV1::InvalidDependencyDeclaration,
         PipelineOutcomeV1::DependencySetExhausted,
+        PipelineOutcomeV1::ModeBindingStale,
     ] {
         assert_eq!(
             executor::commit_fence_authority(&outcome),

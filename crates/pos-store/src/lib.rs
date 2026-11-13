@@ -1066,13 +1066,16 @@ pub(crate) fn install_or_reject(
     }
 }
 
-/// Bind a just-committed admitted batch to its authoritative receipt.
+/// Bind a just-committed admitted batch to its authoritative receipt and the
+/// Gateway mode-binding epoch recorded for its commit (ADR-134 §8).
 pub(crate) fn committed_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineCommitReceiptV1, CoreError> {
     PipelineCommitReceiptV1::try_from_committed_events(basis, timeline, events)
+        .map(|receipt| receipt.with_mode_binding_epoch(mode_binding_epoch))
         .map_err(pipeline_receipt_error)
 }
 
@@ -1081,8 +1084,22 @@ pub(crate) fn recovered_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineOutcomeV1, CoreError> {
-    committed_pipeline_receipt(basis, timeline, events).map(PipelineOutcomeV1::RecoveredDuplicate)
+    committed_pipeline_receipt(basis, timeline, events, mode_binding_epoch)
+        .map(PipelineOutcomeV1::RecoveredDuplicate)
+}
+
+/// Answer a pipeline admission whose append met a stale Gateway mode-binding
+/// epoch with [`PipelineOutcomeV1::ModeBindingStale`]; every other error
+/// stays an error. The adapter has already rolled the attempt back.
+pub(crate) fn pipeline_mode_binding_stale_outcome(
+    error: CoreError,
+) -> Result<PipelineOutcomeV1, CoreError> {
+    match error {
+        CoreError::ModeBindingStale => Ok(PipelineOutcomeV1::ModeBindingStale),
+        error => Err(error),
+    }
 }
 
 /// Rebuild the receipt of a retained attempt found by a basis-free lookup.
@@ -1091,6 +1108,7 @@ pub(crate) fn retained_pipeline_receipt(
     timeline: TimelineId,
     draft_batch_digest: Hash,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineReceiptLookupV1, CoreError> {
     PipelineCommitReceiptV1::try_from_retained_events(
         attempt_id,
@@ -1098,7 +1116,9 @@ pub(crate) fn retained_pipeline_receipt(
         draft_batch_digest,
         events,
     )
-    .map(PipelineReceiptLookupV1::Retained)
+    .map(|receipt| {
+        PipelineReceiptLookupV1::Retained(receipt.with_mode_binding_epoch(mode_binding_epoch))
+    })
     .map_err(pipeline_receipt_error)
 }
 
@@ -1518,6 +1538,19 @@ mod tests {
             ),
             public_key,
         )]
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn only_a_stale_mode_binding_becomes_the_stale_pipeline_outcome() {
+        assert_eq!(
+            pipeline_mode_binding_stale_outcome(CoreError::ModeBindingStale).test_ok(),
+            PipelineOutcomeV1::ModeBindingStale
+        );
+        assert!(matches!(
+            pipeline_mode_binding_stale_outcome(CoreError::ArtifactUnavailable),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]

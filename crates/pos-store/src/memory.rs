@@ -129,6 +129,7 @@ mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_lineage;
+mod gateway_mode_binding;
 mod pipeline_admission;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry;
@@ -384,6 +385,9 @@ pub struct MemoryStore {
     erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
     /// Complete prepared Fork proof retained for exact post-commit recovery.
     erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
+    /// Process-local Gateway mode binding and this instance's attached epoch
+    /// (ADR-134 §8).
+    mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -712,6 +716,9 @@ struct TimelineState {
     timeline: Timeline,
     events: Vec<Event>,
     chain_head: Hash,
+    /// Gateway mode-binding epoch of each committed range of this segment
+    /// (ADR-134 §8). A Fork's inherited prefix keeps its parent's evidence.
+    commit_epochs: Vec<gateway_mode_binding::CommitEpochRangeV1>,
 }
 
 impl TimelineState {
@@ -720,6 +727,7 @@ impl TimelineState {
             timeline,
             events: Vec::new(),
             chain_head,
+            commit_epochs: Vec::new(),
         }
     }
 }
@@ -850,6 +858,7 @@ impl MemoryStore {
             erasure_recovery_errors: BTreeMap::new(),
             erasure_fork_admissions: BTreeMap::new(),
             erasure_fork_recovery_proofs: BTreeMap::new(),
+            mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1::default(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -925,14 +934,16 @@ impl MemoryStore {
         }
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
         let event = {
-            let (timelines, event_ids, hasher, registry) = (
+            let (timelines, event_ids, hasher, registry, mode) = (
                 &mut self.timelines,
                 &mut self.event_ids,
                 &self.hasher,
                 self.key_registry.as_ref(),
+                self.mode_binding.append_mode(),
             );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, draft, hasher.as_ref(), registry)?;
+                let event =
+                    Self::append_one_to_state(state, draft, hasher.as_ref(), registry, mode)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })
@@ -1012,15 +1023,25 @@ impl MemoryStore {
         draft: &EventDraft,
         hasher: &dyn Hasher,
         registry: Option<&KeyRegistryStateV1>,
+        mode: gateway_mode_binding::MemoryModeAppendV1,
     ) -> Result<Event, CoreError> {
-        Self::prepare_one_for_state(state, draft, hasher, registry).map(|(event, chain_head)| {
-            Self::commit_prepared_to_state(state, event.clone(), chain_head);
-            event
-        })
+        Self::prepare_one_for_state(state, draft, hasher, registry)
+            .and_then(|prepared| mode.commit_epoch().map(|epoch| (prepared, epoch)))
+            .map(|((event, chain_head), epoch)| {
+                Self::commit_prepared_to_state(state, event.clone(), chain_head, epoch);
+                event
+            })
     }
 
-    /// Commit an Event previously prepared against this exact Timeline head.
-    fn commit_prepared_to_state(state: &mut TimelineState, event: Event, chain_head: Hash) {
+    /// Commit an Event previously prepared against this exact Timeline head,
+    /// with the Gateway mode-binding epoch the choke-point compare admitted.
+    fn commit_prepared_to_state(
+        state: &mut TimelineState,
+        event: Event,
+        chain_head: Hash,
+        epoch: Option<std::num::NonZeroU64>,
+    ) {
+        gateway_mode_binding::record_commit_epoch_in_state(state, epoch, event.seq, event.seq);
         state.chain_head = chain_head;
         state.timeline.head = event.seq;
         state.events.push(event);
@@ -1721,16 +1742,17 @@ impl MemoryStore {
                 )
             })
             .and_then(|()| {
-                let (timelines, hasher, registry) = (
+                let (timelines, hasher, registry, mode) = (
                     &mut self.timelines,
                     &self.hasher,
                     self.key_registry.as_ref(),
+                    self.mode_binding.append_mode(),
                 );
                 mutable_state(timelines, timeline).and_then(|state| {
                     drafts
                         .iter()
                         .map(|draft| {
-                            Self::append_one_to_state(state, draft, hasher.as_ref(), registry)
+                            Self::append_one_to_state(state, draft, hasher.as_ref(), registry, mode)
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -2438,6 +2460,7 @@ impl MemoryStore {
             .classify_identity(&request.source)
             .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
         let hasher: &dyn Hasher = self.hasher.as_ref();
+        let mode = self.mode_binding.append_mode();
         // Every fallible step precedes the first mutation, matching SQLite's
         // all-or-nothing transaction.
         let (event, provenance) = self
@@ -2455,8 +2478,9 @@ impl MemoryStore {
                         Self::logical_event(prefix, local_event.clone())
                             .map(|event| (local_event, chain_head, event))
                     })
+                    .and_then(|prepared| mode.commit_epoch().map(|epoch| (prepared, epoch)))
                     .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
-                    .and_then(|(local_event, chain_head, event)| {
+                    .and_then(|((local_event, chain_head, event), epoch)| {
                         ForkClassifiedProvenanceV1::derive(
                             request,
                             table,
@@ -2470,7 +2494,7 @@ impl MemoryStore {
                         )
                         .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
                         .map(|provenance| {
-                            Self::commit_prepared_to_state(state, local_event, chain_head);
+                            Self::commit_prepared_to_state(state, local_event, chain_head, epoch);
                             (event, provenance)
                         })
                     })
@@ -4715,14 +4739,16 @@ impl GeoLocationAdmissionStore for MemoryStore {
         )
         .with_wall_time(admitted_at);
         let event = {
-            let (timelines, event_ids, hasher, registry) = (
+            let (timelines, event_ids, hasher, registry, mode) = (
                 &mut self.timelines,
                 &mut self.event_ids,
                 &self.hasher,
                 self.key_registry.as_ref(),
+                self.mode_binding.append_mode(),
             );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, &draft, hasher.as_ref(), registry)?;
+                let event =
+                    Self::append_one_to_state(state, &draft, hasher.as_ref(), registry, mode)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })?
@@ -4914,7 +4940,15 @@ impl GeographicAdmissionStore for MemoryStore {
             .meta
             .fork_point
             .map_or(0, |(_, fork)| fork.as_u64());
-        let origin_logical_seq = crate::checked_logical_head(inherited_prefix, event_seq.as_u64())?;
+        let (origin_logical_seq, commit_epoch) =
+            crate::checked_logical_head(inherited_prefix, event_seq.as_u64()).and_then(
+                |origin| {
+                    self.mode_binding
+                        .append_mode()
+                        .commit_epoch()
+                        .map(|epoch| (origin, epoch))
+                },
+            )?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
@@ -4950,6 +4984,12 @@ impl GeographicAdmissionStore for MemoryStore {
         staged_state.timeline.head = event_seq;
         staged_state.chain_head = next_chain_head;
         staged_state.events.push(event.clone());
+        gateway_mode_binding::record_commit_epoch_in_state(
+            &mut staged_state,
+            commit_epoch,
+            event_seq,
+            event_seq,
+        );
         let link = GeographicCellLink {
             snapshot_id: snapshot_id.clone(),
             snapshot_hash,
@@ -6157,20 +6197,22 @@ impl EventStore for MemoryStore {
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
                     let head = timeline_state.head;
+                    let mode = store.mode_binding.append_mode();
                     let mut ordered = pos_core::store::validate_committed_batch(
                         head,
                         events,
                         &mut |id| store.event_ids.contains(id),
                         &*store.hasher,
                     )?;
-                    crate::finalize_committed_origins(
+                    let commit_epoch = crate::finalize_committed_origins(
                         timeline,
                         timeline_state
                             .meta
                             .fork_point
                             .map_or(0, |(_, fork)| fork.as_u64()),
                         &mut ordered,
-                    )?;
+                    )
+                    .and_then(|()| mode.commit_epoch())?;
                     let mut new_head = head;
                     let mut previous_hash = store.chain_head(timeline);
                     for event in &ordered {
@@ -6185,6 +6227,12 @@ impl EventStore for MemoryStore {
 
                     store.event_ids.extend(ordered.iter().map(|event| event.id));
                     store.state_mut(timeline).map(|state| {
+                        gateway_mode_binding::record_commit_epoch_in_state(
+                            state,
+                            commit_epoch,
+                            head.next(),
+                            new_head,
+                        );
                         state.events.extend(ordered);
                         timeline_state.head = new_head;
                         state.timeline = timeline_state;
@@ -7753,6 +7801,7 @@ mod tests {
                 &make_draft(EntityId::new(), b"classified-suffix"),
                 hasher.as_ref(),
                 None,
+                gateway_mode_binding::MemoryGatewayModeStateV1::default().append_mode(),
             )?
         };
         let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
@@ -8530,7 +8579,14 @@ mod tests {
 
         let (timelines, hasher) = (&mut store.timelines, &store.hasher);
         let state = timelines.get_mut(&timeline.id()).test_ok();
-        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref(), None).is_err());
+        assert!(MemoryStore::append_one_to_state(
+            state,
+            &draft,
+            hasher.as_ref(),
+            None,
+            gateway_mode_binding::MemoryGatewayModeStateV1::default().append_mode(),
+        )
+        .is_err());
         assert!(store
             .append_or_duplicate_with_limit_visible(
                 timeline.id(),

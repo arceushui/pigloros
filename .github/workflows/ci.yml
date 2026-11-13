@@ -477,6 +477,10 @@ jobs:
         run: |
           python scripts/check_gateway_contract.py --append-only origin/main
           python scripts/test_check_gateway_contract.py
+      - name: Prove the Gateway execution-mode profile strings stay confined
+        run: |
+          bash scripts/check-gateway-mode-profile-confinement.sh
+          bash scripts/test-check-gateway-mode-profile-confinement.sh
       - name: Check the Plugin conformance evidence-status records stay pending
         run: |
           python3 scripts/check_plugin_conformance_expected.py

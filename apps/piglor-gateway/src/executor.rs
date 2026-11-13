@@ -196,6 +196,10 @@ mod lifecycle_coverage_tests {
                 std::mem::discriminant(&CoreError::Storage(String::new())),
             );
         }
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::ModeBindingStale)),
+            std::mem::discriminant(&CoreError::ModeBindingStale),
+        );
 
         assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
         Ok(())
@@ -743,6 +747,7 @@ fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
         ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
             CoreError::ErasureContainmentUnavailable
         }
+        ErasureHostErrorV1::ModeBindingStale => CoreError::ModeBindingStale,
         ErasureHostErrorV1::AuthorizationDenied
         | ErasureHostErrorV1::Conflict
         | ErasureHostErrorV1::AdapterFailure => {
@@ -3444,7 +3449,8 @@ pub(crate) const fn commit_fence_authority(
         | PipelineOutcomeV1::Committed(_)
         | PipelineOutcomeV1::RecoveredDuplicate(_)
         | PipelineOutcomeV1::InvalidDependencyDeclaration
-        | PipelineOutcomeV1::DependencySetExhausted => None,
+        | PipelineOutcomeV1::DependencySetExhausted
+        | PipelineOutcomeV1::ModeBindingStale => None,
     }
 }
 

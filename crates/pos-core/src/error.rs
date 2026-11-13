@@ -76,6 +76,12 @@ pub enum CoreError {
     #[error("erasure containment boundary is unavailable")]
     ErasureContainmentUnavailable,
 
+    /// The writer's attached Gateway mode-binding epoch is not the store's
+    /// persisted epoch, or an unattached writer met a bound store (ADR-134
+    /// §8). Nothing was committed.
+    #[error("gateway mode binding is stale")]
+    ModeBindingStale,
+
     #[error("plaintext Persona Preferences are unavailable for this subject")]
     SubjectPlaintextPreferenceRefused,
 }
@@ -219,5 +225,8 @@ mod tests {
         assert!(CoreError::ErasureContainmentUnavailable
             .to_string()
             .contains("containment"));
+        assert!(CoreError::ModeBindingStale
+            .to_string()
+            .contains("mode binding is stale"));
     }
 }

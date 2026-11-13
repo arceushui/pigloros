@@ -667,6 +667,9 @@ pub struct GatewayAuthorization {
     source: Option<Arc<dyn GatewayAuthoritySourceV1>>,
     persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
+    /// The bound Gateway execution mode of the composition (ADR-134 §6); an
+    /// unbound composition admits no action.
+    execution_mode: Option<crate::mode_profile::GatewayExecutionModeRevisionV1>,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
     denial_budget: Arc<Mutex<DenialRecordBudget>>,
@@ -686,9 +689,14 @@ impl GatewayAuthorization {
     /// Bind one adapter to host-pinned authority state with an explicit
     /// revocation-freshness claim.
     ///
-    /// Local hosts normally pass `true`. An Air-Gapped host must pass `false`
-    /// until its pinned revocation snapshot is current; authorization then
-    /// fails closed with [`GatewayAuthorityDenial::RevocationStateStale`].
+    /// The claim follows the bound execution mode's revocation freshness
+    /// (ADR-134 §2 field 8): a Local host observes its revocation state from
+    /// the persisted authority store and passes `true` once it has loaded it;
+    /// a host that passes `false` fails closed with
+    /// [`GatewayAuthorityDenial::RevocationStateStale`]. An Air-Gapped host
+    /// reads authority from its one bound store only, so its revocation state
+    /// is current by construction (D10): [`Self::with_mode_binding`] fixes the
+    /// claim to `true` for an Air-Gapped binding.
     #[must_use]
     pub fn new_with_revocation_state(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
@@ -706,6 +714,7 @@ impl GatewayAuthorization {
             }))),
             source: None,
             revocation_state_current,
+            execution_mode: None,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
             denial_budget: Arc::new(Mutex::new(DenialRecordBudget::default())),
@@ -1145,10 +1154,31 @@ impl GatewayAuthorization {
             .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
-    /// The pinned authority registry digest and revocation-freshness claim
-    /// that select this host's execution profile.
-    pub(crate) const fn execution_profile(&self) -> (Hash, bool) {
-        (self.registry_digest, self.revocation_state_current)
+    /// Bind this authorizer to the composition's bound Gateway execution
+    /// mode (ADR-134 §6 and §10). An Air-Gapped binding makes revocation
+    /// state current by construction.
+    #[must_use]
+    pub fn with_mode_binding(mut self, mode: &crate::mode_profile::GatewayModeBindingV1) -> Self {
+        let revision = mode.revision_input();
+        self.revocation_state_current |= revision.revocation_current_by_construction();
+        self.execution_mode = Some(revision);
+        self
+    }
+
+    /// The pinned authority registry digest, revocation-freshness claim and
+    /// bound execution mode that select this host's execution profile.
+    pub(crate) const fn execution_profile(
+        &self,
+    ) -> (
+        Hash,
+        bool,
+        Option<&crate::mode_profile::GatewayExecutionModeRevisionV1>,
+    ) {
+        (
+            self.registry_digest,
+            self.revocation_state_current,
+            self.execution_mode.as_ref(),
+        )
     }
 }
 

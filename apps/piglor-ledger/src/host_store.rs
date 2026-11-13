@@ -192,7 +192,8 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
         }
         ErasureHostErrorV1::AuthorizationDenied
         | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
+        | ErasureHostErrorV1::AdapterFailure
+        | ErasureHostErrorV1::ModeBindingStale => {
             CoreError::Storage("erasure host rejected ledger operation".to_owned())
         }
     }
@@ -312,6 +313,7 @@ mod tests {
             ErasureHostErrorV1::AuthorizationDenied,
             ErasureHostErrorV1::Conflict,
             ErasureHostErrorV1::AdapterFailure,
+            ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(host_error(error).to_string().contains("rejected"));
         }

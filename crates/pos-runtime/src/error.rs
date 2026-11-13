@@ -252,6 +252,7 @@ const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
         Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
         Outcome::DependencySetExhausted => "DependencySetExhausted",
+        Outcome::ModeBindingStale => "ModeBindingStale",
     }
 }
 
@@ -364,6 +365,7 @@ mod tests {
                 PipelineOutcomeV1::DependencySetExhausted,
                 "DependencySetExhausted",
             ),
+            (PipelineOutcomeV1::ModeBindingStale, "ModeBindingStale"),
         ] {
             assert_eq!(
                 RuntimeError::ScheduledPassNotAdmitted(Box::new(outcome)).to_string(),

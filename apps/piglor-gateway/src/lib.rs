@@ -29,6 +29,7 @@ pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
 pub mod local_principal;
+pub mod mode_profile;
 pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
@@ -103,18 +104,19 @@ fn gateway_binding_error(
     }
 }
 
+/// Bind `plugin` to the installed EPF1 its test's bound Local mode selects
+/// (ADR-134 §7, field 9).
 #[cfg(test)]
 fn gateway_output_binding<P: Plugin>(
     plugin: &P,
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_source(
+    let mode = mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, []);
+    gateway_output_binding_with_profile(
         plugin,
-        pos_runtime::OutputPolicySourceV1::Gateway,
         configuration_details,
-        "deterministic-local-v1",
+        mode.registration_profile_id().unwrap_or_default(),
     )
-    .map_err(|error| gateway_binding_error(plugin.name(), error))
 }
 
 #[cfg(test)]
@@ -365,12 +367,14 @@ mod coverage_tests {
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
         let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
-        assert!(matches!(
-            super::gateway_action_registry_builder(std::iter::empty(), None),
-            Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
-            ))
-        ));
+        for selection in [Some("live-local-v1"), None] {
+            assert!(matches!(
+                super::gateway_action_registry_builder(std::iter::empty(), None, selection),
+                Err(RuntimeError::OutputAdmission(
+                    OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+                ))
+            ));
+        }
     }
 
     // Counts selected-factory invocations while delegating to the Gateway factory.
@@ -487,6 +491,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                Some("live-local-v1"),
             ),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -505,6 +510,7 @@ mod coverage_tests {
             .register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                "deterministic-local-v1",
             )
             .test_ok();
         assert_eq!(configuration.builds.get(), 1);
@@ -541,8 +547,16 @@ mod coverage_tests {
         let schemas_before = registry.composition().schemas.len();
         let foreign = HostCatalogueEntryV1::<ForeignApproverConfiguration>::gateway();
         for result in [
-            registry.register_from_host_catalogue_entry(&foreign, &ForeignApproverConfiguration),
-            registry.register_host_catalogue_fixture(&foreign, &ForeignApproverConfiguration),
+            registry.register_from_host_catalogue_entry(
+                &foreign,
+                &ForeignApproverConfiguration,
+                Some("live-local-v1"),
+            ),
+            registry.register_host_catalogue_fixture(
+                &foreign,
+                &ForeignApproverConfiguration,
+                "deterministic-local-v1",
+            ),
         ] {
             assert!(matches!(
                 result,
@@ -555,6 +569,7 @@ mod coverage_tests {
             registry.register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<ExtraReducerConfiguration>::gateway(),
                 &ExtraReducerConfiguration,
+                "deterministic-local-v1",
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
@@ -598,6 +613,7 @@ mod coverage_tests {
                 .register_host_catalogue_fixture(
                     &HostCatalogueEntryV1::<GatewayActionPlugin>::gateway(),
                     frozen,
+                    "deterministic-local-v1",
                 )
                 .test_ok();
             registry.retained_closure_replay_identities()
@@ -1222,19 +1238,16 @@ impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
     }
 }
 
-/// Registration operation applied to the selected Gateway catalogue entry.
-type GatewayCatalogueRegistration = fn(
-    &mut PluginRegistry,
-    &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
-    &FrozenGatewayActionConfiguration,
-) -> Result<(), pos_runtime::RuntimeError>;
-
 // Resolve the frozen configuration and register the reviewed Gateway entry.
 // Production and nonproduction registries differ only in `register`.
 fn gateway_action_registry_with(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    register: GatewayCatalogueRegistration,
+    register: impl FnOnce(
+        &mut PluginRegistry,
+        &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
+        &FrozenGatewayActionConfiguration,
+    ) -> Result<(), pos_runtime::RuntimeError>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let frozen = FrozenGatewayActionConfiguration::resolve(bodies)?;
     let mut registry = PluginRegistry::new().without_erasure_gate();
@@ -1270,17 +1283,17 @@ fn gateway_action_registry_with_authority(
 }
 
 // The production registry selects the reviewed Gateway entry with installed
-// evidence. Wave 8 has no installed Gateway EPF1, so it fails closed; #461
-// owns positive activation.
+// evidence for the profile the bound execution mode selects (ADR-134 §7,
+// field 9: Local `live-local-v1`, Air-Gapped none). No installed Gateway EPF1
+// exists, so it fails closed; #461 owns positive activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
+    registration_profile_id: Option<&str>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_from_host_catalogue_entry::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_from_host_catalogue_entry(entry, frozen, registration_profile_id)
+    })
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
@@ -1298,11 +1311,9 @@ fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_host_catalogue_fixture::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_host_catalogue_fixture(entry, frozen, "deterministic-local-v1")
+    })
 }
 
 /// Build a unit-test, action-capable Gateway around a verified erasure host.
@@ -1336,8 +1347,16 @@ pub(crate) fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        GatewayProtection::Required(Some(Arc::new(authorization))),
+        GatewayProtection::Required(Some(Arc::new(
+            authorization.with_mode_binding(&test_local_mode()),
+        ))),
     )
+}
+
+/// The Local execution mode every unit-test action composition is bound to.
+#[cfg(test)]
+fn test_local_mode() -> mode_profile::GatewayModeBindingV1 {
+    mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, [])
 }
 
 /// Bytes the Gateway configuration details spend before the bodies: the
@@ -1861,6 +1880,7 @@ enum NotAdmitted {
     HostFault,
     SetExhausted,
     Stale,
+    ModeBindingStale,
     Rejected,
 }
 
@@ -1877,6 +1897,7 @@ const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
         | PipelineOutcomeV1::AuthorityExpired
         | PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
         PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
+        PipelineOutcomeV1::ModeBindingStale => NotAdmitted::ModeBindingStale,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
         | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
@@ -1904,6 +1925,7 @@ fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
         NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
         NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
         NotAdmitted::Stale => GatewayError::ActionObservationStale,
+        NotAdmitted::ModeBindingStale => GatewayError::Store(CoreError::ModeBindingStale),
         NotAdmitted::Rejected => GatewayError::ActionRejected(
             ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
         ),
@@ -2253,6 +2275,10 @@ impl Gateway {
     /// host command stream. Provider authentication and ADR-059 authorization
     /// therefore cannot enable a proposed action outside ADR-060 containment.
     ///
+    /// The bound execution mode `mode` selects the registration profile
+    /// (ADR-134 §7) and enters the execution-profile security revision of
+    /// every admission (§6).
+    ///
     /// # Errors
     /// Returns a store or action-registry error if the recovered host or its
     /// declared output policy cannot be bound.
@@ -2260,6 +2286,7 @@ impl Gateway {
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
+        mode: &mode_profile::GatewayModeBindingV1,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2273,11 +2300,15 @@ impl Gateway {
             GatewayLimits::LOCAL_DEFAULT,
             false,
             bind_action_registry_erasure_gate(
-                gateway_action_registry_builder(bodies, Some(consent_authority.clone())),
+                gateway_action_registry_builder(
+                    bodies,
+                    Some(consent_authority.clone()),
+                    mode.registration_profile_id(),
+                ),
                 gate,
             ),
             consent_authority,
-            GatewayProtection::Required(Some(Arc::new(authorization))),
+            GatewayProtection::Required(Some(Arc::new(authorization.with_mode_binding(mode)))),
         )
     }
 
@@ -2434,7 +2465,9 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(authorization)),
+            authorization: Some(Arc::new(
+                authorization.with_mode_binding(&test_local_mode()),
+            )),
             authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
@@ -4196,21 +4229,29 @@ mod tests {
         drop(gateway);
     }
 
+    /// ADR-134 §7: registration follows the bound mode's selection and fails
+    /// closed in both modes until an EPF1 is installed (#461, #1372).
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
-        let host = ErasureExecutionHostV1::open_verified_empty(
-            StoreConfig::Memory,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .test_ok();
-        assert!(matches!(
-            Gateway::new_with_erasure_host_and_authorization(
-                host,
-                [EntityId::new()],
-                crate::authorization::test_authorization_for(EntityId::new()),
-            ),
-            Err(GatewayError::ActionRegistry(_))
-        ));
+        for mode in [
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        ] {
+            let host = ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            assert!(matches!(
+                Gateway::new_with_erasure_host_and_authorization(
+                    host,
+                    [EntityId::new()],
+                    crate::authorization::test_authorization_for(EntityId::new()),
+                    &crate::mode_profile::test_binding(mode, []),
+                ),
+                Err(GatewayError::ActionRegistry(_))
+            ));
+        }
     }
 
     #[test]
@@ -4239,6 +4280,10 @@ mod tests {
                 host,
                 std::iter::empty(),
                 crate::authorization::test_authorization_for(EntityId::new()),
+                &crate::mode_profile::test_binding(
+                    crate::mode_profile::GatewayModeProfileIdV1::Local,
+                    [],
+                ),
             ),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
@@ -4393,7 +4438,7 @@ mod tests {
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
         let too_many_bodies =
-            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None);
+            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None, None);
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(

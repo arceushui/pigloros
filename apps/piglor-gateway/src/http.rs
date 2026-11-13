@@ -653,8 +653,46 @@ async fn register_prediction(
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let retry_after = retry_after_seconds(&self);
-        with_retry_after(ProblemV1::from(self).into_response(), retry_after)
+        let stale = matches!(self, Self::Store(CoreError::ModeBindingStale));
+        mark_mode_binding_stale(
+            with_retry_after(ProblemV1::from(self).into_response(), retry_after),
+            stale,
+        )
     }
+}
+
+/// Response extension of a write that this process's stale execution-mode
+/// binding refused (ADR-134 §8). The serve loop stops on it after the `503`.
+#[derive(Clone, Copy, Debug)]
+struct ModeBindingStaleResponseV1;
+
+/// Mark the response of a stale-binding refusal.
+fn mark_mode_binding_stale(mut response: Response, stale: bool) -> Response {
+    if stale {
+        response.extensions_mut().insert(ModeBindingStaleResponseV1);
+    }
+    response
+}
+
+/// Fire `signal` when a response carries the stale-binding marker, so the
+/// serve loop answers that `503` and then stops and exits nonzero.
+pub(crate) fn stop_on_stale_mode_binding(
+    router: Router,
+    signal: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
+) -> Router {
+    router.layer(axum::middleware::map_response(move |response: Response| {
+        let signal = std::sync::Arc::clone(&signal);
+        async move {
+            if response
+                .extensions()
+                .get::<ModeBindingStaleResponseV1>()
+                .is_some()
+            {
+                signal.fire();
+            }
+            response
+        }
+    }))
 }
 
 /// Add `Retry-After` to a response when the failure states one.
@@ -731,7 +769,7 @@ const fn store_problem(error: &CoreError) -> Option<ProblemShape> {
             StatusCode::NOT_FOUND,
             false,
         )),
-        CoreError::ErasureContainmentUnavailable => Some(UNAVAILABLE),
+        CoreError::ErasureContainmentUnavailable | CoreError::ModeBindingStale => Some(UNAVAILABLE),
         _ => None,
     }
 }
@@ -1914,6 +1952,41 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(problem["code"], "resource-limit-exceeded");
     }
 
+    /// ADR-134 §8: a stale-binding refusal answers `503`, then stops serving.
+    #[tokio::test]
+    async fn a_stale_binding_response_stops_the_serve_loop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tower::ServiceExt as _;
+        let binding = crate::mode_profile::test_binding(
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            [],
+        );
+        let signal = binding.stale_signal();
+        let app = super::stop_on_stale_mode_binding(
+            Router::new()
+                .route("/ok", axum::routing::get(|| async { "ok" }))
+                .route(
+                    "/stale",
+                    axum::routing::get(|| async {
+                        GatewayError::Store(CoreError::ModeBindingStale)
+                    }),
+                ),
+            binding.stale_signal(),
+        );
+        let ok = app
+            .clone()
+            .oneshot(axum::http::Request::get("/ok").body(axum::body::Body::empty())?)
+            .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert!(!signal.fired());
+        let stale = app
+            .oneshot(axum::http::Request::get("/stale").body(axum::body::Body::empty())?)
+            .await?;
+        assert_eq!(stale.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(signal.fired());
+        Ok(())
+    }
+
     /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn problem_cases() -> [(GatewayError, &'static str, bool); 18] {
@@ -2885,6 +2958,16 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::Store(CoreError::ErasureContainmentUnavailable).into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r
+            .extensions()
+            .get::<super::ModeBindingStaleResponseV1>()
+            .is_none());
+        let r = GatewayError::Store(CoreError::ModeBindingStale).into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r
+            .extensions()
+            .get::<super::ModeBindingStaleResponseV1>()
+            .is_some());
         let r = GatewayError::Store(CoreError::ErasureAccessFrozen).into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::Store(CoreError::TimelineNotFound(TimelineId::new())).into_response();

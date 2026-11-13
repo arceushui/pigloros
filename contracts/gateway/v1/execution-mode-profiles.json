@@ -1,0 +1,49 @@
+{
+  "magic": "GMD1",
+  "version": 1,
+  "lifecycle": "Reviewed",
+  "authority_kind": "gateway-execution-mode-only",
+  "profiles": [
+    {
+      "mode_profile_id": "gateway-mode-air-gapped-v1",
+      "semantic_version": "1.0.0",
+      "mode": "air-gapped",
+      "network_allowed": false,
+      "ingress": [
+        "loopback-http",
+        "fork-admission-socket"
+      ],
+      "startup_predicates": [
+        "linux",
+        "listeners-within-ingress",
+        "network-features-granted",
+        "no-network-ledger-source",
+        "store-mode-binding"
+      ],
+      "revocation_freshness": "current-by-construction",
+      "registration_profile_id": null,
+      "previous_mode_profile_digest": null
+    },
+    {
+      "mode_profile_id": "gateway-mode-local-v1",
+      "semantic_version": "1.0.0",
+      "mode": "local",
+      "network_allowed": true,
+      "ingress": [
+        "loopback-http",
+        "public-read-only",
+        "fork-admission-socket"
+      ],
+      "startup_predicates": [
+        "linux",
+        "listeners-within-ingress",
+        "network-features-granted",
+        "no-network-ledger-source",
+        "store-mode-binding"
+      ],
+      "revocation_freshness": "observed-persisted",
+      "registration_profile_id": "live-local-v1",
+      "previous_mode_profile_digest": null
+    }
+  ]
+}

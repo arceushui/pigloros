@@ -13,6 +13,7 @@ use rusqlite::{
 use std::{
     cell::Cell,
     collections::{BTreeSet, HashSet},
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -168,6 +169,7 @@ mod fork_replay_read;
 mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
+mod gateway_mode_binding;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod interval_test_support;
@@ -316,6 +318,9 @@ pub struct SqliteStore {
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    /// Gateway mode-binding epoch attached to this adapter instance
+    /// (ADR-134 §8). Every Event write compares it with the persisted epoch.
+    mode_binding_epoch: Option<NonZeroU64>,
 }
 
 struct SqliteSchemaColumn {
@@ -1688,6 +1693,7 @@ impl SqliteStore {
                 Self::append_one_in_transaction(
                     &self.conn,
                     self.hasher.as_ref(),
+                    self.mode_binding_epoch,
                     child_timeline_id,
                     draft,
                 )
@@ -1955,6 +1961,7 @@ impl SqliteStore {
     fn append_one_in_transaction(
         tx: &Connection,
         hasher: &dyn Hasher,
+        mode_binding_epoch: Option<NonZeroU64>,
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
@@ -2009,7 +2016,14 @@ impl SqliteStore {
         ) {
             return Err(CoreError::Storage(error.to_string()));
         }
-        Ok(Event {
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            tx,
+            mode_binding_epoch,
+            timeline,
+            seq,
+            seq,
+        )
+        .map(|()| Event {
             id: event_id,
             entity: draft.entity,
             event_type: draft.event_type,
@@ -2180,6 +2194,7 @@ impl SqliteStore {
             plugin_trust_poisoned: Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
+            mode_binding_epoch: None,
         };
         store.finish_open(
             initialize_schema,
@@ -2516,7 +2531,7 @@ impl SqliteStore {
 
     fn prepare_authority_schema(&self) -> Result<(), CoreError> {
         self.conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
                  CREATE TABLE IF NOT EXISTS authority_state (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -2527,18 +2542,22 @@ impl SqliteStore {
                      sequence INTEGER PRIMARY KEY,
                      evidence BLOB NOT NULL CHECK (length(evidence) IN (14, 71))
                  );
+                 {}
                  COMMIT;",
-            )
+                sqlite_schema_ddl(gateway_mode_binding::GATEWAY_MODE_SCHEMA_TABLES)
+            ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_authority_schema_and_state())
     }
 
     fn validate_authority_schema_and_state(&self) -> Result<(), CoreError> {
-        self.validate_authority_schema().and_then(|()| {
-            read_authority_state(&self.conn)
-                .map(|_| ())
-                .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
-        })
+        self.validate_authority_schema()
+            .and_then(|()| self.validate_gateway_mode_schema())
+            .and_then(|()| {
+                read_authority_state(&self.conn)
+                    .map(|_| ())
+                    .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
+            })
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
@@ -3916,6 +3935,7 @@ impl SqliteStore {
                     let event = Self::append_one_in_transaction(
                         &self.conn,
                         self.hasher.as_ref(),
+                        self.mode_binding_epoch,
                         timeline,
                         draft.clone(),
                     )?;
@@ -4225,6 +4245,7 @@ impl SqliteStore {
                         Self::append_one_in_transaction(
                             &self.conn,
                             self.hasher.as_ref(),
+                            self.mode_binding_epoch,
                             timeline,
                             draft.clone(),
                         )
@@ -4288,6 +4309,7 @@ impl SqliteStore {
                         Self::append_one_in_transaction(
                             &self.conn,
                             self.hasher.as_ref(),
+                            self.mode_binding_epoch,
                             timeline,
                             draft.clone(),
                         )
@@ -4485,6 +4507,7 @@ impl SqliteStore {
     fn append_geo_cell_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         hasher: &dyn Hasher,
+        mode_binding_epoch: Option<NonZeroU64>,
         timeline: TimelineId,
         entity: EntityId,
         event_id: EventId,
@@ -4530,7 +4553,14 @@ impl SqliteStore {
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(Event {
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            tx,
+            mode_binding_epoch,
+            timeline,
+            seq,
+            seq,
+        )
+        .map(|()| Event {
             id: event_id,
             entity,
             event_type: Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
@@ -4950,6 +4980,7 @@ impl GeographicAdmissionStore for SqliteStore {
         let event = Self::append_geo_cell_in_transaction(
             &tx,
             self.hasher.as_ref(),
+            self.mode_binding_epoch,
             request.timeline(),
             request.entity(),
             event_id,
@@ -5190,8 +5221,13 @@ impl GeoLocationAdmissionStore for SqliteStore {
             request.payload().clone(),
         )
         .with_wall_time(admitted_at);
-        let event =
-            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), request.timeline(), draft)?;
+        let event = Self::append_one_in_transaction(
+            &tx,
+            self.hasher.as_ref(),
+            self.mode_binding_epoch,
+            request.timeline(),
+            draft,
+        )?;
         let link = pos_core::geo_admission::GeoLocationAdmissionLinkV1::for_snapshot(
             request.timeline(),
             event.id,
@@ -7165,8 +7201,16 @@ impl SqliteStore {
                     timeline.to_string(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        Ok(())
+            .map_err(|e| CoreError::Storage(e.to_string()))
+            .and_then(|_| {
+                gateway_mode_binding::record_commit_epoch_in_transaction(
+                    &self.conn,
+                    self.mode_binding_epoch,
+                    timeline,
+                    head_seq.next(),
+                    new_head,
+                )
+            })
     }
 
     fn compute_chain_hash_at(
@@ -15609,6 +15653,7 @@ mod tests {
         let _ = SqliteStore::append_one_in_transaction(
             &store.conn,
             store.hasher.as_ref(),
+            None,
             fork.child_id,
             tests::make_draft(EntityId::new(), b"classified-registration-event"),
         )?;
@@ -17167,6 +17212,7 @@ mod tests {
             assert!(SqliteStore::append_one_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 tests::make_draft(EntityId::new(), b"draft"),
             )
@@ -17174,6 +17220,7 @@ mod tests {
             assert!(SqliteStore::append_geo_cell_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 EntityId::new(),
                 EventId::new(),
@@ -17209,6 +17256,7 @@ mod tests {
             assert!(SqliteStore::append_one_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 tests::make_draft(EntityId::new(), b"draft"),
             )
@@ -17216,6 +17264,7 @@ mod tests {
             assert!(SqliteStore::append_geo_cell_in_transaction(
                 &tx,
                 store.hasher.as_ref(),
+                None,
                 timeline.id(),
                 EntityId::new(),
                 EventId::new(),
@@ -18497,6 +18546,7 @@ mod tests {
         let error = SqliteStore::append_one_in_transaction(
             &tx,
             store.hasher.as_ref(),
+            None,
             TimelineId::new(),
             make_draft(EntityId::new(), b"unknown"),
         )
@@ -27287,6 +27337,7 @@ mod coverage_entrypoints {
         expect_err(SqliteStore::append_geo_cell_in_transaction(
             &tx,
             store.hasher.as_ref(),
+            None,
             timeline.id(),
             EntityId::new(),
             EventId::new(),
