@@ -1,9 +1,9 @@
 //! Persistent Gateway execution-mode binding of one store (ADR-134 §8).
 //!
-//! A store records the one Gateway execution-mode profile (GMP1) it serves
+//! A store records the one Gateway execution-mode profile it serves
 //! under, with a `binding_epoch` that starts at 1 and increments on every
 //! rotation and migration. The core holds only a neutral, bounded profile
-//! reference: it never sees GMP1 bytes, strings or meaning, which stay private
+//! reference: it never sees the profile record bytes, strings or meaning, which stay private
 //! to the Gateway.
 //!
 //! Every binding change needs an opaque permit that only the trusted host
