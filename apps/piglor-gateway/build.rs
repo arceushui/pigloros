@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .join(", ");
         writeln!(
             source,
-            "/// Canonical GMP1 bytes of `{mode_profile_id}`.\npub(crate) const {name}: &[u8] = &[{literal}];"
+            "/// Canonical GMP1 bytes of `{mode_profile_id}`.\npub(super) const {name}: &[u8] = &[{literal}];"
         )?;
     }
     fs::write(

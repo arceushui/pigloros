@@ -59,7 +59,7 @@ const FRESHNESS: [(&str, u8); 2] = [("current-by-construction", 1), ("observed-p
 /// Returns a description of the first rejected rule: a Draft or test marker,
 /// a malformed or open declaration, a lifecycle other than `Reviewed`, a
 /// missing, third or unsorted identifier, or any GMP1 rule.
-pub(crate) fn compile_declaration_v1(json: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub(super) fn compile_declaration_v1(json: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
     FORBIDDEN_MARKERS
         .iter()
         .find(|marker| json.contains(**marker))
