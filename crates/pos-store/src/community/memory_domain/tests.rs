@@ -424,6 +424,11 @@ fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> Tes
     );
     assert_eq!(intent.authority_request_digest, decision.request_digest());
     assert_eq!(key.burned_credits(), 2);
+    assert_ne!(record.protection_id, record.copy_id);
+    assert_ne!(
+        bootstrapped()?.record()?.protection_id,
+        record.protection_id
+    );
     assert_eq!(
         key.intent().key_owner_text(),
         format!(
