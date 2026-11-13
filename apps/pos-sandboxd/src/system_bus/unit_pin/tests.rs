@@ -27,6 +27,8 @@ struct Bus {
     /// `RefUnit` and `UnrefUnit` calls, in order.
     calls: Vec<String>,
     refuse_ref: bool,
+    /// How long a `RefUnit` reply is held back.
+    ref_delay: Duration,
     refuse_unref: bool,
     /// Successive `ActiveState` reads; the last one repeats.
     states: VecDeque<String>,
@@ -49,10 +51,14 @@ struct Manager(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl Manager {
-    fn ref_unit(&self, name: &str) -> fdo::Result<()> {
-        let mut bus = self.0.lock().map_err(failed)?;
-        bus.calls.push(format!("ref {name}"));
-        if bus.refuse_ref {
+    async fn ref_unit(&self, name: &str) -> fdo::Result<()> {
+        let (refused, delay) = {
+            let mut bus = self.0.lock().map_err(failed)?;
+            bus.calls.push(format!("ref {name}"));
+            (bus.refuse_ref, bus.ref_delay)
+        };
+        tokio::time::sleep(delay).await;
+        if refused {
             Err(fdo::Error::AccessDenied("ref refused".to_owned()))
         } else {
             Ok(())
@@ -223,6 +229,23 @@ impl Fixture {
         Ok(self.bus.lock().map_err(|_| "poisoned")?.calls.clone())
     }
 
+    /// The calls once a release spawned on drop has had time to arrive.
+    async fn settled_calls(&self) -> TestResult<Vec<String>> {
+        tokio::time::sleep(10 * SETTLE_POLL).await;
+        self.calls()
+    }
+
+    /// The calls once at least `count` arrived, then settled.
+    async fn calls_after(&self, count: usize) -> TestResult<Vec<String>> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.calls().map(|calls| calls.len()).unwrap_or_default() < count {
+                tokio::time::sleep(SETTLE_POLL).await;
+            }
+        })
+        .await?;
+        self.settled_calls().await
+    }
+
     fn set(&self, change: impl FnOnce(&mut Bus)) -> TestResult {
         change(&mut *self.bus.lock().map_err(|_| "poisoned")?);
         Ok(())
@@ -258,7 +281,10 @@ async fn the_unit_is_referenced_before_its_cgroup_is_bound() -> TestResult {
         .pinned(fixture.unit(), async { Ok(7) })
         .await?;
     assert_eq!(bound, 7);
-    assert_eq!(fixture.calls()?, [named("ref", fixture.unit())]);
+    assert_eq!(
+        fixture.settled_calls().await?,
+        [named("ref", fixture.unit())]
+    );
     Ok(())
 }
 
@@ -276,7 +302,7 @@ async fn a_failed_bind_releases_the_reference_it_took() -> TestResult {
         Err(SystemdTransientUnitTransportError::CgroupUnitMismatch)
     ));
     assert_eq!(
-        fixture.calls()?,
+        fixture.settled_calls().await?,
         [named("ref", fixture.unit()), named("unref", fixture.unit())]
     );
     Ok(())
@@ -296,7 +322,10 @@ async fn a_refused_reference_binds_nothing() -> TestResult {
         bound,
         Err(SystemdTransientUnitTransportError::UnitRef(_))
     ));
-    assert_eq!(fixture.calls()?, [named("ref", fixture.unit())]);
+    assert_eq!(
+        fixture.settled_calls().await?,
+        [named("ref", fixture.unit())]
+    );
     Ok(())
 }
 
@@ -310,17 +339,52 @@ async fn a_bind_cut_off_mid_way_releases_its_reference() -> TestResult {
     )
     .await;
     assert!(cut.is_err());
-    // The release runs on a task over the same connection.
-    let released = tokio::time::timeout(Duration::from_secs(5), async {
-        while fixture.calls().map(|calls| calls.len()).unwrap_or_default() < 2 {
-            tokio::time::sleep(SETTLE_POLL).await;
-        }
-    })
-    .await;
-    assert!(released.is_ok());
+    // The release runs on a task over the same connection, exactly once.
     assert_eq!(
-        fixture.calls()?,
+        fixture.calls_after(2).await?,
         [named("ref", fixture.unit()), named("unref", fixture.unit())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reference_cut_off_before_its_reply_is_released() -> TestResult {
+    let fixture = Fixture::new(&["inactive"]).await?;
+    fixture.set(|bus| bus.ref_delay = Duration::from_millis(300))?;
+    let cut = tokio::time::timeout(
+        Duration::from_millis(50),
+        fixture.transport.pinned(fixture.unit(), async { Ok(()) }),
+    )
+    .await;
+    assert!(cut.is_err());
+    assert_eq!(
+        fixture.calls_after(2).await?,
+        [named("ref", fixture.unit()), named("unref", fixture.unit())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_completed_bind_leaves_no_release_behind() -> TestResult {
+    let fixture = Fixture::new(&["inactive"]).await?;
+    let (pinned, unpinned) = (named("ref", fixture.unit()), named("unref", fixture.unit()));
+    fixture
+        .transport
+        .pinned(fixture.unit(), async { Ok(()) })
+        .await?;
+    // A bound pin is kept: no release follows it.
+    assert_eq!(fixture.settled_calls().await?, [pinned.clone()]);
+    let failed = fixture
+        .transport
+        .pinned(fixture.unit(), async {
+            Err::<(), _>(SystemdTransientUnitTransportError::CgroupUnitMismatch)
+        })
+        .await;
+    assert!(failed.is_err());
+    // A failed bind is released exactly once.
+    assert_eq!(
+        fixture.settled_calls().await?,
+        [pinned.clone(), pinned, unpinned]
     );
     Ok(())
 }

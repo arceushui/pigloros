@@ -36,15 +36,20 @@ type TransportResult<T> = Result<T, SystemdTransientUnitTransportError>;
 impl SystemdTransientUnitTransport {
     /// Reference the unit, then run `bind`. A failed `bind` releases the
     /// reference again, best effort: nothing will read the unit's result. So
-    /// does a `bind` that is cut off or dropped, from a task on the same
-    /// connection.
+    /// does a reference or a `bind` that is cut off or dropped, from a task
+    /// on the same connection: `RefUnit` may have been sent with its reply
+    /// never awaited, and releasing a unit that was not referenced is
+    /// harmless.
     pub(crate) async fn pinned<T>(
         &self,
         unit: &TransientServiceUnitName,
         bind: impl Future<Output = TransportResult<T>>,
     ) -> TransportResult<T> {
-        pin_with(ManagerProxy::new(&self.connection).await, unit).await?;
         let mut guard = PinGuard(Some((self.connection.clone(), unit.clone())));
+        if let Err(refused) = pin_with(ManagerProxy::new(&self.connection).await, unit).await {
+            guard.disarm();
+            return Err(refused);
+        }
         let bound = bind.await;
         guard.disarm();
         if bound.is_err() {
@@ -124,8 +129,8 @@ impl SystemdTransientUnitTransport {
     }
 }
 
-/// A reference whose `bind` has not finished; dropped armed, it is released
-/// by a task on the connection that took it.
+/// A reference whose request or `bind` has not finished; dropped armed, it
+/// is released by a task on the connection that took it.
 struct PinGuard(Option<(zbus::Connection, TransientServiceUnitName)>);
 
 impl PinGuard {
