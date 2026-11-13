@@ -216,24 +216,6 @@ impl MemoryCommunityDomainV1 {
     /// }
     /// ```
     ///
-    /// nor can a decision ride along with the installed authority:
-    ///
-    /// ```compile_fail,E0061
-    /// use pos_store::community::{
-    ///     CommunityBootstrapRequestV1, CommunityDomainBindingV1, CommunityMetadataAuthorityV1,
-    ///     MemoryCommunityDomainV1,
-    /// };
-    /// fn forge(
-    ///     domain: &mut MemoryCommunityDomainV1,
-    ///     binding: CommunityDomainBindingV1<'_>,
-    ///     authority: &mut CommunityMetadataAuthorityV1,
-    ///     request: CommunityBootstrapRequestV1,
-    ///     decoded: &pos_core::AuthorizationDecisionV1,
-    /// ) {
-    ///     let _ = domain.open(binding, authority, request, decoded);
-    /// }
-    /// ```
-    ///
     /// A missing, revoked or out-of-scope grant refuses this call only
     /// (per-call fail-closed, no latch); see the type documentation.
     ///

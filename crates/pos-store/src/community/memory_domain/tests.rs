@@ -1163,22 +1163,29 @@ fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
         .iter()
         .map(CapabilityGrantV1::binding_digest)
         .collect::<Result<Vec<_>, _>>()?;
-    let foreign_registry = AuthorityRegistrySnapshotV1::try_new(
+    let authenticated: Vec<Hash> = std::collections::BTreeSet::from([
+        world.owner.registry_binding_digest(),
+        foreign_adapter.registry_binding_digest(),
+    ])
+    .into_iter()
+    .collect();
+    // Same revision, but it also trusts the foreign adapter, so only the
+    // policy's owner registry binding can refuse that principal.
+    let trusts_foreign = AuthorityRegistrySnapshotV1::try_new(
+        REGISTRY,
+        authenticated.clone(),
+        bindings.clone(),
+        vec![],
+    )?;
+    let foreign_revision = AuthorityRegistrySnapshotV1::try_new(
         Hash::from_bytes([49; 32]),
-        vec![
-            world.owner.registry_binding_digest(),
-            foreign_adapter.registry_binding_digest(),
-        ]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect(),
+        authenticated,
         bindings,
         vec![],
     )?;
     for (principal, registry) in [
-        (foreign_adapter, world.registry.clone()),
-        (world.owner.clone(), foreign_registry),
+        (foreign_adapter, trusts_foreign),
+        (world.owner.clone(), foreign_revision),
     ] {
         let mut authority = installed(principal, registry, AUDIENCE, &[500]);
         assert_eq!(
