@@ -1460,56 +1460,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn every_protected_route_refuses_an_unprovisioned_host_before_its_body() -> TestResult {
-        let (gateway, app) = served(None)?;
-        let timeline = TimelineId::new().to_string();
-        for (method, route) in crate::http::PROTECTED_ROUTES {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(route.replace("{timeline_id}", &timeline))
-                        .header("content-type", "application/json")
-                        .header(ACTOR_ENTITY_HEADER, actor()?.to_string())
-                        .body(Body::from("{"))?,
-                )
-                .await?;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
-        }
-        gateway.shutdown().await?;
-        drop(gateway);
-        Ok(())
-    }
-
-    #[test]
-    fn the_protected_route_table_is_every_loopback_route() {
-        let source = include_str!("http.rs");
-        let body = source
-            .split("fn loopback_routes() -> Router<AppState> {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .unwrap_or_default();
-        let mut served = body
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix(".route(\""))
-            .filter_map(|rest| {
-                let route = rest.split('"').next()?;
-                let method = if rest.contains(", get(") {
-                    "GET"
-                } else {
-                    "POST"
-                };
-                Some((method, route))
-            })
-            .collect::<Vec<_>>();
-        served.sort_unstable();
-        let mut table = crate::http::PROTECTED_ROUTES.to_vec();
-        table.sort_unstable();
-        assert_eq!(served, table);
-    }
-
     #[test]
     fn binary_compositions_never_reach_the_harness_constructor() {
         let production =

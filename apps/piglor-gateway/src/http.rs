@@ -172,7 +172,7 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-pub(super) const PROTECTED_ROUTES: [(&str, &str); 5] = [
+const PROTECTED_ROUTES: [(&str, &str); 5] = [
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
@@ -1026,6 +1026,73 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
+    }
+
+    #[tokio::test]
+    async fn every_protected_route_refuses_an_unprovisioned_host_before_its_body() {
+        let gateway = Gateway::new_with_erasure_host(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok(),
+            None,
+        )
+        .test_ok();
+        let app = router(AppState {
+            gateway: gateway.clone(),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        let timeline = TimelineId::new().to_string();
+        for (method, route) in PROTECTED_ROUTES {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(route.replace("{timeline_id}", &timeline))
+                        .header("content-type", "application/json")
+                        .header(
+                            crate::operation::ACTOR_ENTITY_HEADER,
+                            test_action_actor().to_string(),
+                        )
+                        .body(Body::from("{"))
+                        .test_ok(),
+                )
+                .await
+                .test_ok();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+        }
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[test]
+    fn the_protected_route_table_is_every_loopback_route() {
+        let source = include_str!("http.rs");
+        let body = source
+            .split("fn loopback_routes() -> Router<AppState> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        let mut served = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".route(\""))
+            .filter_map(|rest| {
+                let route = rest.split('"').next()?;
+                let method = if rest.contains(", get(") {
+                    "GET"
+                } else {
+                    "POST"
+                };
+                Some((method, route))
+            })
+            .collect::<Vec<_>>();
+        served.sort_unstable();
+        let mut table = PROTECTED_ROUTES.to_vec();
+        table.sort_unstable();
+        assert_eq!(served, table);
     }
 
     fn world_action_payload(actor: &str, body: &str, marker: u8) -> serde_json::Value {
