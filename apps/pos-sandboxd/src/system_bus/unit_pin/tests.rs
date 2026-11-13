@@ -373,7 +373,10 @@ async fn a_completed_bind_leaves_no_release_behind() -> TestResult {
         .pinned(fixture.unit(), async { Ok(()) })
         .await?;
     // A bound pin is kept: no release follows it.
-    assert_eq!(fixture.settled_calls().await?, [pinned.clone()]);
+    assert_eq!(
+        fixture.settled_calls().await?,
+        std::slice::from_ref(&pinned)
+    );
     let failed = fixture
         .transport
         .pinned(fixture.unit(), async {
