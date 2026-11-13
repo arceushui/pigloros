@@ -113,6 +113,83 @@ impl Session {
         self.check()?;
         self.buffers.as_ref().ok_or_else(closed)
     }
+
+    /// Admit a fault at `lifecycle` only while its owners and the named browser are retained.
+    #[cfg(test)]
+    fn fault_lifecycle_admitted(
+        &self,
+        environment: &Environment,
+        lifecycle: crate::ProcessFaultLifecycle,
+        target: crate::ProcessFaultTarget,
+        browser: pos_owner_bridge::ProcessIdentity,
+    ) -> Result<(), ()> {
+        match lifecycle {
+            crate::ProcessFaultLifecycle::Quarantined => {
+                require_owned_browser(
+                    || self.preload_fault_owners_retained() && self.window.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || browser.browser_pid,
+                )?;
+            }
+            crate::ProcessFaultLifecycle::PostedReceipt
+            | crate::ProcessFaultLifecycle::PostedEmpty
+            | crate::ProcessFaultLifecycle::PostedWriting
+            | crate::ProcessFaultLifecycle::PostedReady
+            | crate::ProcessFaultLifecycle::PostedConsuming
+            | crate::ProcessFaultLifecycle::PostedRetry(_)
+            | crate::ProcessFaultLifecycle::ReleasingSuccess => {
+                require_owned_browser(
+                    || self.controller.is_some() && self.view.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || browser.browser_pid,
+                )?;
+            }
+            crate::ProcessFaultLifecycle::AwaitingLoad
+            | crate::ProcessFaultLifecycle::Navigating
+            | crate::ProcessFaultLifecycle::BeforeRecord => {
+                require_owned_browser(
+                    || self.preload_fault_owners_retained(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || browser.browser_pid,
+                )?;
+            }
+            crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
+            crate::ProcessFaultLifecycle::PendingOpening => {
+                if target != crate::ProcessFaultTarget::Browser
+                    || !self.pending_opening_owners_retained()
+                    || self.recordless_controller_completion().is_some()
+                    || self.pending_opening_browser_candidate()? != Some(browser)
+                {
+                    return Err(());
+                }
+                self.denials.expect_browser(browser.browser_pid);
+            }
+            crate::ProcessFaultLifecycle::RecordlessOpening => {
+                self.recordless_fault_admitted(environment, target, browser)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Admit a recordless fault only for the one browser the environment still reports.
+    #[cfg(test)]
+    fn recordless_fault_admitted(
+        &self,
+        environment: &Environment,
+        target: crate::ProcessFaultTarget,
+        browser: pos_owner_bridge::ProcessIdentity,
+    ) -> Result<(), ()> {
+        if target != crate::ProcessFaultTarget::Browser
+            || !self.recordless_fault_owners_retained()
+            || super::process_fault::browser_candidate(&environment.raw)? != browser
+        {
+            return Err(());
+        }
+        // The exact environment subscription already exists; arm its
+        // recovery observer before the fixed fault can be invoked.
+        self.denials.expect_browser(browser.browser_pid);
+        Ok(())
+    }
 }
 
 impl NativeOperations for Session {
@@ -152,60 +229,12 @@ impl NativeOperations for Session {
         if !environment.subscribed() {
             return Err(());
         }
-        match authority.lifecycle() {
-            crate::ProcessFaultLifecycle::Quarantined => {
-                require_owned_browser(
-                    || self.preload_fault_owners_retained() && self.window.is_some(),
-                    || self.browser_pid().map_err(|_| ()),
-                    || authority.browser().browser_pid,
-                )?;
-            }
-            crate::ProcessFaultLifecycle::PostedReceipt
-            | crate::ProcessFaultLifecycle::PostedEmpty
-            | crate::ProcessFaultLifecycle::PostedWriting
-            | crate::ProcessFaultLifecycle::PostedReady
-            | crate::ProcessFaultLifecycle::PostedConsuming
-            | crate::ProcessFaultLifecycle::PostedRetry(_)
-            | crate::ProcessFaultLifecycle::ReleasingSuccess => {
-                require_owned_browser(
-                    || self.controller.is_some() && self.view.is_some(),
-                    || self.browser_pid().map_err(|_| ()),
-                    || authority.browser().browser_pid,
-                )?;
-            }
-            crate::ProcessFaultLifecycle::AwaitingLoad
-            | crate::ProcessFaultLifecycle::Navigating
-            | crate::ProcessFaultLifecycle::BeforeRecord => {
-                require_owned_browser(
-                    || self.preload_fault_owners_retained(),
-                    || self.browser_pid().map_err(|_| ()),
-                    || authority.browser().browser_pid,
-                )?;
-            }
-            crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
-            crate::ProcessFaultLifecycle::PendingOpening => {
-                if authority.target() != crate::ProcessFaultTarget::Browser
-                    || !self.pending_opening_owners_retained()
-                    || self.recordless_controller_completion().is_some()
-                    || self.pending_opening_browser_candidate()? != Some(authority.browser())
-                {
-                    return Err(());
-                }
-                self.denials.expect_browser(authority.browser().browser_pid);
-            }
-            crate::ProcessFaultLifecycle::RecordlessOpening => {
-                if authority.target() != crate::ProcessFaultTarget::Browser
-                    || !self.recordless_fault_owners_retained()
-                    || super::process_fault::browser_candidate(&environment.raw)?
-                        != authority.browser()
-                {
-                    return Err(());
-                }
-                // The exact environment subscription already exists; arm its
-                // recovery observer before the fixed fault can be invoked.
-                self.denials.expect_browser(authority.browser().browser_pid);
-            }
-        }
+        self.fault_lifecycle_admitted(
+            environment,
+            authority.lifecycle(),
+            authority.target(),
+            authority.browser(),
+        )?;
         super::process_fault::inject(
             &environment.raw,
             authority,

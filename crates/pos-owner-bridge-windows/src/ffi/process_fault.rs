@@ -510,15 +510,18 @@ fn check_pre_close_identity(
     Ok((identity, image))
 }
 
-pub(super) fn inject(
+/// The browser and the declared target selected from one complete snapshot.
+struct FaultSelection {
+    browser_pid: u32,
+    browser: (ProcessIdentity, std::path::PathBuf),
+    kind: COREWEBVIEW2_PROCESS_KIND,
+    pid: u32,
+}
+
+fn select_fault_target(
     environment: &ICoreWebView2Environment,
     authority: &crate::FaultAuthority,
-    buffers: Option<&super::buffers::Pair>,
-    pending_controller: Option<&super::creation::ControllerCreation>,
-) -> Result<Box<dyn ProcessFaultHandle>, ()> {
-    if !authority.valid() {
-        return Err(());
-    }
+) -> Result<FaultSelection, ()> {
     let first = candidates(environment)?;
     let browser_pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)?;
     let expected = authority.browser();
@@ -534,55 +537,110 @@ pub(super) fn inject(
         ProcessFaultTarget::Renderer => COREWEBVIEW2_PROCESS_KIND_RENDERER,
     };
     let pid = select(&first, kind)?;
-    let handle = open_owned_process(pid)?;
+    Ok(FaultSelection {
+        browser_pid,
+        browser: (browser, browser_path),
+        kind,
+        pid,
+    })
+}
+
+fn retain_fault_target(
+    selection: &FaultSelection,
+    expected: ProcessIdentity,
+) -> Result<(Retained, (ProcessIdentity, std::path::PathBuf)), ()> {
+    let handle = open_owned_process(selection.pid)?;
     // Retain the handle on every subsequent failure path.
     let mut retained = Retained {
         handle,
         identity: expected,
     };
-    let (observed, path) = super::process::read_identity(handle, pid)?;
-    if path != browser_path || (kind == COREWEBVIEW2_PROCESS_KIND_BROWSER && observed != expected) {
+    let (observed, path) = super::process::read_identity(handle, selection.pid)?;
+    if path != selection.browser.1
+        || (selection.kind == COREWEBVIEW2_PROCESS_KIND_BROWSER && observed != expected)
+    {
         return Err(());
     }
     retained.identity = observed;
     if retained.exit_code()?.is_some() {
         return Err(());
     }
+    Ok((retained, (observed, path)))
+}
+
+fn fault_target_changed(
+    environment: &ICoreWebView2Environment,
+    selection: &FaultSelection,
+    handle: HANDLE,
+    target: &(ProcessIdentity, std::path::PathBuf),
+) -> Result<bool, ()> {
     let second = candidates(environment)?;
-    if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != browser_pid
-        || super::process::inspect(browser_pid)?.ok_or(())? != (browser, browser_path)
-        || select(&second, kind)? != pid
-        || super::process::read_identity(handle, pid)? != (observed, path)
-        || !authority.valid()
-        || match authority.lifecycle() {
-            crate::ProcessFaultLifecycle::PostedEmpty
-            | crate::ProcessFaultLifecycle::PostedRetry(_) => {
-                buffers.ok_or(())?.load_state().map_err(|_| ())?
-                    != pos_owner_bridge_codec::ControlState::Empty as u32
-            }
-            crate::ProcessFaultLifecycle::PostedWriting => {
-                buffers.ok_or(())?.load_state().map_err(|_| ())?
-                    != pos_owner_bridge_codec::ControlState::Writing as u32
-            }
-            crate::ProcessFaultLifecycle::PostedReady => {
-                buffers.ok_or(())?.load_state().map_err(|_| ())?
-                    != pos_owner_bridge_codec::ControlState::Ready as u32
-            }
-            crate::ProcessFaultLifecycle::PostedConsuming => {
-                buffers.ok_or(())?.load_state().map_err(|_| ())?
-                    != pos_owner_bridge_codec::ControlState::Consuming as u32
-            }
-            _ => false,
+    Ok(
+        select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != selection.browser_pid
+            || super::process::inspect(selection.browser_pid)?.ok_or(())? != selection.browser
+            || select(&second, selection.kind)? != selection.pid
+            || super::process::read_identity(handle, selection.pid)? != *target,
+    )
+}
+
+fn posted_state_differs(
+    authority: &crate::FaultAuthority,
+    buffers: Option<&super::buffers::Pair>,
+) -> Result<bool, ()> {
+    Ok(match authority.lifecycle() {
+        crate::ProcessFaultLifecycle::PostedEmpty
+        | crate::ProcessFaultLifecycle::PostedRetry(_) => {
+            buffers.ok_or(())?.load_state().map_err(|_| ())?
+                != pos_owner_bridge_codec::ControlState::Empty as u32
         }
-        || (authority.lifecycle() == crate::ProcessFaultLifecycle::PendingOpening
-            && pending_controller.ok_or(())?.succeeded().is_some())
+        crate::ProcessFaultLifecycle::PostedWriting => {
+            buffers.ok_or(())?.load_state().map_err(|_| ())?
+                != pos_owner_bridge_codec::ControlState::Writing as u32
+        }
+        crate::ProcessFaultLifecycle::PostedReady => {
+            buffers.ok_or(())?.load_state().map_err(|_| ())?
+                != pos_owner_bridge_codec::ControlState::Ready as u32
+        }
+        crate::ProcessFaultLifecycle::PostedConsuming => {
+            buffers.ok_or(())?.load_state().map_err(|_| ())?
+                != pos_owner_bridge_codec::ControlState::Consuming as u32
+        }
+        _ => false,
+    })
+}
+
+fn pending_controller_succeeded(
+    authority: &crate::FaultAuthority,
+    pending_controller: Option<&super::creation::ControllerCreation>,
+) -> Result<bool, ()> {
+    Ok(
+        authority.lifecycle() == crate::ProcessFaultLifecycle::PendingOpening
+            && pending_controller.ok_or(())?.succeeded().is_some(),
+    )
+}
+
+pub(super) fn inject(
+    environment: &ICoreWebView2Environment,
+    authority: &crate::FaultAuthority,
+    buffers: Option<&super::buffers::Pair>,
+    pending_controller: Option<&super::creation::ControllerCreation>,
+) -> Result<Box<dyn ProcessFaultHandle>, ()> {
+    if !authority.valid() {
+        return Err(());
+    }
+    let selection = select_fault_target(environment, authority)?;
+    let (retained, target) = retain_fault_target(&selection, authority.browser())?;
+    if fault_target_changed(environment, &selection, retained.handle, &target)?
+        || !authority.valid()
+        || posted_state_differs(authority, buffers)?
+        || pending_controller_succeeded(authority, pending_controller)?
         || retained.exit_code()?.is_some()
     {
         return Err(());
     }
-    authority.record(crate::ProcessFaultMark::Selected(observed));
+    authority.record(crate::ProcessFaultMark::Selected(target.0));
     authority.record(crate::ProcessFaultMark::TerminationCall);
-    terminate_owned_process(handle)?;
+    terminate_owned_process(retained.handle)?;
     Ok(Box::new(retained))
 }
 
