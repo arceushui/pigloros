@@ -2,6 +2,10 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
+    operation::{
+        AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
+        OperationAuthority,
+    },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
         ProblemCodeV1, ProblemV1,
@@ -216,9 +220,12 @@ async fn get_ledger(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn create_timeline(
     State(state): State<AppState>,
+    authority: OperationAuthority<CreateTimelineOperation>,
     ContractJson(body): ContractJson<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let permit = authority.authorize(&state.gateway, None).await?;
     let tl = state.gateway.create_timeline(&body.name).await?;
+    drop(permit);
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -561,20 +568,26 @@ async fn post_action(
 async fn post_signal(
     State(state): State<AppState>,
     ContractPath(id): ContractPath<String>,
+    authority: OperationAuthority<AppendSignalOperation>,
     ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let timeline = crate::parse_timeline_id(&id)?;
+    let permit = authority.authorize(&state.gateway, Some(timeline)).await?;
     let entity_id = body.entity_id.clone();
     let event = state
         .gateway
         .append_signal(&id, &entity_id, &body.into_signal())
         .await?;
+    drop(permit);
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
 async fn post_ledger_prediction(
     State(state): State<AppState>,
+    authority: OperationAuthority<CreatePredictionOperation>,
     ContractJson(body): ContractJson<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
+    let permit = authority.authorize(&state.gateway, None).await?;
     let ledger = match &state.ledger_write {
         LedgerWriteMode::Disabled => return Err(GatewayError::LedgerWriteDisabled),
         LedgerWriteMode::Unconfigured => return Err(GatewayError::LedgerUnavailable),
@@ -582,6 +595,7 @@ async fn post_ledger_prediction(
     };
     body.validate()?;
     let prediction_id = ledger.register(body).await?;
+    drop(permit);
     Ok((
         StatusCode::CREATED,
         Json(json!({ "prediction_id": prediction_id })),
@@ -1235,7 +1249,14 @@ mod tests {
     ) -> (StatusCode, serde_json::Value) {
         let mut builder = Request::builder().method(method).uri(uri);
         if method == "POST" {
-            builder = builder.header(IDEMPOTENCY_KEY_HEADER, next_idempotency_key());
+            // An authorized Gateway admits a mutation only for a granted
+            // actor (#1361); an unprotected one ignores the header.
+            builder = builder
+                .header(IDEMPOTENCY_KEY_HEADER, next_idempotency_key())
+                .header(
+                    crate::operation::ACTOR_ENTITY_HEADER,
+                    test_action_actor().to_string(),
+                );
         }
         let req = if let Some(b) = body {
             builder
@@ -2596,6 +2617,7 @@ osf_link = \"https://osf.io/example\"\n";
                     pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
                     authorization: None,
+                    authorization_required: false,
                 },
                 ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,

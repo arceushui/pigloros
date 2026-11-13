@@ -58,8 +58,13 @@ lookup answers `not-found-or-unavailable` and never reveals whether the resource
 `retryable: true` means an identical retry may succeed. The registry is open: a client handles a
 `code` it does not know by its HTTP status and `retryable` and never fails on it (rule 5).
 
-An authority decision precedes any protected lookup, so a caller without a read grant receives
-the same answer for an unknown Timeline as for an existing one. A missing Principal, or
+Every loopback operation except `/health` and the public Ledger reads is protected by the host's
+Local Principal (#1361): loopback reachability is the trust boundary, there is no credential
+scheme, and a request names the entity it acts as in the optional `x-piglor-actor-entity` header,
+which the Principal's grant must cover. A host without a provisioned Local Principal, or a request
+without a valid actor, is `401 unauthenticated`. An authority decision precedes any protected
+lookup, so a caller without a read grant receives the same answer for an unknown Timeline as for
+an existing one. A missing Principal, or
 authentication evidence outside its validity window, is `401 unauthenticated`; a missing grant
 or capability is `403 unauthorized`; a grant, a delegation parent or consent that was revoked at
 the evaluation or commit fence, or expired, is `403 revoked`; absent or unbound consent is

@@ -1,6 +1,4 @@
 #![forbid(unsafe_code)]
-// The whole crate needs the nonproduction fixture registration of the Gateway action registry.
-#![cfg(feature = "test-support")]
 
 //! The gateway-client-conformance subject adapter of apps/piglor-gateway (provider contract
 //! 2.0.0, Redmine #1295).
@@ -28,10 +26,11 @@
 //!    outputs its record of every sub-case. A `namespaced-failure` family returns its family
 //!    failure when every exchange matched, else `subcase-mismatch`.
 //!
-//! The `authorized` composition is explicitly fixture-only: the fixture registration of the
-//! Gateway action registry and a fixture authority, from which no production authority is
-//! sourced (ADR-108). Results are Local-relaxation engineering evidence, not hosted
-//! conformance.
+//! The `authorized` composition is the production serve composition (#1361): a fixture Local
+//! Principal document is provisioned and recomposed through the production Local Principal
+//! path, and the Gateway requires it for every protected operation. No production authority is
+//! sourced from the fixture document (ADR-108). Results are Local-relaxation engineering
+//! evidence, not hosted conformance.
 
 mod normalize;
 mod subject;

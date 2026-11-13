@@ -3,8 +3,9 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
-//! authorization is opt-in through [`GatewayAuthorization`].
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. The production serve
+//! composition ([`local_principal::local_gateway`]) requires host-bound Principal authorization
+//! ([`GatewayAuthorization`]) for every protected operation.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(test)]
@@ -27,6 +28,8 @@ pub mod local_fork_coordinator;
 pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
+pub mod local_principal;
+pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
@@ -37,12 +40,13 @@ pub use authorization::{
     GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
     GatewayAuthorityDenial, GatewayAuthorization, GatewayAuthorizationAudit,
     GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    GatewayAuthorizationTarget, LocalAuthenticationAdapter, PendingAuthorityDenial,
-    RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
+    GatewayAuthorizationTarget, GatewayOperationV1, LocalAuthenticationAdapter,
+    PendingAuthorityDenial, RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
     MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
+pub use operation::{GatewayOperationPermitV1, OperationAuthority, OperationSpecV1};
 #[cfg(test)]
 use pos_core::store::{AppendIdentity, AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
@@ -1099,6 +1103,10 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
+    /// Whether every protected operation needs [`Self::authorization`]: set
+    /// by an authorized composition and by [`Self::require_authorization`],
+    /// so a composition without its authorizer fails closed (`401`).
+    authorization_required: bool,
 }
 
 /// Action kinds admitted by the Gateway World approver.
@@ -1258,9 +1266,8 @@ fn gateway_action_registry_builder(
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests and behind the
-// `test-support` feature, which no deployable graph enables, so they never
-// enter the release builder.
+// registration authority. They exist only in unit tests, so they never enter
+// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1268,7 +1275,7 @@ fn gateway_action_registry_builder(
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1280,19 +1287,17 @@ fn fixture_action_registry_builder(
     )
 }
 
-/// Build a nonproduction, action-capable Gateway around a verified erasure host.
+/// Build a unit-test, action-capable Gateway around a verified erasure host.
 ///
 /// The action registry is the fixture registration of the reviewed Gateway
-/// entry, and `authorization` is whatever the caller pins: this composition is
-/// fixture-only and is never a source of production authority (ADR-108). It
-/// exists only in unit tests and behind the `test-support` feature, for the
-/// gateway-client-conformance subject adapter (#1295).
+/// entry, and `authorization` is whatever the test pins: this composition is
+/// never a source of production authority (ADR-108). Production composes its
+/// authorizer only through [`Gateway::require_authorization`] (#1361).
 ///
 /// # Errors
 /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn gateway_with_erasure_host_and_authorization(
+#[cfg(test)]
+pub(crate) fn gateway_with_erasure_host_and_authorization(
     host: ErasureExecutionHostV1,
     bodies: impl IntoIterator<Item = EntityId>,
     authorization: GatewayAuthorization,
@@ -2086,6 +2091,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization_required: authorization.is_some(),
             authorization,
         }
         .schedule_startup_consent_cleanup())
@@ -2119,6 +2125,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2326,6 +2333,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2338,7 +2346,7 @@ impl Gateway {
     ///
     /// Test-only: the store has no authority ports, so every denial fails
     /// closed as unavailable evidence (503) and is never answered as a
-    /// denial. No production or `test-support` composition can build it.
+    /// denial. No production composition can build it.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
@@ -2376,6 +2384,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: Some(Arc::new(authorization)),
+            authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2411,6 +2420,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2447,6 +2457,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2484,6 +2495,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2515,6 +2527,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2636,10 +2649,26 @@ impl Gateway {
         self.store.erasure_status().await.map_err(Into::into)
     }
 
-    /// Return whether this Gateway has a provider-neutral host authorizer.
+    /// Return whether this Gateway protects its operations: it has a
+    /// provider-neutral host authorizer, or its composition requires one and
+    /// fails closed without it.
     #[must_use]
     pub const fn has_authorization(&self) -> bool {
-        self.authorization.is_some()
+        self.authorization.is_some() || self.authorization_required
+    }
+
+    /// Bind this Gateway's protected operations to the host-pinned Local
+    /// Principal (owner decisions D1 and D4 on #302).
+    ///
+    /// Every protected operation then requires `authorization`; with `None`
+    /// (an unprovisioned host) each answers `401 unauthenticated` and the
+    /// Gateway never falls back to unprotected operation. Only the trusted
+    /// composition root calls this, before the Gateway is shared.
+    #[must_use]
+    pub fn require_authorization(mut self, authorization: Option<GatewayAuthorization>) -> Self {
+        self.authorization = authorization.map(Arc::new);
+        self.authorization_required = true;
+        self
     }
 
     /// Drain queued store commands and join the dedicated worker.
@@ -2905,7 +2934,7 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
-        if self.authorization.is_some() {
+        if self.has_authorization() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
         self.read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
@@ -3522,6 +3551,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3537,6 +3567,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3561,6 +3592,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 }
@@ -7254,6 +7286,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
@@ -7272,6 +7305,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_list.create_timeline("x").await,
@@ -7316,6 +7350,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             missing
@@ -7360,6 +7395,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = empty_append.create_timeline("e").await.test_ok();
         let err = empty_append
@@ -7385,6 +7421,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_get_timeline
             .append_action(
@@ -7409,6 +7446,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = fail_append.create_timeline("a").await.test_ok();
         let err = fail_append
@@ -7434,6 +7472,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7493,6 +7532,7 @@ mod tests {
                 pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 authorization: None,
+                authorization_required: false,
             };
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)

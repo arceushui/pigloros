@@ -7,11 +7,13 @@ examples, and a frozen compatibility baseline. A client needs only that contract
 crate's Rust source.
 
 This process is not the product MVP. It serves Timeline creation, Event polling, authenticated
-`world.action.v1` proposals, Society Signals and the public Prediction Ledger. The default
-process has no host-bound authority adapter, so action submission fails closed until a host
-configures one: `GatewayAuthenticationAdapter` implementations establish minimized
-`AuthenticatedPrincipalResultV1` evidence, and `GatewayAuthorization` evaluates the pinned
-Principal, consent, capability, delegation, expiry and revocation state. The Wave 9 resource
+`world.action.v1` proposals, Society Signals and the public Prediction Ledger. Every loopback
+operation except `/health` and the public Ledger reads is protected by the host-pinned Local
+Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapter`
+implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, and
+`GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry
+and revocation state. A host without a provisioned Local Principal answers every protected
+operation `401 unauthenticated`. The Wave 9 resource
 families (session, Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections,
 ensembles, Replays, evidence, exports, consent revocation and erasure) are Draft operations of the
 contract that their owner tickets (#302 to #309) will serve. WebSocket streaming remains deferred.
@@ -19,12 +21,46 @@ contract that their owner tickets (#302 to #309) will serve. WebSocket streaming
 ## Run
 
 ```bash
-# Memory store (default loopback)
+# Memory store (default loopback): unprovisioned, so protected routes answer 401
 cargo run -p piglor-gateway --locked -- serve
 
-# SQLite persistence
+# SQLite persistence, with the Local Principal provisioned in the database
 cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080 /tmp/piglor-gw.db
 ```
+
+## Local Principal
+
+Loopback reachability is the Local trust boundary and one host-pinned Local Principal acts behind
+it (owner decision D1 on #302); there is no credential scheme on the v1 routes. A protected request
+names the entity it acts as in the `x-piglor-actor-entity` header, and the Principal's grant must
+cover that entity and the operation. The Principal is provisioned once, explicitly, by the one-shot
+[systemd unit](../../deploy/systemd/piglor-gateway-local-principal-provision.service) while the
+Gateway is stopped; nothing is provisioned implicitly. Its one credential,
+`pigloros.local-principal`, is a TOML document:
+
+```toml
+principal_id = "01JC0GATEWAYQ0CA1PR1NC1PA1"
+trust_domain = "local"
+actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
+operations = ["timeline.create", "timeline.events.read", "timeline.signals.append"]
+```
+
+The grantable operations are `timeline.create`, `timeline.events.read`,
+`timeline.signals.append`, `ledger.predictions.create` and `world.action.v1.submit`. Encrypt it
+like the Fork-admission credentials and provision:
+
+```bash
+systemd-creds encrypt --name=pigloros.local-principal \
+  --with-key=host+tpm2 local-principal.toml pigloros.local-principal.cred
+install -o root -g root -m 0600 pigloros.local-principal.cred \
+  /etc/credstore.encrypted/pigloros.local-principal.cred
+systemctl start piglor-gateway-local-principal-provision.service
+```
+
+Provisioning records one root capability grant in the database's authority records; the authority
+registry snapshot and the Principal's evidence are derived from that record. An exact retry is
+unchanged, and a different document for a provisioned database is refused. `serve` only reads the
+record. A revocation recorded for the grant is answered `403 revoked`.
 
 ### Separate deterministic experiment host
 
@@ -46,9 +82,11 @@ cargo run -p piglor-gateway --locked -- \
   serve 127.0.0.1:8080 /tmp/piglor-126.db
 ```
 
-The experiment is finite and uses caller-supplied simulation time for deterministic driver
-cadence; wall-clock sleep only paces output. After the restart, a host-configured Gateway can
-accept human actions and society signals; the default action route remains fail-closed. See the
+Provision the Local Principal of that file first and send its actor in
+`x-piglor-actor-entity`. The experiment is finite and uses caller-supplied simulation time for
+deterministic driver cadence; wall-clock sleep only paces output. After the restart, the
+provisioned Gateway accepts the society signals its Principal is granted; the action route stays
+fail-closed until an installed World action catalogue exists (#461). See the
 [`pos-experiment` demo guide](../pos-experiment/README.md) for exact requests, overrides,
 restart guidance, and the same-file requirement. Arbitrary raw-SQL writers remain outside
 the supported multi-process boundary.
@@ -84,7 +122,7 @@ are HTML conveniences outside the JSON contract.
 | `POST` | `/v1/ledger/predictions` | `NewPrediction` | `201` `{ "prediction_id" }` when Ledger writes are enabled |
 | `POST` | `/v1/bridges/owntracks` | OwnTracks `location` (Basic authentication) | `[]`, only when the OwnTracks bridge is configured |
 
-- **Actions:** `event_type` defaults to `world.action.v1`; `capability` must be exactly `world.action.v1.submit`. Legacy `world.action` and `world.action.submit` are unsupported. The JSON payload requires `actor_entity_id`, `body_entity_id`, `action_kind` (`impulse` or `target_velocity`), `params` (exactly two JSON float numbers ordered X, Z, in metres per second), `action_scope` (0), `catalogue_version`, and `tick`. Unknown payload fields, integers, strings, extra components, nonfinite values, and binary32 overflow are rejected. The Gateway rounds each finite source to binary32 before storing the shortest exact canonical CBOR float encoding; raw proposed actions must already contain that normalized pair. `impulse` adds the pair to horizontal velocity, while `target_velocity` sets it; vertical Y velocity is unchanged, and position advances over the pinned timestep. The pair is never rounded at the 100 mm position/sensor floor. The WAC1 array remains bounded to 4,096 bytes. A host-bound Gateway authorizer must allow the Principal/entity operation at the current authority fence before any domain approval; the World approver then checks actor identity, the known body ID, and the pinned actuator catalogue, and its approved draft stays tentative. The Gateway commits it only through atomic host admission (ADR-021): inside one host-owned store command it rechecks authorization, persists the Principal's authority chain, and the store compares that chain, the erasure generation, the observed Logical Head, and the remaining Event budget at its commit serialization point. The response is the committed Event named by the authoritative admission receipt. Every action carries an `Idempotency-Key` header of 1 to 128 visible ASCII characters; without one it is `400` `invalid-request`. An exact retry under the same key returns `200` with the original committed Event without re-running approval, a different request under the same key is `409` `idempotency-conflict`, and an action whose observed head moved is `409` `append-conflict`; a rejected action is never retried by the Gateway. The default production Gateway has no authority adapter and therefore fails closed with `401` until the host wires authentication, authority state, and a World body catalogue.
+- **Actions:** `event_type` defaults to `world.action.v1`; `capability` must be exactly `world.action.v1.submit`. Legacy `world.action` and `world.action.submit` are unsupported. The JSON payload requires `actor_entity_id`, `body_entity_id`, `action_kind` (`impulse` or `target_velocity`), `params` (exactly two JSON float numbers ordered X, Z, in metres per second), `action_scope` (0), `catalogue_version`, and `tick`. Unknown payload fields, integers, strings, extra components, nonfinite values, and binary32 overflow are rejected. The Gateway rounds each finite source to binary32 before storing the shortest exact canonical CBOR float encoding; raw proposed actions must already contain that normalized pair. `impulse` adds the pair to horizontal velocity, while `target_velocity` sets it; vertical Y velocity is unchanged, and position advances over the pinned timestep. The pair is never rounded at the 100 mm position/sensor floor. The WAC1 array remains bounded to 4,096 bytes. A host-bound Gateway authorizer must allow the Principal/entity operation at the current authority fence before any domain approval; the World approver then checks actor identity, the known body ID, and the pinned actuator catalogue, and its approved draft stays tentative. The Gateway commits it only through atomic host admission (ADR-021): inside one host-owned store command it rechecks authorization, persists the Principal's authority chain, and the store compares that chain, the erasure generation, the observed Logical Head, and the remaining Event budget at its commit serialization point. The response is the committed Event named by the authoritative admission receipt. Every action carries an `Idempotency-Key` header of 1 to 128 visible ASCII characters; without one it is `400` `invalid-request`. An exact retry under the same key returns `200` with the original committed Event without re-running approval, a different request under the same key is `409` `idempotency-conflict`, and an action whose observed head moved is `409` `append-conflict`; a rejected action is never retried by the Gateway. An unprovisioned Gateway fails closed with `401`; a provisioned one still has no installed World action catalogue (#461), so an authorized action is refused without a commit.
 - **Signals:** convenience wrapper for `society.signal` (see `plugins/society`).
 - **Polling:** `limit` defaults to and may not exceed 100. `from_seq` is inclusive and starts a fresh read. `next_from_seq` is `null` only when the Timeline is exhausted; otherwise it is the inclusive sequence of the first omitted Event. A host-owned Gateway also returns `next_cursor`, which binds that sequence, Timeline, and installed erasure inventory generation. Continue a page with `?cursor=<next_cursor>`; a generation change rejects the cursor with `409` `append-conflict`, so restart from a fresh `from_seq`. `cursor` and `from_seq` cannot appear together. A future independent client will continue polling until exhaustion; this transport behavior is not, by itself, product MVP evidence.
 - **Response budget:** each polling response is at most 1 MiB. The Gateway may return fewer than `limit` Events to stay within that budget. Polling uses the store's bounded-read seam and requests exactly `limit + 1` candidates so the first omitted Event becomes the cursor. The internal read byte bound covers all selected candidates at their per-field maxima; the separate wire-size check trims the page to 1 MiB. The memory adapter derives Fork-segment lengths from Timeline heads and seeks directly into contiguous per-Timeline Event vectors. SQLite derives the same segment ranges from indexed Timeline metadata and uses `(timeline_id, seq)` primary-key range predicates with `LIMIT` in both phases: it first selects only `seq`, `typeof(payload)`, `length(CAST(payload AS BLOB))`, and `length(CAST(event_type AS BLOB))`, validates them, and only then fetches at most the same bounded number of full Events in the same snapshot transaction. Neither adapter scans preceding Event history for a late cursor. SQLite files must use UTF-8 encoding, Event sequences must be contiguous from 1 through `timelines.head_seq`, and offline imports must preserve payloads with SQLite `BLOB` storage class. Existing SQLite files are sequence-validated once when opened; supported import APIs validate committed batches as they arrive. Opening UTF-16 or non-contiguous databases, or polling non-BLOB payload rows, fails closed with an actionable store error. Direct SQL mutation that bypasses `EventStore` while the database is open is outside the supported write boundary. Stored payloads over 256 KiB or imported `event_type` values over 64 KiB return a deterministic `413` `resource-limit-exceeded` problem. The metadata ceiling reserves at most 384 KiB for worst-case JSON escaping; together with the maximum payload's 512 KiB hex form and fixed Event fields this fits the 1 MiB envelope. The exact response-size check still handles decoded payload expansion. For Gateway-authored Events, admission serializes an exact `EventView`-equivalent envelope with worst-case sequence and cursor widths.

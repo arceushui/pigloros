@@ -2,33 +2,28 @@
 //! per sub-case, its exchanges sent as raw HTTP requests through the public `router` and
 //! `spectator_router` of that Gateway, with no socket.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
+use piglor_gateway::local_principal::{
+    load_local_principal, provision_local_principal, LocalPrincipalProvisionV1,
+};
 use piglor_gateway::{
-    gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
-    GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter,
+    router, spectator_router, AppState, Gateway, GatewayAuthorization, GatewayOperationV1,
+    LedgerWriteMode,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
-};
+use pos_core::{EntityId, ErasureRecoveryLimitsV1, PrincipalRefV1};
 use pos_reference::evaluator::ResourceUsage;
 use pos_runtime::ErasureExecutionHostV1;
-use pos_store::StoreConfig;
+use pos_store::{memory::MemoryStore, StoreConfig};
 use serde_json::{json, Map, Value};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
 use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
-use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
+use super::ACTOR_ENTITY_ID;
 use crate::observation_v1;
 
 /// The header an exchange with `actor` sends.
@@ -148,114 +143,49 @@ fn host() -> Option<ErasureExecutionHostV1> {
 }
 
 /// The Gateway of a composition (requirements section 3).
+///
+/// `open` is the unprotected in-process Gateway. `authorized` is the production serve
+/// composition (#1361): the Local Principal is provisioned with the production
+/// `provision_local_principal` into a store and recomposed from it with
+/// `load_local_principal`, and every protected operation requires it.
 fn compose(composition: CompositionV2) -> Option<Gateway> {
     match composition {
         CompositionV2::Open => host().and_then(|host| Gateway::new_with_erasure_host(host).ok()),
-        CompositionV2::Authorized => fixture_authorization()
-            .zip(entity(BODY_ENTITY_ID))
-            .zip(host())
-            .and_then(|((authorization, body), host)| {
-                gateway_with_erasure_host_and_authorization(host, [body], authorization).ok()
-            }),
+        CompositionV2::Authorized => {
+            fixture_authorization()
+                .zip(host())
+                .and_then(|(authorization, host)| {
+                    Gateway::new_with_erasure_host(host)
+                        .ok()
+                        .map(|gateway| gateway.require_authorization(Some(authorization)))
+                })
+        }
     }
 }
 
-/// The fixture-only authority of the `authorized` composition: one Principal whose single
-/// grant lets the fixture actor read Timeline Events and grants no action. It is never a
-/// source of production authority (ADR-108).
+/// The fixture Local Principal of the `authorized` composition: it may create Timelines and
+/// read their Events as the fixture actor, and holds no action or signal grant. Only its
+/// document is fixture data; it is provisioned and recomposed by the production path.
 fn fixture_authorization() -> Option<GatewayAuthorization> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
-        .and_then(|(principal, actor)| authenticated(&principal).zip(read_grant(principal, actor)))
-        .and_then(|(authenticated, grant)| pinned_authorization(authenticated, &grant))
-}
-
-fn authenticated(principal: &PrincipalRefV1) -> Option<AuthenticatedPrincipalResultV1> {
-    AssuranceLevelV1::try_new(1).ok().and_then(|assurance| {
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: principal.clone(),
-            adapter_id: "fixture".to_owned(),
-            assurance,
-            issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(u64::MAX),
-            binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .ok()
-    })
-}
-
-fn read_grant(principal: PrincipalRefV1, actor: EntityId) -> Option<CapabilityGrantV1> {
-    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec!["timeline.events".to_owned()],
-        actions: vec!["read".to_owned()],
-        purposes: vec!["read".to_owned()],
-        audiences: vec!["gateway".to_owned()],
-        actor_entity_ids: vec![actor],
-        subject_ids: Vec::new(),
-        participant_ids: Vec::new(),
-        plugin_id: None,
-        principal_roles: vec![AuthorityRoleV1::Actor],
-        max_uses: 1,
-        budget: 1,
-        environment_constraints: Vec::new(),
-    })
-    .ok()
-    .and_then(|scope| {
-        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id: Hash::from_bytes([5; 32]),
-            grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal),
-            trust_domain: "gateway.fixture".to_owned(),
-            scope,
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(50),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: Vec::new(),
-            consent_references: Vec::new(),
-            policy_revision: Hash::from_bytes([4; 32]),
-            issuance_timeline: TimelineId::from_ulid(Ulid(1)),
-            issuance_seq: Seq::from_u64(1),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: Hash::from_bytes([3; 32]),
-        })
-        .ok()
-    })
-}
-
-fn pinned_authorization(
-    authenticated: AuthenticatedPrincipalResultV1,
-    grant: &CapabilityGrantV1,
-) -> Option<GatewayAuthorization> {
-    grant
-        .binding_digest()
-        .ok()
-        .and_then(|binding| {
-            AuthorityRegistrySnapshotV1::try_new(
-                Hash::from_bytes([3; 32]),
-                vec![authenticated.registry_binding_digest()],
-                vec![binding],
-                Vec::new(),
+        .and_then(|(principal, actor)| {
+            LocalPrincipalProvisionV1::try_new(
+                &principal,
+                [actor],
+                [
+                    GatewayOperationV1::CREATE_TIMELINE,
+                    GatewayOperationV1::READ_EVENTS,
+                ],
             )
             .ok()
         })
-        .and_then(|registry| {
-            let host = AuthorityPersistenceHostV1::new(&registry);
-            let mut state = AuthorityPersistenceStateV1::new();
-            host.authorize_grant(grant)
+        .and_then(|provision| {
+            let mut store = MemoryStore::new();
+            provision_local_principal(&mut store, &provision)
                 .ok()
-                .and_then(|permit| state.issue_grant(permit, grant.clone()).ok())
-                .and_then(|_| state.view(grant.grant_id()).ok())
-                .map(|view| {
-                    GatewayAuthorization::new(
-                        Arc::new(LocalAuthenticationAdapter::new(authenticated)),
-                        view,
-                        registry,
-                    )
-                })
+                .and_then(|_| load_local_principal(&store).ok().flatten())
         })
 }
 

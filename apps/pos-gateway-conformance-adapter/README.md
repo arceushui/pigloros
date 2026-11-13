@@ -23,11 +23,11 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   Its exchanges are raw HTTP requests through the Gateway's public `router` (loopback) and
   `spectator_router` (the non-loopback public listener), with no socket, so Local and Air-Gapped
   are the same execution.
-- The `authorized` composition is explicitly fixture-only: the nonproduction fixture
-  registration of the Gateway action registry (`piglor-gateway` feature `test-support`) and a
-  fixture authority that lets one actor read Timeline Events and grants no action. No production
-  authority is sourced from it (ADR-108). The crate exists only with its own `test-support`
-  feature for that reason.
+- The `authorized` composition is the production serve composition (#1361): a fixture Local
+  Principal document, which lets one actor create Timelines and read their Events and grants no
+  action or signal, is provisioned and recomposed through the production Local Principal path,
+  and the Gateway requires it for every protected operation. No production authority is sourced
+  from the fixture document (ADR-108).
 - Observations are normalized as the profile text states: ULID `id` members, cursors and error
   messages become placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per

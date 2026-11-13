@@ -225,14 +225,122 @@ pub enum GatewayAuthorizationTarget {
         from_position: Seq,
         limit: usize,
     },
+    /// One [`GatewayOperationV1`], on a Timeline when the operation names
+    /// one (an append) and on the host when it does not (a create).
+    Operation { timeline_id: Option<TimelineId> },
 }
 
 impl GatewayAuthorizationTarget {
+    /// The Timeline the operation targets, if it names one.
     #[must_use]
-    pub const fn timeline_id(self) -> TimelineId {
+    pub const fn timeline_id(self) -> Option<TimelineId> {
         match self {
-            Self::Action { timeline_id } | Self::Read { timeline_id, .. } => timeline_id,
+            Self::Action { timeline_id } | Self::Read { timeline_id, .. } => Some(timeline_id),
+            Self::Operation { timeline_id } => timeline_id,
         }
+    }
+}
+
+/// One protected Gateway operation, keyed by the capability `resource` and
+/// `action` a Principal's grant must cover, and the `purpose` it is
+/// evaluated for (#1361).
+///
+/// The named constants are the closed set this Gateway serves; the Local
+/// Principal is provisioned with grants named by [`Self::name`]. Later
+/// operations (#303, #304, #309) add a constant with a fresh resource and
+/// action pair and authorize through [`crate::Gateway::authorize_operation`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GatewayOperationV1 {
+    name: &'static str,
+    resource: &'static str,
+    action: &'static str,
+    purpose: &'static str,
+}
+
+impl GatewayOperationV1 {
+    /// `POST /v1/timelines`: create a root Timeline.
+    pub const CREATE_TIMELINE: Self =
+        Self::new("timeline.create", "timeline", "create", "operation");
+    /// `POST /v1/timelines/{timeline_id}/signals`: append one Society Signal.
+    pub const APPEND_SIGNAL: Self = Self::new(
+        "timeline.signals.append",
+        "society.signal",
+        "append",
+        "operation",
+    );
+    /// `POST /v1/ledger/predictions`: register one Prediction Ledger entry.
+    pub const CREATE_PREDICTION: Self = Self::new(
+        "ledger.predictions.create",
+        "ledger.prediction",
+        "create",
+        "operation",
+    );
+    /// `GET /v1/timelines/{timeline_id}/events`, as [`GatewayAuthorizationRequest::read`] builds it.
+    pub const READ_EVENTS: Self =
+        Self::new("timeline.events.read", "timeline.events", "read", "read");
+    /// `POST /v1/timelines/{timeline_id}/actions`, as [`GatewayAuthorizationRequest::action`]
+    /// builds it for `world.action.v1`.
+    pub const SUBMIT_WORLD_ACTION: Self = Self::new(
+        "world.action.v1.submit",
+        "world.action.v1",
+        "world.action.v1.submit",
+        "action",
+    );
+    /// Every operation this Gateway serves, in name order.
+    pub const ALL: [Self; 5] = [
+        Self::CREATE_PREDICTION,
+        Self::CREATE_TIMELINE,
+        Self::READ_EVENTS,
+        Self::APPEND_SIGNAL,
+        Self::SUBMIT_WORLD_ACTION,
+    ];
+
+    /// An operation keyed by `resource` and `action`, evaluated for `purpose`.
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        resource: &'static str,
+        action: &'static str,
+        purpose: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            resource,
+            action,
+            purpose,
+        }
+    }
+
+    /// The operation name a Local Principal grant lists.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// The capability resource.
+    #[must_use]
+    pub const fn resource(self) -> &'static str {
+        self.resource
+    }
+
+    /// The capability action.
+    #[must_use]
+    pub const fn action(self) -> &'static str {
+        self.action
+    }
+
+    /// The purpose the operation is evaluated for.
+    #[must_use]
+    pub const fn purpose(self) -> &'static str {
+        self.purpose
+    }
+
+    /// The served operation named `name`, if any.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.name == name)
     }
 }
 
@@ -319,6 +427,45 @@ impl GatewayAuthorizationRequest {
             data_category: event_type,
             action: capability.into(),
             purpose: "action".to_owned(),
+            audience: "gateway".to_owned(),
+            at_time,
+            at_position: Seq::ZERO,
+            authority_timeline: None,
+            consent_timeline: None,
+            consent_at_position: None,
+            use_count: 1,
+            budget: 1,
+            consent_policy_revision: Hash::zero(),
+            capability_policy_revision: Hash::zero(),
+            revocation_state_current: true,
+            consent: ConsentEvidenceV1::NotRequired,
+            environment_constraints: Vec::new(),
+        }
+    }
+
+    /// Build the request of one [`GatewayOperationV1`] by `actor_entity_id`,
+    /// bound to `target_timeline` when the operation names one.
+    #[must_use]
+    pub fn operation(
+        actor_entity_id: EntityId,
+        operation: GatewayOperationV1,
+        target_timeline: Option<TimelineId>,
+        at_time: WallTime,
+    ) -> Self {
+        Self {
+            target: GatewayAuthorizationTarget::Operation {
+                timeline_id: target_timeline,
+            },
+            actor_entity_id,
+            subject_id: None,
+            participant_id: None,
+            plugin_id: None,
+            installation_id: None,
+            principal_role: AuthorityRoleV1::Actor,
+            resource: operation.resource().to_owned(),
+            data_category: operation.resource().to_owned(),
+            action: operation.action().to_owned(),
+            purpose: operation.purpose().to_owned(),
             audience: "gateway".to_owned(),
             at_time,
             at_position: Seq::ZERO,
@@ -1159,6 +1306,10 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
             hasher.update(&from_position.as_u64().to_be_bytes());
             hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
         }
+        GatewayAuthorizationTarget::Operation { timeline_id } => {
+            hasher.update(&[2]);
+            digest_optional_fixed(&mut hasher, timeline_id.map(timeline_bytes));
+        }
     }
     hasher.update(&entity_bytes(request.actor_entity_id));
     digest_optional_fixed(&mut hasher, request.subject_id.map(entity_bytes));
@@ -1384,9 +1535,19 @@ mod tests {
     fn fixture_with_actor(actor: EntityId) -> Fixture {
         fixture_with_scope(
             actor,
-            vec!["timeline.events".to_owned(), "world.action.v1".to_owned()],
-            vec!["read".to_owned(), "world.action.v1.submit".to_owned()],
-            vec!["action".to_owned(), "read".to_owned()],
+            [
+                "ledger.prediction",
+                "society.signal",
+                "timeline",
+                "timeline.events",
+                "world.action.v1",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            ["append", "create", "read", "world.action.v1.submit"]
+                .map(str::to_owned)
+                .to_vec(),
+            ["action", "operation", "read"].map(str::to_owned).to_vec(),
         )
     }
 
@@ -1561,9 +1722,9 @@ mod tests {
     ) -> GatewayAuthorization {
         fixture_with_scope(
             actor,
-            vec!["world.action.v1".to_owned()],
-            vec!["world.action.v1.submit".to_owned()],
-            vec!["action".to_owned()],
+            vec!["timeline".to_owned(), "world.action.v1".to_owned()],
+            vec!["create".to_owned(), "world.action.v1.submit".to_owned()],
+            vec!["action".to_owned(), "operation".to_owned()],
         )
         .authorization
     }
@@ -1884,7 +2045,7 @@ mod tests {
                 timeline_id: fixture.target_timeline,
             }
             .timeline_id(),
-            fixture.target_timeline
+            Some(fixture.target_timeline)
         );
         assert_eq!(
             GatewayAuthorizationTarget::Read {
@@ -1893,8 +2054,39 @@ mod tests {
                 limit: 2,
             }
             .timeline_id(),
-            fixture.target_timeline
+            Some(fixture.target_timeline)
         );
+        assert_eq!(
+            GatewayAuthorizationTarget::Operation { timeline_id: None }.timeline_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn served_operations_are_closed_and_keyed_by_resource_and_action() {
+        let names = GatewayOperationV1::ALL.map(GatewayOperationV1::name);
+        let mut sorted = names;
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+        for operation in GatewayOperationV1::ALL {
+            assert_eq!(GatewayOperationV1::named(operation.name()), Some(operation));
+        }
+        assert_eq!(GatewayOperationV1::named("timeline.delete"), None);
+        let custom = GatewayOperationV1::new("scenario.create", "scenario", "create", "operation");
+        assert_eq!(
+            (custom.resource(), custom.action(), custom.purpose()),
+            ("scenario", "create", "operation")
+        );
+        let request = GatewayAuthorizationRequest::operation(
+            EntityId::new(),
+            custom,
+            None,
+            WallTime::from_micros(1),
+        );
+        assert_eq!(request.resource, "scenario");
+        assert_eq!(request.action, "create");
+        assert_eq!(request.purpose, "operation");
+        assert_eq!(request.target.timeline_id(), None);
     }
 
     /// Authorize `request`, require a pending denial and check that its ADN1

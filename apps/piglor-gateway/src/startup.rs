@@ -42,9 +42,13 @@ pub fn open_recovered_erasure_host(
             ErasureExecutionHostV1::open_gateway_with_authority(config, composition, limits)
         }
     };
-    host.map_err(|error| {
-        io::Error::other(format!("erasure host recovery failed ({})", error.code()))
-    })
+    host.map_err(erasure_host_failure)
+}
+
+/// The payload-free startup error of a host that is not ready: it carries
+/// only the closed host error code.
+pub(crate) fn erasure_host_failure(error: pos_core::ErasureHostErrorV1) -> io::Error {
+    io::Error::other(format!("erasure host recovery failed ({})", error.code()))
 }
 
 /// Announce the bound HTTP listener on standard error.

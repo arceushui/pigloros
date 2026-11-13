@@ -721,6 +721,29 @@ fn managed_credential_names(directory: &File) -> Result<(), LocalForkAuthenticat
     })
 }
 
+/// Read the one credential `name` of a protected systemd credential
+/// directory that holds exactly it, with the custody checks of the
+/// Fork-authority credentials: the directory and the file are owned by
+/// `service_uid`, private, never followed through a symlink, and the file
+/// is at most `maximum` bytes.
+pub(crate) fn read_single_credential(
+    directory: &Path,
+    name: &str,
+    service_uid: u32,
+    maximum: usize,
+) -> Result<Zeroizing<Vec<u8>>, LocalForkAuthenticationErrorV1> {
+    open_credential_directory(directory, service_uid).and_then(|directory| {
+        sorted_credential_names(&directory)
+            .and_then(|names| {
+                (names == [name])
+                    .then_some(())
+                    .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+            })
+            .and_then(|()| read_bounded_credential(&directory, name, service_uid, maximum))
+            .map(Zeroizing::new)
+    })
+}
+
 /// List the credential directory's child names, sorted, by its descriptor.
 fn sorted_credential_names(
     directory: &File,
