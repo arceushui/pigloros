@@ -39,7 +39,7 @@ pub const MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE: u32 = 60;
 /// Denial records the whole host may write per window, under the same
 /// fixed-window, monotonic, reset-on-restart rules.
 pub const MAX_DENIAL_RECORDS_PER_MINUTE: u32 = 600;
-const DENIAL_RECORD_WINDOW: Duration = Duration::from_secs(60);
+const DENIAL_RECORD_WINDOW: Duration = Duration::from_mins(1);
 
 /// Opaque, non-secret context supplied to one authentication adapter call.
 ///

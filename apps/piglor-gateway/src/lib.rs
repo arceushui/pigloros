@@ -1785,7 +1785,7 @@ impl From<executor::StoreExecutorError> for GatewayError {
 fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> GatewayError {
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
-        executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
+        executor::ActionCommandError::Authorization(error) => map_authorization_error(&error),
         executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
@@ -3243,7 +3243,7 @@ impl Gateway {
             GatewayAuthorizationError::Denied(pending) => {
                 self.recorded_denial(authorization, pending).await
             }
-            other => map_authorization_error(other),
+            other => map_authorization_error(&other),
         }
     }
 
@@ -3592,7 +3592,7 @@ impl Gateway {
 /// The stable error of an authorization failure that is not answered as a
 /// recorded denial: a denial that has not been recorded fails closed as
 /// unavailable evidence.
-fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+const fn map_authorization_error(error: &GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
