@@ -685,6 +685,11 @@ impl GatewayAuthorization {
         self.budget().settle(handed_out, committed);
     }
 
+    /// Whether any suppression count is still waiting for a marker.
+    pub(crate) fn denial_markers_pending(&self) -> bool {
+        self.budget().has_pending()
+    }
+
     fn budget(&self) -> std::sync::MutexGuard<'_, DenialRecordBudget> {
         self.denial_budget
             .lock()
@@ -1003,6 +1008,11 @@ impl DenialRecordBudget {
         self.per_principal
             .insert(principal.clone(), used.saturating_add(1));
         Ok(if opened { self.take() } else { Vec::new() })
+    }
+
+    /// Whether any count waits for a marker.
+    const fn has_pending(&self) -> bool {
+        self.pending_principal > 0 || self.pending_host > 0
     }
 
     /// Hand out the pending counts as markers and move them in flight.
@@ -1945,7 +1955,7 @@ mod tests {
                 fixture.authenticated.clone(),
             )),
             fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.authorization.registry,
             false,
         );
         let pending = denied(&stale, request);
@@ -2140,6 +2150,7 @@ mod tests {
             // Two more over the host bound.
             assert!(budget.admit(&principal(11), start).is_err());
             assert!(budget.admit(&principal(12), start).is_err());
+            drop(budget);
         }
         let both = vec![
             marker(AuthorizationDenialScopeV1::Principal, 1),
@@ -2169,15 +2180,14 @@ mod tests {
             ]
         );
         let budget = fixture.authorization.budget();
-        assert_eq!(
-            (
-                budget.pending_principal,
-                budget.pending_host,
-                budget.in_flight_principal,
-                budget.in_flight_host
-            ),
-            (0, 0, 0, 0)
+        let counts = (
+            budget.pending_principal,
+            budget.pending_host,
+            budget.in_flight_principal,
+            budget.in_flight_host,
         );
+        drop(budget);
+        assert_eq!(counts, (0, 0, 0, 0));
     }
 
     #[test]
@@ -2381,7 +2391,6 @@ mod tests {
         );
         let shortened = fixture
             .authorization
-            .clone()
             .with_denial_window(Duration::from_millis(5));
         assert_eq!(shortened.budget().window, Duration::from_millis(5));
     }

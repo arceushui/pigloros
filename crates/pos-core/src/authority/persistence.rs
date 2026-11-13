@@ -411,6 +411,10 @@ pub enum AuthorizationDenialScopeV1 {
 /// A durable count of denials one bound suppressed in one closed window, so
 /// a flood beyond the denial-record bounds still leaves an O(1) trace.
 ///
+/// The count is an upper bound: a host re-emits a count whose store write had
+/// an unknown outcome, so such a count may be recorded twice, but a suppressed
+/// denial is never left uncounted.
+///
 /// Its canonical ADS1 encoding is a fixed
 /// [`AUTHORIZATION_DENIAL_SUPPRESSION_BYTES`]-byte record: magic, version,
 /// scope code and the big-endian count. It names no Principal.

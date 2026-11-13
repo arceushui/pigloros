@@ -2651,7 +2651,13 @@ impl Gateway {
         if let Some(authorization) = &self.authorization {
             // Record the unrecorded suppression counts once before the
             // store stops; a count the store cannot take stays pending.
-            self.flush_denial_markers(authorization).await;
+            drop(
+                tokio::spawn(flush_denial_markers(
+                    self.store.clone(),
+                    Arc::clone(authorization),
+                ))
+                .await,
+            );
         }
         self.store.shutdown().await.map_err(Into::into)
     }
@@ -3266,60 +3272,30 @@ impl Gateway {
                 };
             }
         };
-        match self.write_denial_evidence(authorization, batch).await {
+        match write_denial_evidence_detached(self.store.clone(), Arc::clone(authorization), batch)
+            .await
+        {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
             Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
             Err(error) => error.into(),
         }
     }
 
-    /// Write one batch of denial evidence and settle its markers: a marker
-    /// whose record committed is acknowledged, every other handed-out count
-    /// (store fault, full log, dropped or unknown command) stays pending for
-    /// a later marker.
-    async fn write_denial_evidence(
-        &self,
-        authorization: &Arc<GatewayAuthorization>,
-        batch: DenialEvidenceBatch,
-    ) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
-        let handed_out = batch.markers().to_vec();
-        let receipt = self
-            .store
-            .record_denial_evidence(Arc::clone(authorization), batch)
-            .await;
-        authorization.settle_denial_markers(
-            &handed_out,
-            receipt
-                .as_ref()
-                .map_or(&[][..], DenialEvidenceReceipt::committed),
-        );
-        receipt.map(|receipt| receipt.denial())
-    }
-
-    /// Record every unrecorded suppression count as markers; nothing is
-    /// written when no count is pending.
-    async fn flush_denial_markers(&self, authorization: &Arc<GatewayAuthorization>) {
-        let batch = authorization.take_denial_markers();
-        if !batch.is_empty() {
-            drop(self.write_denial_evidence(authorization, batch).await);
-        }
-    }
-
     /// Flush a saturated window's markers when it expires, so a flood
     /// followed by silence still leaves its count. One timer is armed per
-    /// window, at its first suppression, and its write is not rate-limited.
+    /// window, at its first suppression; it holds only the store handle and
+    /// the authorizer, never the Gateway.
     fn schedule_denial_flush(
         &self,
         authorization: &Arc<GatewayAuthorization>,
         flush_at: Option<std::time::Instant>,
     ) {
         if let Some(deadline) = flush_at {
-            let gateway = self.clone();
-            let authorization = Arc::clone(authorization);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                gateway.flush_denial_markers(&authorization).await;
-            });
+            drop(tokio::spawn(flush_expired_denial_window(
+                self.store.clone(),
+                Arc::clone(authorization),
+                deadline,
+            )));
         }
     }
 
@@ -3586,6 +3562,75 @@ impl Gateway {
             ),
             authorization: None,
         }
+    }
+}
+
+/// Pause before the one retry of a failed window flush.
+const DENIAL_FLUSH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Write one batch of denial evidence and settle its markers: a marker whose
+/// record committed is acknowledged, every other handed-out count (store
+/// fault, full log, dropped or unknown command) returns to pending for a
+/// later marker. An unknown outcome may thus be counted twice, never zero
+/// times.
+async fn write_denial_evidence(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
+    let handed_out = batch.markers().to_vec();
+    let receipt = store
+        .record_denial_evidence(Arc::clone(&authorization), batch)
+        .await;
+    authorization.settle_denial_markers(
+        &handed_out,
+        receipt
+            .as_ref()
+            .map_or(&[][..], DenialEvidenceReceipt::committed),
+    );
+    receipt.map(|receipt| receipt.denial())
+}
+
+/// Run [`write_denial_evidence`] on its own task and await it. A caller
+/// dropped mid-await (a client disconnect) cannot interrupt the hand-out,
+/// store write and settlement, while an awaiting caller still answers the
+/// denial only after its record committed. A task that cannot finish is
+/// answered as unavailable evidence.
+async fn write_denial_evidence_detached(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
+    tokio::spawn(write_denial_evidence(store, authorization, batch))
+        .await
+        .unwrap_or(Ok(None))
+}
+
+/// Record every pending suppression count as markers; nothing is written
+/// when no count is pending. Returns whether no count is left pending.
+async fn flush_denial_markers(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+) -> bool {
+    let batch = authorization.take_denial_markers();
+    if !batch.is_empty() {
+        drop(write_denial_evidence(store, Arc::clone(&authorization), batch).await);
+    }
+    !authorization.denial_markers_pending()
+}
+
+/// Wait for a saturated window to expire, then flush its counts, retrying
+/// once after [`DENIAL_FLUSH_RETRY_DELAY`]. Counts a store still refuses stay
+/// pending for the next window, flush or shutdown.
+async fn flush_expired_denial_window(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+    deadline: std::time::Instant,
+) {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    if !flush_denial_markers(store.clone(), Arc::clone(&authorization)).await {
+        tokio::time::sleep(DENIAL_FLUSH_RETRY_DELAY).await;
+        drop(flush_denial_markers(store, authorization).await);
     }
 }
 

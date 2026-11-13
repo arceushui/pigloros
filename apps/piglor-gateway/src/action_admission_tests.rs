@@ -1472,15 +1472,7 @@ async fn deny_reads(fixture: &Fixture, count: u32) -> TestResult<Vec<GatewayErro
 async fn a_flood_then_silence_is_counted_when_the_window_expires() -> TestResult {
     let directory = tempfile::tempdir()?;
     let config = sqlite_config(&directory, "silence.sqlite")?;
-    let actor = EntityId::new();
-    let window = std::time::Duration::from_secs(3);
-    let fixture = fixture_with(
-        host(&config)?,
-        test_authorization_for(actor).with_denial_window(window),
-        actor,
-        EntityId::new(),
-    )
-    .await?;
+    let fixture = fixture(&config).await?;
     let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
     let outcomes = deny_reads(&fixture, limit + 2).await?;
     assert!(outcomes[..usize::try_from(limit)?]
@@ -1490,9 +1482,16 @@ async fn a_flood_then_silence_is_counted_when_the_window_expires() -> TestResult
         .iter()
         .all(|outcome| matches!(outcome, GatewayError::DenialRecordLimitReached { .. })));
 
-    // No further denial arrives; the window's own timer records its count.
-    tokio::time::sleep(window + std::time::Duration::from_secs(1)).await;
-    assert!(fixture.authorization.take_denial_markers().is_empty());
+    // No further denial arrives. The window's armed timer runs this exact
+    // flush at the window's end; running it with an expired deadline makes
+    // the expiry deterministic instead of waiting on the wall clock.
+    crate::flush_expired_denial_window(
+        fixture.gateway.store.clone(),
+        Arc::new(fixture.authorization.clone()),
+        std::time::Instant::now(),
+    )
+    .await;
+    assert!(!fixture.authorization.denial_markers_pending());
     fixture.gateway.shutdown().await?;
     drop(fixture);
 
@@ -1530,5 +1529,103 @@ async fn a_shutdown_flush_the_store_cannot_take_keeps_the_count_pending() -> Tes
         ]
     );
     drop(fixture);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_window_flush_the_store_refuses_retries_once_and_keeps_the_count() -> TestResult {
+    let actor = EntityId::new();
+    let authorization = test_authorization_for(actor);
+    // A store without authority ports refuses every denial-evidence record.
+    let gateway = Gateway::new_with_world_bodies_and_authorization(
+        Box::new(pos_store::memory::MemoryStore::new()),
+        [],
+        authorization.clone(),
+    );
+    let timeline = gateway.create_timeline("refused-flush").await?.id();
+    for _ in 0..=crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
+        let outcome = gateway
+            .read_events_page_authorized(
+                &timeline.to_string(),
+                0,
+                1,
+                GatewayAuthorizationRequest::read(EntityId::new(), timeline, 0, 1, WallTime::now()),
+            )
+            .await;
+        assert!(outcome.is_err());
+    }
+    assert!(authorization.denial_markers_pending());
+
+    crate::flush_expired_denial_window(
+        gateway.store.clone(),
+        Arc::new(authorization.clone()),
+        std::time::Instant::now(),
+    )
+    .await;
+
+    // Both attempts were refused, so the count is still pending, once.
+    assert_eq!(
+        authorization.take_denial_markers().markers(),
+        &[
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 1)
+                .ok_or("marker")?
+        ]
+    );
+    gateway.shutdown().await?;
+    drop(gateway);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_disconnect_mid_write_neither_strands_nor_duplicates_a_count() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let config = sqlite_config(&directory, "disconnect.sqlite")?;
+    let fixture = fixture(&config).await?;
+    let limit = crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
+    deny_reads(&fixture, limit + 1).await?;
+    assert!(fixture.authorization.denial_markers_pending());
+
+    // The next denial opens a new window and carries the marker; the client
+    // disconnects while its write waits behind a blocked store worker.
+    let _shortened = fixture
+        .authorization
+        .clone()
+        .with_denial_window(std::time::Duration::ZERO);
+    let release = fixture
+        .gateway
+        .store
+        .block_worker_for_test()
+        .map_err(|error| format!("{error:?}"))?;
+    let disconnected = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        deny_reads(&fixture, 1),
+    )
+    .await;
+    assert!(disconnected.is_err());
+    // The handed-out count is in flight, not pending and not lost.
+    assert!(!fixture.authorization.denial_markers_pending());
+    drop(release.send(()));
+
+    // The detached write still commits (the shutdown drains it) and settles
+    // the marker exactly once; nothing is pending for the shutdown flush.
+    fixture.gateway.shutdown().await?;
+    assert!(!fixture.authorization.denial_markers_pending());
+    drop(fixture);
+
+    let records = denials_after_restart(&config)?;
+    let markers = records
+        .iter()
+        .filter(|(_, evidence)| matches!(evidence, AuthorizationDenialEvidenceV1::Suppressed(_)))
+        .map(|(_, evidence)| *evidence)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        markers,
+        vec![AuthorizationDenialEvidenceV1::Suppressed(
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 1)
+                .ok_or("marker")?
+        )]
+    );
+    // Every admitted denial, the disconnected one included, was recorded.
+    assert_eq!(records.len(), usize::try_from(limit)? + 2);
     Ok(())
 }

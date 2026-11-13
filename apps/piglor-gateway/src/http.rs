@@ -1752,7 +1752,7 @@ osf_link = \"https://osf.io/example\"\n";
 
     /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn problem_cases() -> [(GatewayError, &'static str, bool); 25] {
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 18] {
         [
             (
                 GatewayError::DependencySetExhausted,
@@ -1808,6 +1808,38 @@ osf_link = \"https://osf.io/example\"\n";
                 false,
             ),
             (
+                GatewayError::ConsentGrantSequenceMismatch,
+                "consent-invalid",
+                false,
+            ),
+            (
+                GatewayError::Store(CoreError::ErasureAccessFrozen),
+                "deleted",
+                false,
+            ),
+            (
+                GatewayError::Store(CoreError::Storage("secret host path".into())),
+                "internal-safe-failure",
+                false,
+            ),
+            (
+                GatewayError::ActionRejected(ActionRejected::UnknownEventType),
+                "unsupported-version",
+                false,
+            ),
+            (
+                GatewayError::ActionRejected(ActionRejected::DomainValidationFailed("bad".into())),
+                "admission-rejected",
+                false,
+            ),
+        ]
+    }
+
+    /// Authority denials and the denial-evidence failures (#1359).
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_problem_cases() -> [(GatewayError, &'static str, bool); 7] {
+        [
+            (
                 GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthorized)),
                 "unauthorized",
                 false,
@@ -1848,38 +1880,13 @@ osf_link = \"https://osf.io/example\"\n";
                 "resource-limit-exceeded",
                 true,
             ),
-            (
-                GatewayError::ConsentGrantSequenceMismatch,
-                "consent-invalid",
-                false,
-            ),
-            (
-                GatewayError::Store(CoreError::ErasureAccessFrozen),
-                "deleted",
-                false,
-            ),
-            (
-                GatewayError::Store(CoreError::Storage("secret host path".into())),
-                "internal-safe-failure",
-                false,
-            ),
-            (
-                GatewayError::ActionRejected(ActionRejected::UnknownEventType),
-                "unsupported-version",
-                false,
-            ),
-            (
-                GatewayError::ActionRejected(ActionRejected::DomainValidationFailed("bad".into())),
-                "admission-rejected",
-                false,
-            ),
         ]
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn gateway_failures_map_to_their_problem_families() {
-        let cases = problem_cases();
+        let cases = problem_cases().into_iter().chain(authority_problem_cases());
         let registry: serde_json::Value = serde_json::from_str(include_str!(
             "../../../contracts/gateway/v1/problem-types.json"
         ))
@@ -2644,6 +2651,30 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_failures_answer_their_status_and_retry_after() {
+        let r = GatewayError::DenialRecordLimitReached {
+            retry_after_seconds: 42,
+        }
+        .into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "42");
+        let r = GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked))
+            .into_response();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(r.headers().get(header::RETRY_AFTER).is_none());
+        let r =
+            GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthenticated))
+                .into_response();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = GatewayError::AuthorizationDenied(recorded(
+            GatewayAuthorityDenial::RevocationStateStale,
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn into_response_status_mapping() {
@@ -2708,24 +2739,6 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::DependencySetExhausted.into_response();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        let r = GatewayError::DenialRecordLimitReached {
-            retry_after_seconds: 42,
-        }
-        .into_response();
-        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(r.headers()[header::RETRY_AFTER], "42");
-        let r = GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked))
-            .into_response();
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        let r =
-            GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthenticated))
-                .into_response();
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        let r = GatewayError::AuthorizationDenied(recorded(
-            GatewayAuthorityDenial::RevocationStateStale,
-        ))
-        .into_response();
-        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
             "world.unknown".into(),
         ))

@@ -71,7 +71,9 @@ Principal this is effectively host-wide) and per host (`denial_records_per_minut
 one-minute window that resets on restart, so a burst across a window boundary can reach twice the
 bound. A denial over either bound is `429 resource-limit-exceeded` (retryable, with
 `Retry-After` until the window closes): it gets no record of its own and is not answered as a
-denial, but each bound's suppressed denials are counted in one durable marker per window. The
+denial, but each bound's suppressed denials are counted in one durable marker per window. A
+marker's count is an upper bound: a count whose write had an unknown outcome is re-emitted, so
+it may be counted twice but never zero times. The
 store keeps at most `authority_denial_records` records and never prunes them; when it is full,
 a denial is `503 temporarily-unavailable` instead.
 
