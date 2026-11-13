@@ -47,8 +47,10 @@ impl Surface {
             return Ok(Poll::Pending);
         };
         self.ownership = Ownership::Environment;
-        completion.map_err(unavailable)?;
-        let folder = self.folder.as_ref().ok_or_else(|| unavailable(()))?;
+        let folder = completion
+            .ok()
+            .and(self.folder.as_ref())
+            .ok_or_else(|| unavailable(()))?;
         self.admit_environment(&self.root.join(folder))?;
         self.ownership = Ownership::CreatingController;
         self.native.create_controller().map_err(unavailable)?;
@@ -102,15 +104,27 @@ impl Surface {
         self.native.subscribe_view(sink).map_err(unavailable)?;
         settings::apply(self.native.as_ref())?;
         self.native.fit_controller().map_err(unavailable)?;
+        Ok(())
+    }
+
+    fn activate_controller(&mut self) -> Result<(std::time::Instant, bool)> {
+        let deadline = (self.clock.now() + Duration::from_secs(1)).min(self.deadline);
+        self.foreground_deadline = Some(deadline);
         self.native.show_window().map_err(unavailable)?;
-        self.foreground_deadline =
-            Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
+        // This observation is optional: a failed or late query cannot establish
+        // foreground, and must not alter the subsequent focus/error path.
+        let started = self.clock.now();
+        let observed = self.native.window();
+        let finished = self.clock.now();
+        let timely_foreground = started < deadline
+            && finished < deadline
+            && observed.is_ok_and(|window| window.foreground);
         {
             #[cfg(test)]
             let _duration = crate::Native::readiness_span("focus");
             self.native.focus_controller().map_err(unavailable)?;
         }
-        Ok(())
+        Ok((deadline, timely_foreground))
     }
 
     pub(super) fn navigate_native(&mut self) -> Result<Poll<pos_owner_bridge::NavigationId>> {
@@ -123,14 +137,36 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         if !self.navigation_issued {
-            let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
-            if !self.native.window().map_err(unavailable)?.foreground {
-                if self.clock.now() < deadline {
-                    return Ok(Poll::Pending);
+            let (deadline, timely_foreground) = if let Some(deadline) = self.foreground_deadline {
+                (deadline, false)
+            } else {
+                match self.activate_controller() {
+                    Ok(activated) => activated,
+                    Err(error) => {
+                        self.activation_error = Some(error);
+                        return Err(error);
+                    }
                 }
-                return Err(SurfaceError::new(BridgeError::Lifecycle(
-                    LifecycleCode::ForegroundUnavailable,
-                )));
+            };
+            if timely_foreground {
+                self.before_deadline()?;
+            } else {
+                self.check_foreground_deadline(deadline)?;
+            }
+            if self.events.invalid() {
+                return Err(super::navigation_lost());
+            }
+            let foreground = self.native.window().map_err(unavailable)?.foreground;
+            if timely_foreground && foreground {
+                self.before_deadline()?;
+            } else {
+                self.check_foreground_deadline(deadline)?;
+            }
+            if self.events.invalid() {
+                return Err(super::navigation_lost());
+            }
+            if !foreground {
+                return Ok(Poll::Pending);
             }
             self.events.begin();
             {
@@ -144,6 +180,21 @@ impl Surface {
             return Err(super::navigation_lost());
         }
         Ok(self.events.started().map_or(Poll::Pending, Poll::Ready))
+    }
+
+    fn check_foreground_deadline(&self, deadline: std::time::Instant) -> Result<()> {
+        let now = self.clock.now();
+        if now >= self.deadline {
+            return Err(SurfaceError::new(BridgeError::Lifecycle(
+                LifecycleCode::ReadinessTimeout,
+            )));
+        }
+        if now >= deadline {
+            return Err(SurfaceError::new(BridgeError::Lifecycle(
+                LifecycleCode::ForegroundUnavailable,
+            )));
+        }
+        Ok(())
     }
 
     pub(super) fn before_deadline(&self) -> Result<()> {

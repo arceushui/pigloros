@@ -423,7 +423,386 @@ fn failed_native_preparation_returns_identity_before_refusing_navigation() -> Te
             fixture.surface.navigate(),
             std::task::Poll::Ready(Err(_))
         ));
+        let attempts = fixture
+            .factory
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == failure)
+            .count();
+        assert!(matches!(
+            fixture.surface.navigate(),
+            std::task::Poll::Ready(Err(_))
+        ));
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == failure)
+                .count(),
+            attempts
+        );
         assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn timely_foreground_survives_slow_focus_when_still_foreground() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .factory
+        .focus_delay
+        .set(std::time::Duration::from_millis(1_100));
+    fixture.factory.navigation_succeeds.set(true);
+    fixture
+        .open(&super::spec(130))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let activation: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(activation, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
+fn foreground_observation_is_optional_and_never_extends_deadlines() -> TestResult {
+    use pos_owner_bridge::MonotonicClock as _;
+    use std::time::Duration;
+
+    for case in [
+        "query_error",
+        "boundary",
+        "crossing",
+        "lost",
+        "late_first",
+        "readiness",
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.navigation_succeeds.set(true);
+        fixture
+            .open(&super::spec(131))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        match case {
+            "query_error" => fixture.factory.pre_focus_window_error.set(true),
+            "boundary" => fixture.factory.show_delay.set(Duration::from_secs(1)),
+            "crossing" => fixture
+                .factory
+                .pre_focus_window_delay
+                .set(Duration::from_secs(1)),
+            "lost" => {
+                fixture.factory.focus_foreground.set(Some(false));
+                fixture
+                    .factory
+                    .focus_delay
+                    .set(Duration::from_millis(1_100));
+            }
+            "late_first" => {
+                fixture.factory.foreground.set(false);
+                fixture.factory.focus_foreground.set(Some(true));
+                fixture
+                    .factory
+                    .focus_delay
+                    .set(Duration::from_millis(1_100));
+            }
+            "readiness" => {
+                fixture
+                    .surface
+                    .set_deadline(fixture.clock.now() + Duration::from_millis(500));
+                fixture.factory.focus_delay.set(Duration::from_millis(500));
+            }
+            _ => return Err("unknown foreground observation case".into()),
+        }
+        let result = fixture.surface.navigate();
+        if case == "query_error" {
+            assert!(result.is_pending(), "{case}");
+            assert!(fixture.factory.calls.borrow().contains(&"navigate"));
+        } else {
+            let expected = if case == "readiness" {
+                LifecycleCode::ReadinessTimeout
+            } else {
+                LifecycleCode::ForegroundUnavailable
+            };
+            assert!(
+                matches!(result, std::task::Poll::Ready(Err(error)) if error.error() == BridgeError::Lifecycle(expected)),
+                "{case}"
+            );
+            fixture.assert_no_ceremony_data();
+            assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
+        }
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == "focus_controller")
+                .count(),
+            1,
+            "{case}"
+        );
+        fixture.factory.pre_focus_window_error.set(false);
+        fixture.factory.pre_focus_window_delay.set(Duration::ZERO);
+        fixture.factory.show_delay.set(Duration::ZERO);
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn foreground_lost_during_focus_must_be_reacquired_before_original_deadline() -> TestResult {
+    use std::time::Duration;
+
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    fixture.factory.focus_foreground.set(Some(false));
+    fixture
+        .open(&super::spec(132))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
+    fixture.clock.advance(Duration::from_millis(999));
+    fixture.factory.foreground.set(true);
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let activation: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(activation, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+#[test]
+fn foreground_activation_waits_for_navigation_after_slow_record_work() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    let identity = fixture
+        .open(&super::spec(126))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(identity.browser_pid, 42);
+    for forbidden in [
+        "show_window",
+        "focus_controller",
+        "navigate",
+        "create_buffers",
+        "post_request",
+        "post_reply",
+    ] {
+        assert!(
+            !fixture.factory.calls.borrow().contains(&forbidden),
+            "{forbidden}"
+        );
+    }
+    fixture
+        .clock
+        .advance(std::time::Duration::from_millis(1_400));
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(fixture.surface.navigate().is_pending());
+    let calls = fixture.factory.calls.borrow();
+    let positions: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(positions, ["show_window", "focus_controller", "navigate"]);
+    drop(calls);
+    fixture.finish()?;
+    Ok(())
+}
+
+struct DelayedRecord<'a> {
+    store: &'a mut pos_owner_bridge::fake::host::FakeStore,
+    clock: &'a pos_owner_bridge::fake::clock::FakeClock,
+    factory: &'a super::native::Factory,
+}
+
+impl pos_owner_bridge::CleanupStore for DelayedRecord<'_> {
+    fn write_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+        for operation in [
+            "show_window",
+            "focus_controller",
+            "navigate",
+            "create_buffers",
+        ] {
+            assert!(
+                !self.factory.calls.borrow().contains(&operation),
+                "{operation}"
+            );
+        }
+        let result = self.store.write_record(record);
+        self.clock.advance(std::time::Duration::from_millis(1_400));
+        result
+    }
+    fn delete_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+        self.store.delete_record(record)
+    }
+    fn records(&mut self) -> Result<Vec<Vec<u8>>, pos_owner_bridge::CleanupError> {
+        self.store.records()
+    }
+    fn folders(&mut self) -> Result<Vec<String>, pos_owner_bridge::CleanupError> {
+        self.store.folders()
+    }
+    fn remove_folder(&mut self, name: &str) -> Result<(), pos_owner_bridge::CleanupError> {
+        self.store.remove_folder(name)
+    }
+}
+
+#[test]
+fn driver_persists_and_probes_before_one_time_activation() -> TestResult {
+    for (case, expected) in [
+        (
+            "success",
+            &["show_window", "focus_controller", "navigate"][..],
+        ),
+        ("record", &[][..]),
+        ("probe", &[][..]),
+        ("show_window", &["show_window"][..]),
+        ("focus_controller", &["show_window", "focus_controller"][..]),
+    ] {
+        run_driver_activation_case(case, expected)?;
+    }
+    Ok(())
+}
+
+fn run_driver_activation_case(case: &'static str, expected: &[&str]) -> TestResult {
+    use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
+    use pos_owner_bridge::ceremony::plan::CeremonyPlan;
+    use pos_owner_bridge::MonotonicClock as _;
+    use pos_owner_bridge_codec::{OwnerUserHandle, PrfInput, WebAuthnChallenge};
+
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    if case == "record" {
+        fixture.store.set_failing(&[StoreOp::Write]);
+    } else if case == "probe" {
+        fixture.loopback.fail_probes_from(Some(1));
+    } else if matches!(case, "show_window" | "focus_controller") {
+        fixture.factory.failure.set(Some(case));
+    }
+    let mut storage = fixture.store.clone();
+    let mut loopback = fixture.loopback.clone();
+    let mut store = DelayedRecord {
+        store: &mut storage,
+        clock: &fixture.clock,
+        factory: &fixture.factory,
+    };
+    let plan = CeremonyPlan::for_test(
+        CeremonyKind::Create,
+        CeremonyId::from_bytes([128; 16]),
+        WebAuthnChallenge::from_bytes([2; 32]),
+        OwnerUserHandle::from_bytes([3; 32]),
+        PrfInput::from_bytes([4; 32]),
+        fixture.clock.now(),
+    );
+    let mut driver = CeremonyDriver::for_test(plan);
+    for _ in 0..8 {
+        let mut env = StepEnv {
+            surface: &mut fixture.surface,
+            clock: &fixture.clock,
+            loopback: &mut loopback,
+            store: &mut store,
+        };
+        assert!(matches!(driver.step(&mut env), Step::Pending), "{case}");
+        let calls = fixture.factory.calls.borrow();
+        let progressed = calls.contains(&"navigate") || calls.contains(&"close_controller");
+        drop(calls);
+        if progressed {
+            break;
+        }
+        fixture
+            .surface
+            .pump()
+            .map_err(|error| format!("pump: {error:?}"))?;
+    }
+    let calls = fixture.factory.calls.borrow();
+    let activation: Vec<_> = calls
+        .iter()
+        .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+        .copied()
+        .collect();
+    assert_eq!(activation, expected, "{case}");
+    drop(calls);
+    assert_eq!(
+        fixture.store.records_now().len(),
+        usize::from(case != "record"),
+        "{case}"
+    );
+    assert_eq!(
+        fixture.loopback.probes(),
+        u32::from(case != "record"),
+        "{case}"
+    );
+    fixture.factory.failure.set(None);
+    if case == "success" {
+        fixture
+            .factory
+            .sink
+            .borrow()
+            .as_ref()
+            .ok_or("missing sink")?
+            .event(crate::NativeEvent::ProcessFailed);
+        let mut env = StepEnv {
+            surface: &mut fixture.surface,
+            clock: &fixture.clock,
+            loopback: &mut loopback,
+            store: &mut store,
+        };
+        assert!(matches!(driver.step(&mut env), Step::Pending));
+    }
+    fixture.exit();
+    let mut env = StepEnv {
+        surface: &mut fixture.surface,
+        clock: &fixture.clock,
+        loopback: &mut loopback,
+        store: &mut store,
+    };
+    assert!(
+        matches!(driver.step(&mut env), Step::Finished(Err(_))),
+        "{case}"
+    );
+    assert!(fixture.surface.idle());
+    assert!(fixture.store.records_now().is_empty());
+    Ok(())
+}
+
+#[test]
+fn reentrant_denial_during_activation_prevents_navigation() -> TestResult {
+    for operation in ["show_window", "window", "focus_controller"] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.reenter_on_activation.set(Some(operation));
+        fixture.factory.navigation_succeeds.set(true);
+        fixture
+            .open(&super::spec(127))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        for _ in 0..2 {
+            assert!(
+                matches!(fixture.surface.navigate(), std::task::Poll::Ready(Err(error))
+                if error.error() == BridgeError::Lifecycle(LifecycleCode::NavigationViolation))
+            );
+        }
+        let calls = fixture.factory.calls.borrow();
+        let activation: Vec<_> = calls
+            .iter()
+            .filter(|call| matches!(**call, "show_window" | "focus_controller" | "navigate"))
+            .copied()
+            .collect();
+        assert_eq!(activation, ["show_window", "focus_controller"]);
+        drop(calls);
+        fixture.assert_no_ceremony_data();
         fixture.finish()?;
     }
     Ok(())
@@ -437,6 +816,7 @@ fn foreground_deadline_refuses_navigation_and_preserves_ownership() -> TestResul
     fixture
         .open(&super::spec(122))
         .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.navigate().is_pending());
     fixture.clock.advance(std::time::Duration::from_millis(999));
     assert!(fixture.surface.navigate().is_pending());
     fixture.clock.advance(std::time::Duration::from_millis(1));
@@ -534,4 +914,194 @@ fn finish_requires_matching_exit_and_retries_each_failed_cleanup_effect() -> Tes
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     assert!(fixture.surface.idle());
     Ok(())
+}
+
+#[test]
+fn foreground_budget_bounds_show_and_each_first_observation() -> TestResult {
+    use std::time::Duration;
+
+    for case in [
+        "late_true",
+        "boundary",
+        "show",
+        "query",
+        "readiness",
+        "on_time",
+    ] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.factory.navigation_succeeds.set(true);
+        if case == "show" {
+            fixture.factory.show_delay.set(Duration::from_secs(1));
+        }
+        if matches!(case, "late_true" | "boundary") {
+            fixture.factory.foreground.set(false);
+        }
+        fixture
+            .open(&super::spec(125))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        match case {
+            "late_true" => {
+                assert!(fixture.surface.navigate().is_pending());
+                fixture.clock.advance(Duration::from_millis(1001));
+                fixture.factory.foreground.set(true);
+            }
+            "boundary" => {
+                assert!(fixture.surface.navigate().is_pending());
+                fixture.clock.advance(Duration::from_secs(1));
+            }
+            "readiness" => fixture.clock.advance(Duration::from_secs(30)),
+            "query" => fixture.factory.window_delay.set(Duration::from_secs(1)),
+            _ => {}
+        }
+        let result = fixture.surface.navigate();
+        if case == "on_time" {
+            assert!(result.is_pending());
+            fixture.clock.advance(Duration::from_secs(2));
+            assert!(fixture.surface.navigate().is_pending());
+            assert_eq!(
+                fixture
+                    .factory
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| **call == "navigate")
+                    .count(),
+                1
+            );
+        } else {
+            let expected = if case == "readiness" {
+                LifecycleCode::ReadinessTimeout
+            } else {
+                LifecycleCode::ForegroundUnavailable
+            };
+            assert!(
+                matches!(result, std::task::Poll::Ready(Err(error))
+                if error.error() == BridgeError::Lifecycle(expected)),
+                "{case}"
+            );
+            fixture.assert_no_ceremony_data();
+            assert!(!fixture.surface.idle());
+        }
+        fixture.factory.window_delay.set(Duration::ZERO);
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn readiness_deadline_crossed_during_foreground_operations_blocks_navigation() -> TestResult {
+    use pos_owner_bridge::MonotonicClock as _;
+    use std::time::Duration;
+
+    for operation in ["show", "window"] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture
+            .open(&super::spec(126))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let remaining = Duration::from_millis(500);
+        let deadline = fixture.clock.now() + remaining;
+        fixture.surface.set_deadline(deadline);
+        if operation == "show" {
+            fixture.factory.show_delay.set(remaining);
+        } else {
+            fixture.factory.window_delay.set(Duration::from_millis(300));
+        }
+        assert!(matches!(
+            fixture.surface.navigate(),
+            std::task::Poll::Ready(Err(error))
+                if error.error() == BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)
+        ));
+        let expected = if operation == "show" {
+            deadline
+        } else {
+            deadline + Duration::from_millis(100)
+        };
+        assert_eq!(fixture.clock.now(), expected);
+        assert!(fixture.factory.calls.borrow().contains(&"show_window"));
+        fixture.assert_no_ceremony_data();
+        assert!(!fixture.surface.idle());
+        fixture.factory.window_delay.set(Duration::ZERO);
+        fixture.factory.show_delay.set(Duration::ZERO);
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn window_and_resize_failures_refuse_refresh_navigation_and_posting() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .open(&super::spec(131))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture
+        .surface
+        .refresh()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    for (failure, dpi) in [("resize_window", 120), ("fit_controller", 144)] {
+        fixture.factory.dpi.set(dpi);
+        fixture.factory.failure.set(Some(failure));
+        assert_eq!(
+            fixture
+                .surface
+                .refresh()
+                .map_err(pos_owner_bridge::SurfaceError::error),
+            Err(unavailable()),
+            "{failure}"
+        );
+    }
+    fixture.factory.failure.set(Some("window"));
+    assert_eq!(
+        fixture
+            .surface
+            .refresh()
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
+    assert_eq!(
+        fixture
+            .surface
+            .navigate()
+            .map(|result| result.map_err(pos_owner_bridge::SurfaceError::error)),
+        std::task::Poll::Ready(Err(unavailable()))
+    );
+    assert_eq!(
+        fixture
+            .surface
+            .post(&guard())
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
+    assert!(posts(&fixture).is_empty());
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture.surface.idle());
+    fixture.finish()
+}
+
+#[test]
+fn readiness_deadline_crossed_by_the_final_foreground_query_blocks_navigation() -> TestResult {
+    use pos_owner_bridge::MonotonicClock as _;
+    use std::time::Duration;
+
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture
+        .open(&super::spec(132))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let deadline = fixture.clock.now() + Duration::from_millis(500);
+    fixture.surface.set_deadline(deadline);
+    // The refresh and the timely pre-focus observation each fit the budget;
+    // the final foreground query is the one that crosses the deadline.
+    fixture.factory.window_delay.set(Duration::from_millis(200));
+    assert_eq!(
+        fixture
+            .surface
+            .navigate()
+            .map(|result| result.map_err(pos_owner_bridge::SurfaceError::error)),
+        std::task::Poll::Ready(Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)))
+    );
+    assert_eq!(fixture.clock.now(), deadline + Duration::from_millis(100));
+    assert!(fixture.factory.calls.borrow().contains(&"focus_controller"));
+    fixture.assert_no_ceremony_data();
+    assert!(!fixture.surface.idle());
+    fixture.factory.window_delay.set(Duration::ZERO);
+    fixture.finish()
 }

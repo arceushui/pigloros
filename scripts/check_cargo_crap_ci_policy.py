@@ -16,7 +16,7 @@ UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd
 DOWNLOAD_ACTION = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 COVERAGE_MERGER = "scripts/merge_owner_bridge_lcov.py"
-COVERAGE_MERGER_SHA256 = '1513c5b117bdf18dbb2b731867ccc26f50025ddfaba99c361afdf69dc9cda18e'
+COVERAGE_MERGER_SHA256 = '5aded2c2efd208194ac002c902ea86773e95b75dddbd2323c8f5e4303768a99d'
 MERGE_COVERAGE_COMMAND = 'python scripts/merge_owner_bridge_lcov.py --linux "${{ runner.temp }}/coverage.lcov" --native "${{ runner.temp }}/owner-windows-lcov/owner-windows.lcov" --receipt "${{ runner.temp }}/owner-windows-lcov/owner-windows-lcov-receipt.json" --workspace "${{ github.workspace }}" --checkout "${{ github.sha }}" --output "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
 SCOPED_JOB_IF = (
     "${{ !cancelled() && needs.preflight-gate.result == 'success' && "

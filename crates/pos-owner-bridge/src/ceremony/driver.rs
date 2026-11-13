@@ -14,9 +14,9 @@
 //! | releasing                 | `RELEASING` observed, or `RELEASE_WINDOW`                      |
 //! | awaiting exit             | the browser exit, or `EXIT_WINDOW` (`CleanupTimeout`)          |
 //!
-//! The 300 s enrollment budget is enforced while a ceremony is opening, loading or posted; it
-//! ends at E4 verification, so it is not checked while the driver releases and waits for exit,
-//! and `next_wake` ignores it from then on.
+//! The 300 s enrollment budget is checked at the start of each opening, loading or posted step.
+//! A consuming step that starts within budget is not interrupted by its expiry (ADR-110 E5).
+//! The budget is not checked while releasing or awaiting exit, and `next_wake` ignores it then.
 
 use std::task::Poll;
 use std::time::Instant;
@@ -614,7 +614,7 @@ impl CeremonyDriver {
             return self.fail_unexpected(error, now);
         }
         match self.known {
-            ControlState::Ready => self.consume(env, now),
+            ControlState::Ready => self.consume(env),
             ControlState::Failed => self.fail(env, now, lifecycle(LifecycleCode::ClientFailed)),
             ControlState::Empty => self.await_receipt(env, now, navigation),
             _ => self.await_reply(env, now),
@@ -639,7 +639,9 @@ impl CeremonyDriver {
         if !reachable(self.known, observed) {
             return Err(UNEXPECTED_STATE);
         }
-        self.observe_advance(observed, now);
+        // Receipt is observed only after the state read completes. Keep the
+        // separate timing-mode CAS race on its existing timestamp semantics.
+        self.observe_advance(observed, env.clock.now());
         Ok(())
     }
 
@@ -692,7 +694,7 @@ impl CeremonyDriver {
                 };
                 Step::Pending
             }
-            Ok(Some(advanced)) => self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => self.fail_unexpected(error, now),
         }
     }
@@ -709,7 +711,7 @@ impl CeremonyDriver {
         navigation: NavigationId,
     ) -> Step {
         match release_loop(env.surface, ControlState::Empty, ReleaseMode::Timing) {
-            Ok(Some(advanced)) => return self.void_timing_failure(advanced, now),
+            Ok(Some(advanced)) => return self.void_timing_failure(advanced, env.clock.now()),
             Err(error) => return self.fail_unexpected(error, now),
             Ok(None) => {}
         }
@@ -724,14 +726,11 @@ impl CeremonyDriver {
         self.post_pair(env, navigation)
     }
 
-    fn consume(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
-        // ADR-110 §6: the interaction window ends at the CAS, so a READY first read after it
-        // is not consumed.
-        if self.interaction_over(now) {
-            return self.fail(env, now, lifecycle(LifecycleCode::InteractionTimeout));
-        }
-        if expired(now, self.plan.t0, CHALLENGE_TTL) {
-            return self.fail(env, now, lifecycle(LifecycleCode::ChallengeExpired));
+    fn consume(&mut self, env: &mut StepEnv<'_>) -> Step {
+        // Check the original bounds at the CAS, not at the preceding state read.
+        let now = env.clock.now();
+        if let Some(error) = self.consume_deadline_error(now) {
+            return self.fail(env, now, error);
         }
         let won = env
             .surface
@@ -740,6 +739,12 @@ impl CeremonyDriver {
             Ok(true) => self.known = ControlState::Consuming,
             Ok(false) => return self.fail_unexpected(UNEXPECTED_STATE, now),
             Err(error) => return self.fail_unexpected(error.error(), now),
+        }
+        // A successful CAS has consumed the reply even if the call spanned a
+        // deadline; retain that state for terminal cleanup, but do not verify.
+        let after_cas = env.clock.now();
+        if let Some(error) = self.consume_deadline_error(after_cas) {
+            return self.fail(env, after_cas, error);
         }
         match self.verify_reply(env) {
             Ok(verified) => {
@@ -752,6 +757,16 @@ impl CeremonyDriver {
                 self.finish_success(env, now, verified)
             }
             Err(error) => self.fail(env, now, error),
+        }
+    }
+
+    fn consume_deadline_error(&self, now: Instant) -> Option<BridgeError> {
+        if self.interaction_over(now) {
+            Some(lifecycle(LifecycleCode::InteractionTimeout))
+        } else if expired(now, self.plan.t0, CHALLENGE_TTL) {
+            Some(lifecycle(LifecycleCode::ChallengeExpired))
+        } else {
+            None
         }
     }
 
@@ -772,7 +787,8 @@ impl CeremonyDriver {
             .get(HEADER..HEADER + length)
             .unwrap_or_default();
         let verified = parse_and_verify(&self.plan, payload, &mut slots.prf)?;
-        if expired(env.clock.now(), self.plan.t0, CHALLENGE_TTL) {
+        let verified_at = env.clock.now();
+        if expired(verified_at, self.plan.t0, CHALLENGE_TTL) {
             return Err(lifecycle(LifecycleCode::ChallengeExpired));
         }
         slots.copy_a.wipe();

@@ -202,6 +202,86 @@ fn consuming_port_delegates_without_intervening_before_the_consuming_exchange() 
 }
 
 #[test]
+fn consuming_port_preserves_successful_cas_when_fault_authority_has_expired() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    let receipt = Instant::now()
+        .checked_sub(pos_owner_bridge::ceremony::timing::INTERACTION)
+        .ok_or("modeled receipt precedes monotonic clock origin")?;
+    let deadline = super::interaction_deadline(fixture.deadline, receipt);
+    {
+        let mut port = ConsumingPort {
+            inner: RefCell::new(&mut fixture.surface),
+            target: ProcessFaultTarget::Browser,
+            inject: true,
+            deadline,
+            trace: Rc::clone(&fixture.trace),
+            state: ProcessFaultState {
+                phase: ProcessFaultPhase::PostedReady,
+                topology: ProcessFaultTopology::SealedSingleViewFrameFree,
+                generation: 1,
+                reply_state: ControlState::Ready as u32,
+                record_count: 1,
+                posts: 1,
+            },
+            handle: RefCell::new(None),
+            failure: RefCell::new(None),
+            reached: RefCell::new(false),
+        };
+        navigate_port(&mut port, &model)?;
+        let id = CeremonyId::from_bytes([MODEL_CASE; 16]);
+        let request_header = OwnerBridgeControlV1::new_request(CeremonyKind::Create, 1, id, 1)
+            .map_err(|error| error.to_string())?
+            .encode();
+        let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)
+            .map_err(|error| error.to_string())?
+            .encode();
+        let mut request = RequestImage::zeroed();
+        request.as_mut_bytes()[..64].copy_from_slice(&request_header);
+        port.create_and_write(&request, &reply_header)
+            .map_err(SurfaceError::error)?;
+        port.post(&PostGuard {
+            generation: 1,
+            navigation_id: NavigationId(7),
+            served_count: 1,
+        })
+        .map_err(SurfaceError::error)?;
+        for (from, to) in [
+            (ControlState::Empty, ControlState::Received),
+            (ControlState::Received, ControlState::Writing),
+            (ControlState::Writing, ControlState::Ready),
+        ] {
+            assert_eq!(
+                port.reply_compare_exchange(from as u32, to as u32),
+                Ok(true)
+            );
+        }
+        assert!(Instant::now() >= deadline);
+        assert_eq!(
+            port.reply_compare_exchange(ControlState::Ready as u32, ControlState::Consuming as u32),
+            Ok(true)
+        );
+        assert_eq!(port.reply_load_state(), Ok(ControlState::Consuming as u32));
+        assert_eq!(
+            *port.failure.borrow(),
+            Some("consuming fault evidence failed")
+        );
+        assert!(!*port.reached.borrow());
+        assert!(port.handle.borrow().is_none());
+        assert!(port.trace.borrow().is_empty());
+        port.zero_close_buffers().map_err(SurfaceError::error)?;
+        port.close_controller().map_err(SurfaceError::error)?;
+        let sink = model.sink.borrow().clone().ok_or("missing modeled sink")?;
+        let _action = sink.event(NativeEvent::BrowserExited { pid: 42 });
+        port.finish().map_err(SurfaceError::error)?;
+    }
+    assert!(fixture.surface.idle());
+    drop(fixture);
+    root.remove()
+}
+
+#[test]
 fn shared_surface_port_preserves_modeled_calls_and_results() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;

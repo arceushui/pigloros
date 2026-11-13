@@ -9,7 +9,7 @@ use std::rc::Rc;
 use pos_owner_bridge::listener::{FixtureProfile, ListenerConfig, LoopbackListener};
 use pos_owner_bridge::LoopbackPort;
 
-use super::{completion, pump_until, session, Events, TestResult};
+use super::{completion, pass, pump_until, session, Events, TestResult};
 use crate::{
     ControlFault, ControlObservation, EventKind, EventSink, NativeAction, NativeError, NativeEvent,
     StaPump,
@@ -177,19 +177,19 @@ const CASES: [Case; 10] = [
     ),
 ];
 
-pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
-    let runtime = crate::verify_fixed_runtime(runtime_path, root)?;
-    let mut factory = crate::Native::owner_factory()?;
+pub(super) fn run(runtime_path: &Path, root: &Path) {
+    let runtime = pass(crate::verify_fixed_runtime(runtime_path, root));
+    let mut factory = pass(crate::Native::owner_factory());
     for (index, case) in CASES.into_iter().enumerate() {
         let (profile, kind, mode) = case;
-        log_start(index, case)?;
+        log_start(index, case);
         let _fault = Fault::new(kind, mode);
         let folder = root.join(format!("control-{index}"));
-        crate::create_private_directory(&folder)?;
-        let mut listener = LoopbackListener::start(
+        pass(crate::create_private_directory(&folder));
+        let mut listener = pass(LoopbackListener::start(
             Box::new(crate::WindowsLoopbackBinder::default()),
             ListenerConfig::fixture(profile),
-        )?;
+        ));
         let events = Rc::new(Events::default());
         let probe = Rc::new(Probe {
             events: Rc::clone(&events),
@@ -204,38 +204,24 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             external_navigation_seen: Cell::new(false),
             unexpected_navigation: Cell::new(false),
         });
-        let mut native = session::Session::new(&factory, events)?;
-        native.create_window(None, 480, 640)?;
-        let sink: Rc<dyn EventSink> = probe.clone();
-        native.create_environment(
+        let mut native = pass(session::Session::new(&factory, events));
+        pass(create_control_session(
+            &mut native,
+            &factory,
+            &probe,
             runtime.root(),
             &folder,
-            super::super::settings::OPTIONS,
-            sink,
-        )?;
-        completion(&factory, "control environment", || {
-            native.environment_completion()
-        })?;
-        native.create_controller()?;
-        completion(&factory, "control controller", || {
-            native.controller_completion()
-        })?;
-        let identity = runtime.browser_identity(native.browser_pid()?)?;
-        native.require_shared_interfaces()?;
-        let sink: Rc<dyn EventSink> = probe.clone();
-        native.subscribe_view(sink)?;
-        prepare_control_view(native.as_ref())?;
+        ));
+        let identity = pass(runtime.browser_identity(pass(native.browser_pid())));
+        pass(subscribe_control_view(&mut native, &probe));
+        pass(prepare_control_view(native.as_ref()));
         listener.begin_navigation();
         probe.events.begin();
-        native.navigate_owner()?;
+        pass(native.navigate_owner());
         let mut armed = false;
         let callback = wait_for_control(&factory, &probe, &listener, &mut armed);
-        log_callback(index, case, &probe, &listener, &callback)?;
-        if let Err(error) = callback {
-            drop(native);
-            log_retired(index, identity.browser_pid, &probe)?;
-            return Err(error);
-        }
+        log_callback(index, case, &probe, &listener, &callback);
+        pass(callback);
         if mode == ControlFault::RetryDenial {
             for attempts in [2, 3] {
                 // Repeated teardown and event-drain calls in one progression
@@ -250,28 +236,56 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
                     assert_eq!(observations[0].completions, 0);
                     assert!(!observations[0].retired);
                 }
-                factory.next()?;
+                pass(factory.next());
             }
         }
-        native.unsubscribe_view()?;
+        pass(native.unsubscribe_view());
         let before_exit = crate::Native::control_observations();
-        native.close_controller()?;
-        pump_until(&factory, "control own browser exit", || {
+        pass(native.close_controller());
+        pass(pump_until(&factory, "control own browser exit", || {
             probe.events.exited() == Some(identity.browser_pid)
-        })?;
+        }));
         let after_exit = crate::Native::control_observations();
         assert_control_retired(&probe, &listener, &before_exit, &after_exit, case, armed);
-        native.unsubscribe_exit()?;
-        native.drop_environment()?;
-        native.destroy_window()?;
+        pass(native.unsubscribe_exit());
+        pass(native.drop_environment());
+        pass(native.destroy_window());
         drop(native);
         listener.shutdown();
     }
-    factory.stop()?;
+    pass(factory.stop());
     drop(factory);
     let composed_root = root.join("composed-control");
-    crate::create_private_directory(&composed_root)?;
-    super::denial::run_control(runtime_path, &composed_root)?;
+    pass(crate::create_private_directory(&composed_root));
+    super::denial::run_control(runtime_path, &composed_root);
+}
+
+// Keep the owning Session alive on every error; its Drop performs the same
+// retained native retirement as the surrounding qualification run.
+fn create_control_session(
+    native: &mut session::Session<'_>,
+    factory: &dyn StaPump,
+    probe: &Rc<Probe>,
+    runtime: &Path,
+    folder: &Path,
+) -> TestResult {
+    native.create_window(None, 480, 640)?;
+    let sink: Rc<dyn EventSink> = probe.clone();
+    native.create_environment(runtime, folder, super::super::settings::OPTIONS, sink)?;
+    completion(factory, "control environment", || {
+        native.environment_completion()
+    })?;
+    native.create_controller()?;
+    completion(factory, "control controller", || {
+        native.controller_completion()
+    })?;
+    Ok(())
+}
+
+fn subscribe_control_view(native: &mut session::Session<'_>, probe: &Rc<Probe>) -> TestResult {
+    native.require_shared_interfaces()?;
+    let sink: Rc<dyn EventSink> = probe.clone();
+    native.subscribe_view(sink)?;
     Ok(())
 }
 
@@ -345,12 +359,11 @@ fn prepare_control_view(native: &dyn crate::NativeOperations) -> TestResult {
     Ok(())
 }
 
-fn log_start(index: usize, (profile, kind, mode): Case) -> TestResult {
-    writeln!(
+fn log_start(index: usize, (profile, kind, mode): Case) {
+    pass(writeln!(
         std::io::stderr(),
         "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
-    )?;
-    Ok(())
+    ));
 }
 
 fn log_callback(
@@ -359,11 +372,11 @@ fn log_callback(
     probe: &Probe,
     listener: &LoopbackListener,
     callback: &TestResult,
-) -> TestResult {
+) {
     let served = listener.served();
-    writeln!(
+    pass(writeln!(
         std::io::stderr(),
-        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} result={:?}",
+        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} listener_observation={:?} result={:?}",
         probe.delivered.get(),
         probe.failures.get(),
         listener.received_request_count(),
@@ -372,18 +385,9 @@ fn log_callback(
         probe.events.started(),
         probe.events.loaded(),
         probe.events.invalid(),
+        listener.observation(),
         callback.as_ref().map_err(ToString::to_string)
-    )?;
-    Ok(())
-}
-
-fn log_retired(index: usize, expected_pid: u32, probe: &Probe) -> TestResult {
-    writeln!(
-        std::io::stderr(),
-        "NATIVE_CONTROL case={index} stage=retired expected_pid={expected_pid} exited={:?}",
-        probe.events.exited()
-    )?;
-    Ok(())
+    ));
 }
 
 fn assert_denials(
@@ -459,6 +463,187 @@ mod tests {
                 );
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn modeled_control_view_setup_stops_at_the_first_failure() {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use crate::NativeFactory as _;
+        use pos_owner_bridge::fake::clock::FakeClock;
+
+        // These are modeled NativeOperations responses, not SDK failures.
+        for (failure, expected, success) in [
+            (
+                None,
+                &["fit_controller", "show_window", "focus_controller"][..],
+                true,
+            ),
+            (Some("set_bool"), &[][..], false),
+            (Some("fit_controller"), &["fit_controller"][..], false),
+            (
+                Some("show_window"),
+                &["fit_controller", "show_window"][..],
+                false,
+            ),
+            (
+                Some("focus_controller"),
+                &["fit_controller", "show_window", "focus_controller"][..],
+                false,
+            ),
+        ] {
+            let model = Factory::new(Creation::Ready, FakeClock::start());
+            model.failure.set(failure);
+            let result = model.session().map(|native| {
+                assert_eq!(
+                    super::prepare_control_view(native.as_ref()).is_ok(),
+                    success,
+                    "{failure:?}"
+                );
+            });
+            assert!(result.is_ok(), "native session: {result:?}");
+            assert_eq!(model.calls.borrow().as_slice(), expected, "{failure:?}");
+            assert!(!model.calls.borrow().contains(&"navigate"));
+        }
+    }
+
+    #[test]
+    fn modeled_control_creation_stops_at_failure_and_retires_owners() {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use pos_owner_bridge::fake::clock::FakeClock;
+        use std::path::Path;
+
+        // Fake responses model setup failure; they are not native SDK results.
+        for (creation, environment_creation, failure, expected, success) in [
+            (
+                Creation::Ready,
+                Creation::Ready,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                true,
+            ),
+            (
+                Creation::Ready,
+                Creation::Ready,
+                Some("create_window"),
+                &["create_window"][..],
+                false,
+            ),
+            (
+                Creation::Ready,
+                Creation::Ready,
+                Some("create_environment"),
+                &["create_window", "create_environment"][..],
+                false,
+            ),
+            (
+                Creation::Ready,
+                Creation::CallbackFailure,
+                None,
+                &["create_window", "create_environment"][..],
+                false,
+            ),
+            (
+                Creation::SynchronousFailure,
+                Creation::Ready,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                false,
+            ),
+            (
+                Creation::CallbackFailure,
+                Creation::Ready,
+                None,
+                &["create_window", "create_environment", "create_controller"][..],
+                false,
+            ),
+        ] {
+            let factory = Factory::new(creation, FakeClock::start());
+            factory.failure.set(failure);
+            factory.environment_creation.set(environment_creation);
+            let probe = Rc::new(probe());
+            let events = Rc::clone(&probe.events);
+            let session_result =
+                super::session::Session::new(&factory, Rc::clone(&events)).map(|mut native| {
+                    let result = super::create_control_session(
+                        &mut native,
+                        &factory,
+                        &probe,
+                        Path::new("modeled-runtime"),
+                        Path::new("modeled-folder"),
+                    );
+                    let calls_before_retirement = factory.calls.borrow().clone();
+                    if success {
+                        assert_eq!(native.browser_pid(), Ok(42));
+                        events.event(NativeEvent::BrowserExited { pid: 42 });
+                    }
+                    factory.failure.set(None);
+                    drop(native);
+                    assert_eq!(result.is_ok(), success);
+                    assert_eq!(calls_before_retirement.as_slice(), expected);
+                    assert!(!calls_before_retirement.contains(&"navigate"));
+                    assert!(factory.calls.borrow().contains(&"drop_environment"));
+                });
+            assert!(
+                session_result.is_ok(),
+                "session creation: {session_result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_control_subscription_stops_at_failure_and_retires_owners() {
+        use crate::adapter::surface::tests::native::{Creation, Factory};
+        use pos_owner_bridge::fake::clock::FakeClock;
+        use std::path::Path;
+
+        for (failure, expected, success) in [
+            (
+                None,
+                &["require_shared_interfaces", "subscribe_view"][..],
+                true,
+            ),
+            (
+                Some("require_shared_interfaces"),
+                &["require_shared_interfaces"][..],
+                false,
+            ),
+            (
+                Some("subscribe_view"),
+                &["require_shared_interfaces", "subscribe_view"][..],
+                false,
+            ),
+        ] {
+            let factory = Factory::new(Creation::Ready, FakeClock::start());
+            let probe = Rc::new(probe());
+            let events = Rc::clone(&probe.events);
+            let session_result =
+                super::session::Session::new(&factory, Rc::clone(&events)).map(|mut native| {
+                    let setup = super::create_control_session(
+                        &mut native,
+                        &factory,
+                        &probe,
+                        Path::new("modeled-runtime"),
+                        Path::new("modeled-folder"),
+                    );
+                    assert!(setup.is_ok(), "control setup: {setup:?}");
+                    assert_eq!(native.browser_pid(), Ok(42));
+                    let before = factory.calls.borrow().len();
+                    factory.failure.set(failure);
+                    let result = super::subscribe_control_view(&mut native, &probe);
+                    let calls = factory.calls.borrow()[before..].to_vec();
+                    factory.failure.set(None);
+                    events.event(NativeEvent::BrowserExited { pid: 42 });
+                    drop(native);
+                    assert_eq!(result.is_ok(), success);
+                    assert_eq!(calls.as_slice(), expected);
+                    assert!(factory.calls.borrow().contains(&"drop_environment"));
+                    assert!(!factory.calls.borrow().contains(&"navigate"));
+                });
+            assert!(
+                session_result.is_ok(),
+                "session creation: {session_result:?}"
+            );
         }
     }
 

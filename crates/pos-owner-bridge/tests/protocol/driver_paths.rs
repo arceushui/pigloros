@@ -1600,3 +1600,22 @@ fn consuming_event_at_the_generation_limit_fails_closed() -> TestResult {
     assert_eq!(*driver.prf(), [0; 32]);
     Ok(())
 }
+
+#[test]
+fn enrollment_budget_does_not_interrupt_consuming_verification() -> TestResult {
+    for delay in [Duration::from_secs(2), Duration::from_secs(3)] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::SlowSecondCopy(delay),
+            SurfaceConfig::default(),
+        )?;
+        let plan = create_plan(&rig.clock)
+            .with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(3)));
+        let (result, driver) = rig.run(plan);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(driver.request_clear());
+        assert!(rig.store.records_now().is_empty());
+        assert!(rig.handle.log().contains(&LogEntry::Finished));
+    }
+    Ok(())
+}

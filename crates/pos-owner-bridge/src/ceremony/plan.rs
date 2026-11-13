@@ -12,7 +12,9 @@ use zeroize::Zeroizing;
 use super::timing::ENROLLMENT_BUDGET;
 use crate::{BridgeError, ProtocolCode, ReplyImage, RequestImage};
 
-/// An enrollment budget: the ceremony fails once `limit` has passed since `start`.
+/// An enrollment budget checked at the start of each opening, loading or posted step.
+///
+/// A consuming step that starts within the budget is not interrupted by its expiry.
 ///
 /// Production code can only build the ADR-110 §8 budget of five minutes; the length is a
 /// constant of the protocol, not configuration.

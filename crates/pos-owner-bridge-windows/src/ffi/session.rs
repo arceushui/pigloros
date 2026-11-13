@@ -121,12 +121,11 @@ impl NativeOperations for Session {
         &self,
         authority: &crate::FaultAuthority,
     ) -> Result<Box<dyn crate::RetainedExitHandle>, ()> {
-        if !self.preload_fault_owners_retained()
-            || self.window.is_none()
-            || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-        {
-            return Err(());
-        }
+        require_owned_browser(
+            || self.preload_fault_owners_retained() && self.window.is_some(),
+            || self.browser_pid().map_err(|_| ()),
+            || authority.browser().browser_pid,
+        )?;
         let environment = self.environment_ref().map_err(|_| ())?;
         self.denials.expect_browser(authority.browser().browser_pid);
         super::process_fault::retain_exit_browser(&environment.raw, authority)
@@ -155,12 +154,11 @@ impl NativeOperations for Session {
         }
         match authority.lifecycle() {
             crate::ProcessFaultLifecycle::Quarantined => {
-                if !self.preload_fault_owners_retained()
-                    || self.window.is_none()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.preload_fault_owners_retained() && self.window.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::PostedReceipt
             | crate::ProcessFaultLifecycle::PostedEmpty
@@ -169,21 +167,20 @@ impl NativeOperations for Session {
             | crate::ProcessFaultLifecycle::PostedConsuming
             | crate::ProcessFaultLifecycle::PostedRetry(_)
             | crate::ProcessFaultLifecycle::ReleasingSuccess => {
-                if self.controller.is_none()
-                    || self.view.is_none()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.controller.is_some() && self.view.is_some(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::AwaitingLoad
             | crate::ProcessFaultLifecycle::Navigating
             | crate::ProcessFaultLifecycle::BeforeRecord => {
-                if !self.preload_fault_owners_retained()
-                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
-                {
-                    return Err(());
-                }
+                require_owned_browser(
+                    || self.preload_fault_owners_retained(),
+                    || self.browser_pid().map_err(|_| ()),
+                    || authority.browser().browser_pid,
+                )?;
             }
             crate::ProcessFaultLifecycle::AwaitingExitSuccess => return Err(()),
             crate::ProcessFaultLifecycle::PendingOpening => {
@@ -303,23 +300,15 @@ impl NativeOperations for Session {
     fn pending_opening_browser_candidate(
         &self,
     ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
-        if !self.pending_opening_owners_retained() {
-            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
-            return Err(());
-        }
-        if self.recordless_controller_completion().is_some() {
-            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
-            return Err(());
-        }
-        let candidate = super::process_fault::pending_browser_candidate(
-            &self.environment_ref().map_err(|_| ())?.raw,
-        )?;
-        if !self.pending_opening_owners_retained()
-            || self.recordless_controller_completion().is_some()
-        {
-            return Err(());
-        }
-        Ok(candidate)
+        pending_candidate_checked(
+            || self.pending_opening_owners_retained(),
+            || self.recordless_controller_completion(),
+            || {
+                super::process_fault::pending_browser_candidate(
+                    &self.environment_ref().map_err(|_| ())?.raw,
+                )
+            },
+        )
     }
 
     #[cfg(test)]
@@ -607,6 +596,39 @@ impl NativeOperations for Session {
     }
 }
 
+#[cfg(test)]
+fn require_owned_browser(
+    owners: impl FnOnce() -> bool,
+    browser: impl FnOnce() -> Result<u32, ()>,
+    expected: impl FnOnce() -> u32,
+) -> Result<(), ()> {
+    if !owners() || browser()? != expected() {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn pending_candidate_checked(
+    mut owners: impl FnMut() -> bool,
+    mut callback: impl FnMut() -> Option<bool>,
+    observe: impl FnOnce() -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()>,
+) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+    if !owners() {
+        pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
+        return Err(());
+    }
+    if callback().is_some() {
+        pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
+        return Err(());
+    }
+    let candidate = observe()?;
+    if !owners() || callback().is_some() {
+        return Err(());
+    }
+    Ok(candidate)
+}
+
 fn failed(_: windows::core::Error) -> NativeError {
     NativeError {
         operation: Operation::Controller,
@@ -617,5 +639,148 @@ const fn closed() -> NativeError {
     NativeError {
         operation: Operation::Controller,
         failure: Failure::Closed,
+    }
+}
+
+#[cfg(test)]
+mod pending_candidate_tests {
+    #![forbid(unsafe_code)]
+
+    use pos_owner_bridge::ProcessIdentity;
+    use pos_owner_bridge_codec::ImagePathSha256;
+
+    #[test]
+    fn modeled_owned_browser_check_refuses_early_without_extra_reads() {
+        for (owners, pid, expected_pid, result, expected_calls) in [
+            (false, Ok(7), 7, Err(()), &["owners"][..]),
+            (true, Err(()), 7, Err(()), &["owners", "browser"][..]),
+            (
+                true,
+                Ok(8),
+                7,
+                Err(()),
+                &["owners", "browser", "expected"][..],
+            ),
+            (
+                true,
+                Ok(7),
+                7,
+                Ok(()),
+                &["owners", "browser", "expected"][..],
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let observed = super::require_owned_browser(
+                || {
+                    calls.borrow_mut().push("owners");
+                    owners
+                },
+                || {
+                    calls.borrow_mut().push("browser");
+                    pid
+                },
+                || {
+                    calls.borrow_mut().push("expected");
+                    expected_pid
+                },
+            );
+            assert_eq!(observed, result);
+            assert_eq!(calls.into_inner(), expected_calls);
+        }
+    }
+    use std::cell::RefCell;
+
+    #[test]
+    fn modeled_pending_candidate_refuses_changed_owners_or_completion_in_order() {
+        let identity = ProcessIdentity {
+            browser_pid: 7,
+            creation_filetime: 9,
+            image_path_sha256: ImagePathSha256::from_bytes([3; 32]),
+        };
+        for (
+            initial_owner,
+            initial_callback,
+            observed,
+            final_owner,
+            final_callback,
+            expected,
+            expected_calls,
+        ) in [
+            (false, None, Ok(None), true, None, Err(()), &["owners"][..]),
+            (
+                true,
+                Some(true),
+                Ok(None),
+                true,
+                None,
+                Err(()),
+                &["owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Err(()),
+                true,
+                None,
+                Err(()),
+                &["owners", "callback", "observe"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                false,
+                None,
+                Err(()),
+                &["owners", "callback", "observe", "owners"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                true,
+                Some(false),
+                Err(()),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(None),
+                true,
+                None,
+                Ok(None),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+            (
+                true,
+                None,
+                Ok(Some(identity)),
+                true,
+                None,
+                Ok(Some(identity)),
+                &["owners", "callback", "observe", "owners", "callback"][..],
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let mut owner_values = [initial_owner, final_owner].into_iter();
+            let mut callback_values = [initial_callback, final_callback].into_iter();
+            let result = super::pending_candidate_checked(
+                || {
+                    calls.borrow_mut().push("owners");
+                    owner_values.next().unwrap_or(false)
+                },
+                || {
+                    calls.borrow_mut().push("callback");
+                    callback_values.next().unwrap_or(Some(false))
+                },
+                || {
+                    calls.borrow_mut().push("observe");
+                    observed
+                },
+            );
+            assert_eq!(result, expected);
+            assert_eq!(calls.into_inner(), expected_calls);
+        }
     }
 }

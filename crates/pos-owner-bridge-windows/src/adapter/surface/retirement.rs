@@ -83,12 +83,10 @@ impl Surface {
         self.native.unsubscribe_exit().map_err(unavailable)?;
         self.native.drop_environment().map_err(unavailable)?;
         self.native.destroy_window().map_err(unavailable)?;
-        if let Some(folder) = self.folder.take() {
-            // Sharing failure leaves a recognized recordless orphan. The next
-            // portable restart sweep retries it; no PBCR is fabricated.
-            if remove_folder {
-                let _removed_or_deferred = self.store.remove_folder(&folder);
-            }
+        // Sharing failure leaves a recognized recordless orphan. The next
+        // portable restart sweep retries it; no PBCR is fabricated.
+        if let Some(folder) = self.folder.take().filter(|_| remove_folder) {
+            let _removed_or_deferred = self.store.remove_folder(&folder);
         }
         self.identity = None;
         self.failed_open = false;
@@ -99,10 +97,10 @@ impl Surface {
 
     pub(super) fn finish_folder(&mut self) -> Result<()> {
         self.native.destroy_window().map_err(unavailable)?;
-        if let Some(folder) = &self.folder {
-            self.store.remove_folder(folder).map_err(unavailable)?;
-            self.folder = None;
-        }
+        self.folder.as_ref().map_or(Ok(()), |folder| {
+            self.store.remove_folder(folder).map_err(unavailable)
+        })?;
+        self.folder = None;
         Ok(())
     }
 }

@@ -28,14 +28,21 @@ pub(super) fn inspect(pid: u32) -> Result<Option<(ProcessIdentity, PathBuf)>, ()
         Ok(handle) => handle,
         // All other arguments are fixed valid values. A nonzero invalid PID is
         // absence; access denial and every other failed inspection stay unknown.
-        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(None),
-        Err(_) => return Err(()),
+        Err(error) => return absent_on_open_failure(&error).map(|()| None),
     };
     let observed = read_identity(handle, pid);
     // SAFETY: this is the single close of the successfully opened handle, after
     // every query finishes. All query failures pass through this same close.
     let closed = unsafe { CloseHandle(handle) };
     observed.and_then(|identity| closed.map(|()| Some(identity)).map_err(|_| ()))
+}
+
+fn absent_on_open_failure(error: &windows::core::Error) -> Result<(), ()> {
+    if error.code() == ERROR_INVALID_PARAMETER.to_hresult() {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 pub(super) fn read_identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
@@ -84,20 +91,71 @@ fn image_digest(handle: HANDLE) -> Result<(ImagePathSha256, PathBuf), ()> {
             &raw mut length,
         )
     };
-    queried.map_err(|_| ()).and_then(|()| {
-        let image = image
-            .get(..length as usize)
-            .filter(|image| !image.is_empty())
-            .ok_or(())?;
-        // PBCR stores the exact returned UTF-16LE path digest, without lossy
-        // conversion. The same handle observation supplies the activation path.
-        let mut digest = Sha256::new();
-        for unit in image {
-            digest.update(unit.to_le_bytes());
+    queried
+        .map_err(|_| ())
+        .and_then(|()| digest_image_units(&image, length))
+}
+
+fn digest_image_units(image: &[u16], length: u32) -> Result<(ImagePathSha256, PathBuf), ()> {
+    let image = image
+        .get(..length as usize)
+        .filter(|image| !image.is_empty())
+        .ok_or(())?;
+    // PBCR stores the exact returned UTF-16LE path digest, without lossy
+    // conversion. The same handle observation supplies the activation path.
+    let mut digest = Sha256::new();
+    for unit in image {
+        digest.update(unit.to_le_bytes());
+    }
+    Ok((
+        ImagePathSha256::from_bytes(digest.finalize().into()),
+        PathBuf::from(OsString::from_wide(image)),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![forbid(unsafe_code)]
+
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Error, HRESULT};
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+
+    #[test]
+    fn modeled_process_open_failure_retains_absence_and_unknown_distinction() {
+        assert_eq!(super::inspect(0), Err(()));
+        assert_eq!(
+            super::absent_on_open_failure(&Error::from_hresult(
+                ERROR_INVALID_PARAMETER.to_hresult()
+            )),
+            Ok(())
+        );
+        for code in [ERROR_ACCESS_DENIED.to_hresult(), HRESULT(-1)] {
+            assert_eq!(
+                super::absent_on_open_failure(&Error::from_hresult(code)),
+                Err(())
+            );
         }
-        Ok((
-            ImagePathSha256::from_bytes(digest.finalize().into()),
-            PathBuf::from(OsString::from_wide(image)),
-        ))
-    })
+    }
+
+    #[test]
+    fn modeled_image_length_and_digest_preserve_utf16_units() -> Result<(), ()> {
+        let units = [0x41, 0xd800, 0x42];
+        assert!(super::digest_image_units(&units, 0).is_err());
+        assert!(super::digest_image_units(&units, 4).is_err());
+        let (digest, path) = super::digest_image_units(&units, 2)?;
+        assert_eq!(
+            digest,
+            pos_owner_bridge_codec::ImagePathSha256::from_bytes([
+                0xa4, 0x96, 0xea, 0xef, 0xc7, 0x38, 0xf7, 0x1a, 0xac, 0x9f, 0x89, 0x32, 0xd9, 0xd6,
+                0xeb, 0x61, 0x58, 0x1e, 0xbf, 0x6b, 0xa7, 0x71, 0x61, 0xa4, 0xd7, 0x87, 0x89, 0x9a,
+                0xca, 0xda, 0x1b, 0xb7,
+            ])
+        );
+        assert_eq!(
+            path.as_os_str().encode_wide().collect::<Vec<_>>(),
+            units[..2]
+        );
+        Ok(())
+    }
 }
