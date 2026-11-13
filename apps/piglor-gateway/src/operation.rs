@@ -56,10 +56,11 @@ impl OperationSpecV1 for CreatePredictionOperation {
     const OPERATION: GatewayOperationV1 = GatewayOperationV1::CREATE_PREDICTION;
 }
 
-/// The authority inputs of one protected operation, extracted from the
-/// request head before its body: only the acting entity, when the request
-/// names a valid one. Extraction never fails; a missing or malformed actor
-/// is decided by [`Self::authorize`].
+/// The authority inputs of one protected operation, from the request head.
+///
+/// They are only the acting entity, when the request names a valid one.
+/// Extraction never fails; a missing or malformed actor is decided by
+/// [`Self::authorize`].
 pub struct OperationAuthority<O> {
     actor_entity_id: Option<EntityId>,
     operation: PhantomData<fn() -> O>,

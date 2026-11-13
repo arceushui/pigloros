@@ -188,8 +188,9 @@ impl LocalPrincipalProvisionV1 {
     }
 }
 
-/// Persist `provision` as the store's one Local Principal: its root
-/// capability grant, committed under a permit of the
+/// Persist `provision` as the store's one Local Principal.
+///
+/// Its root capability grant commits under a permit of the
 /// [`AuthorityPersistenceHostV1`] its registry snapshot attests. An exact
 /// retry is [`AuthorityCommitOutcomeV1::Unchanged`].
 ///
@@ -291,10 +292,11 @@ pub fn load_host_local_principal(
         .and_then(|loaded| loaded.map_err(io::Error::other))
 }
 
-/// The production serve composition (D1): the Gateway over `host`, with
-/// authenticated local `OwnTracks` ingress when `owntracks_owner_key` is
-/// given, whose every protected operation requires the Local Principal
-/// recorded in the host's store.
+/// The production serve composition (D1) of the Gateway over `host`.
+///
+/// It accepts authenticated local `OwnTracks` ingress when
+/// `owntracks_owner_key` is given, and every protected operation requires
+/// the Local Principal recorded in the host's store.
 ///
 /// # Errors
 /// Returns an error when the authority records are unavailable or the
@@ -802,22 +804,22 @@ mod tests {
             .to_str()
             .ok_or("temporary path is not UTF-8")?
             .to_owned();
-        let provision = served_provision()?;
+        let served = served_provision()?;
         // Nothing is provisioned implicitly.
         assert!(load_local_principal(&SqliteStore::open(&path)?)?.is_none());
         let mut store = SqliteStore::open(&path)?;
         assert_eq!(
-            provision_local_principal(&mut store, &provision)?,
+            provision_local_principal(&mut store, &served)?,
             AuthorityCommitOutcomeV1::Committed
         );
         // One adapter instance is bound to the host that provisioned it.
         assert_eq!(
-            provision_local_principal(&mut store, &provision),
+            provision_local_principal(&mut store, &served),
             Err(LocalPrincipalErrorV1::Unavailable)
         );
         drop(store);
         assert_eq!(
-            provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?,
+            provision_local_principal(&mut SqliteStore::open(&path)?, &served)?,
             AuthorityCommitOutcomeV1::Unchanged
         );
         assert_eq!(
