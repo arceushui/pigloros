@@ -77,7 +77,6 @@ pub fn announce_mode_binding(mode: &GatewayModeBindingV1) {
 
 /// The router of a bound Gateway: after it answers a stale-binding refusal
 /// (`503`), the serve loop stops (ADR-134 §8).
-#[must_use]
 pub fn bound_router(router: Router, mode: &GatewayModeBindingV1) -> Router {
     let signal = mode.stale_signal();
     router.layer(axum::middleware::map_response(
