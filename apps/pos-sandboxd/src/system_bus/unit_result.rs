@@ -449,6 +449,8 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
     type Read = Result<SystemdUnitResultObservation, SystemdUnitResultError>;
+    /// Builds the outcome of a `Result` that carries the recorded main exit.
+    type Recorded = fn(SystemdMainExit) -> SystemdUnitOutcome;
 
     const UNIT_PATH: &str =
         "/org/freedesktop/systemd1/unit/pigloros_2dattempt_2d40404040404040404040404040404040_2eservice";
@@ -743,7 +745,7 @@ mod tests {
             ("core-dump", CLD_DUMPED, 6, signaled(6, true)),
             ("core-dump", CLD_DUMPED, 25, file_size(true)),
         ];
-        let recorded: [(&str, fn(SystemdMainExit) -> SystemdUnitOutcome); 7] = [
+        let recorded: [(&str, Recorded); 7] = [
             ("timeout", |main| SystemdUnitOutcome::Timeout { main }),
             ("oom-kill", |main| SystemdUnitOutcome::OomKill { main }),
             ("resources", |main| SystemdUnitOutcome::Resources { main }),
