@@ -261,7 +261,7 @@ fn present(weights: &[u8]) -> ReadOutcome {
     ))))
 }
 
-fn refused(error: SubjectFieldOwnerReadErrorV1) -> ReadOutcome {
+const fn refused(error: SubjectFieldOwnerReadErrorV1) -> ReadOutcome {
     (Err(error), Vec::new())
 }
 
