@@ -233,16 +233,28 @@ pub fn provision_local_fork_admission_authority(
     credential_directory: &Path,
 ) -> io::Result<()> {
     let credentials = credentials(credential_directory)?;
-    let lock = GatewayModeStoreLockV1::shared(sqlite_path).map_err(io::Error::other)?;
-    let provisioned = SqliteStore::open(sqlite_path)
+    provision_bound_store(sqlite_path, &credentials)
+}
+
+/// Provision as an offline writer: under the shared mode lock, on a store
+/// whose binding the adapter attached.
+fn provision_bound_store(
+    sqlite_path: &str,
+    credentials: &LocalForkAuthenticationCredentialsV1,
+) -> io::Result<()> {
+    GatewayModeStoreLockV1::shared(sqlite_path)
         .map_err(io::Error::other)
-        .and_then(|mut store| {
-            attach_offline_writer_v1(&mut store)
+        .and_then(|lock| {
+            let provisioned = SqliteStore::open(sqlite_path)
                 .map_err(io::Error::other)
-                .and_then(|_| provision_with_credentials(&mut store, &credentials))
-        });
-    drop(lock);
-    provisioned
+                .and_then(|mut store| {
+                    attach_offline_writer_v1(&mut store)
+                        .map_err(io::Error::other)
+                        .and_then(|_| provision_with_credentials(&mut store, credentials))
+                });
+            drop(lock);
+            provisioned
+        })
 }
 
 fn provision_with_credentials(
