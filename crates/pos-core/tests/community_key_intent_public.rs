@@ -49,7 +49,17 @@ fn fields(value: &mut Value) -> Fallible<&mut Vec<Value>> {
     }
 }
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ]
+        })
+        .map(char::from)
+        .collect()
 }
 fn oracle(domain: &[u8], canonical: &[u8]) -> Hash {
     let mut input = domain.to_vec();

@@ -79,11 +79,7 @@ fn owner() -> Fallible<AuthenticatedPrincipalResultV1> {
 }
 
 fn resource(incarnation: [u8; 16]) -> String {
-    let hex: String = incarnation
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("community-metadata:{hex}")
+    format!("community-metadata:{}", hex(&incarnation))
 }
 
 fn grant(grant_id: Hash, seq: u64) -> Fallible<CapabilityGrantV1> {
@@ -292,7 +288,17 @@ fn bootstrapped() -> Fallible<World> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ]
+        })
+        .map(char::from)
+        .collect()
 }
 
 fn oracle(domain: &[u8], preimage: &[u8]) -> Hash {
@@ -357,9 +363,9 @@ fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> Tes
     let record = world.record()?;
     let key = world.key()?;
     let intent = key.intent().as_input();
-    assert!(intent.protection_operation_id == record.protection_id);
+    assert_eq!(intent.protection_operation_id, record.protection_id);
     assert!(intent.parent_operation == CommunityArtifactOperationV1::Control(CONTROL));
-    assert!(intent.timeline == anchor_timeline());
+    assert_eq!(intent.timeline, anchor_timeline());
     assert_eq!(intent.generation, ANCHOR_GENERATION);
     assert!(intent.purpose == CommunityArtifactPurposeV1::LifecycleControl);
     assert_eq!(
@@ -467,43 +473,43 @@ fn cne1_identity_and_framing_match_the_independent_wire_oracle() -> TestResult {
     assert_eq!(cne1[1], Value::Integer(1.into()));
     assert_eq!(bytes_of(&cne1[2])?, b"CSI1".as_slice());
     let cover = bytes_of(&cne1[3])?;
-    let csm1 = array(cover)?;
-    assert_eq!(bytes_of(&csm1[0])?, b"CSM1".as_slice());
-    assert_eq!(bytes_of(&csm1[2])?, INCARNATION.as_slice());
+    let cover_fields = array(cover)?;
+    assert_eq!(bytes_of(&cover_fields[0])?, b"CSM1".as_slice());
+    assert_eq!(bytes_of(&cover_fields[2])?, INCARNATION.as_slice());
     assert_eq!(
-        bytes_of(&csm1[3])?,
+        bytes_of(&cover_fields[3])?,
         anchor_timeline().inner().to_bytes().as_slice()
     );
-    assert_eq!(bytes_of(&csm1[4])?, ANCHOR_GENERATION.as_slice());
-    assert_eq!(bytes_of(&csm1[5])?, record.protection_id.as_slice());
-    assert_eq!(csm1[6], Value::Array(vec![]));
-    assert_eq!(csm1[7], Value::Integer(HORIZON.into()));
+    assert_eq!(bytes_of(&cover_fields[4])?, ANCHOR_GENERATION.as_slice());
+    assert_eq!(bytes_of(&cover_fields[5])?, record.protection_id.as_slice());
+    assert_eq!(cover_fields[6], Value::Array(vec![]));
+    assert_eq!(cover_fields[7], Value::Integer(HORIZON.into()));
 
-    let coe1 = array(bytes_of(&cne1[4])?)?;
-    assert_eq!(coe1.len(), 5);
-    assert_eq!(bytes_of(&coe1[0])?, b"COE1".as_slice());
-    assert_eq!(bytes_of(&coe1[3])?.len(), 12);
-    assert_eq!(bytes_of(&coe1[4])?.len(), plaintext.len() + 16);
-    let coh1 = array(bytes_of(&coe1[2])?)?;
-    assert_eq!(coh1.len(), 13);
-    assert_eq!(bytes_of(&coh1[0])?, b"COH1".as_slice());
-    assert_eq!(coh1[4], Value::Integer(3.into()));
-    assert_eq!(coh1[5], Value::Integer(2.into()));
-    assert_eq!(bytes_of(&coh1[6])?, record.protection_id.as_slice());
-    assert_eq!(coh1[7], Value::Integer(6.into()));
+    let envelope = array(bytes_of(&cne1[4])?)?;
+    assert_eq!(envelope.len(), 5);
+    assert_eq!(bytes_of(&envelope[0])?, b"COE1".as_slice());
+    assert_eq!(bytes_of(&envelope[3])?.len(), 12);
+    assert_eq!(bytes_of(&envelope[4])?.len(), plaintext.len() + 16);
+    let header = array(bytes_of(&envelope[2])?)?;
+    assert_eq!(header.len(), 13);
+    assert_eq!(bytes_of(&header[0])?, b"COH1".as_slice());
+    assert_eq!(header[4], Value::Integer(3.into()));
+    assert_eq!(header[5], Value::Integer(2.into()));
+    assert_eq!(bytes_of(&header[6])?, record.protection_id.as_slice());
+    assert_eq!(header[7], Value::Integer(6.into()));
     assert_eq!(
-        coh1[8],
+        header[8],
         Value::Text(world.key()?.intent().key_owner_text().to_owned())
     );
-    assert_eq!(coh1[9], Value::Integer(7.into()));
-    assert_eq!(coh1[10], Value::Integer(1.into()));
+    assert_eq!(header[9], Value::Integer(7.into()));
+    assert_eq!(header[10], Value::Integer(1.into()));
     assert_eq!(
-        bytes_of(&coh1[11])?,
+        bytes_of(&header[11])?,
         oracle(b"PiglorOS.Community.ScopeCover.v1", cover)
             .as_bytes()
             .as_slice()
     );
-    assert_eq!(coh1[12], Value::Integer(HORIZON.into()));
+    assert_eq!(header[12], Value::Integer(HORIZON.into()));
     assert_ne!(record.selection.address, record.key_copy.address);
     Ok(())
 }
