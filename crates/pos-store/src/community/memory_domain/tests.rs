@@ -73,10 +73,14 @@ fn principal(byte: u8) -> Fallible<PrincipalRefV1> {
 }
 
 fn owner() -> Fallible<AuthenticatedPrincipalResultV1> {
+    owner_via("local-adapter")
+}
+
+fn owner_via(adapter: &str) -> Fallible<AuthenticatedPrincipalResultV1> {
     Ok(AuthenticatedPrincipalResultV1::try_from_draft(
         AuthenticatedPrincipalDraftV1 {
             principal: principal(2)?,
-            adapter_id: "local-adapter".to_owned(),
+            adapter_id: adapter.to_owned(),
             assurance: AssuranceLevelV1::try_new(1)?,
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(1_000_000),
@@ -233,10 +237,20 @@ impl World {
 
     /// The installed authority, with trusted wall samples at 500 micros.
     fn authority_with(&self, audience: &str, samples: &[u64]) -> CommunityMetadataAuthorityV1 {
+        self.installed(self.owner.clone(), self.registry.clone(), audience, samples)
+    }
+
+    fn installed(
+        &self,
+        principal: AuthenticatedPrincipalResultV1,
+        registry: AuthorityRegistrySnapshotV1,
+        audience: &str,
+        samples: &[u64],
+    ) -> CommunityMetadataAuthorityV1 {
         CommunityMetadataAuthorityV1::new(
             CommunityMetadataAuthorityInputV1 {
-                registry: self.registry.clone(),
-                principal: self.owner.clone(),
+                registry,
+                principal,
                 actor_entity_id: actor(),
                 principal_role: AuthorityRoleV1::Actor,
                 audience: audience.to_owned(),
@@ -254,6 +268,14 @@ impl World {
     /// The exact request the domain must build for `action`, written out
     /// independently from ADR-129 §3 and the installed inputs.
     fn expected_request(&self, action: &str) -> Fallible<AuthorizationRequestV1> {
+        self.expected_request_in(action, "community.owner-metadata")
+    }
+
+    fn expected_request_in(
+        &self,
+        action: &str,
+        category: &str,
+    ) -> Fallible<AuthorizationRequestV1> {
         let persisted = self.domain.store.load_authority(LEAF)?;
         Ok(AuthorizationRequestV1::try_from_draft(
             AuthorizationRequestDraftV1 {
@@ -265,7 +287,7 @@ impl World {
                 installation_id: None,
                 principal_role: AuthorityRoleV1::Actor,
                 resource: resource(INCARNATION),
-                data_category: "community.owner-metadata".to_owned(),
+                data_category: category.to_owned(),
                 action: action.to_owned(),
                 purpose: "owner-enforcement".to_owned(),
                 audience: AUDIENCE.to_owned(),
@@ -1106,5 +1128,64 @@ fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> Tes
             "tamper case {index}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn bootstrap_request_binds_the_exact_owner_metadata_category() -> TestResult {
+    let world = bootstrapped()?;
+    let bound = world.key()?.intent().as_input().authority_request_digest;
+    assert_eq!(
+        bound,
+        world
+            .expected_request_in("write", "community.owner-metadata")?
+            .binding_digest()
+    );
+    for other in ["community.execution-state", "community.owner-metadata.v2"] {
+        assert_ne!(
+            bound,
+            world.expected_request_in("write", other)?.binding_digest()
+        );
+    }
+    Ok(())
+}
+
+/// The policy's owner registry binding covers the principal's adapter, and
+/// the persisted grant's own registry digest pins the registry revision, so
+/// an installed principal from another adapter or a registry snapshot of
+/// another revision is refused.
+#[test]
+fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
+    let mut world = World::new(&[LEAF])?;
+    let foreign_adapter = owner_via("other-adapter")?;
+    let bindings = world
+        .grants
+        .iter()
+        .map(CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>()?;
+    let foreign_registry = AuthorityRegistrySnapshotV1::try_new(
+        Hash::from_bytes([49; 32]),
+        vec![
+            world.owner.registry_binding_digest(),
+            foreign_adapter.registry_binding_digest(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect(),
+        bindings,
+        vec![],
+    )?;
+    for (principal, registry) in [
+        (foreign_adapter, world.registry.clone()),
+        (world.owner.clone(), foreign_registry),
+    ] {
+        let mut authority = world.installed(principal, registry, AUDIENCE, &[500]);
+        assert_eq!(
+            world.open_as(request()?, &mut authority),
+            Err(Error::EvidenceUnavailable)
+        );
+    }
+    assert_nothing_created(&world);
     Ok(())
 }
