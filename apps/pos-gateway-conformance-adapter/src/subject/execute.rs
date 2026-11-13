@@ -368,6 +368,8 @@ mod tests {
     fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
         let store = ScratchStore::new();
         let path = store.path.clone();
+        assert_eq!(std::path::Path::new(&store.path_text()), path.as_path());
+        assert!(path.starts_with(std::env::temp_dir()));
         std::fs::write(&path, b"store")?;
         let mut journal = path.clone().into_os_string();
         journal.push("-wal");
