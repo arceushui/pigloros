@@ -176,6 +176,10 @@ impl World {
     }
 
     fn decision_for(&self, leaf: Hash) -> Fallible<AuthorizationDecisionV1> {
+        self.decision_as(leaf, "write")
+    }
+
+    fn decision_as(&self, leaf: Hash, action: &str) -> Fallible<AuthorizationDecisionV1> {
         let persisted = self.domain.store.load_authority(leaf)?;
         let request = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
             authenticated: owner()?,
@@ -187,7 +191,7 @@ impl World {
             principal_role: AuthorityRoleV1::Actor,
             resource: resource(INCARNATION),
             data_category: "community.owner-metadata".to_owned(),
-            action: "write".to_owned(),
+            action: action.to_owned(),
             purpose: "owner-enforcement".to_owned(),
             audience: AUDIENCE.to_owned(),
             at_time: WallTime::from_micros(500),
@@ -566,10 +570,32 @@ fn missing_grant_is_unavailable_and_creates_nothing() -> TestResult {
 fn revoked_grant_decision_is_unavailable() -> TestResult {
     let mut world = World::new(&[LEAF])?;
     world.revoke(0, 2, 1)?;
-    let decision = world.decision()?;
-    assert_eq!(decision.outcome(), AuthorizationOutcomeV1::RevokedAtFence);
-    assert_eq!(decision.grant_id(), Some(LEAF));
+    assert!(!world.decision()?.is_allowed());
     assert_unavailable(&mut world)?;
+    assert!(world.domain.keys.is_empty());
+    Ok(())
+}
+
+#[test]
+fn denied_decision_for_the_current_leaf_and_head_is_unavailable() -> TestResult {
+    let mut world = World::new(&[LEAF])?;
+    let decision = world.decision_as(LEAF, "dispose")?;
+    assert_eq!(
+        decision.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    assert_eq!(decision.grant_id(), Some(LEAF));
+    assert_eq!(
+        decision.at_position(),
+        world
+            .domain
+            .metadata_authority(&world.policy)?
+            .head_position()
+    );
+    assert_eq!(
+        world.open_with(request()?, &decision),
+        Err(Error::EvidenceUnavailable)
+    );
     assert!(world.domain.keys.is_empty());
     Ok(())
 }
