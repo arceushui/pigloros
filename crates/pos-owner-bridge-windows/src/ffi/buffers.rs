@@ -85,7 +85,7 @@ impl Mapping {
     }
 
     fn initialize(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > self.capacity || !bytes.len().is_multiple_of(8) {
+        if !valid_aligned_offset(self.capacity, bytes.len()) {
             return Err(unavailable());
         }
         for (index, chunk) in bytes.chunks_exact(8).enumerate() {
@@ -110,7 +110,7 @@ impl Mapping {
     }
 
     fn zero_from(&self, start: usize) -> Result<()> {
-        if start > self.capacity || !start.is_multiple_of(8) {
+        if !valid_aligned_offset(self.capacity, start) {
             return Err(unavailable());
         }
         for index in start / 8..self.capacity / 8 {
@@ -215,6 +215,10 @@ fn observe_mapping(object: &ICoreWebView2SharedBuffer, capacity: u32) -> Result<
     // SAFETY: the live buffer owns the mapping; initialized output receives a
     // borrowed pointer used only while that interface is held and not closed.
     unsafe { object.Buffer(&raw mut pointer) }.map_err(|_| unavailable())?;
+    admit_mapping(size, capacity, pointer)
+}
+
+fn admit_mapping(size: u64, capacity: u32, pointer: *mut u8) -> Result<NonNull<u8>> {
     if size != u64::from(capacity) || capacity < 64 || !capacity.is_multiple_of(8) {
         return Err(unavailable());
     }
@@ -403,6 +407,48 @@ mod zero_witness {
 
         pub(crate) fn take_native_zero_observations() -> Vec<NativeZeroObservation> {
             OBSERVATIONS.with(|observations| observations.borrow_mut().take().unwrap_or_default())
+        }
+    }
+}
+
+const fn valid_aligned_offset(capacity: usize, offset: usize) -> bool {
+    offset <= capacity && offset.is_multiple_of(8)
+}
+
+#[cfg(test)]
+mod tests {
+    #[repr(align(64))]
+    struct Aligned([u8; 128]);
+
+    #[test]
+    fn modeled_mapping_metadata_refuses_invalid_size_and_alignment() {
+        let mut storage = Aligned([0; 128]);
+        let pointer = storage.0.as_mut_ptr();
+        assert_eq!(
+            super::admit_mapping(64, 64, pointer).map(std::ptr::NonNull::as_ptr),
+            Ok(pointer)
+        );
+        for (size, capacity, pointer) in [
+            (63, 64, pointer),
+            (56, 56, pointer),
+            (65, 65, pointer),
+            (64, 64, std::ptr::null_mut()),
+            (64, 64, pointer.wrapping_add(1)),
+        ] {
+            assert_eq!(
+                super::admit_mapping(size, capacity, pointer),
+                Err(super::unavailable())
+            );
+        }
+    }
+
+    #[test]
+    fn aligned_offsets_include_end_but_reject_unaligned_and_out_of_bounds() {
+        for offset in [0, 8, 56, 64] {
+            assert!(super::valid_aligned_offset(64, offset));
+        }
+        for offset in [1, 63, 65, 72, usize::MAX] {
+            assert!(!super::valid_aligned_offset(64, offset));
         }
     }
 }

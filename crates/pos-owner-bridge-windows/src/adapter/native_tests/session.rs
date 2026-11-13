@@ -121,6 +121,7 @@ impl Drop for Session<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::native_tests::pass;
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::{EventSink, NativeEvent, StaPump};
     use pos_owner_bridge::fake::clock::FakeClock;
@@ -164,9 +165,119 @@ mod tests {
         }
     }
 
+    // This scripted factory models host ownership and cleanup; it does not
+    // claim that the native SDK returned a particular failure or callback.
+    struct PendingOrBlockedFactory {
+        native: Rc<Factory>,
+        failing: Option<&'static str>,
+        forbidden: &'static [&'static str],
+        pumps: Cell<u8>,
+    }
+
+    impl StaPump for PendingOrBlockedFactory {
+        fn next(&self) -> NativeResult<NativePulse> {
+            assert_eq!(self.pumps.get(), 0, "modeled recovery did not progress");
+            self.pumps.set(1);
+            let calls = self.native.calls.borrow();
+            if let Some(failing) = self.failing {
+                assert!(calls.contains(&failing));
+            }
+            for forbidden in self.forbidden {
+                assert!(
+                    !calls.contains(forbidden),
+                    "released {forbidden} before recovery"
+                );
+            }
+            drop(calls);
+            if self.failing.is_some() {
+                self.native.failure.set(None);
+            } else {
+                self.native.creation.set(Creation::CallbackFailure);
+            }
+            // The keeper must retain all owners even after the pump reports quit.
+            Ok(NativePulse::Quit)
+        }
+
+        fn stop(&mut self) -> NativeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeFactory for PendingOrBlockedFactory {
+        fn session(&self) -> NativeResult<Box<dyn NativeOperations>> {
+            self.native.session()
+        }
+    }
+
     #[test]
-    fn raw_session_retains_unknown_pid_until_its_matching_exit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn modeled_pending_controller_and_quit_retain_owners_until_completion() {
+        let native = Factory::new(Creation::Pending, FakeClock::start());
+        let factory = PendingOrBlockedFactory {
+            native: Rc::clone(&native),
+            failing: None,
+            forbidden: &[
+                "unsubscribe_view",
+                "unsubscribe_exit",
+                "drop_environment",
+                "destroy_window",
+            ],
+            pumps: Cell::new(0),
+        };
+        let session = Session::new(&factory, Rc::new(Events::default())).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            session
+        });
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
+        drop(session);
+        assert_eq!(factory.pumps.get(), 1);
+        let calls = native.calls.borrow();
+        assert!(!calls.contains(&"close_controller"));
+        assert!(calls.contains(&"drop_environment"));
+        assert!(calls.contains(&"destroy_window"));
+    }
+
+    #[test]
+    fn modeled_teardown_failure_retains_later_owners_until_retry() {
+        for (failing, forbidden) in [
+            (
+                "unsubscribe_view",
+                &["unsubscribe_exit", "drop_environment", "destroy_window"][..],
+            ),
+            (
+                "unsubscribe_exit",
+                &["drop_environment", "destroy_window"][..],
+            ),
+            ("drop_environment", &["destroy_window"][..]),
+            ("destroy_window", &[][..]),
+        ] {
+            let native = Factory::new(Creation::Ready, FakeClock::start());
+            native.failure.set(Some(failing));
+            let factory = PendingOrBlockedFactory {
+                native: Rc::clone(&native),
+                failing: Some(failing),
+                forbidden,
+                pumps: Cell::new(0),
+            };
+            let session = Session::new(&factory, Rc::new(Events::default()));
+            let error = session.as_ref().err();
+            assert!(session.is_ok(), "session creation: {error:?}");
+            drop(session);
+            assert_eq!(factory.pumps.get(), 1, "{failing}");
+            let calls = native.calls.borrow();
+            assert_eq!(
+                calls.iter().filter(|call| **call == failing).count(),
+                2,
+                "{failing}"
+            );
+            assert!(calls.contains(&"destroy_window"));
+            assert!(!calls.contains(&"close_controller"));
+        }
+    }
+
+    #[test]
+    fn raw_session_retains_unknown_pid_until_its_matching_exit() {
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
         let factory = RecoveringFactory {
@@ -174,50 +285,44 @@ mod tests {
             events: Rc::clone(&events),
             pumps: Cell::new(0),
         };
-        let mut session =
-            Session::new(&factory, Rc::clone(&events)).map_err(|e| format!("{e:?}"))?;
-        session.create_controller().map_err(|e| format!("{e:?}"))?;
-        assert!(matches!(session.controller_completion(), Some(Ok(()))));
-        native.creation.set(Creation::MissingView);
-        events.event(NativeEvent::BrowserExited { pid: 99 });
-        drop(session);
-        assert_eq!(factory.pumps.get(), 2);
-        let calls = native.calls.borrow();
-        let close = calls
-            .iter()
-            .position(|call| *call == "close_controller")
-            .ok_or("no close")?;
-        let unsubscribe = calls
-            .iter()
-            .position(|call| *call == "unsubscribe_exit")
-            .ok_or("no exit unsubscribe")?;
-        let drop_environment = calls
-            .iter()
-            .position(|call| *call == "drop_environment")
-            .ok_or("no environment drop")?;
-        assert!(close < unsubscribe && unsubscribe < drop_environment);
-        Ok(())
+        let result = Session::new(&factory, Rc::clone(&events)).map(|mut session| {
+            let created = session.create_controller();
+            assert!(created.is_ok(), "controller creation: {created:?}");
+            assert_eq!(session.controller_completion(), Some(Ok(())));
+            native.creation.set(Creation::MissingView);
+            events.event(NativeEvent::BrowserExited { pid: 99 });
+            drop(session);
+            assert_eq!(factory.pumps.get(), 2);
+            let calls = native.calls.borrow();
+            let close = calls.iter().position(|call| *call == "close_controller");
+            let unsubscribe = calls.iter().position(|call| *call == "unsubscribe_exit");
+            let drop_environment = calls.iter().position(|call| *call == "drop_environment");
+            assert!(close.is_some(), "no close");
+            assert!(unsubscribe.is_some(), "no exit unsubscribe");
+            assert!(drop_environment.is_some(), "no environment drop");
+            assert!(close < unsubscribe && unsubscribe < drop_environment);
+        });
+        assert!(result.is_ok(), "session creation: {result:?}");
     }
 
     #[test]
-    fn raw_session_without_controller_retires_without_an_exit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn raw_session_without_controller_retires_without_an_exit() {
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
-        let session = Session::new(&native, events).map_err(|e| format!("{e:?}"))?;
+        let session = Session::new(&native, events);
+        let error = session.as_ref().err();
+        assert!(session.is_ok(), "session creation: {error:?}");
         drop(session);
         assert!(native.calls.borrow().contains(&"drop_environment"));
-        Ok(())
     }
 
     #[test]
-    fn idle_native_session_refuses_operations_until_their_owners_exist(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn idle_native_session_refuses_operations_until_their_owners_exist() {
         let _port = crate::Native::fixed_port_fixture();
-        let mut factory = crate::Native::owner_factory()?;
+        let mut factory = pass(crate::Native::owner_factory());
         let events = Rc::new(Events::default());
         let sink: Rc<dyn EventSink> = events.clone();
-        let mut session = Session::new(&factory, events)?;
+        let mut session = pass(Session::new(&factory, events));
         let closed = crate::NativeError {
             operation: crate::Operation::Controller,
             failure: crate::Failure::Closed,
@@ -235,7 +340,7 @@ mod tests {
             "require_shared_interfaces",
             session.require_shared_interfaces(),
         );
-        assert_closed("subscribe_view", session.subscribe_view(sink));
+        assert_closed("subscribe_view", session.subscribe_view(Rc::clone(&sink)));
         assert_closed(
             "set_bool",
             session.set_bool(crate::BoolProperty::Script, true),
@@ -255,6 +360,30 @@ mod tests {
         assert_eq!(session.source().err(), Some(closed));
         assert_eq!(session.load_state(), Err(closed));
         assert_eq!(session.compare_exchange(0, 1), Err(closed));
+        let invalid_environment = crate::NativeError {
+            operation: crate::Operation::Environment,
+            failure: crate::Failure::CallFailed,
+        };
+        for (runtime, folder) in [
+            ("", "folder"),
+            ("bad\0runtime", "folder"),
+            ("runtime", ""),
+            ("runtime", "bad\0folder"),
+        ] {
+            assert_eq!(
+                session.create_environment(
+                    std::path::Path::new(runtime),
+                    std::path::Path::new(folder),
+                    crate::adapter::settings::OPTIONS,
+                    Rc::clone(&sink),
+                ),
+                Err(invalid_environment)
+            );
+            assert!(!session.pending());
+            assert!(session.environment_completion().is_none());
+            assert!(session.environment_creation_completion().is_none());
+            assert_eq!(session.environment().err(), Some(closed));
+        }
         assert!(reply.as_bytes().iter().all(|byte| *byte == 0));
         assert!(session.environment_completion().is_none());
         assert!(session.controller_completion().is_none());
@@ -264,7 +393,7 @@ mod tests {
         assert!(session.pending_opening_browser_candidate().is_err());
         assert!(session.recordless_browser_candidate().is_err());
         assert!(!session.pending());
-        assert!(!session.has_controller()?);
+        assert!(!pass(session.has_controller()));
         assert!(!session.buffer_close_uncertain());
         assert!(!session.preload_fault_owners_retained());
         assert!(!session.pending_opening_owners_retained());
@@ -272,15 +401,14 @@ mod tests {
         assert!(!session.fault_owners_retained());
         assert!(!session.exit_fault_owners_retained());
         for _ in 0..2 {
-            session.close_buffers()?;
-            session.unsubscribe_view()?;
-            session.close_controller()?;
-            session.unsubscribe_exit()?;
-            session.drop_environment()?;
-            session.destroy_window()?;
+            pass(session.close_buffers());
+            pass(session.unsubscribe_view());
+            pass(session.close_controller());
+            pass(session.unsubscribe_exit());
+            pass(session.drop_environment());
+            pass(session.destroy_window());
         }
         drop(session);
-        factory.stop()?;
-        Ok(())
+        pass(factory.stop());
     }
 }

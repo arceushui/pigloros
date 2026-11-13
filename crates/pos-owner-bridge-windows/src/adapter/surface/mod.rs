@@ -203,17 +203,21 @@ impl Surface {
     ) -> Option<PreEnvironmentRetention> {
         let opening = self.opening_spec.as_ref()?;
         if &opening.ceremony_id != ceremony
-            || self.folder.as_ref()? != &pos_owner_bridge::folder_name(ceremony)
+            || self
+                .folder
+                .as_ref()
+                .is_none_or(|folder| *folder != pos_owner_bridge::folder_name(ceremony))
             || self.identity.is_some()
             || self.buffers
             || self.generation.is_some()
-            || !self.native.window().ok()?.exists
+            || !self.native.window().is_ok_and(|window| window.exists)
             || !self.store.records().ok()?.is_empty()
+            || self.folder.as_ref().is_none_or(|folder| {
+                crate::verify_private_directory(&self.root.join(folder)).is_err()
+            })
         {
             return None;
         }
-        let folder = self.root.join(self.folder.as_ref()?);
-        crate::verify_private_directory(&folder).ok()?;
         match (self.ownership, self.failed_open) {
             (Ownership::CreatingEnvironment, false) => Some(PreEnvironmentRetention::Active),
             (Ownership::CreatingEnvironment | Ownership::Environment, true) => {
@@ -261,6 +265,21 @@ impl Surface {
     }
 
     #[cfg(test)]
+    fn verify_fault_environment(&self) -> std::result::Result<(), ()> {
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    fn verify_fault_identity(&self, browser: ProcessIdentity) -> std::result::Result<(), ()> {
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(in crate::adapter) fn prepare_recordless_browser(
         &mut self,
     ) -> std::result::Result<ProcessIdentity, ()> {
@@ -268,20 +287,17 @@ impl Surface {
             || !self.native.recordless_fault_owners_retained()
             || self.events.invalid()
             || self.events.exited().is_some()
-            || !self.store.records().map_err(|_| ())?.is_empty()
+            || !self.store.records().is_ok_and(|records| records.is_empty())
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.native.recordless_browser_candidate()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        self.events.expect_browser(browser.browser_pid);
-        self.recordless_fault = Some(browser);
-        Ok(browser)
+        self.verify_fault_environment()
+            .and_then(|()| self.native.recordless_browser_candidate())
+            .and_then(|browser| self.verify_fault_identity(browser).map(|()| browser))
+            .inspect(|browser| {
+                self.events.expect_browser(browser.browser_pid);
+                self.recordless_fault = Some(*browser);
+            })
     }
 
     #[cfg(test)]
@@ -296,19 +312,18 @@ impl Surface {
             || self.events.invalid()
             || self.events.exited().is_some()
             || !self.native.recordless_fault_owners_retained()
-            || !self.store.records().map_err(|_| ())?.is_empty()
+            || !self.store.records().is_ok_and(|records| records.is_empty())
         {
             return Err(());
         }
-        let browser = self.recordless_fault.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.recordless_browser_candidate()? != browser
-        {
-            return Err(());
-        }
+        let browser = self.recordless_fault.ok_or(()).and_then(|browser| {
+            self.verify_fault_environment()
+                .and_then(|()| self.verify_fault_identity(browser))
+                .and_then(|()| self.native.recordless_browser_candidate())
+                .ok()
+                .filter(|candidate| *candidate == browser)
+                .ok_or(())
+        })?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
@@ -431,13 +446,12 @@ impl Surface {
         {
             return Err(());
         }
-        let browser = self.recordless_fault.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.pending_opening_browser_candidate()? != Some(browser)
-        {
+        let browser = self.recordless_fault.ok_or(()).and_then(|browser| {
+            self.verify_fault_environment()
+                .and_then(|()| self.verify_fault_identity(browser))
+                .map(|()| browser)
+        })?;
+        if self.native.pending_opening_browser_candidate() != Ok(Some(browser)) {
             return Err(());
         }
         let events = Rc::clone(&self.events);
@@ -496,18 +510,16 @@ impl Surface {
         {
             return Err(());
         }
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        let presence = self.native.early_renderer_presence()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.events.invalid()
-            || self.events.exited().is_some()
-        {
-            return Err(());
-        }
-        Ok(presence)
+        self.identity
+            .ok_or(())
+            .and_then(|browser| {
+                self.verify_fault_identity(browser)
+                    .and_then(|()| self.native.early_renderer_presence())
+                    .and_then(|presence| self.verify_fault_identity(browser).map(|()| presence))
+            })
+            .ok()
+            .filter(|_| !self.events.invalid() && self.events.exited().is_none())
+            .ok_or(())
     }
 
     #[cfg(test)]
@@ -536,14 +548,15 @@ impl Surface {
         if !self.awaiting_load_fault_ready() || generation != 1 || posts != 0 {
             return Err(());
         }
-        let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        let record_count = self.store.records().map_err(|_| ())?.len();
+        let record_count = self
+            .identity
+            .ok_or(())
+            .and_then(|browser| {
+                self.verify_fault_environment()
+                    .and_then(|()| self.verify_fault_identity(browser))
+            })
+            .and_then(|()| self.store.records().map_err(|_| ()))?
+            .len();
         if record_count != 1 {
             return Err(());
         }
@@ -569,8 +582,9 @@ impl Surface {
         target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
-        self.awaiting_load_fault_state(1, 0)?;
-        let browser = self.identity.ok_or(())?;
+        let browser = self
+            .awaiting_load_fault_state(1, 0)
+            .and_then(|_| self.identity.ok_or(()))?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
@@ -615,14 +629,15 @@ impl Surface {
         if !self.navigating_fault_ready() || generation != 1 || posts != 0 {
             return Err(());
         }
-        let browser = self.identity.ok_or(())?;
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        let record_count = self.store.records().map_err(|_| ())?.len();
+        let record_count = self
+            .identity
+            .ok_or(())
+            .and_then(|browser| {
+                self.verify_fault_environment()
+                    .and_then(|()| self.verify_fault_identity(browser))
+            })
+            .and_then(|()| self.store.records().map_err(|_| ()))?
+            .len();
         if record_count != 1 {
             return Err(());
         }
@@ -648,8 +663,9 @@ impl Surface {
         target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
-        self.navigating_fault_state(1, 0)?;
-        let browser = self.identity.ok_or(())?;
+        let browser = self
+            .navigating_fault_state(1, 0)
+            .and_then(|_| self.identity.ok_or(()))?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
@@ -686,14 +702,9 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        Ok(browser)
+        self.verify_fault_environment()
+            .and_then(|()| self.identity.ok_or(()))
+            .and_then(|browser| self.verify_fault_identity(browser).map(|()| browser))
     }
 
     #[cfg(test)]
@@ -735,38 +746,7 @@ impl Surface {
         &mut self,
         posts: u8,
     ) -> std::result::Result<crate::ProcessFaultState, ()> {
-        if self.ownership != Ownership::Controller
-            || self.close != CloseState::Idle
-            || self.failed_open
-            || self.events.invalid()
-            || self.events.exited().is_some()
-            || !self.buffers
-            || !self.navigation_issued
-            || self.events.loaded().is_none()
-            || self.loopback.served().count != 1
-            || !self.loopback.served().integrity_ok
-            || !crate::Native::process_failure_observations().is_empty()
-        {
-            return Err(());
-        }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
-        // The caller is the sealed single-view fixture; subscriptions were
-        // installed before its only navigation, and every frame/popup callback
-        // invalidates these events. The policy binds the fixture asset bytes.
-        let state = crate::ProcessFaultState {
-            phase: crate::ProcessFaultPhase::PostedReceipt,
-            topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
-            generation: self.generation.ok_or(())?,
-            reply_state: self.native.load_state().map_err(|_| ())?,
-            record_count: self.store.records().map_err(|_| ())?.len(),
-            posts,
-        };
+        let state = self.posted_fault_snapshot(posts, crate::ProcessFaultPhase::PostedReceipt)?;
         if state.generation != 1 || state.record_count != 1 || state.posts != 1 {
             return Err(());
         }
@@ -774,10 +754,10 @@ impl Surface {
     }
 
     #[cfg(test)]
-    pub(in crate::adapter) fn posted_retry_fault_state(
+    fn posted_fault_snapshot(
         &mut self,
         posts: u8,
-        point: crate::RetryPoint,
+        phase: crate::ProcessFaultPhase,
     ) -> std::result::Result<crate::ProcessFaultState, ()> {
         if self.ownership != Ownership::Controller
             || self.close != CloseState::Idle
@@ -793,24 +773,41 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
         // The caller is the sealed single-view fixture; subscriptions were
         // installed before its only navigation, and every frame/popup callback
         // invalidates these events. The policy binds the fixture asset bytes.
-        let state = crate::ProcessFaultState {
-            phase: crate::ProcessFaultPhase::PostedRetry,
-            topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
-            generation: self.generation.ok_or(())?,
-            reply_state: self.native.load_state().map_err(|_| ())?,
-            record_count: self.store.records().map_err(|_| ())?.len(),
-            posts,
-        };
+        self.verify_fault_environment()
+            .and_then(|()| self.identity.ok_or(()))
+            .and_then(|browser| self.verify_fault_identity(browser))
+            .and_then(|()| self.generation.ok_or(()))
+            .and_then(|generation| {
+                self.native
+                    .load_state()
+                    .map(|reply_state| (generation, reply_state))
+                    .map_err(|_| ())
+            })
+            .and_then(|(generation, reply_state)| {
+                self.store
+                    .records()
+                    .map(|records| crate::ProcessFaultState {
+                        phase,
+                        topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
+                        generation,
+                        reply_state,
+                        record_count: records.len(),
+                        posts,
+                    })
+                    .map_err(|_| ())
+            })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn posted_retry_fault_state(
+        &mut self,
+        posts: u8,
+        point: crate::RetryPoint,
+    ) -> std::result::Result<crate::ProcessFaultState, ()> {
+        let state = self.posted_fault_snapshot(posts, crate::ProcessFaultPhase::PostedRetry)?;
         if state.generation != u32::from(point.post())
             || state.record_count != 1
             || state.posts != point.post()
@@ -1056,14 +1053,10 @@ impl Surface {
         {
             return Err(());
         }
-        let folder = self.folder.as_ref().ok_or(())?;
-        let folder = self.root.join(folder);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.identity.ok_or(())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
-            return Err(());
-        }
+        let browser = self
+            .verify_fault_environment()
+            .and_then(|()| self.identity.ok_or(()))
+            .and_then(|browser| self.verify_fault_identity(browser).map(|()| browser))?;
         let events = Rc::clone(&self.events);
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
@@ -1233,11 +1226,11 @@ impl OwnerWebSurface for Surface {
         if self.buffers || self.events.invalid() {
             return Err(unavailable(()));
         }
-        let header = request
+        let request_control = request
             .as_bytes()
             .get(..64)
+            .and_then(|header| OwnerBridgeControlV1::decode(header).ok())
             .ok_or_else(|| unavailable(()))?;
-        let request_control = OwnerBridgeControlV1::decode(header).map_err(unavailable)?;
         let reply_control = OwnerBridgeControlV1::decode(reply_header).map_err(unavailable)?;
         if request_control.role() != ControlRole::Request
             || reply_control.role() != ControlRole::Reply
@@ -1268,33 +1261,23 @@ impl OwnerWebSurface for Surface {
     }
 
     fn reply_load_state(&self) -> Result<u32> {
+        let state = self.native.load_state().map_err(unavailable);
         #[cfg(test)]
-        {
-            let state = self.native.load_state().map_err(unavailable);
-            if matches!(state.as_ref(), Ok(value) if *value == ControlState::Releasing as u32) {
-                self.readiness_timing.releasing();
-            }
-            state
+        if matches!(state.as_ref(), Ok(value) if *value == ControlState::Releasing as u32) {
+            self.readiness_timing.releasing();
         }
-        #[cfg(not(test))]
-        self.native.load_state().map_err(unavailable)
+        state
     }
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool> {
-        #[cfg(test)]
-        {
-            let result = self
-                .native
-                .compare_exchange(current, new)
-                .map_err(unavailable);
-            if new == ControlState::ReleaseRequested as u32 && matches!(result.as_ref(), Ok(true)) {
-                self.readiness_timing.cas();
-            }
-            result
-        }
-        #[cfg(not(test))]
-        self.native
+        let result = self
+            .native
             .compare_exchange(current, new)
-            .map_err(unavailable)
+            .map_err(unavailable);
+        #[cfg(test)]
+        if new == ControlState::ReleaseRequested as u32 && matches!(result.as_ref(), Ok(true)) {
+            self.readiness_timing.cas();
+        }
+        result
     }
     fn reply_copy(&self, out: &mut ReplyImage) -> Result<()> {
         self.native.copy_reply(out).map_err(unavailable)

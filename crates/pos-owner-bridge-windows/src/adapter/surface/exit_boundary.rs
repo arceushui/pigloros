@@ -37,12 +37,17 @@ impl Surface {
         {
             return Err(());
         }
-        let spec = self.opening_spec.as_ref().ok_or(())?;
-        let folder = self.folder.as_ref().ok_or(())?;
-        let browser = self.identity.ok_or(())?;
-        if spec.ceremony_id != ceremony || *folder != pos_owner_bridge::folder_name(&ceremony) {
+        let admitted = self
+            .opening_spec
+            .as_ref()
+            .zip(self.folder.as_ref())
+            .zip(self.identity)
+            .filter(|((spec, folder), _)| {
+                spec.ceremony_id == ceremony && **folder == pos_owner_bridge::folder_name(&ceremony)
+            });
+        let Some(((_, folder), browser)) = admitted else {
             return Err(());
-        }
+        };
         let records = self.store.records().map_err(|_| ())?;
         let [bytes] = records.as_slice() else {
             return Err(());
@@ -123,14 +128,18 @@ impl Surface {
         {
             return Err(());
         }
-        let browser = self.identity.ok_or(())?;
-        let folder = self.folder.as_ref().ok_or(())?;
-        let spec = self.opening_spec.as_ref().ok_or(())?;
-        if spec.ceremony_id != capture.ceremony
-            || *folder != pos_owner_bridge::folder_name(&capture.ceremony)
-        {
+        let admitted = self
+            .opening_spec
+            .as_ref()
+            .zip(self.folder.as_ref())
+            .zip(self.identity)
+            .filter(|((spec, folder), _)| {
+                spec.ceremony_id == capture.ceremony
+                    && **folder == pos_owner_bridge::folder_name(&capture.ceremony)
+            });
+        let Some(((_, folder), browser)) = admitted else {
             return Err(());
-        }
+        };
         let records = self.store.records().map_err(|_| ())?;
         let [bytes] = records.as_slice() else {
             return Err(());
@@ -147,7 +156,7 @@ impl Surface {
         let path = self.root.join(folder);
         crate::verify_private_directory(&path).map_err(|_| ())?;
         self.admit_environment(&path).map_err(|_| ())?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+        if self.runtime.identity(browser.browser_pid) != Ok(browser) {
             return Err(());
         }
         let events = Rc::clone(&self.events);
@@ -193,18 +202,25 @@ impl Surface {
         {
             return Err(());
         }
-        let close = self.initial_close.ok_or(())?;
-        if close.removed.is_err()
-            || close.closed.is_err()
-            || !close.buffers_closed
-            || close.buffers_uncertain
-            || !close.had_controller
-        {
+        if self.initial_close.is_none_or(|close| {
+            close.removed.is_err()
+                || close.closed.is_err()
+                || !close.buffers_closed
+                || close.buffers_uncertain
+                || !close.had_controller
+        }) {
             return Err(());
         }
-        let spec = self.opening_spec.as_ref().ok_or(())?;
-        let folder = self.folder.as_ref().ok_or(())?;
-        crate::verify_private_directory(&self.root.join(folder)).map_err(|_| ())?;
+        let (spec, folder) = self
+            .opening_spec
+            .as_ref()
+            .zip(self.folder.as_ref())
+            .ok_or(())
+            .and_then(|(spec, folder)| {
+                crate::verify_private_directory(&self.root.join(folder))
+                    .map(|()| (spec, folder))
+                    .map_err(|_| ())
+            })?;
         self.admit_environment(&self.root.join(folder))
             .map_err(|_| ())?;
         let records = self.store.records().map_err(|_| ())?;
@@ -222,8 +238,11 @@ impl Surface {
         {
             return Err(());
         }
-        let capture = self.exit_capture.as_ref().ok_or(())?;
-        let handle = capture.handle.as_ref().ok_or(())?;
+        let (capture, handle) = self
+            .exit_capture
+            .as_ref()
+            .and_then(|capture| capture.handle.as_ref().map(|handle| (capture, handle)))
+            .ok_or(())?;
         if capture.consumed
             || capture.deadline != deadline
             || capture.ceremony != spec.ceremony_id
@@ -233,11 +252,9 @@ impl Surface {
         }
         self.native.retained_exit_membership(handle.as_ref())?;
         let code = handle.observe()?;
-        if Instant::now() >= deadline {
-            return Err(());
-        }
-        if self.events.exited().is_some()
-            && !self.events.matching_exit_at_boundary(browser.browser_pid)
+        if Instant::now() >= deadline
+            || (self.events.exited().is_some()
+                && !self.events.matching_exit_at_boundary(browser.browser_pid))
         {
             return Err(());
         }
@@ -265,25 +282,29 @@ impl Surface {
         }
         capture.consumed = true;
         let boundary = boundary?;
-        let capture = self.exit_capture.as_mut().ok_or(())?;
-        let handle = capture.handle.as_mut().ok_or(())?;
         if inject {
             if !matches!(boundary, ExitBoundary::ActiveStatus(_)) {
                 return Err(());
             }
             let events = Rc::clone(&self.events);
-            let authority = crate::FaultAuthority {
-                browser: handle.identity(),
-                target: crate::ProcessFaultTarget::Browser,
-                lifecycle: crate::ProcessFaultLifecycle::AwaitingExitSuccess,
-                valid: Rc::new(move || {
-                    Instant::now() < deadline && !events.invalid() && events.exited().is_none()
-                }),
-                trace: Rc::clone(&capture.trace),
-            };
-            handle.terminate(&authority)?;
+            let trace = Rc::clone(&capture.trace);
+            capture.handle.as_mut().ok_or(()).and_then(|handle| {
+                let authority = crate::FaultAuthority {
+                    browser: handle.identity(),
+                    target: crate::ProcessFaultTarget::Browser,
+                    lifecycle: crate::ProcessFaultLifecycle::AwaitingExitSuccess,
+                    valid: Rc::new(move || {
+                        Instant::now() < deadline && !events.invalid() && events.exited().is_none()
+                    }),
+                    trace,
+                };
+                handle.terminate(&authority)
+            })?;
         }
-        Ok(capture.handle.take().ok_or(())?.into_fault())
+        capture
+            .handle
+            .take()
+            .map_or(Err(()), |handle| Ok(handle.into_fault()))
     }
 
     pub(in crate::adapter) fn matching_exit_event(&self) -> bool {

@@ -320,6 +320,122 @@ fn exit_capture_rejects_record_loss_and_corruption_without_discarding_the_record
     Ok(())
 }
 
+fn wrong_identity_record(fixture: &Fixture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let selected = spec(40);
+    let browser = fixture.surface.identity.ok_or("missing browser")?;
+    let wrong = CleanupRecordV1::new(
+        selected.ceremony_id,
+        &selected.folder_name,
+        browser.browser_pid,
+        browser.creation_filetime + 1,
+        browser.image_path_sha256,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut encoded = [0; 4096];
+    let size = pos_owner_bridge_codec::encode_cleanup_record(&wrong, &mut encoded)
+        .map_err(|error| error.to_string())?;
+    Ok(encoded[..size].to_vec())
+}
+
+#[test]
+fn exit_capture_refuses_untrusted_ownership_before_controller_close() -> TestResult {
+    for case in [
+        "generation",
+        "ceremony",
+        "record_identity",
+        "runtime_identity",
+        "store_unavailable",
+        "folder_unavailable",
+        "environment_unavailable",
+    ] {
+        let mut fixture = buffered_fixture()?;
+        fixture
+            .surface
+            .zero_close_buffers()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let selected = spec(40);
+        let ceremony = selected.ceremony_id;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let armed_ceremony = if case == "ceremony" {
+            spec(41).ceremony_id
+        } else {
+            ceremony
+        };
+        fixture
+            .surface
+            .arm_exit_capture(armed_ceremony, std::rc::Rc::default(), deadline)
+            .map_err(|()| "arm modeled capture")?;
+
+        let original = fixture.store.records_now()[0].clone();
+        if case == "generation" {
+            fixture.surface.generation = Some(2);
+        } else if case == "record_identity" {
+            let wrong = wrong_identity_record(&fixture)?;
+            fixture
+                .store
+                .delete_record(&original)
+                .map_err(|_| "remove modeled record")?;
+            fixture.store.preload(wrong);
+        } else if case == "runtime_identity" {
+            super::fault_states::change_identity(&mut fixture, 0);
+        } else if case == "store_unavailable" {
+            fixture
+                .store
+                .set_failing(&[pos_owner_bridge::fake::host::StoreOp::List]);
+        } else if case == "folder_unavailable" {
+            std::fs::rename(
+                fixture.root.join(&selected.folder_name),
+                fixture.root.join("displaced-exit-folder"),
+            )?;
+        } else if case == "environment_unavailable" {
+            fixture.factory.failure.set(Some("environment"));
+        }
+
+        let retained = fixture.store.records_now();
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert_eq!(fixture.store.records_now(), retained, "{case}");
+        assert!(!fixture.surface.idle(), "{case}");
+        assert!(
+            fixture.surface.classify_exit_boundary(deadline).is_err(),
+            "{case}"
+        );
+        assert!(
+            !fixture.factory.calls.borrow().contains(&"terminate_exit"),
+            "{case}"
+        );
+
+        fixture.surface.generation = Some(1);
+        fixture.surface.runtime = std::sync::Arc::new(super::Runtime(fixture.root.clone()));
+        fixture.store.set_failing(&[]);
+        fixture.factory.failure.set(None);
+        if case == "folder_unavailable" {
+            std::fs::rename(
+                fixture.root.join("displaced-exit-folder"),
+                fixture.root.join(&selected.folder_name),
+            )?;
+        }
+        if case == "record_identity" {
+            for bytes in retained {
+                fixture
+                    .store
+                    .delete_record(&bytes)
+                    .map_err(|_| "remove wrong modeled record")?;
+            }
+            fixture.store.preload(original);
+        }
+        // A refused pre-close capture is one-shot even after its inputs recover.
+        assert!(
+            fixture.surface.classify_exit_boundary(deadline).is_err(),
+            "{case}"
+        );
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
 #[test]
 fn exit_capture_refuses_unavailable_or_mismatched_handle_without_releasing_owner() -> TestResult {
     for failure in ["retain_exit", "mismatched_exit_handle"] {
@@ -391,6 +507,27 @@ fn exit_boundary_refuses_foreign_or_independently_invalid_events() -> TestResult
             .finish()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
     }
+    Ok(())
+}
+
+#[test]
+fn modeled_exit_observation_rechecks_events_after_the_handle_query() -> TestResult {
+    let (mut fixture, deadline) = closed_fixture()?;
+    assert!(matches!(
+        fixture.surface.classify_exit_boundary(deadline),
+        Ok(ExitBoundary::ObjectExitedAwaitingSdk(_))
+    ));
+    fixture.factory.failure.set(Some("exit_observe_invalid"));
+    assert!(fixture.surface.classify_exit_boundary(deadline).is_err());
+    assert!(!fixture.surface.matching_exit_event());
+    assert!(!fixture.store.records_now().is_empty());
+    assert!(!fixture.factory.calls.borrow().contains(&"terminate_exit"));
+    fixture.factory.failure.set(None);
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.idle());
     Ok(())
 }
 

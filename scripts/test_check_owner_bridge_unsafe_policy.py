@@ -1556,8 +1556,8 @@ def test_owned_process_fault_authority() -> None:
         "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
         "late identity requery restored": ("fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }", "fn exit_code(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }"),
         "required earlier identity query removed": ("fn observe(&self) -> Result<Option<u32>, ()> {\n        self.verified_exit_code()\n    }", "fn observe(&self) -> Result<Option<u32>, ()> {\n        self.retained.exit_code()\n    }"),
-        "required identity mismatch accepted": ("if identity != self.retained.identity {", "if false {"),
-        "required image mismatch accepted": ("if image != self.image {", "if false {"),
+        "required identity mismatch accepted": ("if identity != expected {", "if false {"),
+        "required image mismatch accepted": ("if image != expected_image {", "if false {"),
     }
     for name, (old, new) in mutations.items():
         if old not in original:
@@ -1603,10 +1603,10 @@ def test_owned_process_fault_authority() -> None:
         ("self.inner.write_record(record)", "Ok(())"),
         ("decoded.browser_pid() != browser.browser_pid", "false"),
         (".push(ProcessFaultMark::RecordWritten)", ".push(ProcessFaultMark::TerminationCall)"),
-        ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
+        ("previous.len() == usize::from(point.post() - 1) * 2", "true"),
         ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
         ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
-        ("match self.surface.pending_opening_completion() {", "match Some(true) {"),
+        ("let completion = self.surface.pending_opening_completion();", "let completion = Some(true);"),
         ("self.surface.pending_opening_completion().is_none()", "true"),
         ("controller_held_before_exit(&crate::Native::callback_order())", "true"),
         ("Instant::now() >= self.deadline", "false"),
@@ -1683,9 +1683,20 @@ def test_owned_process_fault_authority() -> None:
         ("self.surface.controller_creation_retention(ceremony) == Some(Abandoned)", "true"),
         ("self.surface.abandoned_completed_browser(ceremony).ok()", "None"),
         ("|| !sdk_success", "|| false"),
-        ("|| !no_resurrection", "|| false"),
-        ("Some(EnvironmentSdkOutcome::NativeFailure) if obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
-        ("Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
+        ("|| !self.retirement.no_resurrection", "|| false"),
+        ("Some(EnvironmentSdkOutcome::NativeFailure) if self.obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
+        ("Some(EnvironmentSdkOutcome::InitiationRefused) if self.obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
+        ("result.map_err(|()| query_error)?.ok_or(pending_error)", "Ok(0)"),
+        ("nonzero_reply_zeroing_observed(&observations)", "true"),
+        ("pass(environment_record_evidence(&mut fixture.store))", "EnvironmentRecordEvidence { no_record: true, retained_orphan: true }"),
+        ("run_initial_scenarios(runtime, &root.0)", "Ok(())"),
+        ("run_later_scenarios(runtime, &root.0)", "Ok(())"),
+        ("if !self.failed || !self.wipe.secrets || !self.wipe.plan_if_quarantined || !self.complete", "if false"),
+        ("if !self.verified || !self.complete || !self.native_zeroed", "if false"),
+        ("|| !self.wipe.plan_wiped", "|| false"),
+        ("if !self.evidence_complete || self.result_error.is_none()", "if false"),
+        ("|| !successful_close_observed(self.close)", "|| false"),
+        ("|| !native_zeroing_observed(self.zero_observations)", "|| false"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing new evidence mutation target: {old}")
@@ -1703,7 +1714,8 @@ def test_owned_process_fault_authority() -> None:
     # bounded test-only recorder, not an invented event or a comment decoy.
     for relative, old, new, expected in (
         ("src/ffi/creation.rs", "result.is_ok(),", "true,", "callback invocation differs from reviewed SDK path"),
-        ("src/ffi/creation.rs", "hr.is_err() && value.is_some()", "false", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "classify_creation(hr.is_err(), value.is_some())", "classify_creation(false, value.is_some())", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "failed && present", "false", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/creation.rs", "crate::CreationCallback::NativeFailure", "crate::CreationCallback::Success", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "super::events::observe(observed.as_ref(), EventKind::BrowserExited, result);", "let _ignored = result;", "callback invocation differs from reviewed SDK path"),
@@ -1759,7 +1771,7 @@ def test_owned_process_fault_authority() -> None:
     # folder, window, ceremony and pre-buffer state around the attempt.
     for relative, old, new, expected in (
         ("src/adapter/native_tests/process_fault.rs", "fixture.pre_environment_competitor_blocked(", "fixture.discard_competitor_check(", "process fault fixture differs from reviewed sealed caller"),
-        ("src/adapter/surface/mod.rs", "!self.native.window().ok()?.exists", "false", "process fault authority function pre_environment_retention differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "!self.native.window().is_ok_and(|window| window.exists)", "false", "process fault authority function pre_environment_retention differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "opening != spec || self.failed_open", "false", "competing-admission observation open differs from reviewed code"),
         ("src/ffi/session.rs", "self.window_ref()?.snapshot()", "unavailable_window()", "competing-admission observation window differs from reviewed code"),
         ("src/ffi/window.rs", "IsWindow(Some(self.hwnd))", "IsWindow(None)", "competing-admission observation snapshot differs from reviewed code"),
@@ -1866,7 +1878,9 @@ def test_owned_process_fault_authority() -> None:
         raise SystemExit("the actual shared identity observer was rejected")
     for old, new in (
         ("times.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
-        ("queried.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("queried\n        .map_err(|_| ())", "Ok::<(), ()>(())"),
+        ("absent_on_open_failure(&error).map(|()| None)", "Ok(None)"),
+        (".filter(|image| !image.is_empty())", ".filter(|_| true)"),
         ("browser_pid: pid,", "browser_pid: 1,"),
         ("digest.update(unit.to_le_bytes());", "digest.update(unit.to_be_bytes());"),
         ("PathBuf::from(OsString::from_wide(image))", 'PathBuf::from("unrelated")'),
@@ -1963,10 +1977,24 @@ def test_recordless_and_release_authority() -> None:
     cases = (
         ("src/ffi/creation.rs", "succeeded", "Result::is_ok", "Result::is_err"),
         ("src/ffi/session.rs", "recordless_fault_owners_retained", "== Some(true)", "== Some(false)"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if !owners() {", "if false {"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if callback().is_some() {", "if false {"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "let candidate = observe()?;", "let candidate = None;"),
+        ("src/ffi/session.rs", "pending_candidate_checked", "if !owners() || callback().is_some() {", "if false {"),
+        ("src/ffi/session.rs", "require_owned_browser", "if !owners() || browser()? != expected() {", "if false {"),
+        ("src/ffi/session.rs", "retain_exit_browser", "|| self.preload_fault_owners_retained() && self.window.is_some()", "|| true"),
+        ("src/ffi/session.rs", "inject_process_fault", "|| self.controller.is_some() && self.view.is_some()", "|| true"),
         ("src/ffi/session.rs", "exit_fault_owners_retained", "self.view.is_none()", "self.view.is_some()"),
         ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
         ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),
         ("src/adapter/surface/mod.rs", "inject_view_fault", "std::time::Instant::now() < deadline", "true"),
+        ("src/adapter/surface/mod.rs", "verify_fault_environment", "crate::verify_private_directory(&folder).map_err(|_| ())?;", "let _removed_check = &folder;"),
+        ("src/adapter/surface/mod.rs", "verify_fault_environment", "self.admit_environment(&folder).map_err(|_| ())", "Ok(())"),
+        ("src/adapter/surface/mod.rs", "verify_fault_identity", "self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser", "false"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", "self.loopback.served().count != 1", "false"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", "self.verify_fault_environment()", "Ok::<(), ()>(())"),
+        ("src/adapter/surface/mod.rs", "posted_fault_snapshot", ".and_then(|browser| self.verify_fault_identity(browser))", ".map(|_removed_check| ())"),
+        ("src/adapter/surface/mod.rs", "posted_fault_state", "state.posts != 1", "false"),
     )
     for relative, name, old, new in cases:
         source = (ROOT / SHIM / relative).read_text()
@@ -2002,8 +2030,10 @@ def test_typed_process_failure_evidence() -> None:
     source = (ROOT / SHIM / relative).read_text()
     message = f"{SHIM}/{relative}: process failure observations differ from reviewed typed callbacks"
     for old, new in (
-        ("_ => NativeProcessFailure::Other", "_ => NativeProcessFailure::BrowserExited"),
-        (".unwrap_or(NativeProcessFailure::Unavailable)", ".unwrap_or(NativeProcessFailure::BrowserExited)"),
+        ("Some(_) => NativeProcessFailure::Other", "Some(_) => NativeProcessFailure::BrowserExited"),
+        ("None => NativeProcessFailure::Unavailable", "None => NativeProcessFailure::BrowserExited"),
+        ("let result = classify_process_kind(kind);", "let result = classify_process_kind(None);"),
+        ("NativeProcessFailure::Unavailable => None", "NativeProcessFailure::Unavailable => Some(false)"),
         ("push_observation(failures, result)", "failures.borrow_mut().clear()"),
         ("PROCESS_FAILURES.with(|failures| failures.borrow().clone())", "Vec::new()"),
     ):
@@ -2056,6 +2086,7 @@ def test_private_fault_capability_construction() -> None:
         if not errors(changed):
             raise SystemExit(f"product capability was accepted: {marker}")
     for statement, expected in (
+        ("fn f() { crate::Native::model_main_renderer_exit(); }", "modeled renderer observation belongs only in its reviewed model"),
         ("type Alias = crate::RetainedExitHandle;", "retained-exit capability belongs only in reviewed paths"),
         ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
         ("fn f() { let _seal = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
@@ -2075,6 +2106,21 @@ def test_private_fault_capability_construction() -> None:
     expected = f"{SHIM}/{surface}: fault capability references belong only in reviewed authority paths"
     if expected not in errors(resurrected):
         raise SystemExit("removed exit authority could be resurrected by its old name")
+
+    # The source-bound model spy may borrow a validated authority, but its
+    # method allowance must not permit minting authority or adjacent callers.
+    native = "src/adapter/surface/tests/native.rs"
+    spy = (ROOT / SHIM / native).read_text()
+    if errors(dict(sources, **{native: spy})):
+        raise SystemExit("the source-bound fault model spy was rejected")
+    for statement, expected in (
+        ("fn unreviewed(authority: &crate::FaultAuthority) {}", "fault capability references belong only in reviewed authority paths"),
+        ("fn inject_process_fault() { let _ = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
+        ("fn inject_process_fault() { let _ = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
+    ):
+        changed = dict(sources, **{native: spy + "\n" + statement})
+        if f"{SHIM}/{native}: {expected}" not in errors(changed):
+            raise SystemExit(f"fault model spy allowance accepted bypass: {statement}")
 
     for statement in (
         "type Alias = crate::FaultAuthority; fn forge() -> Alias { Alias { browser, target, valid, trace } }",
@@ -2274,7 +2320,7 @@ def test_external_qualification_is_sealed() -> None:
         (f"{SHIM}/src/adapter/native_tests/process_fault/model_tests.rs", "fresh success driver ended without result", "fresh success accepted a completed driver"),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "self.observe_fault_with_clock(target, first, deadline, &SystemClock)", "self.observe_fault_with_clock(target, first, deadline + Duration::from_secs(1), &SystemClock)"),
         (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "validate_process_failures(&observed, expected)", "Ok(())"),
-        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "verdict.validate()?;", "let _ignored = verdict.validate();"),
+        (f"{SHIM}/src/adapter/native_tests/process_fault.rs", "pass(verdict.validate());", "let _ignored = verdict.validate();"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert!(!*port.reached.borrow());", "assert!(*port.reached.borrow());"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "assert_eq!(error.as_deref(), expected);", "let _ignored = expected;"),
         (f"{SHIM}/src/adapter/native_tests/process_fault/port_tests.rs", "(1, 0, other_ceremony, folder, identity(), mismatch)", "(1, 0, other_ceremony, other_folder, identity(), mismatch)"),
@@ -2335,6 +2381,15 @@ def test_external_qualification_is_sealed() -> None:
         raise SystemExit("missing resource callback diagnostic source was accepted")
     if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
         raise SystemExit("External allowance escaped into product source")
+    pending_model = f"{SHIM}/src/adapter/surface/tests/pending_creation.rs"
+    for escaped in (
+        "fn escaped() { let call = Surface::lose_pending_controller_parent; }",
+        "type Escaped = crate::ControllerParentLossSeal;",
+    ):
+        changed = dict(sources, **{pending_model: sources[pending_model] + "\n" + escaped})
+        if not any("controller parent loss capability outside sealed test fixture" in item
+                   for item in errors(changed)):
+            raise SystemExit("Controller parent-loss authority escaped the modeled test")
     for escaped in (
         "type Escaped = crate::ControllerParentLossSeal;",
         "fn escaped() { let call = crate::NativeOperations::lose_controller_parent; }",

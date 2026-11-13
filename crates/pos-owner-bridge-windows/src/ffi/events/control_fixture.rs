@@ -20,28 +20,43 @@ std::thread_local! {
 }
 
 pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>) {
+    let kind = args.and_then(|args| {
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        // SAFETY: actual ProcessFailed callback args on the invoking STA and
+        // initialized enum output. This test-only read distinguishes the exact
+        // owned view's main renderer exit from other native failure kinds.
+        unsafe { args.ProcessFailedKind(&raw mut kind) }
+            .ok()
+            .map(|()| kind)
+    });
+    let result = classify_process_kind(kind);
+    PROCESS_FAILURES.with(|failures| push_observation(failures, result));
+}
+
+fn classify_process_kind(
+    kind: Option<COREWEBVIEW2_PROCESS_FAILED_KIND>,
+) -> crate::NativeProcessFailure {
     use crate::NativeProcessFailure;
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
-    let result = args
-        .and_then(|args| {
-            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-            // SAFETY: actual ProcessFailed callback args on the invoking STA and
-            // initialized enum output. This test-only read distinguishes the exact
-            // owned view's main renderer exit from other native failure kinds.
-            unsafe { args.ProcessFailedKind(&raw mut kind) }
-                .ok()
-                .map(|()| match kind {
-                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
-                        NativeProcessFailure::MainRendererExited
-                    }
-                    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
-                        NativeProcessFailure::BrowserExited
-                    }
-                    _ => NativeProcessFailure::Other,
-                })
-        })
-        .unwrap_or(NativeProcessFailure::Unavailable);
-    PROCESS_FAILURES.with(|failures| push_observation(failures, result));
+    match kind {
+        Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) => {
+            NativeProcessFailure::MainRendererExited
+        }
+        Some(COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED) => {
+            NativeProcessFailure::BrowserExited
+        }
+        Some(_) => NativeProcessFailure::Other,
+        None => NativeProcessFailure::Unavailable,
+    }
+}
+
+fn legacy_process_failure(failure: crate::NativeProcessFailure) -> Option<bool> {
+    use crate::NativeProcessFailure;
+    match failure {
+        NativeProcessFailure::MainRendererExited => Some(true),
+        NativeProcessFailure::BrowserExited | NativeProcessFailure::Other => Some(false),
+        NativeProcessFailure::Unavailable => None,
+    }
 }
 
 pub(super) fn mode(kind: EventKind) -> ControlFault {
@@ -144,6 +159,13 @@ pub(super) fn navigation(args: &ICoreWebView2NavigationStartingEventArgs) -> Res
 }
 
 impl crate::Native {
+    // Scripted classification for model tests only; it grants no native fault authority.
+    pub(crate) fn model_main_renderer_exit() {
+        PROCESS_FAILURES.with(|failures| {
+            push_observation(failures, crate::NativeProcessFailure::MainRendererExited);
+        });
+    }
+
     pub(crate) fn reset_process_failure_observations() {
         PROCESS_FAILURES.with(|failures| failures.borrow_mut().clear());
         RENDERER_STATES.with(|states| states.borrow_mut().clear());
@@ -158,18 +180,12 @@ impl crate::Native {
     }
 
     pub(crate) fn process_failure_observations() -> Vec<Option<bool>> {
-        use crate::NativeProcessFailure;
         PROCESS_FAILURES.with(|failures| {
             failures
                 .borrow()
                 .iter()
-                .map(|failure| match failure {
-                    NativeProcessFailure::MainRendererExited => Some(true),
-                    NativeProcessFailure::BrowserExited | NativeProcessFailure::Other => {
-                        Some(false)
-                    }
-                    NativeProcessFailure::Unavailable => None,
-                })
+                .copied()
+                .map(legacy_process_failure)
                 .collect()
         })
     }
@@ -185,6 +201,33 @@ impl crate::Native {
 
     pub(crate) fn control_observations() -> Vec<ControlObservation> {
         OBSERVATIONS.with(|observations| observations.borrow().clone())
+    }
+}
+
+#[test]
+fn modeled_process_failure_metadata_preserves_classification() {
+    use crate::NativeProcessFailure::{BrowserExited, MainRendererExited, Other, Unavailable};
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+    for (kind, expected, legacy) in [
+        (
+            Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED),
+            MainRendererExited,
+            Some(true),
+        ),
+        (
+            Some(COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED),
+            BrowserExited,
+            Some(false),
+        ),
+        (
+            Some(COREWEBVIEW2_PROCESS_FAILED_KIND(i32::MAX)),
+            Other,
+            Some(false),
+        ),
+        (None, Unavailable, None),
+    ] {
+        assert_eq!(classify_process_kind(kind), expected);
+        assert_eq!(legacy_process_failure(expected), legacy);
     }
 }
 

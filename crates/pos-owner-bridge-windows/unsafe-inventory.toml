@@ -27,7 +27,7 @@ hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_pr
 
 [[block]]
 file = "src/ffi/cleanup.rs"
-line = 66
+line = 63
 function = "cleanup_file_volume"
 operation = "GetVolumeInformationByHandleW"
 invariant = "Borrowed handle stays owned by the live File; distinct initialized scalar/name outputs; require NTFS and consistent volume serial for actual opened files."
@@ -35,7 +35,7 @@ hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_pr
 
 [[block]]
 file = "src/ffi/cleanup.rs"
-line = 89
+line = 84
 function = "publish_cleanup"
 operation = "MoveFileExW MOVEFILE_WRITE_THROUGH"
 invariant = "Owned terminated same-directory paths; pending File was flushed and dropped; WRITE_THROUGH alone never requests copy or replacement; preserve both possible names on failure."
@@ -180,7 +180,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 37
+line = 36
 function = "inspect"
 operation = "CloseHandle"
 invariant = "Exactly one close after all queries, including every query error path."
@@ -188,7 +188,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 48
+line = 55
 function = "read_identity"
 operation = "GetProcessTimes"
 invariant = "Live query-only handle and four distinct initialized output FILETIME values."
@@ -196,7 +196,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 79
+line = 86
 function = "image_digest"
 operation = "QueryFullProcessImageNameW"
 invariant = "Live handle; owned32768code-unit writable buffer with an initialized in-out bound."
@@ -317,7 +317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 229
+line = 233
 function = "close_object"
 operation = "object.Close()"
 invariant = "a live owned STA interface; all atomic borrows ended before this call and no pointer access is attempted after it, including on error."
@@ -325,7 +325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 279
+line = 283
 function = "post_request"
 operation = "view.PostSharedBufferToScript( &self.request.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; pointer/COM owners remain on this STA. Request access is read-only."
@@ -333,7 +333,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/buffers.rs"
-line = 292
+line = 296
 function = "post_reply"
 operation = "view.PostSharedBufferToScript( &self.reply.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, w!( ), )"
 invariant = "live main-frame interface and admitted mapping, constant JSON; this is the reply buffer's sole allowed read/write exposure."
@@ -341,7 +341,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 75
+line = 67
 function = "start"
 operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
 invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
@@ -349,7 +349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 147
+line = 131
 function = "start"
 operation = "environment.CreateCoreWebView2Controller(hwnd, &callback)"
 invariant = "retained live STA environment and callback; the surface keeps its owned top-level HWND alive until this async operation completes."
@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 386
+line = 375
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 391
+line = 380
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 451
+line = 440
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 463
+line = 452
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 492
+line = 481
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 553
+line = 542
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1389,7 +1389,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 193
+line = 188
 function = "stop_fetches"
 operation = "view.Stop()"
 invariant = "Exact retained session view on its creating STA; resource denial or failed mandatory navigation cancellation only. Stop HRESULT guards security-subscription removal and Close; it grants no control-family permission."
@@ -1397,7 +1397,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 205
+line = 200
 function = "defer_request"
 operation = "args.GetDeferral()"
 invariant = "Owned live resource callback arguments on their creating STA. Retain returned deferral with arguments and exact session view while cancellation is unresolved."
@@ -1405,7 +1405,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 219
+line = 214
 function = "complete_request"
 operation = "deferral.Complete()"
 invariant = "Retained creating-STA deferral; Complete at most once, marked before COM, only after successful resource Stop or ADR-130 mandatory control denial. An uncertain result keeps the event owners until the matching own browser exit."
@@ -1493,7 +1493,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 97
+line = 112
 function = "readback"
 operation = "NewWindow::Handled"
 invariant = "exact retained callback args, same STA; initialized BOOL output, read only after the real Handled setter succeeded. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1501,7 +1501,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 104
+line = 119
 function = "readback"
 operation = "Permission::State"
 invariant = "exact retained callback args on this STA and initialized enum output. No permission state is granted by this observation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1509,7 +1509,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 111
+line = 126
 function = "readback"
 operation = "Download::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output, no download path or operation is read or accepted. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1517,7 +1517,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 117
+line = 132
 function = "readback"
 operation = "External::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no URI is passed to an application launcher. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1525,7 +1525,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 123
+line = 138
 function = "readback"
 operation = "Authentication::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no credential/response object is accessed. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1533,7 +1533,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 137
+line = 152
 function = "navigation"
 operation = "Navigation::Cancel"
 invariant = "Actual invoking-STA navigation args, after Cancel=true succeeded; initialized BOOL output. The observation never authorizes navigation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1541,7 +1541,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 31
+line = 28
 function = "process_failed"
 operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
 invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."
@@ -1733,7 +1733,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 110
+line = 125
 function = "drop"
 operation = "CloseHandle"
 invariant = "Single close of the retained process object on every exit path."
@@ -1741,7 +1741,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 122
+line = 137
 function = "exit_code"
 operation = "GetExitCodeProcess"
 invariant = "Immediate query on the live retained process handle with a writable output."
@@ -1749,7 +1749,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 138
+line = 148
 function = "candidates"
 operation = "GetProcessInfos"
 invariant = "Current retained environment on its creating STA; no other source."
@@ -1757,7 +1757,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 141
+line = 151
 function = "candidates"
 operation = "Count"
 invariant = "Live collection and initialized count; reject more than 64."
@@ -1765,7 +1765,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 148
+line = 158
 function = "candidates"
 operation = "GetValueAtIndex"
 invariant = "Index stays within the checked bounded collection."
@@ -1773,7 +1773,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 152
+line = 162
 function = "candidates"
 operation = "ProcessId"
 invariant = "Live collection item and initialized unique output."
@@ -1781,7 +1781,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 154
+line = 164
 function = "candidates"
 operation = "Kind"
 invariant = "Live collection item and initialized unique output."
@@ -1789,7 +1789,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 213
+line = 223
 function = "open_owned_process"
 operation = "OpenProcess"
 invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
@@ -1797,7 +1797,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 226
+line = 236
 function = "terminate_owned_process"
 operation = "TerminateProcess"
 invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."

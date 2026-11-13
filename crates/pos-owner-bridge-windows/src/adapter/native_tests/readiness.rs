@@ -20,15 +20,16 @@ use pos_owner_bridge_codec::{
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
 use super::trace::{worker_stage, Trace};
-use super::{retirement, TestResult};
+use super::{pass, pass_unwind, retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
 const RUNS_PER_WORKER: usize = 250;
 
-pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
-    let loopback =
-        SharedLoopback::start_fixture(pos_owner_bridge::listener::FixtureProfile::Pending)?;
+pub(super) fn run(runtime_path: &Path, root: &Path) {
+    let loopback = pass(SharedLoopback::start_fixture(
+        pos_owner_bridge::listener::FixtureProfile::Pending,
+    ));
     let foreground = Arc::new(Foreground::default());
     let mut workers = Vec::new();
     for worker in 0..WORKERS {
@@ -37,28 +38,24 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let loopback = loopback.clone();
         let foreground = Arc::clone(&foreground);
         workers.push(thread::spawn(move || {
-            run_worker(&path, root, loopback, &foreground, worker)
-                .map_err(|error| error.to_string())
+            pass(run_worker(&path, root, loopback, &foreground, worker))
         }));
     }
     // Every creating STA retires its accepted owners before its join completes.
     let results: Vec<_> = workers.into_iter().map(thread::JoinHandle::join).collect();
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
-        let result =
-            result.unwrap_or_else(|_| Err(format!("readiness STA worker {worker} panicked")));
-        writeln!(
+        pass(writeln!(
             std::io::stderr(),
             "NATIVE_READINESS worker={worker} result={result:?}"
-        )?;
+        ));
         reports.push(result);
     }
     let mut completed = 0;
     for result in reports {
-        completed += result?;
+        completed += pass_unwind(result);
     }
     assert_eq!(completed, 1_000);
-    Ok(())
 }
 
 fn run_worker(
@@ -68,23 +65,25 @@ fn run_worker(
     foreground: &Foreground,
     worker: usize,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    crate::create_private_directory(&root)?;
-    let runtime = Arc::new(crate::verify_fixed_runtime(runtime_path, &root)?);
-    let factory = Rc::new(crate::Native::owner_factory()?);
+    pass(crate::create_private_directory(&root));
+    let runtime = Arc::new(pass(crate::verify_fixed_runtime(runtime_path, &root)));
+    let factory = Rc::new(pass(crate::Native::owner_factory()));
     let shared_factory: Rc<dyn NativeFactory> = factory.clone();
-    let mut store = WindowsCleanupStore::open(root.clone())?;
-    let mut surface = Surface::new(
-        shared_factory,
-        runtime,
-        root,
-        Box::new(loopback.clone()),
-        Box::new(store.clone()),
-        Box::new(SystemClock),
-    )
-    .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let mut store = pass(WindowsCleanupStore::open(root.clone()));
+    let mut surface = pass(
+        Surface::new(
+            shared_factory,
+            runtime,
+            root,
+            Box::new(loopback.clone()),
+            Box::new(store.clone()),
+            Box::new(SystemClock),
+        )
+        .map_err(pos_owner_bridge::SurfaceError::error),
+    );
     let mut outcome = Ok(RUNS_PER_WORKER);
     for iteration in 0..RUNS_PER_WORKER {
-        let number = u64::try_from(worker * RUNS_PER_WORKER + iteration + 1)?;
+        let number = pass(u64::try_from(worker * RUNS_PER_WORKER + iteration + 1));
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
         let started = Instant::now();
@@ -108,13 +107,13 @@ fn run_worker(
     worker_stage(worker, "dropping-surface");
     drop(surface);
     worker_stage(worker, "surface-dropped");
-    assert!(store.records()?.is_empty());
-    assert!(store.folders()?.is_empty());
+    assert!(pass(store.records()).is_empty());
+    assert!(pass(store.folders()).is_empty());
     worker_stage(worker, "store-checked");
     drop(store);
     worker_stage(worker, "store-dropped");
-    let mut factory = Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared")?;
-    factory.stop()?;
+    let mut factory = pass(Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared"));
+    pass(factory.stop());
     worker_stage(worker, "timer-stopped");
     drop(factory);
     worker_stage(worker, "apartment-released");
@@ -202,13 +201,13 @@ fn run_ceremony(
     // receipt still share the original fifteen-second ceremony deadline.
     // Match product admission: do not start another ceremony while this one's
     // cancellation or browser retirement is unresolved, even after receipt.
-    let _visible = acquire_foreground(surface, foreground, number)?;
+    let _visible = acquire_foreground(surface, foreground, number);
     let started = Instant::now();
     surface.begin_readiness_timing(number, started);
     crate::Native::readiness_navigation_case(Some((number, started)));
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
-    let mut driver = new_driver(id, started)?;
+    let mut driver = new_driver(id, started);
     let mut trace = Trace::new(number, started);
     let mut receipt = None;
     let mut timing = ProgressTiming::default();
@@ -276,6 +275,17 @@ fn run_ceremony(
     let _logged = writeln!(std::io::stderr(),
         "NATIVE_G3_RESOURCE_SNAPSHOT case={number} fields=(captured_case,entries,overflow,subscriptions) snapshot={resource:?}");
     crate::Native::readiness_navigation_case(None);
+    readiness_verdict(failure, receipt, deadline, result_error, resource)
+}
+
+// Pure verdict over observations collected after the real retirement path.
+fn readiness_verdict(
+    failure: Option<Box<dyn std::error::Error>>,
+    receipt: Option<Instant>,
+    deadline: Instant,
+    result_error: Option<BridgeError>,
+    resource: Option<(Option<u64>, u8, bool, u8)>,
+) -> TestResult {
     if let Some(error) = failure {
         return Err(format!("{error}; resource snapshot={resource:?}").into());
     }
@@ -292,15 +302,13 @@ fn run_ceremony(
     Ok(())
 }
 
-pub(super) fn new_driver(
-    id: CeremonyId,
-    started: Instant,
-) -> Result<CeremonyDriver, Box<dyn std::error::Error>> {
+pub(super) fn new_driver(id: CeremonyId, started: Instant) -> CeremonyDriver {
     let stored = StoredGet::new(
         vec![0x80, 0x81],
         OwnerUserHandle::from_bytes([4; 32]),
-        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY)
-            .map_err(|error| error.to_string())?,
+        pass(CoseEs256PublicKey::from_canonical_encoding(
+            &FIXTURE_COSE_KEY,
+        )),
         false,
         false,
         0,
@@ -314,7 +322,7 @@ pub(super) fn new_driver(
         started,
     )
     .with_stored(Some(stored));
-    Ok(CeremonyDriver::for_test(plan))
+    CeremonyDriver::for_test(plan)
 }
 
 pub(super) fn env<'a>(
@@ -350,15 +358,15 @@ fn acquire_foreground<'a>(
     surface: &Surface,
     foreground: &'a Foreground,
     number: u64,
-) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
-    let ticket = foreground.request(number, Instant::now())?;
+) -> Ticket<'a> {
+    let ticket = pass(foreground.request(number, Instant::now()));
     let mut trace = Trace::new(number, Instant::now());
     loop {
         trace.queued(surface);
-        if ticket.is_next(Instant::now())? {
-            return Ok(ticket);
+        if pass(ticket.is_next(Instant::now())) {
+            return ticket;
         }
-        pump(surface)?;
+        pass(pump(surface));
     }
 }
 
@@ -389,16 +397,189 @@ mod tests {
     use pos_owner_bridge::{CleanupStore, SystemClock};
     use pos_owner_bridge_codec::CeremonyId;
 
-    use super::{
-        run_ceremony, Foreground, SharedLoopback, Surface, TestResult, WindowsCleanupStore,
-    };
+    use super::{run_ceremony, Foreground, SharedLoopback, Surface, WindowsCleanupStore};
     use crate::adapter::native_tests::FixtureRoot;
     use crate::adapter::surface::tests::native::{Creation, Factory};
     use crate::adapter::surface::tests::Runtime;
     use crate::NativeFactory;
 
+    struct QuitTwiceFactory {
+        native: Rc<Factory>,
+        pulses: std::cell::Cell<u8>,
+    }
+
+    impl crate::StaPump for QuitTwiceFactory {
+        fn next(&self) -> crate::NativeResult<crate::NativePulse> {
+            let count = self.pulses.get();
+            self.pulses.set(count.saturating_add(1));
+            Ok(if count < 2 {
+                crate::NativePulse::Quit
+            } else {
+                crate::NativePulse::Timer
+            })
+        }
+
+        fn stop(&mut self) -> crate::NativeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeFactory for QuitTwiceFactory {
+        fn session(&self) -> crate::NativeResult<Box<dyn crate::NativeOperations>> {
+            self.native.session()
+        }
+    }
+
     #[test]
-    fn modeled_readiness_failures_retire_before_reporting_and_release_foreground() -> TestResult {
+    fn modeled_quit_retains_pending_owners_and_cancel_done_is_stable() {
+        use pos_owner_bridge::OwnerWebSurface as _;
+
+        let _port = crate::Native::fixed_port_fixture();
+        let retained_driver = std::cell::RefCell::new(None);
+        let result = FixtureRoot::new().map(|root| {
+            let model = Factory::new(Creation::Pending, FakeClock::start());
+            let scripted = Rc::new(QuitTwiceFactory {
+                native: Rc::clone(&model),
+                pulses: std::cell::Cell::new(0),
+            });
+            let factory: Rc<dyn NativeFactory> = scripted.clone();
+            let result = WindowsCleanupStore::open(root.0.clone()).map(|mut store| {
+                let result =
+                    SharedLoopback::start_fixture(FixtureProfile::Pending).map(|mut loopback| {
+                        let result = Surface::new(
+                            Rc::clone(&factory),
+                            Arc::new(Runtime(root.0.clone())),
+                            root.0.clone(),
+                            Box::new(loopback.clone()),
+                            Box::new(store.clone()),
+                            Box::new(SystemClock),
+                        )
+                        .map_err(pos_owner_bridge::SurfaceError::error)
+                        .map(|mut surface| {
+                            let started = Instant::now();
+                            surface.set_deadline(
+                                started + pos_owner_bridge::ceremony::timing::READINESS,
+                            );
+                            let ceremony = CeremonyId::from_bytes([239; 16]);
+                            let spec = pos_owner_bridge::SurfaceSpec {
+                                ceremony_id: ceremony,
+                                folder_name: pos_owner_bridge::folder_name(&ceremony),
+                                owner_window: None,
+                            };
+                            assert!(surface.open(&spec).is_pending());
+                            assert!(surface.open(&spec).is_pending());
+                            assert!(super::pump(&surface).is_err());
+                            super::pump_retaining(&surface);
+                            assert_eq!(scripted.pulses.get(), 2);
+                            assert!(!surface.idle());
+                            assert!(surface.recordless_opening_ready());
+                            assert!(store.records().is_ok_and(|records| records.is_empty()));
+                            assert!(!model.calls.borrow().contains(&"unsubscribe_exit"));
+                            assert!(!model.calls.borrow().contains(&"drop_environment"));
+                            model.creation.set(Creation::CallbackFailure);
+                            surface.abandon_opening();
+                            assert!(matches!(surface.poll_failed_open(), Ok(true)));
+                            assert!(surface.idle());
+
+                            let mut driver = super::new_driver(ceremony, Instant::now());
+                            for _ in 0..2 {
+                                let error = super::cancel_driver(
+                                    &mut driver,
+                                    &mut surface,
+                                    &mut loopback,
+                                    &mut store,
+                                )
+                                .err();
+                                assert_eq!(
+                                    error,
+                                    Some(pos_owner_bridge::BridgeError::Lifecycle(
+                                        pos_owner_bridge::LifecycleCode::ControllerLost
+                                    ))
+                                );
+                                assert!(driver.request_clear());
+                            }
+                            assert!(surface.idle());
+                            assert!(store.records().is_ok_and(|records| records.is_empty()));
+                            assert!(retained_driver.replace(Some(driver)).is_none());
+                            drop(surface);
+                        });
+                        assert!(result.is_ok(), "surface creation: {result:?}");
+                        drop(loopback);
+                    });
+                assert!(result.is_ok(), "loopback creation: {result:?}");
+                drop(store);
+            });
+            assert!(result.is_ok(), "store creation: {result:?}");
+            drop(factory);
+            assert!(root.remove().is_ok());
+        });
+        assert!(result.is_ok(), "fixture root: {result:?}");
+        drop(retained_driver);
+    }
+
+    #[test]
+    fn modeled_readiness_verdict_preserves_deadline_result_and_error_precedence() {
+        use pos_owner_bridge::{BridgeError, LifecycleCode, QuarantineCode};
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(15);
+        let before = Some(start + Duration::from_secs(14) + Duration::from_nanos(999_999_999));
+        let snapshot = Some((Some(7), 0, false, 1));
+        for code in [LifecycleCode::ControllerLost, LifecycleCode::ClientFailed] {
+            assert!(super::readiness_verdict(
+                None,
+                before,
+                deadline,
+                Some(BridgeError::Lifecycle(code)),
+                snapshot
+            )
+            .is_ok());
+        }
+        for receipt in [
+            None,
+            Some(deadline),
+            Some(deadline + Duration::from_nanos(1)),
+        ] {
+            let error = super::readiness_verdict(
+                None,
+                receipt,
+                deadline,
+                Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost)),
+                snapshot,
+            )
+            .err()
+            .map(|error| error.to_string());
+            assert!(error.as_deref().is_some_and(
+                |value| value.starts_with("packaged Get readiness/cancellation failed:")
+            ));
+        }
+        for result in [
+            None,
+            Some(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout)),
+            Some(BridgeError::Quarantine(
+                QuarantineCode::ControllerCloseFailed,
+            )),
+        ] {
+            let error = super::readiness_verdict(None, before, deadline, result, snapshot)
+                .err()
+                .map(|error| error.to_string());
+            assert!(error.as_deref().is_some_and(
+                |value| value.starts_with("packaged Get readiness/cancellation failed:")
+            ));
+        }
+        let failure: Box<dyn std::error::Error> = "modeled prior failure".into();
+        let error = super::readiness_verdict(Some(failure), None, deadline, None, snapshot)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("modeled prior failure; resource snapshot=Some((Some(7), 0, false, 1))")
+        );
+    }
+
+    #[test]
+    fn modeled_readiness_failures_retire_before_reporting_and_release_foreground() {
         let _port = crate::Native::fixed_port_fixture();
         for (creation, failure, expected) in [
             (Creation::Ready, Some("pump"), "Sta: CallFailed"),
@@ -415,65 +596,85 @@ mod tests {
         ] {
             let number = 10_240;
             let _logged = writeln!(std::io::stderr(), "NATIVE_READINESS_MODEL case={number} observation=scripted qualified=false expected={expected}");
-            let root = FixtureRoot::new()?;
-            let model = Factory::new(creation, FakeClock::start());
-            model.failure.set(failure);
-            let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
-            let mut store = WindowsCleanupStore::open(root.0.clone())?;
-            let mut loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
-            let mut surface = Surface::new(
-                Rc::clone(&factory),
-                Arc::new(Runtime(root.0.clone())),
-                root.0.clone(),
-                Box::new(loopback.clone()),
-                Box::new(store.clone()),
-                Box::new(SystemClock),
-            )
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
-            let foreground = Foreground::default();
-            let error = run_ceremony(
-                &mut surface,
-                &mut loopback,
-                &mut store,
-                &foreground,
-                CeremonyId::from_bytes([240; 16]),
-                number,
-            )
-            .err()
-            .map(|error| error.to_string());
-            assert!(error
-                .as_deref()
-                .is_some_and(|error| error.starts_with(expected)));
-            assert!(surface.idle());
-            assert!(store.records()?.is_empty());
-            assert_eq!(store.folders()?.len(), 1);
-            let calls = model.calls.borrow();
-            let unsubscribe = calls
-                .iter()
-                .position(|call| *call == "unsubscribe_exit")
-                .ok_or("exit handler was not retired")?;
-            let released = calls
-                .iter()
-                .position(|call| *call == "drop_environment")
-                .ok_or("environment was not retired")?;
-            let destroyed = calls
-                .iter()
-                .position(|call| *call == "destroy_window")
-                .ok_or("window was not retired")?;
-            assert!(unsubscribe < released && released < destroyed);
-            assert!(!calls.contains(&"navigate"));
-            assert!(!calls.contains(&"create_buffers"));
-            assert!(!calls.contains(&"post"));
-            let next = foreground.request(number + 1, Instant::now())?;
-            assert!(next.is_next(Instant::now())?);
-            drop(next);
-            drop(calls);
-            drop(surface);
-            drop(loopback);
-            drop(store);
-            drop(factory);
-            root.remove()?;
+            let retained_foreground = std::cell::RefCell::new(None);
+            let result = FixtureRoot::new().map(|root| {
+                let model = Factory::new(creation, FakeClock::start());
+                model.failure.set(failure);
+                let factory: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&model));
+                let result = WindowsCleanupStore::open(root.0.clone()).map(|mut store| {
+                    let result = SharedLoopback::start_fixture(FixtureProfile::Pending).map(
+                        |mut loopback| {
+                            let result = Surface::new(
+                                Rc::clone(&factory),
+                                Arc::new(Runtime(root.0.clone())),
+                                root.0.clone(),
+                                Box::new(loopback.clone()),
+                                Box::new(store.clone()),
+                                Box::new(SystemClock),
+                            )
+                            .map_err(pos_owner_bridge::SurfaceError::error)
+                            .map(|mut surface| {
+                                let foreground = Foreground::default();
+                                let error = run_ceremony(
+                                    &mut surface,
+                                    &mut loopback,
+                                    &mut store,
+                                    &foreground,
+                                    CeremonyId::from_bytes([240; 16]),
+                                    number,
+                                )
+                                .err()
+                                .map(|error| error.to_string());
+                                assert!(error
+                                    .as_deref()
+                                    .is_some_and(|error| error.starts_with(expected)));
+                                assert!(surface.idle());
+                                assert!(store.records().is_ok_and(|records| records.is_empty()));
+                                assert!(store.folders().is_ok_and(|folders| folders.len() == 1));
+                                let calls = model.calls.borrow();
+                                let unsubscribe =
+                                    calls.iter().position(|call| *call == "unsubscribe_exit");
+                                let released =
+                                    calls.iter().position(|call| *call == "drop_environment");
+                                let destroyed =
+                                    calls.iter().position(|call| *call == "destroy_window");
+                                assert!(unsubscribe.is_some(), "exit handler was not retired");
+                                assert!(released.is_some(), "environment was not retired");
+                                assert!(destroyed.is_some(), "window was not retired");
+                                assert!(unsubscribe < released && released < destroyed);
+                                assert!(!calls.contains(&"navigate"));
+                                assert!(!calls.contains(&"create_buffers"));
+                                assert!(!calls.contains(&"post"));
+                                let next =
+                                    foreground.request(number + 1, Instant::now()).map(|next| {
+                                        assert_eq!(
+                                            next.is_next(Instant::now())
+                                                .as_ref()
+                                                .copied()
+                                                .map_err(ToString::to_string),
+                                            Ok(true)
+                                        );
+                                        drop(next);
+                                    });
+                                assert!(next.is_ok(), "foreground request: {next:?}");
+                                drop(calls);
+                                drop(surface);
+                                assert!(retained_foreground.replace(Some(foreground)).is_none());
+                            });
+                            assert!(result.is_ok(), "surface creation: {result:?}");
+                            drop(loopback);
+                        },
+                    );
+                    assert!(result.is_ok(), "loopback creation: {result:?}");
+                    drop(store);
+                });
+                assert!(result.is_ok(), "store creation: {result:?}");
+                drop(factory);
+                let removed = root.remove();
+                assert!(removed.is_ok(), "fixture removal: {removed:?}");
+            });
+            assert!(result.is_ok(), "fixture root: {result:?}");
+            drop(retained_foreground);
         }
-        Ok(())
     }
 }

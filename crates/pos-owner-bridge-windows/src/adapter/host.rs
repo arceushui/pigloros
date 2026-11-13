@@ -54,10 +54,10 @@ impl WindowsOwnerHost {
         store: impl CleanupStore + Send + 'static,
         profile: fn() -> Result<(), BridgeError>,
     ) -> Result<Self, BridgeError> {
-        profile()?;
-        crate::refuse_overrides()?;
-        crate::verify_private_directory(&root)?;
-        let loopback = SharedLoopback::start()?;
+        let loopback = profile()
+            .and_then(|()| crate::refuse_overrides())
+            .and_then(|()| crate::verify_private_directory(&root))
+            .and_then(|()| SharedLoopback::start())?;
         Self::spawn(runtime, root, loopback, WindowsCleanupStore::new(store))
     }
 
@@ -118,10 +118,7 @@ impl WindowsOwnerHost {
                 }
                 // Surface/driver/keeper owners have all gone before the last
                 // factory and apartment are released on this creating thread.
-                let factory = Rc::try_unwrap(factory);
-                if let Ok(mut factory) = factory {
-                    let _stopped = factory.stop();
-                }
+                let _stopped = Rc::try_unwrap(factory).map(|mut factory| factory.stop());
             })
             .map_err(|_| UNAVAILABLE)?;
         match started.recv() {
@@ -274,12 +271,12 @@ impl Worker {
             Step::Finished(result) => result,
             Step::Done => Err(UNAVAILABLE),
         };
-        if let Some(driver) = self.active.take() {
+        let _delivered = self.active.take().map(|driver| {
             self.surface.abandon_opening();
             let reply = self.keeper.finish(driver, result);
             self.quarantined |= reply.driver.is_none();
-            let _delivered = self.endpoint.reply_run(reply);
-        }
+            self.endpoint.reply_run(reply)
+        });
     }
 
     fn cleanup(&mut self) {

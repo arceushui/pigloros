@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +22,66 @@ use super::events::Events;
 use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, StaPump};
 
 pub(in crate::adapter) type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Returns a native fixture step's value, or fails the calling test with its error.
+///
+/// Fixture steps that cannot fail on a qualified runner assert through this
+/// seam instead of carrying an error branch that no hosted run can execute.
+/// It is the harness's single sanctioned failing seam: the workspace denies
+/// `panic!`, `unwrap` and `expect`, so every other fixture failure is an
+/// assertion. `resume_unwind` skips the panic hook, so the caller's location
+/// is read here and carried in the message instead.
+/// Never call it inside a native callback: an unwind must not cross the SDK.
+#[track_caller]
+pub(in crate::adapter) fn pass<T, E: std::fmt::Debug>(step: Result<T, E>) -> T {
+    let location = std::panic::Location::caller();
+    match step {
+        Ok(value) => value,
+        Err(error) => {
+            let message = format!("native fixture step failed at {location}: {error:?}");
+            let _logged = writeln!(std::io::stderr(), "{message}");
+            std::panic::resume_unwind(Box::new(message))
+        }
+    }
+}
+
+/// Returns a caught unwind's or joined thread's value, or resumes the unwind
+/// with its original payload, which `pass` would flatten to `Any { .. }`.
+pub(in crate::adapter) fn pass_unwind<T>(attempt: std::thread::Result<T>) -> T {
+    match attempt {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+#[test]
+fn passing_fixture_step_yields_its_value() {
+    assert_eq!(pass::<_, ()>(Ok(7)), 7);
+    assert_eq!(pass_unwind(Ok(7)), 7);
+}
+
+#[test]
+#[should_panic(expected = "native fixture step failed at ")]
+fn failed_fixture_step_fails_its_test() {
+    pass::<(), _>(Err("refused"));
+}
+
+#[test]
+fn failed_fixture_step_names_its_caller_and_error() {
+    let unwound = std::panic::catch_unwind(|| pass::<(), _>(Err("refused")));
+    assert!(
+        unwound.is_err_and(|payload| payload
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("native_tests.rs:")
+                && message.ends_with(": \"refused\"")))
+    );
+}
+
+#[test]
+#[should_panic(expected = "modeled fixture unwind")]
+fn caught_fixture_unwind_resumes_with_its_original_payload() {
+    pass_unwind::<()>(Err(Box::new("modeled fixture unwind")));
+}
 
 mod controls;
 mod denial;
@@ -246,7 +307,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by delivery qualification")?;
-        denial::run_delivery(&runtime, &root.0)?;
+        denial::run_delivery(&runtime, &root.0);
         root.remove()
     }
 
@@ -256,7 +317,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by renderer qualification")?;
-        denial::run_renderer(&runtime, &root.0)?;
+        denial::run_renderer(&runtime, &root.0);
         root.remove()
     }
 
@@ -266,7 +327,7 @@ impl crate::Native {
         let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
             .ok_or("canonical retained runtime is required by control qualification")?;
-        controls::run(&runtime, &root.0)?;
+        controls::run(&runtime, &root.0);
         root.remove()
     }
 
@@ -363,7 +424,7 @@ impl crate::Native {
         drop(listener);
         let driver_root = root.0.join("resource-driver");
         crate::create_private_directory(&driver_root)?;
-        denial::run(&runtime_path, &driver_root)?;
+        denial::run(&runtime_path, &driver_root);
         root.remove()?;
         Ok(())
     }
@@ -459,6 +520,14 @@ impl crate::Native {
         let sink: Rc<dyn EventSink> = events.clone();
         native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
         assert!(native.pending());
+        let closed = crate::NativeError {
+            operation: crate::Operation::Controller,
+            failure: crate::Failure::Closed,
+        };
+        assert_eq!(native.destroy_window(), Err(closed));
+        assert!(native.pending());
+        assert!(native.window()?.exists);
+        assert!(!native.has_controller()?);
         completion(&factory, "environment creation", || {
             native.environment_completion()
         })?;
@@ -478,6 +547,9 @@ impl crate::Native {
         completion(&factory, "controller creation", || {
             native.controller_completion()
         })?;
+        assert_eq!(native.destroy_window(), Err(closed));
+        assert!(native.has_controller()?);
+        assert!(native.window()?.exists);
         assert!(native.create_controller().is_err());
         let identity = runtime.browser_identity(native.browser_pid()?)?;
         events.expect_browser(identity.browser_pid);
@@ -517,7 +589,7 @@ impl crate::Native {
         factory.stop()?;
         listener.shutdown();
         drop(listener);
-        readiness::run(&runtime_path, &root.0)?;
+        readiness::run(&runtime_path, &root.0);
         root.remove()?;
         Ok(())
     }
@@ -642,6 +714,17 @@ fn exercise_unacknowledged_buffers(
     assert!(!native.compare_exchange(ControlState::Empty as u32, ControlState::Failed as u32)?);
     assert!(native.compare_exchange(ControlState::Writing as u32, ControlState::Empty as u32)?);
     let mut copied = ReplyImage::zeroed();
+    copied.select(CeremonyKind::Get);
+    copied.as_mut_bytes().fill(0xa5);
+    assert_eq!(
+        native.copy_reply(&mut copied),
+        Err(crate::NativeError {
+            operation: crate::Operation::Buffers,
+            failure: crate::Failure::CallFailed,
+        })
+    );
+    assert!(copied.as_bytes().iter().all(|byte| *byte == 0xa5));
+    copied.select(CeremonyKind::Create);
     native.copy_reply(&mut copied)?;
     assert_eq!(&copied.as_bytes()[..64], &reply_header);
     native.post(BufferSlot::Request)?;

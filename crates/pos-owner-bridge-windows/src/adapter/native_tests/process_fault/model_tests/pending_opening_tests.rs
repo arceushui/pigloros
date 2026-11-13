@@ -69,8 +69,8 @@ fn retire(root: FixtureRoot, fixture: Fixture, model: &Factory) -> TestResult {
         exit(model)?;
     }
     let id = CeremonyId::from_bytes([MODEL_CASE; 16]);
-    let driver = readiness::new_driver(id, Instant::now())?;
-    fixture.retire(driver, Err(ERROR), Some(id))?;
+    let driver = readiness::new_driver(id, Instant::now());
+    fixture.retire(driver, Err(ERROR), Some(id));
     root.remove()
 }
 
@@ -343,4 +343,194 @@ fn modeled_pending_observer_preserves_pump_failures_before_exit_or_completion() 
         retire(root, fixture, &model)?;
     }
     Ok(())
+}
+
+#[test]
+fn modeled_recordless_observer_enforces_deadline_before_event_and_after_query() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    for (at_boundary, advance, accepted) in [
+        (false, Duration::ZERO, true),
+        (true, Duration::ZERO, false),
+        (false, Duration::from_secs(6), false),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, clock) = pending(&root)?;
+        exit(&model)?;
+        fixture.trace.borrow_mut().clear();
+        fixture.trace.borrow_mut().extend([
+            ProcessFaultMark::RecordlessOpening {
+                generation: 1,
+                record_count: 0,
+            },
+            ProcessFaultMark::Selected(BROWSER),
+            ProcessFaultMark::TerminationCall,
+        ]);
+        fixture.handle = Some(Box::new(Handle {
+            code: Ok(Some(0x535)),
+            clock: clock.0.clone(),
+            advance,
+        }));
+        fixture.deadline = clock.0.now()
+            + if at_boundary {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(5)
+            };
+        let result = fixture.observe_recordless_with_clock(BROWSER, &clock);
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(fixture.evidence_complete, accepted);
+        assert_eq!(fixture.trace.borrow().len(), if accepted { 5 } else { 3 });
+        retire(root, fixture, &model)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_recordless_observer_refuses_untrusted_exit_evidence() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let other_browser = ProcessIdentity {
+        creation_filetime: BROWSER.creation_filetime + 1,
+        ..BROWSER
+    };
+    for (label, code, expected_browser, ordered, expected_error) in [
+        (
+            "missing handle",
+            None,
+            BROWSER,
+            true,
+            "recordless handle disappeared",
+        ),
+        (
+            "query failure",
+            Some(Err(())),
+            BROWSER,
+            true,
+            "recordless exit query failed",
+        ),
+        (
+            "pending exit",
+            Some(Ok(None)),
+            BROWSER,
+            true,
+            "recordless process exit pending",
+        ),
+        (
+            "wrong exit code",
+            Some(Ok(Some(0))),
+            BROWSER,
+            true,
+            "recordless fault evidence is incomplete",
+        ),
+        (
+            "wrong browser identity",
+            Some(Ok(Some(0x535))),
+            other_browser,
+            true,
+            "recordless fault evidence is incomplete",
+        ),
+        (
+            "wrong trace order",
+            Some(Ok(Some(0x535))),
+            BROWSER,
+            false,
+            "recordless fault evidence is incomplete",
+        ),
+    ] {
+        let root = FixtureRoot::new()?;
+        let (mut fixture, model, clock) = pending(&root)?;
+        exit(&model)?;
+        fixture.trace.borrow_mut().clear();
+        let opening = ProcessFaultMark::RecordlessOpening {
+            generation: 1,
+            record_count: 0,
+        };
+        if ordered {
+            fixture.trace.borrow_mut().extend([
+                opening,
+                ProcessFaultMark::Selected(BROWSER),
+                ProcessFaultMark::TerminationCall,
+            ]);
+        } else {
+            fixture.trace.borrow_mut().extend([
+                opening,
+                ProcessFaultMark::TerminationCall,
+                ProcessFaultMark::Selected(BROWSER),
+            ]);
+        }
+        fixture.handle = code.map(|code| {
+            Box::new(Handle {
+                code,
+                clock: clock.0.clone(),
+                advance: Duration::ZERO,
+            }) as Box<dyn ProcessFaultHandle>
+        });
+        let result = fixture.observe_recordless_with_clock(expected_browser, &clock);
+        assert_eq!(
+            result.err().map(|error| error.to_string()).as_deref(),
+            Some(expected_error),
+            "{label}"
+        );
+        assert!(!fixture.evidence_complete, "{label}");
+        assert!(fixture.surface.pending_opening_owners_retained(), "{label}");
+        retire(root, fixture, &model)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn modeled_opening_first_refuses_expiry_and_unavailable_fault_authority() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model) = fixture(&root)?;
+    model.creation.set(Creation::Pending);
+    let selected = super::super::fixed_competing_spec(MODEL_CASE);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    model.pending_browser.set(Some(BROWSER));
+    fixture.deadline = Instant::now();
+    assert_eq!(
+        fixture
+            .opening_first_browser()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("opening browser cutpoint was not reached")
+    );
+    assert!(fixture.surface.recordless_opening_ready());
+    assert!(!fixture.surface.pending_opening_owners_retained());
+    fixture.deadline = Instant::now() + Duration::from_secs(5);
+    let (browser, mark) = fixture.opening_first_browser()?;
+    assert_eq!(browser, BROWSER);
+    assert_eq!(mark, FIRST);
+    assert!(!fixture.surface.recordless_opening_ready());
+    assert!(fixture.surface.pending_opening_owners_retained());
+    assert_eq!(
+        fixture
+            .inject_opening_first_browser(browser, mark)
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("pending-opening browser fault refused")
+    );
+    assert!(fixture.handle.is_none());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.pending_opening_owners_retained());
+    retire(root, fixture, &model)
+}
+
+#[test]
+fn modeled_opening_first_rejects_an_unrelated_cutpoint() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let (mut fixture, model, _clock) = pending(&root)?;
+    fixture.handle = None;
+    let result = fixture.inject_opening_first_browser(BROWSER, ProcessFaultMark::OwnBrowserExited);
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some("unexpected opening fault cutpoint")
+    );
+    assert!(fixture.handle.is_none());
+    assert!(!fixture.evidence_complete);
+    assert!(fixture.surface.pending_opening_owners_retained());
+    retire(root, fixture, &model)
 }

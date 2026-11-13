@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::fake::host::{FakeLoopback, FakeStore};
 use pos_owner_bridge::{
-    BridgeError, MonotonicClock, OwnerWebSurface, ProcessIdentity, SurfaceSpec,
+    BridgeError, LifecycleCode, MonotonicClock, OwnerWebSurface, ProcessIdentity, SurfaceSpec,
 };
 use pos_owner_bridge_codec::{CeremonyId, ImagePathSha256};
 
@@ -285,6 +285,57 @@ fn quarantined_fault_refuses_missing_state_and_unheld_keeper() -> TestResult {
         .is_err());
     assert_eq!(*fixture.factory.calls.borrow(), before);
     fixture.finish()
+}
+
+#[test]
+fn synchronous_navigation_failure_refuses_readiness_until_owned_exit() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.navigation_succeeds.set(true);
+    fixture.factory.fail_during_navigation.set(true);
+    fixture
+        .open(&spec(42))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+
+    assert!(matches!(fixture.surface.navigate(), Poll::Ready(Err(error))
+        if error.error() == BridgeError::Lifecycle(LifecycleCode::NavigationViolation)));
+    assert!(matches!(fixture.surface.navigate(), Poll::Ready(Err(error))
+        if error.error() == BridgeError::Lifecycle(LifecycleCode::NavigationViolation)));
+    assert_eq!(
+        fixture
+            .factory
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == "navigate")
+            .count(),
+        1
+    );
+    assert!(!fixture.surface.buffers);
+    assert!(!fixture.factory.calls.borrow().contains(&"create_buffers"));
+    assert!(!fixture.factory.calls.borrow().contains(&"post"));
+    assert!(fixture.store.records_now().is_empty());
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.finish().is_err());
+    assert!(!fixture.surface.idle());
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing sink")?;
+    sink.event(NativeEvent::BrowserExited { pid: 43 });
+    assert!(fixture.surface.finish().is_err());
+    assert!(!fixture.surface.idle());
+    fixture.exit();
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.idle());
+    Ok(())
 }
 
 #[test]

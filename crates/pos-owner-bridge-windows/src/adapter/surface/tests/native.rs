@@ -28,15 +28,27 @@ pub(in crate::adapter) enum Creation {
 
 pub(in crate::adapter) struct Factory {
     pub(in crate::adapter) creation: Cell<Creation>,
-    pub(super) environment_creation: Cell<Creation>,
+    pub(in crate::adapter) environment_creation: Cell<Creation>,
     pub(super) environment_completions: Cell<u32>,
     pub(super) controller_completions: Cell<u32>,
     pub(in crate::adapter) calls: RefCell<Vec<&'static str>>,
     pub(in crate::adapter) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
+    pub(super) show_delay: Cell<Duration>,
+    pub(super) focus_delay: Cell<Duration>,
+    pub(super) focus_foreground: Cell<Option<bool>>,
+    pub(super) pre_focus_window_delay: Cell<Duration>,
+    pub(super) pre_focus_window_error: Cell<bool>,
+    pub(super) reenter_on_activation: Cell<Option<&'static str>>,
+    pub(super) window_delay: Cell<Duration>,
     pub(in crate::adapter) navigation_succeeds: Cell<bool>,
+    pub(super) fail_during_navigation: Cell<bool>,
     pub(in crate::adapter) failure: Cell<Option<&'static str>>,
     pub(super) mismatched_setting: Cell<Option<BoolProperty>>,
+    pub(super) environment_arguments: Cell<&'static str>,
+    pub(super) environment_options: Cell<EnvironmentOptions>,
+    pub(super) environment_version: Cell<&'static str>,
+    pub(super) environment_folder: RefCell<Option<PathBuf>>,
     pub(super) source: RefCell<String>,
     pub(super) state: Cell<u32>,
     pub(super) invalidate_request: Cell<bool>,
@@ -62,9 +74,21 @@ impl Factory {
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
             foreground: Cell::new(true),
+            show_delay: Cell::new(Duration::ZERO),
+            focus_delay: Cell::new(Duration::ZERO),
+            focus_foreground: Cell::new(None),
+            pre_focus_window_delay: Cell::new(Duration::ZERO),
+            pre_focus_window_error: Cell::new(false),
+            reenter_on_activation: Cell::new(None),
+            window_delay: Cell::new(Duration::ZERO),
             navigation_succeeds: Cell::new(false),
+            fail_during_navigation: Cell::new(false),
             failure: Cell::new(None),
             mismatched_setting: Cell::new(None),
+            environment_arguments: Cell::new(""),
+            environment_options: Cell::new(super::super::super::settings::OPTIONS),
+            environment_version: Cell::new("153.0.4234.48"),
+            environment_folder: RefCell::new(None),
             source: RefCell::new(crate::OWNER_URL.to_owned()),
             state: Cell::new(0),
             invalidate_request: Cell::new(false),
@@ -160,6 +184,13 @@ impl crate::RetainedExitHandle for ExitHandle {
         if self.factory.failure.get() == Some("exit_observation") {
             Err(())
         } else {
+            if self.factory.failure.get() == Some("exit_observe_invalid") {
+                let sink = self.factory.sink.borrow().clone();
+                if let Some(sink) = sink {
+                    sink.event(crate::NativeEvent::Frame);
+                    sink.event(crate::NativeEvent::BrowserExited { pid: 42 });
+                }
+            }
             Ok(self.factory.exit_code.get())
         }
     }
@@ -194,6 +225,35 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn inject_process_fault(
+        &self,
+        authority: &crate::FaultAuthority,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        let mode = self.factory.failure.get();
+        if matches!(
+            mode,
+            Some("fault_spy" | "fault_spy_frame" | "fault_spy_exit")
+        ) {
+            let event = match mode {
+                Some("fault_spy_frame") => Some(crate::NativeEvent::Frame),
+                Some("fault_spy_exit") => Some(crate::NativeEvent::BrowserExited { pid: 42 }),
+                _ => None,
+            };
+            if let Some(event) = event {
+                let sink = self.factory.sink.borrow().clone();
+                if let Some(sink) = sink {
+                    let _action = sink.event(event);
+                }
+            }
+            self.call(if authority.valid() {
+                "fault_valid"
+            } else {
+                "fault_invalid"
+            });
+        }
+        Err(())
+    }
+
     fn preload_fault_owners_retained(&self) -> bool {
         self.controller
             && self.factory.preload_owners.get()
@@ -269,11 +329,36 @@ impl NativeOperations for Session {
         .then_some(true)
     }
 
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if self.factory.failure.get() == Some("pending-callback-after") {
+            self.factory.pending_browser.get().ok_or(())
+        } else {
+            Err(())
+        }
+    }
+
     fn create_window(&mut self, _: Option<u64>, _: u32, _: u32) -> NativeResult<()> {
         self.effect("create_window")
     }
     fn window(&self) -> NativeResult<WindowSnapshot> {
         self.check("window")?;
+        let calls = self.factory.calls.borrow();
+        let before_focus = calls.contains(&"show_window") && !calls.contains(&"focus_controller");
+        drop(calls);
+        if before_focus {
+            self.factory
+                .clock
+                .advance(self.factory.pre_focus_window_delay.get());
+            if self.factory.reenter_on_activation.get() == Some("window") {
+                if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                    sink.event(crate::NativeEvent::NewWindow);
+                }
+            }
+            if self.factory.pre_focus_window_error.get() {
+                return Err(failed());
+            }
+        }
+        self.factory.clock.advance(self.factory.window_delay.get());
         Ok(WindowSnapshot {
             exists: self.factory.window_exists.get(),
             close_requested: self.factory.close_requested.get(),
@@ -286,13 +371,30 @@ impl NativeOperations for Session {
         self.effect("resize_window")
     }
     fn show_window(&self) -> NativeResult<()> {
-        self.effect("show_window")
+        self.effect("show_window")?;
+        self.factory.clock.advance(self.factory.show_delay.get());
+        if self.factory.reenter_on_activation.get() == Some("show_window") {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::NewWindow);
+            }
+        }
+        Ok(())
     }
     fn fit_controller(&self) -> NativeResult<()> {
         self.effect("fit_controller")
     }
     fn focus_controller(&self) -> NativeResult<()> {
-        self.effect("focus_controller")
+        self.effect("focus_controller")?;
+        self.factory.clock.advance(self.factory.focus_delay.get());
+        if let Some(foreground) = self.factory.focus_foreground.get() {
+            self.factory.foreground.set(foreground);
+        }
+        if self.factory.reenter_on_activation.get() == Some("focus_controller") {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::NewWindow);
+            }
+        }
+        Ok(())
     }
     fn create_environment(
         &mut self,
@@ -327,12 +429,20 @@ impl NativeOperations for Session {
     fn environment(&self) -> NativeResult<EnvironmentSnapshot> {
         self.check("environment")?;
         Ok(EnvironmentSnapshot {
-            version: NativeText::fixture("153.0.4234.48"),
+            version: NativeText::fixture(self.factory.environment_version.get()),
             folder: NativePath::from_utf16(
-                &self.folder.as_os_str().encode_wide().collect::<Vec<_>>(),
+                &self
+                    .factory
+                    .environment_folder
+                    .borrow()
+                    .as_ref()
+                    .unwrap_or(&self.folder)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
             )?,
-            arguments: NativeText::fixture(""),
-            options: super::super::super::settings::OPTIONS,
+            arguments: NativeText::fixture(self.factory.environment_arguments.get()),
+            options: self.factory.environment_options.get(),
         })
     }
     fn create_controller(&mut self) -> NativeResult<()> {
@@ -362,7 +472,7 @@ impl NativeOperations for Session {
         })
     }
     fn has_controller(&self) -> NativeResult<bool> {
-        Ok(self.controller)
+        self.check("has_controller").map(|()| self.controller)
     }
     fn browser_pid(&self) -> NativeResult<u32> {
         if self.factory.creation.get() == Creation::MissingView {
@@ -387,6 +497,11 @@ impl NativeOperations for Session {
     }
     fn navigate_owner(&self) -> NativeResult<()> {
         self.call("navigate");
+        if self.factory.fail_during_navigation.get() {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::ProcessFailed);
+            }
+        }
         if self.factory.navigation_succeeds.get() {
             Ok(())
         } else {
