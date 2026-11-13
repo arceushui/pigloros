@@ -4754,6 +4754,18 @@ mod tests {
     }
 
     #[test]
+    fn expired_authority_load_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::LoadAuthorityCommand {
+                leaf_grant_id: pos_core::Hash::from_bytes([1; 32]),
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_action_receipt_purge_replies() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(

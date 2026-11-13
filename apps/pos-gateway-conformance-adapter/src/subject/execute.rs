@@ -359,3 +359,22 @@ async fn exchange_all(
     run.record = Value::Object(record);
     run
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchStore;
+
+    #[test]
+    fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
+        let store = ScratchStore::new();
+        let path = store.path.clone();
+        std::fs::write(&path, b"store")?;
+        let mut journal = path.clone().into_os_string();
+        journal.push("-wal");
+        std::fs::write(&journal, b"journal")?;
+        drop(store);
+        assert!(!path.exists());
+        assert!(!std::path::Path::new(&journal).exists());
+        Ok(())
+    }
+}

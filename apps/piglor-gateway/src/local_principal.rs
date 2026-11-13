@@ -1337,6 +1337,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn only_a_store_record_ahead_of_the_pinned_chain_is_reloaded() -> TestResult {
+        let provision = served_provision()?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
+        let authorization =
+            load_local_principal(&SqliteStore::open(&path)?)?.ok_or("provisioned")?;
+        let recorded = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        assert!(!authorization.is_behind(&recorded));
+        record_revocation(&path, &provision)?;
+        let revoked = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        assert!(authorization.is_behind(&revoked));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_conflicting_authority_record_fails_startup() -> TestResult {
         let provision = served_provision()?;
