@@ -98,6 +98,8 @@ pub mod plugin_trust_registry;
 #[cfg(target_os = "linux")]
 pub mod protected_sqlite_namespace;
 pub mod stitch;
+#[cfg(any(test, feature = "test-support"))]
+pub mod subject_data_consumer;
 mod timeline_range;
 pub mod trusted_clock;
 

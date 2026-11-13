@@ -5,6 +5,7 @@ use pos_crypto::plugin_manifest::{
     verify_plugin_release_signature_v1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
+use pos_plugin_content::{validate_plugin_bundle_content_v1, ValidatedPluginBundleContentV1};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, SCOPE, TICK},
     release::{pmf1_digest, Shape},
@@ -146,7 +147,21 @@ fn proven_projection(
     Ok((projection, proof))
 }
 
-/// The PMF1 digest, projection, verified release proof and trusted second of the release.
+/// The same closure's projected release and independently validated proofs.
+fn proven_artifacts(
+    material: &Material,
+    bundle: &VerifiedReleaseBundleV1,
+) -> BoxResult<(
+    ValidatedPluginManifestProjectionV1,
+    VerifiedPluginReleaseSignatureV1,
+    ValidatedPluginBundleContentV1,
+)> {
+    let (projection, proof) = proven_projection(material, bundle)?;
+    let content = validate_plugin_bundle_content_v1(bundle)?;
+    Ok((projection, proof, content))
+}
+
+/// The PMF1 digest, projection, signature and content proofs, and trusted second.
 fn release_inputs(
     world: &World,
     material: &Material,
@@ -155,12 +170,13 @@ fn release_inputs(
     [u8; 32],
     ValidatedPluginManifestProjectionV1,
     VerifiedPluginReleaseSignatureV1,
+    ValidatedPluginBundleContentV1,
     TrustedUtcSecondV1,
 )> {
     let bundle = world.store.read_verified(address)?;
-    let (projection, proof) = proven_projection(material, &bundle)?;
+    let (projection, proof, content) = proven_artifacts(material, &bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
-    Ok((pmf1_digest(&bundle), projection, proof, utc))
+    Ok((pmf1_digest(&bundle), projection, proof, content, utc))
 }
 
 /// Advance, roll back and read the registry through the facade.
@@ -171,7 +187,7 @@ fn advance_and_read(
     address: &BundleAddressV1,
     timeline: TimelineId,
 ) -> BoxResult<Observed> {
-    let (digest, projection, proof, utc) = release_inputs(world, material, address)?;
+    let (digest, projection, proof, content, utc) = release_inputs(world, material, address)?;
     let (anchor, tps1, evidence) = (&world.anchor, &material.tps1, &material.evidence);
     host(host_under_test.with_plugin_trust_registry(|registry| {
         let advanced = registry.advance_policy(anchor, tps1, evidence, utc, TICK);
@@ -180,7 +196,7 @@ fn advance_and_read(
             tps1,
             evidence,
             &projection,
-            &proof,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, TICK),
             activation(timeline, 9),
         );

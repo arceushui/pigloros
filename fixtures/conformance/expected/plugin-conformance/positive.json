@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "ed6b89c2dc0ed7c4df1d06c95a2cff8719597f86277468156676fa97abd12b4c",
+  "input_blake3_digest": "1dc0559b30409e63830454be46d80fb6634ad3c14d26d99bc94ca8dd99ebac8b",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",
