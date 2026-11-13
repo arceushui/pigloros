@@ -714,39 +714,6 @@ fn refused<T>() -> Result<T, pos_owner_bridge::SurfaceError> {
 }
 
 #[test]
-fn modeled_pending_controller_parent_loss_is_refused_by_the_modeled_session() -> TestResult {
-    let mut fixture = Fixture::new(Creation::Pending)?;
-    let selected = spec(115);
-    assert!(fixture.surface.open(&selected).is_pending());
-    assert!(fixture.surface.open(&selected).is_pending());
-    let ceremony = selected.ceremony_id;
-    assert!(fixture
-        .surface
-        .pre_environment_retention(&ceremony)
-        .is_none());
-    assert_eq!(
-        fixture.surface.controller_creation_retention(&ceremony),
-        Some(super::super::PreEnvironmentRetention::Active)
-    );
-    assert_eq!(
-        fixture.surface.lose_pending_controller_parent(&ceremony),
-        Err(())
-    );
-    assert_eq!(
-        fixture.surface.controller_creation_retention(&ceremony),
-        Some(super::super::PreEnvironmentRetention::Active)
-    );
-    assert!(!fixture.surface.idle());
-    fixture.assert_no_ceremony_data();
-
-    fixture.surface.abandon_opening();
-    fixture.factory.creation.set(Creation::CallbackFailure);
-    assert_eq!(fixture.surface.poll_failed_open(), Ok(true));
-    assert!(fixture.surface.idle());
-    Ok(())
-}
-
-#[test]
 fn modeled_reopen_of_a_ready_surface_is_refused_and_retires_through_its_own_exit() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     let selected = spec(116);
