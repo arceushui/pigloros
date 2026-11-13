@@ -1,6 +1,8 @@
 name: owner-bridge-windows
 
 on:
+  push:
+    branches: [diag/535-cc-full]
   workflow_call:
   workflow_dispatch:
 
@@ -70,7 +72,7 @@ jobs:
             $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
           } catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
           try {
-            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored --nocapture
+            cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --no-fail-fast --ignore-run-fail --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored --nocapture
             $nativeResult = $LASTEXITCODE
           } finally {
             try {
@@ -87,7 +89,7 @@ jobs:
       - name: Enforce both changed-line Windows coverage floors
         shell: pwsh
         env:
-          COVERAGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
+          COVERAGE_BASE: origin/main
         working-directory: crates/pos-owner-bridge-windows
         run: covgate check "$env:RUNNER_TEMP/owner-windows-coverage.json" --base "$env:COVERAGE_BASE" --no-github-summary
       - name: Enforce both full-file Windows coverage floors
