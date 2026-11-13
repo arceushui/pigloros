@@ -886,6 +886,7 @@ fn fuel_outcome(plugin: PluginId) -> CommunityPassOutcomeV1 {
             plugin,
             expected_plugin_id: "plugin-a".to_owned(),
             gate: Err(Error::FuelExhausted),
+            content_validation: pos_plugin_release::ContentValidationV1::NotPerformed,
             invocation_id: None,
             launch_failure: Some(Error::FuelExhausted),
             sync: Ok(()),

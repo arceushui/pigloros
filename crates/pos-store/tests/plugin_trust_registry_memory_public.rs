@@ -44,7 +44,10 @@ mod erased_activation {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                &release_one().release_proof()?,
+                (
+                    &release_one().release_proof()?,
+                    &release_one().content_proof()?
+                ),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),
@@ -53,7 +56,10 @@ mod erased_activation {
         assert_eq!(store.retained_policy_state("scope")?, before_policy);
         assert_eq!(store.ledger("scope")?, before_ledger);
         assert_eq!(store.active_release("scope", "plugin-a")?, None);
-        assert_eq!(store.retained_release_decision("scope", [0x01; 32])?, None);
+        assert_eq!(
+            store.retained_release_decision("scope", release_one().pmf1_digest()?)?,
+            None
+        );
         Ok(())
     }
 }

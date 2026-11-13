@@ -12,6 +12,7 @@ use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::ValidatedPluginBundleContentV1;
 use pos_plugin_publisher::test_support::spy_registry::SpyRegistry;
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
@@ -27,6 +28,7 @@ type Registry<T> = Result<T, Reg>;
 pub struct Scripted<'a> {
     inner: &'a SpyRegistry,
     forced: Option<Reg>,
+    accepted: Option<CurrentReleaseEvaluationV1>,
     calls: AtomicUsize,
 }
 
@@ -37,6 +39,7 @@ impl<'a> Scripted<'a> {
         Self {
             inner,
             forced: None,
+            accepted: None,
             calls: AtomicUsize::new(0),
         }
     }
@@ -47,6 +50,18 @@ impl<'a> Scripted<'a> {
         Self {
             inner,
             forced: Some(error),
+            accepted: None,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Return an existing evaluation to model a historically admitted release.
+    #[must_use]
+    pub const fn accepting(inner: &'a SpyRegistry, accepted: CurrentReleaseEvaluationV1) -> Self {
+        Self {
+            inner,
+            forced: None,
+            accepted: Some(accepted),
             calls: AtomicUsize::new(0),
         }
     }
@@ -77,7 +92,10 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _projection: &ValidatedPluginManifestProjectionV1,
-        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        (_release_proof, _content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
@@ -101,7 +119,10 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _target: &ValidatedPluginManifestProjectionV1,
-        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        (_release_proof, _content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
@@ -144,6 +165,9 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         self.count();
         if let Some(error) = self.forced {
             return Err(error);
+        }
+        if let Some(accepted) = &self.accepted {
+            return Ok(accepted.clone());
         }
         self.inner.evaluate_current_release(
             anchor,
