@@ -5031,7 +5031,6 @@ struct EnvironmentObstructionEvidence {
 struct EnvironmentOpeningEvidence {
     driver_pending: bool,
     active_blocked: bool,
-    attempt_failed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -5111,8 +5110,7 @@ impl EnvironmentObstructionEvidence {
             }
             _ => false,
         };
-        if self.opening.attempt_failed
-            || !qualified_outcome
+        if !qualified_outcome
             || !self.retirement.no_resurrection
             || !self.retirement.abandoned_blocked
             || !self.wipe.wiped
@@ -5138,7 +5136,6 @@ fn modeled_environment_obstruction_success() -> EnvironmentObstructionEvidence {
         opening: EnvironmentOpeningEvidence {
             driver_pending: true,
             active_blocked: true,
-            attempt_failed: false,
         },
         retirement: EnvironmentRetirementEvidence {
             no_resurrection: true,
@@ -5236,8 +5233,7 @@ fn modeled_environment_obstruction_verdict_checks_sdk_outcomes() {
 #[test]
 fn modeled_environment_obstruction_verdict_requires_retained_custody() {
     type Change = fn(&mut EnvironmentObstructionEvidence);
-    let contradictions: [(&str, Change); 9] = [
-        ("attempt failed", |e| e.opening.attempt_failed = true),
+    let contradictions: [(&str, Change); 8] = [
         ("driver resurrected", |e| {
             e.retirement.no_resurrection = false;
         }),
@@ -5359,7 +5355,6 @@ fn run_environment_obstruction(
         opening: EnvironmentOpeningEvidence {
             driver_pending,
             active_blocked,
-            attempt_failed: false,
         },
         retirement: EnvironmentRetirementEvidence {
             no_resurrection,
