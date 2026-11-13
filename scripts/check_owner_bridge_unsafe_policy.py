@@ -910,7 +910,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "31d6ce4b86a3f3316828599a0bb6e72bd81fdf073c8d6f969c8026dc56c09eb7"
+    return hashlib.sha256(normalized).hexdigest() == "4d6bab8adbc14b220ece10903de68ec5ac0c9b94a7847c5d3b512379ef8b200e"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1187,7 +1187,9 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "e455365f08d79a80fdd9cc69c3a3e41e90f3a6d34b236e46b98fa5a7eee45ab1"),
+        ("src/ffi/session.rs", "inject_process_fault", "bdb0fd4bf5bb50b76ac5174f0c070cbeb469f58242d50adcb1670cd4340dddc6"),
+        ("src/ffi/session.rs", "fault_lifecycle_admitted", "3651ac17a6e219ee50f0c9afc70b85ade88b4d523c852c71d4a37d2559343d29"),
+        ("src/ffi/session.rs", "recordless_fault_admitted", "c14474a40ac77aff8e2b81c8a75e99dce639297cad8a1ec29770321b31e2aa14"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1539,7 +1541,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     complete_sources = {
         lib: "0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63",
         prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
-        prefix + "adapter/native_tests.rs": "a816745c20a3a63f13929c7d172f8a38435ee5d984e0a68c9cb6aedf5055ecdb",
+        prefix + "adapter/native_tests.rs": "5f1ddbd12093d300d1482f226b0d33be5f8e78880cabe698526a132abee06c6e",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "bb0cbe0ced177ac33833c89cffaa68f2e30ddd4af0e07e875c67283b6e9cb3e6",
     }
     for path, digest in complete_sources.items():
@@ -1603,20 +1605,20 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': 'dfbb90c082db2ae740681117de33344e068ab798cb9dd0b6bc05923b42af8b9a',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '46828ff25edf3810bae3c0890b81faf3aad8632a38150e0d465f5a00d628f16c',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '6fcd4e9d65e7fd1c08aafc78ddf2772b120378addcf252dbc253148b4a3f858d',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '1636121e22c73e504104a8e6cdd5ce2cd870042d43733e9a5d06b07fe73e247f',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '9eecf9c656fc640a0f3979d6681537ef7c0272c833070d9c1c3852139a0d01d4',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'bd6ce6cae654ee04b191e8486c0b173a6c7eb41b1e2dfc29d91f3e4f14d99cca',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_states.rs': '11d4d03049b7b8a9533eec881e19626939e9f11f034f8288cb50ba9ffc63bb48',
     'crates/pos-owner-bridge-windows/src/adapter/surface/controller_qualification.rs': 'fefd0b9c7ddb6f9eb0c8b67c74d4c4d8bf6090c7cb5c79484505e7af767806f8',
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '06c9c91606a4500a0ade936cb0b3292c14853128671c88df6e1781e7bbc61fe0',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '22458323cf7cbcce46eed498886d741c86d39bf5b4295fa8ae7b2582dd61146c',
     'crates/pos-owner-bridge-windows/src/ffi/process_fault/candidate_tests.rs': '29ea47f5ebe24db94d0d8104b2bb13e8338743c7411db543f00cd350d2fd22df',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'e67443515d2c15e86aeaf7708d020264a0a23b3cc125fe2501575bcd7d529176',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'cf9f1cb7a28dea1bce36c1c939bd0f901177e3f84dc0b020d450c43d2b4359e7',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '71f6f8d17899bb398948fada325cb478cd7e71e532c38ac305f83dc686a0ddf9',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'cbf00676ab0b7589051f9a6db3502ab240c8e0177e9cd0efb3f916dfcbdcaf6e',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': '4b8d0d6988f0d20b4238182d7d1b638f51bef11467fdd47fd502b70bc2a0ee5c',
     'crates/pos-owner-bridge-windows/src/lib.rs': '0d395f5c6d154bcd9023f195e7891c9c464936b6e50a4167853853caf3196b63',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '88fbe08686eba330d9b3624bdb1ed5406efe331f5caabc67babf74b3ef98ae0e',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': 'a816745c20a3a63f13929c7d172f8a38435ee5d984e0a68c9cb6aedf5055ecdb',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '5f1ddbd12093d300d1482f226b0d33be5f8e78880cabe698526a132abee06c6e',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',
     'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '63f7dd99a0acd42cf9d7397b87dcadac042bbda0d9f3b59a393562d3424cff98',
     'crates/pos-owner-bridge-windows/src/ffi/events/resource.rs': '45a67ad7beb6d2fd518428e95f3b83f951ef26b8eace0b31cae52ef940c8315c',

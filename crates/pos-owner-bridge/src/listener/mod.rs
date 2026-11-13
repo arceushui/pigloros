@@ -205,17 +205,23 @@ impl SlotGuard {
             accepted: false,
         })
     }
-}
 
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        #[cfg(feature = "test-support")]
+    /// Stop counting an accepted connection as being handled.
+    #[cfg(feature = "test-support")]
+    fn finish_handling(&self) {
         if self.accepted {
             self.shared
                 .observations
                 .handling
                 .fetch_sub(1, Ordering::SeqCst);
         }
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        #[cfg(feature = "test-support")]
+        self.finish_handling();
         self.shared.release();
     }
 }
