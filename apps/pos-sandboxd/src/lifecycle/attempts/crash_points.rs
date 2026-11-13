@@ -468,6 +468,7 @@ mod cases {
                             error: ExecuteError::HostTimeout,
                             unit: UnitState::Unknown,
                             cgroup: None,
+                            evidence: None,
                         })
                     }
                     Err(error) => {
@@ -475,6 +476,7 @@ mod cases {
                             error,
                             unit: UnitState::NotStarted,
                             cgroup: None,
+                            evidence: None,
                         })
                     }
                 };
@@ -494,17 +496,22 @@ mod cases {
                     cgroup,
                     ending,
                     network: NetworkEvidence::None,
+                    evidence: crate::ResourceEvidence::new(
+                        None,
+                        crate::ReleaseOutcome::new(None, None, None),
+                    ),
                 })
             }
         }
 
-        fn finish(
-            &self,
+        fn finish<'a>(
+            &'a self,
+            _progress: &'a mut AttemptProgress<()>,
             directory: PreparedAttemptDirectory,
             cgroup: Option<BoundAttemptCgroup>,
             root: Option<CrashRoot>,
             deadlines: AttemptCleanupDeadlines,
-        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
+        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
         {
             if self.world.frozen() {
                 // A crashed process stops and removes nothing.

@@ -57,13 +57,14 @@ use tokio::time::Instant;
 use super::{finish_with, RootRelease};
 use crate::{
     AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError, AttemptEnding,
-    AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError, CancelSignal, CheckedRoot,
-    CommittedPlannedAttempt, CompletedAttemptCleanup, ExecuteError, ExecuteFailure, ExecuteJob,
-    ExecutionOwnership, ImageActivationError, LaunchBarrier, LocalNetworkPort, ModePlan,
-    NetworkEvidence, PlannedAttemptIntent, PreparedAttemptDirectory, ReconciledRestart,
-    RecordedRoot, RecoveredAttemptIntent, StagingLedger, SystemdAttemptRegistry,
-    SystemdAttemptRegistryError, SystemdTransientUnitTransport, SystemdVerifiedStart,
-    TransientServiceUnitName, UnitState, VerifiedRootMount, VerifiedStagedInput,
+    AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError, BoundAttemptCgroup,
+    CancelSignal, CheckedRoot, CommittedPlannedAttempt, CompletedAttemptCleanup, ExecuteError,
+    ExecuteFailure, ExecuteJob, ExecutionOwnership, ImageActivationError, LaunchBarrier,
+    LocalNetworkPort, ModePlan, NetworkEvidence, PlannedAttemptIntent, PreparedAttemptDirectory,
+    ReconciledRestart, RecordedRoot, RecoveredAttemptIntent, ReleaseOutcome, ReleaseResources,
+    ResourceEvidence, StagingLedger, SystemdAttemptRegistry, SystemdAttemptRegistryError,
+    SystemdTransientUnitTransport, SystemdVerifiedStart, TransientServiceUnitName, UnitState,
+    VerifiedRootMount, VerifiedStagedInput,
 };
 
 /// The most live attempts one snapshot carries (ADR-069 §4.1, RCC1).
@@ -161,16 +162,40 @@ pub enum AttemptProgress<S> {
         error: ExecuteError,
         /// What is known of the unit.
         unit: UnitState,
+        /// The resource evidence, once the launcher barrier existed: what it
+        /// established, the pre-release evidence once read, and the terminal
+        /// evidence of a unit whose cgroup was bound.
+        evidence: Option<ResourceEvidence>,
     },
     /// The execution ended.
     Executed {
-        /// The verified start and its requested-state readback.
+        /// The verified start: its requested-state readback and the requested
+        /// configuration (RQE1's inputs).
         started: S,
         /// How the released attempt ended.
         ending: AttemptEnding,
         /// The network evidence.
         network: NetworkEvidence,
+        /// The pre-release, release and terminal resource evidence.
+        evidence: ResourceEvidence,
     },
+}
+
+impl<S> AttemptProgress<S> {
+    /// The verified start, if known, and the resource evidence of an
+    /// execution that reached its launcher barrier.
+    fn reached(&mut self) -> Option<(Option<&S>, &mut ResourceEvidence)> {
+        match self {
+            Self::Executed {
+                started, evidence, ..
+            } => Some((Some(&*started), evidence)),
+            Self::Failed {
+                evidence: Some(evidence),
+                ..
+            } => Some((None, evidence)),
+            _ => None,
+        }
+    }
 }
 
 /// The terminal cleanup of an ended attempt.
@@ -356,7 +381,8 @@ impl AdmittedInput for VerifiedStagedInput {
 type Recheck<'a> = &'a (dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Sync);
 
 /// The result of one execution step.
-type Executed<S, C> = Result<AttemptExecution<S, C>, ExecuteFailure<C>>;
+type Executed<S, C> =
+    Result<AttemptExecution<S, C, ResourceEvidence>, ExecuteFailure<C, ResourceEvidence>>;
 
 /// The execution and terminal cleanup of one attempt, behind one port.
 trait AttemptSteps<I: AdmittedInput>: Sync {
@@ -376,14 +402,16 @@ trait AttemptSteps<I: AdmittedInput>: Sync {
         cancel: CancelSignal,
     ) -> impl Future<Output = Executed<Self::Started, Self::Cgroup>> + Send + 'a;
 
-    /// Finish the attempt's terminal cleanup within `deadlines`.
-    fn finish(
-        &self,
+    /// Read the terminal evidence of `progress`, then finish the attempt's
+    /// terminal cleanup within `deadlines`.
+    fn finish<'a>(
+        &'a self,
+        progress: &'a mut AttemptProgress<Self::Started>,
         directory: PreparedAttemptDirectory,
         cgroup: Option<Self::Cgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_;
+    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a;
 }
 
 /// What one production execution needs beyond the admission.
@@ -427,7 +455,7 @@ where
     I: AdmittedInput,
     N: LocalNetworkPort + Sync,
     F: FnOnce(&AdmittedAttempt) -> Result<B, E> + Send,
-    B: LaunchBarrier + Send + 'static,
+    B: LaunchBarrier<Evidence = ReleaseOutcome> + Send + 'static,
     E: Error + Send + Sync + 'static,
 {
     type Launch = AttemptLaunch<F>;
@@ -452,27 +480,86 @@ where
         async move {
             match barrier {
                 Ok(mut barrier) => {
-                    crate::execute(self.transport, &mut barrier, self.network, job, recheck).await
+                    let executed =
+                        crate::execute(self.transport, &mut barrier, self.network, job, recheck)
+                            .await;
+                    with_release(executed, barrier.evidence())
                 }
                 Err(error) => Err(ExecuteFailure {
                     error: ExecuteError::Barrier(Box::new(error)),
                     unit: UnitState::NotStarted,
                     cgroup: None,
+                    evidence: None,
                 }),
             }
         }
     }
 
-    fn finish(
-        &self,
+    fn finish<'a>(
+        &'a self,
+        progress: &'a mut AttemptProgress<SystemdVerifiedStart>,
         directory: PreparedAttemptDirectory,
         cgroup: Option<crate::BoundAttemptCgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
+    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
     {
-        finish_with(self.transport, directory, cgroup, root, deadlines)
+        async move {
+            let unit = directory.intent().unit_name().clone();
+            let settle_by = deadlines.shutdown().grace();
+            conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
+            finish_with(self.transport, directory, cgroup, root, deadlines).await
+        }
     }
+}
+
+/// The production execution's result with what its launcher barrier
+/// established.
+fn with_release<S, C>(
+    executed: Result<AttemptExecution<S, C, ReleaseResources>, ExecuteFailure<C, ReleaseResources>>,
+    release: ReleaseOutcome,
+) -> Executed<S, C> {
+    match executed {
+        Ok(execution) => Ok(AttemptExecution {
+            attempt_id: execution.attempt_id,
+            started: execution.started,
+            cgroup: execution.cgroup,
+            ending: execution.ending,
+            network: execution.network,
+            evidence: ResourceEvidence::new(Some(execution.evidence), release),
+        }),
+        Err(failure) => Err(ExecuteFailure {
+            error: failure.error,
+            unit: failure.unit,
+            cgroup: failure.cgroup,
+            evidence: Some(ResourceEvidence::new(failure.evidence, release)),
+        }),
+    }
+}
+
+/// Read the terminal evidence of a pinned unit, before its teardown.
+///
+/// Only a unit whose cgroup was bound was pinned: `RefUnit` precedes the
+/// binding. Its result, counters and `/work` usage are read, then its pin is
+/// released, so the teardown's absence wait can see it unloaded.
+async fn conclude(
+    transport: &SystemdTransientUnitTransport,
+    progress: &mut AttemptProgress<SystemdVerifiedStart>,
+    unit: &TransientServiceUnitName,
+    cgroup: Option<&BoundAttemptCgroup>,
+    settle_by: Instant,
+) {
+    let Some((started, evidence)) = progress.reached() else {
+        return;
+    };
+    let Some(cgroup) = cgroup else {
+        return;
+    };
+    let work = evidence.release().work();
+    let terminal = transport
+        .conclude(unit, started, cgroup, work, settle_by)
+        .await;
+    evidence.conclude(terminal);
 }
 
 /// What an attempt's run shares with cancellation and the recovery snapshot.
@@ -1175,7 +1262,7 @@ impl OwnedAttempt<'_> {
     where
         N: LocalNetworkPort + Sync,
         F: FnOnce(&AdmittedAttempt) -> Result<B, E> + Send,
-        B: LaunchBarrier + Send + 'static,
+        B: LaunchBarrier<Evidence = ReleaseOutcome> + Send + 'static,
         E: Error + Send + Sync + 'static,
     {
         self.run_with(steps, launch, budget).await
@@ -1252,7 +1339,16 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
         Ok(attempt) => attempt,
         Err(error) => {
             let unit = UnitState::NotStarted;
-            return (AttemptProgress::Failed { error, unit }, None, None);
+            let evidence = None;
+            return (
+                AttemptProgress::Failed {
+                    error,
+                    unit,
+                    evidence,
+                },
+                None,
+                None,
+            );
         }
     };
     let root = match input.activate(directory).await {
@@ -1267,6 +1363,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 started: execution.started,
                 ending: execution.ending,
                 network: execution.network,
+                evidence: execution.evidence,
             },
             Some(execution.cgroup),
         ),
@@ -1274,6 +1371,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
             AttemptProgress::Failed {
                 error: failure.error,
                 unit: failure.unit,
+                evidence: failure.evidence,
             },
             failure.cgroup,
         ),
@@ -1295,14 +1393,14 @@ async fn run_prepared<I: AdmittedInput, S: AttemptSteps<I>>(
     cancel: CancelSignal,
     budget: CleanupBudget,
 ) -> Progressed<S::Started> {
-    let (progress, cgroup, root) = if cancel.is_requested() {
+    let (mut progress, cgroup, root) = if cancel.is_requested() {
         (AttemptProgress::CancelledBeforeActivation, None, None)
     } else {
         activate_and_execute(steps, launch, input, &directory, cancel).await
     };
     let deadlines = budget.deadlines(Instant::now());
     let cleanup = steps
-        .finish(directory, cgroup, root, deadlines)
+        .finish(&mut progress, directory, cgroup, root, deadlines)
         .await
         .map_err(AttemptLifecycleError::from);
     (progress, cleanup)

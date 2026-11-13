@@ -642,6 +642,7 @@ mod tests {
                 SystemdManagerReadbackOnlyProperty::RootImagePolicy,
                 "",
             ),
+            requested: Vec::new(),
         })
     }
 

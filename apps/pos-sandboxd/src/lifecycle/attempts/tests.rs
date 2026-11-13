@@ -287,12 +287,14 @@ mod cases {
                         error,
                         unit: UnitState::NotStarted,
                         cgroup: None,
+                        evidence: None,
                     });
                 }
                 let cgroup = lock(&self.cgroup).take().ok_or_else(|| ExecuteFailure {
                     error: ExecuteError::HostTimeout,
                     unit: UnitState::Unknown,
                     cgroup: None,
+                    evidence: None,
                 })?;
                 let bound = if self.behaviour == Behaviour::Substitutes {
                     (cgroup.identity().0, cgroup.identity().1 + 1)
@@ -312,6 +314,7 @@ mod cases {
                             error: ExecuteError::HostTimeout,
                             unit: UnitState::Killed,
                             cgroup: Some(cgroup),
+                            evidence: None,
                         })
                     }
                     Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
@@ -322,17 +325,22 @@ mod cases {
                     cgroup,
                     ending,
                     network: NetworkEvidence::None,
+                    evidence: crate::ResourceEvidence::new(
+                        None,
+                        crate::ReleaseOutcome::new(None, None, None),
+                    ),
                 })
             }
         }
 
-        fn finish(
-            &self,
+        fn finish<'a>(
+            &'a self,
+            _progress: &'a mut AttemptProgress<()>,
             directory: PreparedAttemptDirectory,
             cgroup: Option<BoundAttemptCgroup>,
             root: Option<FakeRoot>,
             deadlines: AttemptCleanupDeadlines,
-        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + '_
+        ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
         {
             let cleanup = finish_with(self.transport, directory, cgroup, root, deadlines);
             async move {
@@ -708,7 +716,8 @@ mod cases {
             ended.progress(),
             AttemptProgress::Failed {
                 error: ExecuteError::AttemptAlreadyClaimed,
-                unit: UnitState::NotStarted
+                unit: UnitState::NotStarted,
+                ..
             }
         ));
         cleaned(&ended)?;
@@ -964,7 +973,8 @@ mod cases {
             ended.progress(),
             AttemptProgress::Failed {
                 error: ExecuteError::HostTimeout,
-                unit: UnitState::Killed
+                unit: UnitState::Killed,
+                ..
             }
         ));
         cleaned(&ended)?;
@@ -984,7 +994,8 @@ mod cases {
             ended.progress(),
             AttemptProgress::Failed {
                 error: ExecuteError::DirectoryIdentity,
-                unit: UnitState::NotStarted
+                unit: UnitState::NotStarted,
+                ..
             }
         ));
         cleaned(&ended)?;
@@ -1184,7 +1195,8 @@ mod cases {
             ended.progress(),
             AttemptProgress::Failed {
                 error: ExecuteError::AttemptAlreadyClaimed,
-                unit: UnitState::NotStarted
+                unit: UnitState::NotStarted,
+                ..
             }
         ));
         cleaned(&ended)?;
@@ -1421,6 +1433,7 @@ mod cases {
 
         impl LaunchBarrier for OpenBarrier {
             type Error = Refused;
+            type Evidence = crate::ReleaseOutcome;
 
             fn prepare(
                 &mut self,
@@ -1435,8 +1448,13 @@ mod cases {
             fn release(
                 &mut self,
                 _attempt: &ActiveAttempt,
+                _cgroup: crate::CgroupView<'_>,
             ) -> impl Future<Output = Result<(), Refused>> + Send {
                 std::future::ready(Ok(()))
+            }
+
+            fn evidence(&mut self) -> crate::ReleaseOutcome {
+                crate::ReleaseOutcome::new(None, None, None)
             }
         }
 
@@ -1472,7 +1490,8 @@ mod cases {
                 ended.progress(),
                 AttemptProgress::Failed {
                     error: ExecuteError::Barrier(_),
-                    unit: UnitState::NotStarted
+                    unit: UnitState::NotStarted,
+                    ..
                 }
             ));
             cleaned(&ended)?;
@@ -1564,6 +1583,181 @@ mod cases {
                 refused,
                 Err(pos_reference::provider_admission::execution::StagingError::CleanupFailed)
             ));
+            Ok(())
+        }
+    }
+
+    /// The resource evidence the lifecycle carries and completes before
+    /// teardown (ADR-069 R9 §4.6.6 and §4.6.7).
+    mod evidence {
+        use super::*;
+        use crate::{ReleaseOutcome, ResourceEvidence, TerminalServiceError};
+
+        fn unreleased() -> ResourceEvidence {
+            ResourceEvidence::new(None, ReleaseOutcome::new(None, None, None))
+        }
+
+        #[test]
+        fn a_release_outcome_joins_both_execution_results() {
+            let executed: Result<AttemptExecution<(), (), ReleaseResources>, _> =
+                Err(ExecuteFailure {
+                    error: ExecuteError::HostTimeout,
+                    unit: UnitState::Killed,
+                    cgroup: Some(()),
+                    evidence: None,
+                });
+            let joined = with_release(executed, ReleaseOutcome::new(Some([3; 32]), None, None));
+            let failure = joined.err();
+            let evidence = failure
+                .as_ref()
+                .and_then(|failure| failure.evidence.as_ref());
+            assert!(evidence.is_some_and(|evidence| {
+                evidence.resources().is_none()
+                    && evidence.release().ready1_digest() == Some([3; 32])
+                    && evidence.terminal().is_none()
+            }));
+        }
+
+        #[tokio::test]
+        async fn an_execution_keeps_its_pre_release_evidence_with_the_outcome() -> TestResult {
+            let fixture = manager(1).await?;
+            let directory = fixture.cgroup_directory();
+            for (name, bytes) in [
+                ("memory.events.local", "max 0\noom_kill 0\n"),
+                ("memory.swap.events", "max 0\n"),
+                ("pids.events.local", "max 0\n"),
+                ("cpu.stat", "nr_throttled 0\nthrottled_usec 0\n"),
+                ("memory.max", "max\n"),
+                ("memory.swap.max", "0\n"),
+                ("pids.max", "64\n"),
+                ("cpu.max", "50000 100000\n"),
+            ] {
+                fs::write(directory.join(name), bytes)?;
+            }
+            let resources = ReleaseResources::new(
+                5,
+                fixture.bound.capture_limit_events()?,
+                fixture.bound.read_effective_limits()?,
+            );
+            let executed: Result<_, ExecuteFailure<(), ReleaseResources>> = Ok(AttemptExecution {
+                attempt_id: [1; 16],
+                started: (),
+                cgroup: (),
+                ending: AttemptEnding::CgroupEmpty,
+                network: NetworkEvidence::None,
+                evidence: resources,
+            });
+            let joined = with_release(executed, ReleaseOutcome::new(None, None, None))
+                .map_err(|failure| failure.error)?;
+            let kept = joined.evidence.resources().ok_or("no resources")?;
+            assert_eq!(kept.activated_monotonic_ns(), 5);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn a_unit_whose_cgroup_was_bound_is_concluded_before_teardown() -> TestResult {
+            let fixture = manager(1).await?;
+            let started = SystemdVerifiedStart::for_test(
+                TransientServiceUnitName::from_attempt_id([1; 16])?,
+                "/org/freedesktop/systemd1/unit/attempt",
+            )?;
+            assert!(started.requested_configuration().is_empty());
+            let mut progress = AttemptProgress::Executed {
+                started,
+                ending: AttemptEnding::CgroupEmpty,
+                network: NetworkEvidence::None,
+                evidence: unreleased(),
+            };
+            let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
+            let settle_by = Instant::now() + Duration::from_millis(100);
+            conclude(
+                &fixture.transport,
+                &mut progress,
+                &unit,
+                Some(&fixture.bound),
+                settle_by,
+            )
+            .await;
+            let AttemptProgress::Executed { evidence, .. } = progress else {
+                return Err("the progress changed".into());
+            };
+            let terminal = evidence.terminal().ok_or("not concluded")?;
+            // The fake manager knows no result or pin; both are recorded as
+            // missing, never invented.
+            assert!(terminal.service().is_err());
+            assert!(terminal.unpinned().is_err());
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn a_failure_after_the_bind_is_concluded_without_a_result() -> TestResult {
+            let fixture = manager(1).await?;
+            let mut progress = AttemptProgress::<SystemdVerifiedStart>::Failed {
+                error: ExecuteError::HostTimeout,
+                unit: UnitState::Killed,
+                evidence: Some(unreleased()),
+            };
+            let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
+            conclude(
+                &fixture.transport,
+                &mut progress,
+                &unit,
+                Some(&fixture.bound),
+                Instant::now(),
+            )
+            .await;
+            let AttemptProgress::Failed {
+                evidence: Some(evidence),
+                ..
+            } = progress
+            else {
+                return Err("the progress changed".into());
+            };
+            let terminal = evidence.terminal().ok_or("not concluded")?;
+            assert!(matches!(
+                terminal.service(),
+                Err(TerminalServiceError::Unstarted)
+            ));
+            Ok(())
+        }
+
+        /// An unpinned unit: no cgroup was bound, so `RefUnit` never ran and
+        /// nothing is read or released.
+        #[tokio::test]
+        async fn an_unpinned_unit_is_neither_read_nor_released() -> TestResult {
+            let fixture = manager(1).await?;
+            let calls = fixture.calls();
+            let mut progress = AttemptProgress::<SystemdVerifiedStart>::Failed {
+                error: ExecuteError::HostTimeout,
+                unit: UnitState::Unknown,
+                evidence: Some(unreleased()),
+            };
+            let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
+            conclude(
+                &fixture.transport,
+                &mut progress,
+                &unit,
+                None,
+                Instant::now(),
+            )
+            .await;
+            assert!(matches!(
+                progress,
+                AttemptProgress::Failed {
+                    evidence: Some(ref evidence),
+                    ..
+                } if evidence.terminal().is_none()
+            ));
+            let mut progress = AttemptProgress::<SystemdVerifiedStart>::NotPrepared;
+            conclude(
+                &fixture.transport,
+                &mut progress,
+                &unit,
+                Some(&fixture.bound),
+                Instant::now(),
+            )
+            .await;
+            assert_eq!(calls.count()?, 0);
             Ok(())
         }
     }

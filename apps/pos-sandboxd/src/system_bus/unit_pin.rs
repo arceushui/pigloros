@@ -1,0 +1,162 @@
+//! The attempt unit's pin and the evidence read around its release and exit
+//! (ADR-069 R9 §4.6.6, §4.6.7 and the watchdog anchor of §4.6.5).
+//!
+//! With systemd's default garbage collection a successful transient service
+//! is unloaded once unreferenced, taking its `Result`, `ExecMainCode` and
+//! `ExecMainStatus` with it. The provider therefore references the unit with
+//! `RefUnit` before its cgroup is bound, reads the result after exit, and
+//! releases it with `UnrefUnit` before teardown. All three calls, and the
+//! activation-time read, go over the transport's single retained
+//! connection: systemd tracks the reference by that client's bus name, so a
+//! lost connection drops the pin and the result is then missing evidence,
+//! never read again elsewhere.
+
+use std::fs::File;
+use std::future::Future;
+use std::time::Duration;
+
+use tokio::time::Instant;
+use zbus::proxy::CacheProperties;
+use zbus_systemd::systemd1::{ManagerProxy, UnitProxy};
+
+use super::{
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdUnitResultError,
+    SystemdUnitResultObservation, SystemdVerifiedStart, TransientServiceUnitName,
+};
+use crate::{
+    BoundAttemptCgroup, ReleaseResources, TerminalResources, TerminalServiceError, WorkUsage,
+};
+
+const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
+/// How often an unsettled unit's result is read again.
+const SETTLE_POLL: Duration = Duration::from_millis(10);
+
+type TransportResult<T> = Result<T, SystemdTransientUnitTransportError>;
+
+impl SystemdTransientUnitTransport {
+    /// Reference the unit, then run `bind`. A failed `bind` releases the
+    /// reference again, best effort: nothing will read the unit's result.
+    pub(crate) async fn pinned<T>(
+        &self,
+        unit: &TransientServiceUnitName,
+        bind: impl Future<Output = TransportResult<T>>,
+    ) -> TransportResult<T> {
+        pin_with(ManagerProxy::new(&self.connection).await, unit).await?;
+        let bound = bind.await;
+        if bound.is_err() {
+            self.unpin(unit).await.ok();
+        }
+        bound
+    }
+
+    /// Release the unit's reference.
+    pub(crate) async fn unpin(&self, unit: &TransientServiceUnitName) -> TransportResult<()> {
+        unpin_with(ManagerProxy::new(&self.connection).await, unit).await
+    }
+
+    /// The unit's activation time, then the bound cgroup's baseline counters
+    /// and effective kernel limits.
+    pub(crate) async fn release_resources(
+        &self,
+        started: &SystemdVerifiedStart,
+        cgroup: &BoundAttemptCgroup,
+    ) -> TransportResult<(u64, ReleaseResources)> {
+        let unit = UnitProxy::builder(&self.connection)
+            .path(started.unit_path.clone())
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await;
+        let activated = activated_with(unit).await?;
+        let baseline = cgroup.capture_limit_events()?;
+        let effective = cgroup.read_effective_limits()?;
+        Ok((
+            activated,
+            ReleaseResources::new(activated, baseline, effective),
+        ))
+    }
+
+    /// The terminal evidence of the exited `unit`, before teardown: its
+    /// cgroup counters, its `/work` usage, its settled result and the release
+    /// of its pin, in that order.
+    ///
+    /// `started` is `None` when the execution failed before a verified start
+    /// reached the lifecycle; the result is then missing. An unsettled result
+    /// is read again until `settle_by`.
+    pub(crate) async fn conclude(
+        &self,
+        unit: &TransientServiceUnitName,
+        started: Option<&SystemdVerifiedStart>,
+        cgroup: &BoundAttemptCgroup,
+        work: Option<&File>,
+        settle_by: Instant,
+    ) -> TerminalResources {
+        let terminal = cgroup.capture_limit_events();
+        let work_after = work.map(WorkUsage::observe);
+        let service = match started {
+            Some(started) => self.settled_result(started, settle_by).await,
+            None => Err(TerminalServiceError::Unstarted),
+        };
+        let unpinned = self.unpin(unit).await;
+        TerminalResources::new(terminal, work_after, service, unpinned)
+    }
+
+    /// The unit's result once it settled, or the last failure at `settle_by`.
+    async fn settled_result(
+        &self,
+        started: &SystemdVerifiedStart,
+        settle_by: Instant,
+    ) -> Result<SystemdUnitResultObservation, TerminalServiceError> {
+        loop {
+            let read = self.read_unit_result(started).await;
+            let unsettled = matches!(read, Err(SystemdUnitResultError::NotSettled { .. }));
+            if !unsettled || Instant::now() >= settle_by {
+                return read.map_err(TerminalServiceError::from);
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    }
+}
+
+async fn pin_with(
+    proxy: zbus::Result<ManagerProxy<'_>>,
+    unit: &TransientServiceUnitName,
+) -> TransportResult<()> {
+    let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    proxy
+        .ref_unit(unit.as_str().to_owned())
+        .await
+        .map_err(SystemdTransientUnitTransportError::UnitRef)
+}
+
+async fn unpin_with(
+    proxy: zbus::Result<ManagerProxy<'_>>,
+    unit: &TransientServiceUnitName,
+) -> TransportResult<()> {
+    let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    proxy
+        .unref_unit(unit.as_str().to_owned())
+        .await
+        .map_err(SystemdTransientUnitTransportError::UnitUnref)
+}
+
+/// `ActiveEnterTimestampMonotonic` in nanoseconds; zero is no activation.
+async fn activated_with(unit: zbus::Result<UnitProxy<'_>>) -> TransportResult<u64> {
+    let unit = unit.map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+    let microseconds = unit
+        .active_enter_timestamp_monotonic()
+        .await
+        .map_err(
+            |source| SystemdTransientUnitTransportError::PropertyReadback {
+                property: "ActiveEnterTimestampMonotonic",
+                source: Box::new(source),
+            },
+        )?;
+    microseconds
+        .checked_mul(NANOSECONDS_PER_MICROSECOND)
+        .filter(|&nanoseconds| nanoseconds != 0)
+        .ok_or(SystemdTransientUnitTransportError::ActivationUnset)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
