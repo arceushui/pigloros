@@ -109,7 +109,9 @@ impl SystemdTransientUnitTransport {
         };
         let mut read = self.read_unit_result(started, invocation).await;
         while matches!(read, Err(SystemdUnitResultError::NotSettled { .. }))
-            && Instant::now() < settle_by
+            && !settle_by
+                .saturating_duration_since(Instant::now())
+                .is_zero()
         {
             tokio::time::sleep(SETTLE_POLL).await;
             read = self.read_unit_result(started, invocation).await;
