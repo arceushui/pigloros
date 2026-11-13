@@ -1393,6 +1393,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_current_pin_decides_alongside_an_admitted_operation() -> TestResult {
+        let served = served_store(&served_provision()?)?;
+        let actor = actor()?;
+        let admitted = served
+            .gateway
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
+            .await?;
+        // The store is not ahead, so the next decision takes no write guard
+        // and never queues behind the admitted operation.
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            served.gateway.authorize_operation(
+                GatewayOperationV1::CREATE_TIMELINE,
+                Some(actor),
+                None,
+                None,
+            ),
+        )
+        .await??;
+        drop(next);
+        drop(admitted);
+        served.gateway.shutdown().await?;
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_an_admitted_mutation() -> TestResult {
         let served = served_store(&served_provision()?)?;
         let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
