@@ -1165,9 +1165,11 @@ fn unreadable_sqlite_registry_is_unavailable_rather_than_inactive() -> TestResul
         Some(Refusal::RegistryUnavailable)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
+    // The store's own Timeline read fails closed on its erasure containment
+    // when the registry is unreadable, so nothing is decrypted or delivered.
     assert_eq!(
         read(&mut store, &fx.keys, fx.timeline),
-        refused(SubjectFieldOwnerReadErrorV1::ReadUnavailableBeforeDelivery)
+        refused(SubjectFieldOwnerReadErrorV1::ErasureFenced)
     );
     Ok(())
 }
