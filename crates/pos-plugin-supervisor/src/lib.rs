@@ -44,6 +44,9 @@
 //! The [`fallback`] module is the ADR-119 composition boundary transaction: the host-level
 //! orchestration that activates an owner-declared fallback at a Tick Boundary (#667).
 //!
+//! The [`host_composition`] module holds the ADR-133 community lifecycle facade,
+//! [`CommunityLifecycleHostV1`], which coordinates Store persistence and Runtime authority.
+//!
 //! [`CommunityPluginSubjectOutcomeV1`] is the stable per-Plugin outcome record of a host pass
 //! for the #194 subject adapter, which owns the EAI1/EAO1 wire code (#585). See the README.
 //!
@@ -58,6 +61,7 @@
 pub mod adapter;
 pub mod fallback;
 pub mod frame;
+pub mod host_composition;
 pub mod ipc;
 pub mod launch;
 mod member;
@@ -94,6 +98,10 @@ pub use fallback::{
     COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
+pub use host_composition::{
+    CommunityBootstrapRequestV1, CommunityDomainOpenedV1, CommunityInstalledCatalogueV1,
+    CommunityLifecycleHostV1, MemoryCommunityDomainV1,
+};
 pub use ipc::{
     WorkerCallV1, WorkerEnvelopeErrorV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1,
 };

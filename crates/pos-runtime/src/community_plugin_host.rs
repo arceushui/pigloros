@@ -23,6 +23,7 @@ mod gate;
 mod host;
 #[cfg(target_os = "linux")]
 mod install;
+mod metadata_authority;
 mod negotiation;
 mod profile;
 #[cfg(target_os = "linux")]
@@ -63,6 +64,10 @@ pub use install::{
     host_error_for_install_v1, host_error_for_rollback_v1, install_community_release_v1,
     rollback_community_release_v1, ActivationTargetV1, CommunityInstallErrorV1,
     CommunityInstallRequestV1, CommunityRollbackErrorV1,
+};
+pub use metadata_authority::{
+    metadata_resource, CommunityMetadataActionV1, CommunityMetadataAuthorityInputV1,
+    CommunityMetadataAuthorityV1, CommunityMetadataPurposeV1, CommunityMetadataUseV1,
 };
 #[cfg(target_os = "linux")]
 pub use negotiation::negotiate_community_plugin_v1;

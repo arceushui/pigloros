@@ -43,7 +43,7 @@ impl CommunityArtifactPurposeV1 {
         }
     }
 
-    const fn admits(self, kind: CommunityArtifactKindV1) -> bool {
+    pub(super) const fn admits(self, kind: CommunityArtifactKindV1) -> bool {
         use CommunityArtifactKindV1 as K;
         matches!(
             (self, kind),
@@ -300,7 +300,7 @@ impl<'a> CommunityEncryptedEnvelopeV1<'a> {
     }
 }
 
-fn validate_operation(
+pub(super) fn validate_operation(
     operation: CommunityArtifactOperationV1,
     timeline: TimelineId,
     generation: [u8; 16],
@@ -319,7 +319,7 @@ fn validate_operation(
     }
 }
 
-fn encode_operation(out: &mut Vec<u8>, operation: CommunityArtifactOperationV1) {
+pub(super) fn encode_operation(out: &mut Vec<u8>, operation: CommunityArtifactOperationV1) {
     match operation {
         CommunityArtifactOperationV1::Pass(key) => {
             out.push(0);
@@ -338,14 +338,29 @@ fn encode_operation(out: &mut Vec<u8>, operation: CommunityArtifactOperationV1) 
 }
 
 fn derive_owner(input: CommunityArtifactHeaderInputV1) -> Result<OwnerIdV1> {
+    derive_key_owner(
+        input.timeline,
+        input.generation,
+        input.purpose,
+        input.operation,
+    )
+}
+
+/// Derive the exact ADR-128 per-operation key owner spelling.
+pub(super) fn derive_key_owner(
+    timeline: TimelineId,
+    generation: [u8; 16],
+    purpose: CommunityArtifactPurposeV1,
+    operation: CommunityArtifactOperationV1,
+) -> Result<OwnerIdV1> {
     let mut text = Zeroizing::new(String::with_capacity(128));
     text.push_str("community:");
-    append_hex(&mut text, &input.timeline.inner().to_bytes());
+    append_hex(&mut text, &timeline.inner().to_bytes());
     text.push(':');
-    append_hex(&mut text, &input.generation);
+    append_hex(&mut text, &generation);
     text.push(':');
-    text.push(char::from(b'0' + input.purpose.code()));
-    match input.operation {
+    text.push(char::from(b'0' + purpose.code()));
+    match operation {
         CommunityArtifactOperationV1::Pass(key) => {
             text.push_str(":p:");
             append_hex(&mut text, &key.ordinal().to_be_bytes());
@@ -399,7 +414,7 @@ pub(super) fn read_kind(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifact
     })
 }
 
-fn read_operation(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactOperationV1> {
+pub(super) fn read_operation(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactOperationV1> {
     read_head(cursor, 0).and_then(|kind| {
         bounded_bytes(cursor, MAX_COMMUNITY_PASS_KEY_BYTES_V1).and_then(|bytes| match kind {
             0 => CommunityPassKeyV1::from_canonical_cbor(bytes)
