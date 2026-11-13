@@ -71,5 +71,9 @@ required-features = ["test-support"]
 name = "owner_store_interlock_public"
 required-features = ["test-support"]
 
+[[test]]
+name = "subject_data_consumer_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
