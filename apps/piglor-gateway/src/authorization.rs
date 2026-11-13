@@ -12,7 +12,8 @@ use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1,
-    AuthorizationDenialRecordV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
+    AuthorizationDenialEvidenceV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
     Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
@@ -26,9 +27,17 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 /// Denial records one Principal may cause per window before further denials
-/// are answered as `429 resource-limit-exceeded` without a store write.
+/// are answered as `429 resource-limit-exceeded` without their own record.
+///
+/// The bound is operational, never authoritative: a fixed one-minute window
+/// on the monotonic [`Instant`] clock, held in memory, so a burst straddling
+/// a window boundary can reach twice the bound and a restart resets every
+/// count. Every suppressed denial is still counted in one ADS1 marker per
+/// bound and window. With the single host-pinned Local Principal (owner
+/// decision D1 on #302) this per-Principal bound is effectively host-wide.
 pub const MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE: u32 = 60;
-/// Denial records the whole host may write per window.
+/// Denial records the whole host may write per window, under the same
+/// fixed-window, monotonic, reset-on-restart rules.
 pub const MAX_DENIAL_RECORDS_PER_MINUTE: u32 = 600;
 const DENIAL_RECORD_WINDOW: Duration = Duration::from_secs(60);
 
@@ -636,21 +645,49 @@ impl GatewayAuthorization {
     }
 
     /// Admit one more denial record under the per-Principal and host-wide
-    /// fixed-window bounds; `false` means the denial is answered as
-    /// `resource-limit-exceeded` and nothing is written.
-    pub(crate) fn admit_denial_record(&self, pending: &PendingAuthorityDenial) -> bool {
+    /// fixed-window bounds. A suppressed denial is answered as
+    /// `resource-limit-exceeded` without a record of its own and is counted
+    /// toward its window's suppression marker.
+    ///
+    /// An admitted denial is returned with the suppression markers of the
+    /// window it closed, if any; a suppressed one returns the time until its
+    /// window closes, for `Retry-After`.
+    pub(crate) fn admit_denial_record(
+        &self,
+        pending: PendingAuthorityDenial,
+    ) -> Result<DenialEvidenceBatch, Duration> {
         self.denial_budget
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .admit(&pending.principal, Instant::now())
+            .map(|suppressions| DenialEvidenceBatch {
+                suppressions,
+                denial: Some(pending),
+            })
     }
 
-    /// Durably record one pending denial in the authority store and return the
-    /// only value the Gateway answers as an authority denial.
+    /// Close the current denial-record window for a shutdown: its suppression
+    /// markers, if any, so the flood volume of an unfinished window is still
+    /// recorded once.
+    pub(crate) fn close_denial_window(&self) -> DenialEvidenceBatch {
+        DenialEvidenceBatch {
+            suppressions: self
+                .denial_budget
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .close(),
+            denial: None,
+        }
+    }
+
+    /// Durably record one batch of denial evidence in the authority store:
+    /// first the closed window's ADS1 markers, then the admitted denial's ADN1
+    /// record, each in its own committed transaction. Returns the only value
+    /// the Gateway answers as an authority denial when the batch holds one.
     ///
     /// The store is bound to this host's persistence identity first (an
-    /// idempotent rebind), then appends the ADN1 record in its own committed
-    /// transaction. Run it on the store worker, never under the commit fence.
+    /// idempotent rebind). Run it on the store worker, never under the commit
+    /// fence.
     ///
     /// # Errors
     /// Returns a closed persistence error when the store is bound to another
@@ -658,14 +695,31 @@ impl GatewayAuthorization {
     pub(crate) fn record_denial(
         &self,
         store: &mut dyn AuthorityPersistencePortV1,
-        pending: &PendingAuthorityDenial,
-    ) -> Result<RecordedAuthorityDenial, AuthorityPersistenceErrorV1> {
+        batch: &DenialEvidenceBatch,
+    ) -> Result<Option<RecordedAuthorityDenial>, AuthorityPersistenceErrorV1> {
         store
             .bind_authority_persistence(self.persistence.persistence_binding())
             .and_then(|()| {
-                store.record_authorization_denial(self.persistence.authorize_denial(pending.record))
+                batch.suppressions.iter().try_for_each(|marker| {
+                    store.record_authorization_denial(
+                        self.persistence
+                            .authorize_denial(AuthorizationDenialEvidenceV1::Suppressed(*marker)),
+                    )
+                })
             })
-            .map(|()| RecordedAuthorityDenial(pending.denial))
+            .and_then(|()| {
+                batch
+                    .denial
+                    .as_ref()
+                    .map(|pending| {
+                        store
+                            .record_authorization_denial(self.persistence.authorize_denial(
+                                AuthorizationDenialEvidenceV1::Denial(pending.record),
+                            ))
+                            .map(|()| RecordedAuthorityDenial(pending.denial))
+                    })
+                    .transpose()
+            })
     }
 
     /// Replace the pinned authority snapshot at a host-controlled fence.
@@ -812,36 +866,88 @@ const fn denial_of(
     }
 }
 
+/// Denial evidence awaiting its store write: the suppression markers of a
+/// closed window and at most one admitted denial.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenialEvidenceBatch {
+    suppressions: Vec<AuthorizationDenialSuppressionV1>,
+    denial: Option<PendingAuthorityDenial>,
+}
+
 /// A fixed-window bound on denial records (#1359): at most
 /// [`MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE`] per Principal and
 /// [`MAX_DENIAL_RECORDS_PER_MINUTE`] in total. A new window forgets every
 /// Principal, so the map never holds more entries than the host-wide bound.
+///
+/// Suppressed denials are counted per bound; the counts become one ADS1
+/// marker per bound when their window closes, which is always together with
+/// the first admitted denial of the next window or at shutdown, so a flood
+/// costs O(1) marker writes per window.
 #[derive(Debug, Default)]
 struct DenialRecordBudget {
     window_start: Option<Instant>,
     total: u32,
     per_principal: BTreeMap<PrincipalRefV1, u32>,
+    suppressed_by_principal: u64,
+    suppressed_by_host: u64,
 }
 
 impl DenialRecordBudget {
-    fn admit(&mut self, principal: &PrincipalRefV1, now: Instant) -> bool {
-        if self
+    fn admit(
+        &mut self,
+        principal: &PrincipalRefV1,
+        now: Instant,
+    ) -> Result<Vec<AuthorizationDenialSuppressionV1>, Duration> {
+        let closed = if self
             .window_start
             .is_none_or(|start| now.saturating_duration_since(start) >= DENIAL_RECORD_WINDOW)
         {
             self.window_start = Some(now);
             self.total = 0;
             self.per_principal.clear();
-        }
+            self.close()
+        } else {
+            Vec::new()
+        };
         let used = self.per_principal.get(principal).copied().unwrap_or(0);
-        let admitted = self.total < MAX_DENIAL_RECORDS_PER_MINUTE
-            && used < MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
-        if admitted {
-            self.total = self.total.saturating_add(1);
-            self.per_principal
-                .insert(principal.clone(), used.saturating_add(1));
+        if self.total >= MAX_DENIAL_RECORDS_PER_MINUTE {
+            self.suppressed_by_host = self.suppressed_by_host.saturating_add(1);
+            return Err(self.retry_after(now));
         }
-        admitted
+        if used >= MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
+            self.suppressed_by_principal = self.suppressed_by_principal.saturating_add(1);
+            return Err(self.retry_after(now));
+        }
+        self.total = self.total.saturating_add(1);
+        self.per_principal
+            .insert(principal.clone(), used.saturating_add(1));
+        Ok(closed)
+    }
+
+    /// The markers of the suppressed counts, which this resets.
+    fn close(&mut self) -> Vec<AuthorizationDenialSuppressionV1> {
+        let markers = [
+            (
+                AuthorizationDenialScopeV1::Principal,
+                self.suppressed_by_principal,
+            ),
+            (AuthorizationDenialScopeV1::Host, self.suppressed_by_host),
+        ]
+        .into_iter()
+        .filter_map(|(scope, suppressed)| {
+            AuthorizationDenialSuppressionV1::try_new(scope, suppressed)
+        })
+        .collect();
+        self.suppressed_by_principal = 0;
+        self.suppressed_by_host = 0;
+        markers
+    }
+
+    /// The time until the current window closes.
+    fn retry_after(&self, now: Instant) -> Duration {
+        self.window_start.map_or(DENIAL_RECORD_WINDOW, |start| {
+            DENIAL_RECORD_WINDOW.saturating_sub(now.saturating_duration_since(start))
+        })
     }
 }
 
@@ -1088,6 +1194,16 @@ mod tests {
             self.unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!("fixture error: {error:?}")))
             })
+        }
+    }
+
+    trait TestSome<T> {
+        fn test_some(self) -> T;
+    }
+
+    impl<T> TestSome<T> for Option<T> {
+        fn test_some(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected a value")))
         }
     }
 
@@ -1767,17 +1883,33 @@ mod tests {
         let mut request = action(&fixture);
         request.actor_entity_id = EntityId::new();
         let pending = denied(&fixture.authorization, request);
+        let record = pending.record;
+        let marker = AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Host, 4)
+            .test_some();
+        let batch = DenialEvidenceBatch {
+            suppressions: vec![marker],
+            denial: Some(pending),
+        };
 
         let mut store = pos_store::memory::MemoryStore::new();
         assert_eq!(
-            fixture.authorization.record_denial(&mut store, &pending),
-            Ok(RecordedAuthorityDenial(
+            fixture.authorization.record_denial(&mut store, &batch),
+            Ok(Some(RecordedAuthorityDenial(
                 GatewayAuthorityDenial::Unauthorized
-            ))
+            )))
         );
         assert_eq!(
             store.load_authorization_denials(0, 8).test_ok(),
-            vec![pending.record]
+            vec![
+                (1, AuthorizationDenialEvidenceV1::Suppressed(marker)),
+                (2, AuthorizationDenialEvidenceV1::Denial(record)),
+            ]
+        );
+        assert_eq!(
+            fixture
+                .authorization
+                .record_denial(&mut store, &fixture.authorization.close_denial_window()),
+            Ok(None)
         );
         assert_eq!(
             RecordedAuthorityDenial(GatewayAuthorityDenial::Revoked).denial(),
@@ -1794,7 +1926,7 @@ mod tests {
             )
             .test_ok();
         assert_eq!(
-            fixture.authorization.record_denial(&mut foreign, &pending),
+            fixture.authorization.record_denial(&mut foreign, &batch),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
         assert!(foreign
@@ -1928,35 +2060,78 @@ mod tests {
         let principal = |byte: u8| PrincipalRefV1::try_new([byte; 16], "gateway.test").test_ok();
         let mut budget = DenialRecordBudget::default();
         for _ in 0..MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
-            assert!(budget.admit(&principal(1), start));
+            assert_eq!(budget.admit(&principal(1), start), Ok(Vec::new()));
         }
-        assert!(!budget.admit(&principal(1), start));
-        assert!(budget.admit(&principal(2), start));
+        let later = start + Duration::from_secs(20);
+        for _ in 0..3 {
+            assert_eq!(
+                budget.admit(&principal(1), later),
+                Err(Duration::from_secs(40))
+            );
+        }
+        assert_eq!(budget.admit(&principal(2), later), Ok(Vec::new()));
 
-        // A new window forgets every Principal.
-        let later = start + DENIAL_RECORD_WINDOW;
-        assert!(budget.admit(&principal(1), later));
+        // The first admitted denial of the next window carries one marker
+        // with the previous window's suppressed count, and a new window
+        // forgets every Principal.
+        let next = start + DENIAL_RECORD_WINDOW;
+        assert_eq!(
+            budget.admit(&principal(1), next),
+            Ok(vec![AuthorizationDenialSuppressionV1::try_new(
+                AuthorizationDenialScopeV1::Principal,
+                3
+            )
+            .test_some()])
+        );
         assert_eq!(budget.per_principal.len(), 1);
+        assert!(budget.close().is_empty());
 
         let mut budget = DenialRecordBudget::default();
         let principals =
             MAX_DENIAL_RECORDS_PER_MINUTE / MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE;
         for byte in 0..principals {
             for _ in 0..MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
-                assert!(budget.admit(&principal(u8::try_from(byte).test_ok()), start));
+                assert!(budget
+                    .admit(&principal(u8::try_from(byte + 1).test_ok()), start)
+                    .is_ok());
             }
         }
-        assert!(!budget.admit(&principal(200), start));
+        assert_eq!(
+            budget.admit(&principal(200), start),
+            Err(DENIAL_RECORD_WINDOW)
+        );
         assert_eq!(budget.total, MAX_DENIAL_RECORDS_PER_MINUTE);
+        assert_eq!(
+            budget.close(),
+            vec![
+                AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Host, 1)
+                    .test_some()
+            ]
+        );
+        assert_eq!(
+            DenialRecordBudget::default().retry_after(start),
+            DENIAL_RECORD_WINDOW
+        );
 
         let fixture = fixture();
         let mut request = action(&fixture);
         request.actor_entity_id = EntityId::new();
         let pending = denied(&fixture.authorization, request);
         for _ in 0..MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
-            assert!(fixture.authorization.admit_denial_record(&pending));
+            assert!(fixture
+                .authorization
+                .admit_denial_record(pending.clone())
+                .is_ok());
         }
-        assert!(!fixture.authorization.admit_denial_record(&pending));
+        assert!(fixture.authorization.admit_denial_record(pending).is_err());
+        assert_eq!(
+            fixture.authorization.close_denial_window().suppressions,
+            vec![AuthorizationDenialSuppressionV1::try_new(
+                AuthorizationDenialScopeV1::Principal,
+                1
+            )
+            .test_some()]
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDenialRecordV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDenialEvidenceV1,
+    AuthorizationDenialRecordV1, AuthorizationDenialScopeV1, AuthorizationDenialSuppressionV1,
     CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
     CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
     ErasureRecoveryLimitsV1, Hash, Kind, PrincipalRefV1, ProposedAction, Seq, TimelineId, WallTime,
@@ -1167,10 +1168,24 @@ async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> Test
 }
 
 /// The ADN1 denial records a fresh process finds in the authority store.
-fn denials_after_restart(config: &StoreConfig) -> TestResult<Vec<AuthorizationDenialRecordV1>> {
+fn denials_after_restart(
+    config: &StoreConfig,
+) -> TestResult<Vec<(u64, AuthorizationDenialEvidenceV1)>> {
     Ok(host(config)?
         .command_sender()?
-        .with_scheduled_admission(|ports| ports.load_authorization_denials(0, 16))??)
+        .with_scheduled_admission(|ports| {
+            ports.load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)
+        })??)
+}
+
+/// The one ADN1 denial a log holds, or an error naming what it holds.
+fn only_denial(
+    records: &[(u64, AuthorizationDenialEvidenceV1)],
+) -> TestResult<AuthorizationDenialRecordV1> {
+    match records {
+        [(1, AuthorizationDenialEvidenceV1::Denial(record))] => Ok(*record),
+        other => Err(format!("expected exactly one denial record, got {other:?}").into()),
+    }
 }
 
 fn sqlite_config(directory: &tempfile::TempDir, name: &str) -> TestResult<StoreConfig> {
@@ -1243,14 +1258,13 @@ async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestR
 
     // The denial was committed in the authority store before the answer and
     // survives the restart.
-    let records = denials_after_restart(&config)?;
-    assert_eq!(records.len(), 1);
+    let record = only_denial(&denials_after_restart(&config)?)?;
     assert_eq!(
-        records[0].outcome(),
+        record.outcome(),
         pos_core::AuthorizationOutcomeV1::RevokedAtFence
     );
     assert_eq!(
-        records[0].error(),
+        record.error(),
         Some(pos_core::AuthorityErrorV1::RevokedAtFence)
     );
     Ok(())
@@ -1260,7 +1274,7 @@ async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestR
 /// restart and return the typed denial with the records the log still holds.
 async fn denied_with_durable_evidence(
     authorization: impl FnOnce(EntityId) -> GatewayAuthorization,
-) -> TestResult<(GatewayError, Vec<AuthorizationDenialRecordV1>)> {
+) -> TestResult<(GatewayError, Vec<(u64, AuthorizationDenialEvidenceV1)>)> {
     let directory = tempfile::tempdir()?;
     let config = sqlite_config(&directory, "denied.sqlite")?;
     let actor = EntityId::new();
@@ -1281,12 +1295,9 @@ async fn expired_authentication_evidence_is_unauthenticated_with_durable_evidenc
         outcome,
         GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthenticated
     ));
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0].outcome(),
-        pos_core::AuthorizationOutcomeV1::Expired
-    );
-    assert_eq!(records[0].error(), None);
+    let record = only_denial(&records)?;
+    assert_eq!(record.outcome(), pos_core::AuthorizationOutcomeV1::Expired);
+    assert_eq!(record.error(), None);
     Ok(())
 }
 
@@ -1298,12 +1309,9 @@ async fn an_expired_grant_is_revoked_with_durable_evidence() -> TestResult {
         outcome,
         GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
     ));
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0].outcome(),
-        pos_core::AuthorizationOutcomeV1::Expired
-    );
-    assert_eq!(records[0].error(), None);
+    let record = only_denial(&records)?;
+    assert_eq!(record.outcome(), pos_core::AuthorizationOutcomeV1::Expired);
+    assert_eq!(record.error(), None);
     Ok(())
 }
 
@@ -1358,7 +1366,7 @@ async fn a_store_that_refuses_the_denial_record_never_answers_the_denial() -> Te
 }
 
 #[tokio::test]
-async fn a_denial_flood_is_bounded_before_any_store_write() -> TestResult {
+async fn a_denial_flood_is_bounded_and_counted_in_one_marker() -> TestResult {
     let directory = tempfile::tempdir()?;
     let config = sqlite_config(&directory, "flood.sqlite")?;
     let fixture = fixture(&config).await?;
@@ -1379,18 +1387,43 @@ async fn a_denial_flood_is_bounded_before_any_store_write() -> TestResult {
                 if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
     }
-    assert!(matches!(
-        read().await,
-        Err(GatewayError::DenialRecordLimitReached)
-    ));
+    for _ in 0..3 {
+        assert!(matches!(
+            read().await,
+            Err(GatewayError::DenialRecordLimitReached {
+                retry_after_seconds: 1..=60
+            })
+        ));
+    }
+    // The shutdown closes the open window and records its suppressed count.
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
 
-    // A denial whose store command cannot run is answered with the store's
-    // error, never as a denial.
+    let records = denials_after_restart(&config)?;
+    let limit = usize::try_from(crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE)?;
+    assert_eq!(records.len(), limit + 1);
+    assert!(records[..limit]
+        .iter()
+        .all(|(_, evidence)| matches!(evidence, AuthorizationDenialEvidenceV1::Denial(_))));
+    assert_eq!(
+        records[limit].1,
+        AuthorizationDenialEvidenceV1::Suppressed(
+            AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Principal, 3)
+                .ok_or("marker")?
+        )
+    );
+    assert_eq!(records[limit].0, u64::try_from(limit + 1)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_denial_whose_store_command_cannot_run_is_answered_with_the_store_error() -> TestResult {
+    let fixture = fixture(&StoreConfig::Memory).await?;
     fixture.gateway.shutdown().await?;
     let lapsed = fixture
         .gateway
         .read_events_page_authorized(
-            &timeline,
+            &fixture.timeline.to_string(),
             0,
             1,
             GatewayAuthorizationRequest::read(
@@ -1404,11 +1437,5 @@ async fn a_denial_flood_is_bounded_before_any_store_write() -> TestResult {
         .await;
     assert!(matches!(lapsed, Err(GatewayError::StoreExecutorClosed)));
     drop(fixture);
-
-    // Only the admitted denials were written.
-    assert_eq!(
-        u32::try_from(denials_after_restart(&config)?.len())?,
-        crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE
-    );
     Ok(())
 }

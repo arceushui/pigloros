@@ -25,10 +25,13 @@ pub use knowledge::{
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityViewV1, AuthorizationDenialPermitV1,
-    AuthorizationDenialRecordV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    PersistedAuthorityV1, AUTHORIZATION_DENIAL_RECORD_BYTES, MAX_AUTHORIZATION_DENIALS_PER_READ,
-    MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+    AuthorityPersistenceStateV1, AuthorityViewV1, AuthorizationDenialEvidenceV1,
+    AuthorizationDenialPermitV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    PersistedAuthorityV1, AUTHORIZATION_DENIAL_RECORD_BYTES,
+    AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, MAX_AUTHORIZATION_DENIALS_PER_READ,
+    MAX_AUTHORIZATION_DENIAL_RECORDS, MAX_PERSISTED_AUTHORITY_GRANTS,
+    MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 
 const PRINCIPAL_MAGIC: [u8; 4] = *b"PRN1";

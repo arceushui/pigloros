@@ -322,6 +322,14 @@
           },
           "429": {
             "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current minute; the denial is neither recorded nor answered as a denial.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -454,6 +462,14 @@
           },
           "429": {
             "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current minute; the denial is neither recorded nor answered as a denial.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6838,6 +6854,21 @@
         "runtime": {
           "code": "resource-limit-exceeded",
           "status": 429
+        }
+      }
+    },
+    "authority_denial_records": {
+      "value": 10000000,
+      "unit": "denial records",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "pos-core MAX_AUTHORIZATION_DENIAL_RECORDS (#1359); a full authority store refuses further denial evidence and never prunes it",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "temporarily-unavailable",
+          "status": 503
         }
       }
     }

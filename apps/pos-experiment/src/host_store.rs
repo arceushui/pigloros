@@ -210,7 +210,7 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 from: u64,
                 limit: usize,
             ) -> Result<
-                Vec<pos_core::AuthorizationDenialRecordV1>,
+                Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
                 pos_core::AuthorityPersistenceErrorV1,
             > {
                 self.$field.load_authorization_denials(from, limit)
@@ -449,8 +449,10 @@ impl pos_core::AuthorityPersistencePortV1 for HostedExperimentStore {
         &self,
         from: u64,
         limit: usize,
-    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, pos_core::AuthorityPersistenceErrorV1>
-    {
+    ) -> Result<
+        Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
+        pos_core::AuthorityPersistenceErrorV1,
+    > {
         self.with_admission(|store| store.load_authorization_denials(from, limit))
             .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
     }
@@ -1031,9 +1033,9 @@ mod host_store_tests {
         bytes[4] = 1;
         bytes[69] = pos_core::AuthorizationOutcomeV1::Expired.code();
         bytes[70] = u8::MAX;
-        let denial = pos_core::AuthorizationDenialRecordV1::decode(&bytes)?;
+        let denial = pos_core::AuthorizationDenialEvidenceV1::decode(&bytes)?;
         store.record_authorization_denial(authority.authorize_denial(denial))?;
-        assert_eq!(store.load_authorization_denials(0, 8)?, vec![denial]);
+        assert_eq!(store.load_authorization_denials(0, 8)?, vec![(1, denial)]);
         Ok(())
     }
 

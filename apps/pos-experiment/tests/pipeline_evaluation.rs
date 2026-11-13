@@ -1052,7 +1052,8 @@ impl AuthorityPersistencePortV1 for FoldFaultStore {
         &self,
         from: u64,
         limit: usize,
-    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, AuthorityPersistenceErrorV1> {
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
         self.store().load_authorization_denials(from, limit)
     }
 }

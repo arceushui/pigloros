@@ -3,15 +3,16 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
-    AuthorizationDenialRecordV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
+    AuthorizationDenialEvidenceV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1,
     CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
     ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
     DelegationChainV1, EntityId, Hash, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
-    AUTHORIZATION_DENIAL_RECORD_BYTES, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
-    MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES,
-    MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES,
-    MAX_PRINCIPAL_RECORD_BYTES,
+    AUTHORIZATION_DENIAL_RECORD_BYTES, AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, DELEGATE_ACTION_V1,
+    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS,
+    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
+    MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
 };
 use ulid::Ulid;
 
@@ -2538,8 +2539,66 @@ fn a_denial_record_binds_only_a_denied_decision_without_payload() {
         Vec::new(),
     ));
     let host = AuthorityPersistenceHostV1::new(&registry);
-    let denial = ok(expired.ok_or("expired record"));
+    let denial = AuthorizationDenialEvidenceV1::Denial(ok(expired.ok_or("expired record")));
     let permit = host.authorize_denial(denial);
     assert_eq!(permit.persistence_binding(), host.persistence_binding());
-    assert_eq!(permit.record(), &denial);
+    assert_eq!(permit.evidence(), &denial);
+    assert_eq!(
+        ok(AuthorizationDenialEvidenceV1::decode(&denial.encode())),
+        denial
+    );
+}
+
+#[test]
+fn a_suppression_marker_counts_a_closed_window_without_naming_anyone() {
+    assert_eq!(
+        AuthorizationDenialSuppressionV1::try_new(AuthorizationDenialScopeV1::Host, 0),
+        None
+    );
+    for (scope, code) in [
+        (AuthorizationDenialScopeV1::Principal, 0_u8),
+        (AuthorizationDenialScopeV1::Host, 1),
+    ] {
+        let marker = ok(AuthorizationDenialSuppressionV1::try_new(scope, 513).ok_or("marker"));
+        assert_eq!(marker.scope(), scope);
+        assert_eq!(marker.suppressed(), 513);
+        let bytes = marker.encode();
+        assert_eq!(bytes.len(), AUTHORIZATION_DENIAL_SUPPRESSION_BYTES);
+        assert_eq!(&bytes[..4], b"ADS1");
+        assert_eq!(bytes[5], code);
+        assert_eq!(ok(AuthorizationDenialSuppressionV1::decode(&bytes)), marker);
+        let evidence = AuthorizationDenialEvidenceV1::Suppressed(marker);
+        assert_eq!(
+            ok(AuthorizationDenialEvidenceV1::decode(&evidence.encode())),
+            evidence
+        );
+    }
+    let valid = ok(AuthorizationDenialSuppressionV1::try_new(
+        AuthorizationDenialScopeV1::Principal,
+        1,
+    )
+    .ok_or("marker"))
+    .encode();
+    let mutate = |at: usize, value: u8| {
+        let mut bytes = valid;
+        bytes[at] = value;
+        bytes
+    };
+    let malformed: [&[u8]; 5] = [
+        &valid[..AUTHORIZATION_DENIAL_SUPPRESSION_BYTES - 1],
+        &mutate(0, b'X'),
+        &mutate(4, 2),
+        &mutate(5, 2),
+        &mutate(13, 0),
+    ];
+    for bytes in malformed {
+        assert_eq!(
+            AuthorizationDenialSuppressionV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+        assert_eq!(
+            AuthorizationDenialEvidenceV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+    }
 }

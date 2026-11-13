@@ -64,11 +64,16 @@ authentication evidence outside its validity window, is `401 unauthenticated`; a
 or capability is `403 unauthorized`; a grant, a delegation parent or consent that was revoked at
 the evaluation or commit fence, or expired, is `403 revoked`; absent or unbound consent is
 `403 consent-invalid`; a host that cannot vouch for its revocation state, or cannot durably
-record the denial, is `503 temporarily-unavailable` (retryable). Every denial is committed as a
-payload-free record in the host's authority store before it is answered. Denial records are
-bounded per Principal (`principal_denial_records_per_minute`) and per host
-(`denial_records_per_minute`); a denial over either bound is `429 resource-limit-exceeded`
-(retryable) and is neither recorded nor answered as a denial.
+record the denial, is `503 temporarily-unavailable` (retryable). Every answered denial is
+committed as a payload-free record in the host's authority store before it is answered. Denial
+records are bounded per Principal (`principal_denial_records_per_minute`; with the single Local
+Principal this is effectively host-wide) and per host (`denial_records_per_minute`) in a fixed
+one-minute window that resets on restart, so a burst across a window boundary can reach twice the
+bound. A denial over either bound is `429 resource-limit-exceeded` (retryable, with
+`Retry-After` until the window closes): it gets no record of its own and is not answered as a
+denial, but each bound's suppressed denials are counted in one durable marker per window. The
+store keeps at most `authority_denial_records` records and never prunes them; when it is full,
+a denial is `503 temporarily-unavailable` instead.
 
 ## Idempotency
 

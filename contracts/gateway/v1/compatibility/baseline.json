@@ -319,6 +319,14 @@
                   "$ref": "#/components/schemas/Problem"
                 }
               }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
             }
           }
         }
@@ -449,6 +457,14 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }
@@ -1275,6 +1291,21 @@
         "runtime": {
           "code": "resource-limit-exceeded",
           "status": 429
+        }
+      }
+    },
+    "authority_denial_records": {
+      "value": 10000000,
+      "unit": "denial records",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "pos-core MAX_AUTHORIZATION_DENIAL_RECORDS (#1359); a full authority store refuses further denial evidence and never prunes it",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "temporarily-unavailable",
+          "status": 503
         }
       }
     }

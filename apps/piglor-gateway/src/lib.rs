@@ -1637,9 +1637,13 @@ pub enum GatewayError {
     #[error("authorization evidence unavailable")]
     AuthorizationEvidenceUnavailable,
     /// This Principal, or the host, reached its denial-record bound for the
-    /// current window; the denial is not recorded or answered as a denial.
+    /// current window; the denial gets no record of its own (only the
+    /// window's suppression count) and is not answered as a denial.
     #[error("authorization denial limit reached")]
-    DenialRecordLimitReached,
+    DenialRecordLimitReached {
+        /// Whole seconds until the current window closes, at least 1.
+        retry_after_seconds: u64,
+    },
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -2330,6 +2334,10 @@ impl Gateway {
     /// The authorizer owns adapter evidence and the current authority snapshot;
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
+    ///
+    /// Test-only: the store has no authority ports, so every denial fails
+    /// closed as unavailable evidence (503) and is never answered as a
+    /// denial. No production or `test-support` composition can build it.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
@@ -2639,6 +2647,18 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        if let Some(authorization) = &self.authorization {
+            // Record the open denial-record window's suppression count once;
+            // a store that cannot take it any more loses only that count.
+            drop(
+                self.store
+                    .record_denial_evidence(
+                        Arc::clone(authorization),
+                        authorization.close_denial_window(),
+                    )
+                    .await,
+            );
+        }
         self.store.shutdown().await.map_err(Into::into)
     }
 
@@ -3239,12 +3259,20 @@ impl Gateway {
         authorization: &Arc<GatewayAuthorization>,
         pending: PendingAuthorityDenial,
     ) -> GatewayError {
-        if !authorization.admit_denial_record(&pending) {
-            return GatewayError::DenialRecordLimitReached;
-        }
+        let batch = match authorization.admit_denial_record(pending) {
+            Ok(batch) => batch,
+            Err(retry_after) => {
+                return GatewayError::DenialRecordLimitReached {
+                    retry_after_seconds: retry_after
+                        .as_secs()
+                        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+                        .max(1),
+                }
+            }
+        };
         match self
             .store
-            .record_authority_denial(Arc::clone(authorization), pending)
+            .record_denial_evidence(Arc::clone(authorization), batch)
             .await
         {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),

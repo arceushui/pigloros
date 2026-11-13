@@ -590,7 +590,26 @@ async fn post_ledger_prediction(
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        ProblemV1::from(self).into_response()
+        let retry_after = retry_after_seconds(&self);
+        let mut response = ProblemV1::from(self).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
+    }
+}
+
+/// The `Retry-After` seconds of a failure that states when a retry may succeed.
+const fn retry_after_seconds(error: &GatewayError) -> Option<u64> {
+    if let GatewayError::DenialRecordLimitReached {
+        retry_after_seconds,
+    } = error
+    {
+        Some(*retry_after_seconds)
+    } else {
+        None
     }
 }
 
@@ -735,7 +754,7 @@ const fn bound_problem(error: &GatewayError) -> ProblemShape {
             StatusCode::TOO_MANY_REQUESTS,
             false,
         ),
-        GatewayError::StoreExecutorSaturated | GatewayError::DenialRecordLimitReached => (
+        GatewayError::StoreExecutorSaturated | GatewayError::DenialRecordLimitReached { .. } => (
             Code::ResourceLimitExceeded,
             StatusCode::TOO_MANY_REQUESTS,
             true,
@@ -1823,7 +1842,9 @@ osf_link = \"https://osf.io/example\"\n";
                 true,
             ),
             (
-                GatewayError::DenialRecordLimitReached,
+                GatewayError::DenialRecordLimitReached {
+                    retry_after_seconds: 1,
+                },
                 "resource-limit-exceeded",
                 true,
             ),
@@ -2687,6 +2708,12 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::DependencySetExhausted.into_response();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
+        let r = GatewayError::DenialRecordLimitReached {
+            retry_after_seconds: 42,
+        }
+        .into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "42");
         let r = GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked))
             .into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);

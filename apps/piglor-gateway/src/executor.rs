@@ -5,8 +5,8 @@
 //! dedicated OS thread.
 use crate::{
     authorization::{
-        GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
-        PendingAuthorityDenial, RecordedAuthorityDenial,
+        DenialEvidenceBatch, GatewayAuthorization, GatewayAuthorizationDecision,
+        GatewayAuthorizationError, RecordedAuthorityDenial,
     },
     AdmittedAction, EventNotice,
 };
@@ -1474,16 +1474,16 @@ impl StoreExecutor {
             PurgeActionReceiptsCommand { limit, reply }
         )))
     }
-    /// Durably record one pending authority denial in its own store command.
-    pub(crate) async fn record_authority_denial(
+    /// Durably record one batch of denial evidence in its own store command.
+    pub(crate) async fn record_denial_evidence(
         &self,
         authorization: Arc<GatewayAuthorization>,
-        pending: PendingAuthorityDenial,
+        batch: DenialEvidenceBatch,
     ) -> Result<Option<RecordedAuthorityDenial>, StoreExecutorError> {
         submit!(self, |reply| Command::Action(Box::new(
             DenialEvidenceCommand {
                 authorization,
-                pending,
+                batch,
                 reply
             }
         )))
@@ -2210,15 +2210,16 @@ impl WorkerCommandV1 for PurgeActionReceiptsCommand {
     }
 }
 
-/// Append one pending denial's ADN1 record to the host's authority store.
+/// Append one batch of denial evidence to the host's authority store.
 ///
 /// It runs as its own Write-class command, after the caller released the
-/// commit fence, so an authority replacement never waits behind it. A store
-/// without the authority ports, or a failed write, records nothing and
-/// replies `None`: the denial is then not answered.
+/// commit fence, so an authority replacement never waits behind it. A failed
+/// write records nothing durable for the denial and replies `None`: the
+/// denial is then not answered. Only the test-only `Generic` and `Gateway`
+/// stores lack the authority ports; production always runs on `Host`.
 struct DenialEvidenceCommand {
     authorization: Arc<GatewayAuthorization>,
-    pending: PendingAuthorityDenial,
+    batch: DenialEvidenceBatch,
     reply: oneshot::Sender<Result<Option<RecordedAuthorityDenial>, StoreExecutorError>>,
 }
 
@@ -2226,7 +2227,7 @@ impl WorkerCommandV1 for DenialEvidenceCommand {
     fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
         let Self {
             authorization,
-            pending,
+            batch,
             reply,
         } = *self;
         let recorded = match &mut state.store {
@@ -2234,11 +2235,12 @@ impl WorkerCommandV1 for DenialEvidenceCommand {
                 .command_sender()
                 .and_then(|mut sender| {
                     sender.with_scheduled_admission(|ports| {
-                        authorization.record_denial(ports, &pending)
+                        authorization.record_denial(ports, &batch)
                     })
                 })
                 .ok()
-                .and_then(Result::ok),
+                .and_then(Result::ok)
+                .flatten(),
             #[cfg(test)]
             ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
         };
@@ -4668,8 +4670,8 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
             Command::Action(Box::new(super::DenialEvidenceCommand {
+                batch: authorization.admit_denial_record(pending).test_value(),
                 authorization,
-                pending,
                 reply,
             })),
             receiver,

@@ -5965,8 +5965,10 @@ mod tests {
             &self,
             from: u64,
             limit: usize,
-        ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, pos_core::AuthorityPersistenceErrorV1>
-        {
+        ) -> Result<
+            Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
+            pos_core::AuthorityPersistenceErrorV1,
+        > {
             pos_core::AuthorityPersistencePortV1::load_authorization_denials(
                 &self.inner,
                 from,

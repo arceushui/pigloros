@@ -5,12 +5,13 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityGranteeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationDenialRecordV1, AuthorizationOutcomeV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    DelegateClassV1, EntityId, ErasureContainmentGateV1, Hash, PrincipalRefV1, Seq, TimelineId,
-    AUTHORIZATION_DENIAL_RECORD_BYTES, DELEGATE_ACTION_V1, MAX_AUTHORITY_REGISTRY_BINDINGS,
-    MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES, MAX_PERSISTED_AUTHORITY_GRANTS,
-    MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+    AuthorizationDenialEvidenceV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, AuthorizationOutcomeV1, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, DelegateClassV1, EntityId, ErasureContainmentGateV1, Hash, PrincipalRefV1,
+    Seq, TimelineId, AUTHORIZATION_DENIAL_RECORD_BYTES, DELEGATE_ACTION_V1,
+    MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES,
+    MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, EventStore};
 use tempfile::tempdir;
@@ -987,7 +988,7 @@ fn authority_state_rejects_a_backdated_persisted_revocation() {
 }
 
 /// One ADN1 denial record built from its canonical bytes.
-fn denial(marker: u8) -> AuthorizationDenialRecordV1 {
+fn denial(marker: u8) -> AuthorizationDenialEvidenceV1 {
     let mut bytes = [0_u8; AUTHORIZATION_DENIAL_RECORD_BYTES];
     bytes[..4].copy_from_slice(b"ADN1");
     bytes[4] = 1;
@@ -995,11 +996,19 @@ fn denial(marker: u8) -> AuthorizationDenialRecordV1 {
     bytes[37..69].copy_from_slice(&[marker.wrapping_add(1); 32]);
     bytes[69] = AuthorizationOutcomeV1::RevokedAtFence.code();
     bytes[70] = AuthorityErrorV1::RevokedAtFence.code();
-    ok(AuthorizationDenialRecordV1::decode(&bytes))
+    AuthorizationDenialEvidenceV1::Denial(ok(AuthorizationDenialRecordV1::decode(&bytes)))
+}
+
+fn suppressed(count: u64) -> AuthorizationDenialEvidenceV1 {
+    AuthorizationDenialEvidenceV1::Suppressed(ok(AuthorizationDenialSuppressionV1::try_new(
+        AuthorizationDenialScopeV1::Principal,
+        count,
+    )
+    .ok_or("marker")))
 }
 
 #[test]
-fn denial_records_are_bound_ordered_and_bounded_in_both_adapters() {
+fn denial_records_are_bound_ordered_and_paged_by_sequence_in_both_adapters() {
     let host = authority_host(hash(7), &[]);
     let foreign = authority_host(hash(7), &[]);
     for store in &mut authority_stores() {
@@ -1012,14 +1021,18 @@ fn denial_records_are_bound_ordered_and_bounded_in_both_adapters() {
             store.record_authorization_denial(foreign.authorize_denial(denial(1))),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
-        for marker in 1..=3 {
-            ok(store.record_authorization_denial(host.authorize_denial(denial(marker))));
+        for evidence in [denial(1), suppressed(9), denial(3)] {
+            ok(store.record_authorization_denial(host.authorize_denial(evidence)));
         }
         assert_eq!(
             ok(store.load_authorization_denials(0, usize::MAX)),
-            vec![denial(1), denial(2), denial(3)]
+            vec![(1, denial(1)), (2, suppressed(9)), (3, denial(3))]
         );
-        assert_eq!(ok(store.load_authorization_denials(1, 1)), vec![denial(2)]);
+        assert_eq!(
+            ok(store.load_authorization_denials(1, 1)),
+            vec![(2, suppressed(9))]
+        );
+        assert!(ok(store.load_authorization_denials(3, 8)).is_empty());
         assert!(ok(store.load_authorization_denials(u64::MAX, 1)).is_empty());
     }
 }
@@ -1036,7 +1049,10 @@ fn sqlite_denial_records_survive_reopen_and_fail_closed_when_unwritable_or_corru
     }
     {
         let store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-        assert_eq!(ok(store.load_authorization_denials(0, 8)), vec![denial(1)]);
+        assert_eq!(
+            ok(store.load_authorization_denials(0, 8)),
+            vec![(1, denial(1))]
+        );
     }
     {
         let connection = ok(rusqlite::Connection::open(&path));
@@ -1053,13 +1069,16 @@ fn sqlite_denial_records_survive_reopen_and_fail_closed_when_unwritable_or_corru
             store.record_authorization_denial(host.authorize_denial(denial(2))),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
-        assert_eq!(ok(store.load_authorization_denials(0, 8)), vec![denial(1)]);
+        assert_eq!(
+            ok(store.load_authorization_denials(0, 8)),
+            vec![(1, denial(1))]
+        );
     }
     {
         let connection = ok(rusqlite::Connection::open(&path));
         ok(connection.execute_batch("DROP TRIGGER reject_denial_insert"));
         ok(connection.execute(
-            "INSERT INTO authority_denials (adn1) VALUES (zeroblob(71))",
+            "INSERT INTO authority_denials (evidence) VALUES (zeroblob(71))",
             [],
         ));
     }
@@ -1068,5 +1087,31 @@ fn sqlite_denial_records_survive_reopen_and_fail_closed_when_unwritable_or_corru
         store.load_authorization_denials(0, 8),
         Err(AuthorityPersistenceErrorV1::InvalidRecord)
     );
-    assert_eq!(ok(store.load_authorization_denials(0, 1)), vec![denial(1)]);
+    assert_eq!(
+        ok(store.load_authorization_denials(0, 1)),
+        vec![(1, denial(1))]
+    );
+}
+
+#[test]
+fn a_read_only_open_before_the_denial_table_exists_names_the_writable_migration() {
+    let directory = ok(tempdir());
+    let path = directory.path().join("old.db");
+    drop(ok(SqliteStore::open(path.to_str().unwrap_or_default())));
+    {
+        let connection = ok(rusqlite::Connection::open(&path));
+        ok(connection.execute_batch("DROP TABLE authority_denials"));
+    }
+    let Err(error) = SqliteStore::open_read_only(path.to_str().unwrap_or_default()) else {
+        std::panic::resume_unwind(Box::new("a read-only open must not create the table"));
+    };
+    assert!(
+        error.to_string().contains("open the store writable once"),
+        "{error}"
+    );
+    drop(ok(SqliteStore::open(path.to_str().unwrap_or_default())));
+    let store = ok(SqliteStore::open_read_only(
+        path.to_str().unwrap_or_default(),
+    ));
+    assert!(ok(store.load_authorization_denials(0, 1)).is_empty());
 }

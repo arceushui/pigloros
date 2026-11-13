@@ -15,6 +15,7 @@ use crate::CanonicalBytes;
 
 const PERSISTENCE_MAGIC: [u8; 4] = *b"APS1";
 const DENIAL_MAGIC: [u8; 4] = *b"ADN1";
+const SUPPRESSION_MAGIC: [u8; 4] = *b"ADS1";
 const DENIAL_REQUEST_DIGEST_AT: usize = 5;
 const DENIAL_OPERATION_BINDING_AT: usize = DENIAL_REQUEST_DIGEST_AT + 32;
 const DENIAL_OUTCOME_AT: usize = DENIAL_OPERATION_BINDING_AT + 32;
@@ -30,8 +31,13 @@ pub const MAX_PERSISTED_AUTHORITY_GRANTS: usize = 4_096;
 pub const MAX_PERSISTED_AUTHORITY_STATE_BYTES: usize = 16 * 1_024 * 1_024;
 /// Exact canonical bytes of one ADN1 authorization-denial record.
 pub const AUTHORIZATION_DENIAL_RECORD_BYTES: usize = DENIAL_ERROR_AT + 1;
-/// Maximum ADN1 records one denial read returns.
+/// Exact canonical bytes of one ADS1 suppressed-denials marker.
+pub const AUTHORIZATION_DENIAL_SUPPRESSION_BYTES: usize = 14;
+/// Maximum denial-evidence records one read returns.
 pub const MAX_AUTHORIZATION_DENIALS_PER_READ: usize = 1_024;
+/// Hard bound on denial-evidence records one authority store retains. At the
+/// bound a store refuses every further record (fail closed); it never prunes.
+pub const MAX_AUTHORIZATION_DENIAL_RECORDS: u64 = 10_000_000;
 
 /// Closed persistence failures that do not reveal protected record existence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -169,15 +175,16 @@ impl AuthorityPersistenceHostV1 {
         })
     }
 
-    /// Authorize recording of one exact denial this host decided.
+    /// Authorize recording of one exact denial-evidence record this host
+    /// produced.
     #[must_use]
     pub const fn authorize_denial(
         &self,
-        record: AuthorizationDenialRecordV1,
+        evidence: AuthorizationDenialEvidenceV1,
     ) -> AuthorizationDenialPermitV1 {
         AuthorizationDenialPermitV1 {
             persistence_binding: self.binding,
-            record,
+            evidence,
         }
     }
 
@@ -380,7 +387,7 @@ impl AuthorizationDenialRecordV1 {
                 AuthorizationOutcomeV1::from_code(record[DENIAL_OUTCOME_AT])
                     .ok()
                     .filter(|outcome| !outcome.is_allowed())
-                    .zip(decode_denial_error(record[DENIAL_ERROR_AT]))
+                    .zip(decode_denial_error(record[DENIAL_ERROR_AT]).ok())
                     .map(|(outcome, error)| Self {
                         request_digest: denial_hash_at(&record, DENIAL_REQUEST_DIGEST_AT),
                         operation_binding: denial_hash_at(&record, DENIAL_OPERATION_BINDING_AT),
@@ -392,12 +399,137 @@ impl AuthorizationDenialRecordV1 {
     }
 }
 
-/// `Some(None)` for a denial without a safe-error code, `Some(Some(_))` for a
-/// known AUD1 code and `None` for an unknown one.
-fn decode_denial_error(code: u8) -> Option<Option<AuthorityErrorV1>> {
+/// The bound a suppressed-denials marker counts against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationDenialScopeV1 {
+    /// One Principal's denial-record bound.
+    Principal,
+    /// The host-wide denial-record bound.
+    Host,
+}
+
+/// A durable count of denials one bound suppressed in one closed window, so
+/// a flood beyond the denial-record bounds still leaves an O(1) trace.
+///
+/// Its canonical ADS1 encoding is a fixed
+/// [`AUTHORIZATION_DENIAL_SUPPRESSION_BYTES`]-byte record: magic, version,
+/// scope code and the big-endian count. It names no Principal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizationDenialSuppressionV1 {
+    scope: AuthorizationDenialScopeV1,
+    suppressed: u64,
+}
+
+impl AuthorizationDenialSuppressionV1 {
+    /// A marker for `suppressed` denials; `None` when nothing was suppressed.
+    #[must_use]
+    pub const fn try_new(scope: AuthorizationDenialScopeV1, suppressed: u64) -> Option<Self> {
+        if suppressed == 0 {
+            None
+        } else {
+            Some(Self { scope, suppressed })
+        }
+    }
+
+    /// The bound that suppressed the denials.
+    #[must_use]
+    pub const fn scope(&self) -> AuthorizationDenialScopeV1 {
+        self.scope
+    }
+
+    /// How many denials the bound suppressed in the window; never zero.
+    #[must_use]
+    pub const fn suppressed(&self) -> u64 {
+        self.suppressed
+    }
+
+    /// Encode the exact fixed-size ADS1 record.
+    #[must_use]
+    pub const fn encode(&self) -> [u8; AUTHORIZATION_DENIAL_SUPPRESSION_BYTES] {
+        let count = self.suppressed.to_be_bytes();
+        [
+            SUPPRESSION_MAGIC[0],
+            SUPPRESSION_MAGIC[1],
+            SUPPRESSION_MAGIC[2],
+            SUPPRESSION_MAGIC[3],
+            VERSION,
+            match self.scope {
+                AuthorizationDenialScopeV1::Principal => 0,
+                AuthorizationDenialScopeV1::Host => 1,
+            },
+            count[0],
+            count[1],
+            count[2],
+            count[3],
+            count[4],
+            count[5],
+            count[6],
+            count[7],
+        ]
+    }
+
+    /// Decode and validate one exact ADS1 record.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityPersistenceErrorV1::InvalidRecord`] for another
+    /// length, magic or version, an unknown scope, or a zero count.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AuthorityPersistenceErrorV1> {
+        <[u8; AUTHORIZATION_DENIAL_SUPPRESSION_BYTES]>::try_from(bytes)
+            .ok()
+            .filter(|record| record[..4] == SUPPRESSION_MAGIC && record[4] == VERSION)
+            .and_then(|record| {
+                let suppressed = u64::from_be_bytes(std::array::from_fn(|index| record[6 + index]));
+                match record[5] {
+                    0 => Some((AuthorizationDenialScopeV1::Principal, suppressed)),
+                    1 => Some((AuthorizationDenialScopeV1::Host, suppressed)),
+                    _ => None,
+                }
+            })
+            .and_then(|(scope, suppressed)| Self::try_new(scope, suppressed))
+            .ok_or(AuthorityPersistenceErrorV1::InvalidRecord)
+    }
+}
+
+/// One record of an authority store's denial evidence: a denied decision or
+/// a suppressed-denials marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationDenialEvidenceV1 {
+    /// One denied decision (ADN1).
+    Denial(AuthorizationDenialRecordV1),
+    /// Denials a bound suppressed in one closed window (ADS1).
+    Suppressed(AuthorizationDenialSuppressionV1),
+}
+
+impl AuthorizationDenialEvidenceV1 {
+    /// Encode the record's exact canonical bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Denial(record) => record.encode().to_vec(),
+            Self::Suppressed(marker) => marker.encode().to_vec(),
+        }
+    }
+
+    /// Decode one ADN1 or ADS1 record by its length.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityPersistenceErrorV1::InvalidRecord`] for bytes that
+    /// are neither a valid ADN1 nor a valid ADS1 record.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AuthorityPersistenceErrorV1> {
+        if bytes.len() == AUTHORIZATION_DENIAL_RECORD_BYTES {
+            AuthorizationDenialRecordV1::decode(bytes).map(Self::Denial)
+        } else {
+            AuthorizationDenialSuppressionV1::decode(bytes).map(Self::Suppressed)
+        }
+    }
+}
+
+/// `Ok(None)` for a denial without a safe-error code, `Ok(Some(_))` for a
+/// known AUD1 code and an error for an unknown one.
+fn decode_denial_error(code: u8) -> Result<Option<AuthorityErrorV1>, AuthorityErrorV1> {
     match code {
-        NO_DENIAL_ERROR_CODE => Some(None),
-        known => AuthorityErrorV1::from_code(known).ok().map(Some),
+        NO_DENIAL_ERROR_CODE => Ok(None),
+        known => AuthorityErrorV1::from_code(known).map(Some),
     }
 }
 
@@ -405,11 +537,12 @@ fn denial_hash_at(record: &[u8; AUTHORIZATION_DENIAL_RECORD_BYTES], at: usize) -
     Hash::from_bytes(std::array::from_fn(|index| record[at + index]))
 }
 
-/// Opaque capability to record one exact denial through the trusted host.
+/// Opaque capability to record one exact denial-evidence record through the
+/// trusted host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthorizationDenialPermitV1 {
     persistence_binding: AuthorityPersistenceBindingV1,
-    record: AuthorizationDenialRecordV1,
+    evidence: AuthorizationDenialEvidenceV1,
 }
 
 impl AuthorizationDenialPermitV1 {
@@ -419,10 +552,10 @@ impl AuthorizationDenialPermitV1 {
         self.persistence_binding
     }
 
-    /// The one denial record this permit lets an adapter append.
+    /// The one evidence record this permit lets an adapter append.
     #[must_use]
-    pub const fn record(&self) -> &AuthorizationDenialRecordV1 {
-        &self.record
+    pub const fn evidence(&self) -> &AuthorizationDenialEvidenceV1 {
+        &self.evidence
     }
 }
 
@@ -1240,29 +1373,32 @@ pub trait AuthorityPersistencePortV1 {
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>;
 
-    /// Durably append the denial record `permit` names, in its own committed
-    /// transaction, before the host answers the denial (D9 on #302).
+    /// Durably append the denial-evidence record `permit` names, in its own
+    /// committed transaction, before the host answers (D9 on #302). Records
+    /// are numbered from 1 in append order and never pruned.
     ///
     /// # Errors
     /// Returns a closed unavailable error when the adapter is not bound to the
-    /// permit's host, sits inside another transaction, or cannot commit.
+    /// permit's host, sits inside another transaction, already holds
+    /// [`MAX_AUTHORIZATION_DENIAL_RECORDS`] records, or cannot commit.
     fn record_authorization_denial(
         &mut self,
         permit: AuthorizationDenialPermitV1,
     ) -> Result<(), AuthorityPersistenceErrorV1>;
 
-    /// Load up to `limit` denial records, capped at
-    /// [`MAX_AUTHORIZATION_DENIALS_PER_READ`], starting at the zero-based
-    /// record `from`, in the order they were recorded.
+    /// Load up to `limit` evidence records, capped at
+    /// [`MAX_AUTHORIZATION_DENIALS_PER_READ`], whose sequence is greater than
+    /// `after`, with their sequences, in append order. Pass the last sequence
+    /// read to continue (keyset pagination).
     ///
     /// # Errors
     /// Returns a closed unavailable error when the adapter cannot read, and an
     /// invalid-record error for an untrustworthy persisted record.
     fn load_authorization_denials(
         &self,
-        from: u64,
+        after: u64,
         limit: usize,
-    ) -> Result<Vec<AuthorizationDenialRecordV1>, AuthorityPersistenceErrorV1>;
+    ) -> Result<Vec<(u64, AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>;
 }
 
 /// The authority Timelines a delegation chain was issued on.
