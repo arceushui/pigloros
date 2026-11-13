@@ -1141,7 +1141,6 @@ async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestR
 /// The kernel observation of ADR-069 R9 §4.4 around the release: frozen
 /// after `ReadyV1`, re-derived by the recheck, and handed to the lifecycle.
 mod kernel_observation {
-    use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
 
