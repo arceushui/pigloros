@@ -36,7 +36,7 @@ mod tests;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
-    fmt::{self, Write as _},
+    fmt,
     net::SocketAddr,
     num::NonZeroU64,
     str::FromStr,
@@ -232,12 +232,17 @@ impl GatewayModeProfileDigestV1 {
 
     /// Lower-case hexadecimal for operator disclosure.
     fn to_hex(self) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
         self.0
             .iter()
-            .fold(String::with_capacity(64), |mut hex, byte| {
-                drop(write!(hex, "{byte:02x}"));
-                hex
+            .flat_map(|byte| {
+                [
+                    DIGITS[usize::from(byte >> 4)],
+                    DIGITS[usize::from(byte & 0x0f)],
+                ]
             })
+            .map(char::from)
+            .collect()
     }
 }
 
