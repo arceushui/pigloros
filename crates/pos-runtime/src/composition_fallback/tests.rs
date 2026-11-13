@@ -7,6 +7,10 @@ use pos_core::{Capability, EntityId, ImplementationKeyV1};
 use pos_crypto::plugin_execution::{PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1};
 
 use super::*;
+use crate::community_plugin_host::{
+    AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginHostErrorV1 as HostError,
+    ComponentTrapClassV1, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+};
 use crate::{PluginExecutionModeV1, RequiredPluginCompositionV1};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -705,6 +709,54 @@ fn a_reserved_type_is_refused_on_the_facts_only_path() -> TestResult {
 fn host_cause_names_are_distinct() {
     let names: BTreeSet<&str> = trigger::HOST_CAUSES.iter().map(|(name, _)| *name).collect();
     assert_eq!(names.len(), trigger::HOST_CAUSES.len());
+}
+
+#[test]
+fn every_host_error_variant_has_exactly_one_host_cause_row() {
+    let variants = [
+        HostError::InvalidManifest,
+        HostError::InvalidBundleContent {
+            reason: BundleContentReasonV1::Malformed,
+        },
+        HostError::ArtifactTrustDenied {
+            basis: TrustDenialBasisV1::Expired,
+        },
+        HostError::ArtifactRevoked {
+            basis: RevocationBasisV1::Artifact,
+        },
+        HostError::IncompatibleAbi,
+        HostError::MissingFeature { index: 0 },
+        HostError::CapabilityDenied { index: 0 },
+        HostError::InvalidInvocation,
+        HostError::InvalidGuestOutput,
+        HostError::UnsupportedSchema,
+        HostError::StateMigrationFailed,
+        HostError::GuestDeclaredFailure,
+        HostError::ComponentTrap {
+            class: ComponentTrapClassV1::Other,
+            reproduction: TrapReproductionV1::Unverified,
+        },
+        HostError::WorkerCrashed,
+        HostError::FuelExhausted,
+        HostError::MemoryLimitExceeded,
+        HostError::HostCallLimitExceeded,
+        HostError::OutputLimitExceeded,
+        HostError::DeterministicDeadlineExceeded,
+        HostError::OperationalWatchdogStop,
+        HostError::AtomicCommitFailed {
+            failure: AtomicCommitFailureV1::Operational,
+        },
+    ];
+    let names: BTreeSet<&str> = variants.into_iter().map(HostError::name).collect();
+    assert_eq!(names.len(), variants.len());
+    assert_eq!(trigger::HOST_CAUSES.len(), variants.len());
+    for name in names {
+        let rows = trigger::HOST_CAUSES
+            .iter()
+            .filter(|(listed, _)| *listed == name)
+            .count();
+        assert_eq!(rows, 1, "{name}");
+    }
 }
 
 #[path = "declaration_tests.rs"]

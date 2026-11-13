@@ -66,6 +66,7 @@ fn a_basis_is_reported_beside_its_host_name() {
         assert_eq!(error.name(), "InvalidBundleContent");
         assert_eq!(error.basis_name(), Some(expected));
         assert_eq!(error.class(), Class::PreExecutionRejection);
+        assert_eq!(error.to_string(), "invalid community Plugin bundle content");
         assert!(error.produced_in_v1());
     }
 }

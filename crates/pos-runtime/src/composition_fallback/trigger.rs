@@ -85,15 +85,17 @@ pub enum FallbackTriggerCauseV1 {
 /// `ComponentTrap` is listed with its `Unverified` cause; a reproduced trap is
 /// recognized before this table is read.
 ///
-/// A table keeps the lookup within the complexity bound: twenty distinct
-/// causes would need twenty match arms. This module's public integration test
+/// A table keeps the lookup within the complexity bound: one match arm per
+/// distinct cause would exceed it. This module's public integration test
 /// guards it with two exhaustive `match`es with no wildcard arm: one gives
 /// every variant a distinct index and one its expected cause. A new variant
 /// therefore fails to compile until both are extended, and the test then fails
 /// until a sample of it classifies through this table to its expected cause.
-/// Errors mapped to `Unrelated` are explicitly listed here. The unit test of
-/// the parent module checks that the
-/// names are distinct, so with one row per variant no stale row can remain.
+///
+/// A variant whose cause is `Unrelated` is listed too, although the lookup
+/// would also classify an unlisted name as `Unrelated`. The unit tests of the
+/// parent module therefore require exactly one row for every variant's name
+/// and no other row, so a missing, misspelled or stale row fails there.
 pub(super) const HOST_CAUSES: [(&str, Cause); 21] = [
     ("InvalidManifest", Cause::InvalidManifest),
     ("InvalidBundleContent", Cause::Unrelated),
