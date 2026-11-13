@@ -1256,7 +1256,7 @@ fn graph_root_rejects_invalid_roots_and_identities() -> TestResult {
         ))),
         Some(Error::BoundsExceeded)
     );
-    let mut trailing = bytes.to_vec();
+    let mut trailing = Root::new(base)?.to_canonical_cbor().to_vec();
     trailing.push(0);
     assert_eq!(
         error_of(Root::from_canonical_cbor(&trailing)),
