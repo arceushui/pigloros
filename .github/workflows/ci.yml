@@ -654,8 +654,8 @@ jobs:
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
       - name: Exercise the unsupported non-Linux EPF1 boundary
         run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
-      - name: Exercise the unsupported Windows subject encryptor profile
-        run: cargo test -p pos-owner-bridge --lib --locked only_linux_supports_the_nonce_ledger_and_encryptor_lock -- --include-ignored
+      - name: Exercise the Windows subject encryptor platform admission
+        run: cargo test -p pos-owner-bridge --lib --locked linux_and_windows_support_the_nonce_ledger_and_encryptor_lock -- --include-ignored
       - name: Check narrower-target Replay representation boundaries
         run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
       - name: Exercise narrower-target registry cardinality refusals
