@@ -85,13 +85,13 @@ const fn input() -> Input {
     }
 }
 
-fn value(parent: (u64, Vec<u8>), kinds: &[u64], slots: &[u64]) -> Value {
+fn value(parent: (u64, &[u8]), kinds: &[u64], slots: &[u64]) -> Value {
     Value::Array(vec![
         bytes(b"CKP1"),
         uint(1),
         bytes(&[1; 16]),
         uint(parent.0),
-        bytes(&parent.1),
+        bytes(parent.1),
         bytes(&[0xab; 16]),
         bytes(&[0xcd; 16]),
         uint(3),
@@ -105,7 +105,7 @@ fn value(parent: (u64, Vec<u8>), kinds: &[u64], slots: &[u64]) -> Value {
 }
 
 fn control_value() -> Value {
-    value((2, vec![2; 16]), &[6, 7], &[])
+    value((2, &[2; 16]), &[6, 7], &[])
 }
 
 fn intent() -> Fallible<Intent> {
@@ -183,7 +183,7 @@ fn pass_and_initialization_parents_and_member_slots_roundtrip() -> TestResult {
             .with(Kind::ExecutionProvenance);
         input.member_slots = Slots::new(&[0, 7, 63])?;
         let intent = Intent::new(input)?;
-        let mut expected = value(parent, &[0, 3], &[0, 7, 63]);
+        let mut expected = value((parent.0, &parent.1), &[0, 3], &[0, 7, 63]);
         fields(&mut expected)?[7] = uint(0);
         let expected = encode(&expected)?;
         assert_eq!(&*intent.to_canonical_cbor(), &expected);
@@ -235,11 +235,11 @@ fn decoded_kinds_and_slots_are_bounded_and_strictly_ascending() -> TestResult {
         (&[9], &[], Error::InvalidEncoding),
     ];
     for (kinds, slots, error) in cases {
-        let bytes = encode(&value((2, vec![2; 16]), kinds, slots))?;
+        let bytes = encode(&value((2, &[2; 16]), kinds, slots))?;
         assert_eq!(Intent::from_canonical_cbor(&bytes).err(), Some(error));
     }
     let all_slots: Vec<u64> = (0..64).collect();
-    let bytes = encode(&value((2, vec![2; 16]), &[6], &all_slots))?;
+    let bytes = encode(&value((2, &[2; 16]), &[6], &all_slots))?;
     assert_eq!(
         Intent::from_canonical_cbor(&bytes)?
             .as_input()
@@ -250,7 +250,7 @@ fn decoded_kinds_and_slots_are_bounded_and_strictly_ascending() -> TestResult {
     );
     let mut too_many = all_slots;
     too_many.push(64);
-    let bytes = encode(&value((2, vec![2; 16]), &[6], &too_many))?;
+    let bytes = encode(&value((2, &[2; 16]), &[6], &too_many))?;
     assert_eq!(
         Intent::from_canonical_cbor(&bytes).err(),
         Some(Error::BoundsExceeded)
