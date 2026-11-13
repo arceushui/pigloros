@@ -1311,15 +1311,15 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
     let service = RecordingService::exact(expected_system_call_filter()?);
     let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0x20; 16])?;
-    let started = UnitHost::start(
-        &transport,
-        name.clone(),
-        request(LaunchMode::Local {
-            host_service: descriptor()?,
-        })?,
-    )
-    .await?;
+    let request = request(LaunchMode::Local {
+        host_service: descriptor()?,
+    })?;
+    let requested = request.requested_configuration();
+    let started = UnitHost::start(&transport, name.clone(), request).await?;
     assert_eq!(started.unit_name(), &name);
+    // RQE1's `requested` travels with the verified start.
+    assert!(!requested.is_empty());
+    assert_eq!(started.requested_configuration(), requested.as_slice());
     // The fixed cgroup mount has no such attempt cgroup.
     let error = UnitHost::bind_cgroup(&transport, &started)
         .await

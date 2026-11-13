@@ -78,8 +78,6 @@ const EMPTY_POLL: Duration = Duration::from_millis(10);
 /// at `D` itself would race the enforcer it backs up.
 const ESCALATION_GRACE: Duration = Duration::from_secs(1);
 
-const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
-
 /// The systemd operations the execute path needs, behind one port.
 ///
 /// The production implementation is the typed D-Bus transport.
@@ -780,23 +778,18 @@ fn anchor(activated_ns: u64, watchdog: Duration, call: Duration) -> Result<Ancho
         .ok_or(ExecuteError::Activation)
 }
 
-/// The [`Instant`] at `CLOCK_MONOTONIC` time `target_ns`, which may be past.
+/// The [`Instant`] at `CLOCK_MONOTONIC` time `target_ns`, which may be past:
+/// the clock's origin as an [`Instant`], plus `target_ns`.
 fn instant_at_monotonic(target_ns: u64) -> Option<Instant> {
     // Sample the absolute clock first, as the release window does.
     let now = clock_gettime(ClockId::Monotonic);
     let instant = Instant::now();
-    let now_ns = i128::from(now.tv_sec) * NANOSECONDS_PER_SECOND + i128::from(now.tv_nsec);
-    let offset = i128::from(target_ns) - now_ns;
-    u64::try_from(offset.unsigned_abs())
+    u64::try_from(now.tv_sec)
         .ok()
-        .map(Duration::from_nanos)
-        .and_then(|distance| {
-            if offset < 0 {
-                instant.checked_sub(distance)
-            } else {
-                instant.checked_add(distance)
-            }
-        })
+        .zip(u32::try_from(now.tv_nsec).ok())
+        .map(|(seconds, nanoseconds)| Duration::new(seconds, nanoseconds))
+        .and_then(|elapsed| instant.checked_sub(elapsed))
+        .and_then(|origin| origin.checked_add(Duration::from_nanos(target_ns)))
 }
 
 /// `failure` with the pre-release evidence taken before it.

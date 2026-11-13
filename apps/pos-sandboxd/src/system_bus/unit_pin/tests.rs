@@ -35,6 +35,8 @@ struct Bus {
     result: &'static str,
     /// `ExecMainCode` and `ExecMainStatus`.
     main_exit: (i32, i32),
+    /// How often the service's `Result` was read.
+    result_reads: usize,
 }
 
 type Shared = Arc<Mutex<Bus>>;
@@ -101,7 +103,9 @@ struct Service(Shared);
 impl Service {
     #[zbus(property, name = "Result")]
     fn result(&self) -> fdo::Result<String> {
-        Ok(self.0.lock().map_err(failed)?.result.to_owned())
+        let mut bus = self.0.lock().map_err(failed)?;
+        bus.result_reads += 1;
+        Ok(bus.result.to_owned())
     }
 
     #[zbus(property, name = "ExecMainCode")]
@@ -439,6 +443,8 @@ async fn an_exited_unit_is_measured_read_and_then_unpinned() -> TestResult {
     assert!(matches!(terminal.work_after(), Some(Ok(_))));
     let service = terminal.service().as_ref().map_err(ToString::to_string)?;
     assert_eq!(service.result(), SystemdServiceResult::Success);
+    // A settled unit is read once, never polled to the deadline.
+    assert_eq!(fixture.bus.lock().map_err(|_| "poisoned")?.result_reads, 1);
     assert!(terminal.unpinned().is_ok());
     assert_eq!(fixture.calls()?, [named("unref", fixture.unit())]);
     Ok(())

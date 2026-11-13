@@ -112,8 +112,36 @@ fn a_requested_work_mount_is_observed_and_held_for_after_exit() -> TestResult {
     let held = observed.work().ok_or("no /work handle")?;
     let usage = WorkUsage::observe(held)?;
     assert_eq!(usage.mount(), work);
-    assert_eq!(usage.mount().mount_id(), work.mount_id());
+    let shm = statx(CWD, "/dev/shm", AtFlags::empty(), StatxFlags::MNT_ID)?;
+    assert_eq!(work.mount_id(), shm.stx_mnt_id);
+    assert_eq!(usage.mount().mount_id(), shm.stx_mnt_id);
+    let block = u64::try_from(fstatfs(held)?.f_bsize)?;
     assert!(usage.available_bytes() <= work.capacity_bytes());
+    // Free space is counted in whole blocks, and a test host has some.
+    assert_eq!(usage.available_bytes() % block, 0);
+    assert!(usage.available_bytes() >= block);
+    // The release outcome keeps this handle for the terminal reading.
+    let outcome = crate::ReleaseOutcome::new(None, Some(observed), None);
+    assert!(outcome.work().is_some());
+    Ok(())
+}
+
+#[test]
+fn a_process_list_is_read_up_to_its_bound_and_no_further() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let listing = |size: u64| -> TestResult<File> {
+        let head = format!("{}\n", own_pid());
+        let padding = usize::try_from(size)? - head.len();
+        let mut body = head.into_bytes();
+        body.extend(std::iter::repeat_n(b'\n', padding));
+        std::fs::write(directory.path().join("cgroup.procs"), body)?;
+        Ok(File::open(directory.path())?)
+    };
+    assert_eq!(member(listing(MAX_PROCS_BYTES)?.as_fd(), own_pid()), Ok(()));
+    assert_eq!(
+        member(listing(MAX_PROCS_BYTES + 1)?.as_fd(), own_pid()),
+        Err(KernelObservationError::CgroupProcs)
+    );
     Ok(())
 }
 

@@ -107,14 +107,14 @@ impl SystemdTransientUnitTransport {
         let Some((started, invocation)) = started else {
             return Err(TerminalServiceError::Unstarted);
         };
-        loop {
-            let read = self.read_unit_result(started, invocation).await;
-            let unsettled = matches!(read, Err(SystemdUnitResultError::NotSettled { .. }));
-            if !unsettled || Instant::now() >= settle_by {
-                return read.map_err(TerminalServiceError::from);
-            }
+        let mut read = self.read_unit_result(started, invocation).await;
+        while matches!(read, Err(SystemdUnitResultError::NotSettled { .. }))
+            && Instant::now() < settle_by
+        {
             tokio::time::sleep(SETTLE_POLL).await;
+            read = self.read_unit_result(started, invocation).await;
         }
+        read.map_err(TerminalServiceError::from)
     }
 }
 

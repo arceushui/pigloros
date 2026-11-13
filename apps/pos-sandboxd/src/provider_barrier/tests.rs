@@ -1345,6 +1345,9 @@ mod kernel_observation {
         let evidence = barrier.evidence();
         let received = launcher.join().map_err(|_| "launcher thread")?;
         assert_eq!(received.as_ref(), evidence.release());
+        // The release binds the digest the production readback derived.
+        let release = evidence.release().ok_or("no release")?;
+        assert_eq!(release.fields.observed_readback_digest, OBSERVED_READBACK);
         let observation = evidence.observation().ok_or("no observation")?;
         assert_eq!(observation.main_pid(), own_pid());
         assert_eq!(observation.invocation_id(), INVOCATION);

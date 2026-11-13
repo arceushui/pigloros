@@ -111,6 +111,8 @@ struct FakeHost {
     activated: Option<u64>,
 }
 
+const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
+
 /// `CLOCK_MONOTONIC` now, in nanoseconds.
 fn monotonic_now_ns() -> u64 {
     let now = clock_gettime(ClockId::Monotonic);
