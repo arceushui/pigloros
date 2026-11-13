@@ -94,8 +94,11 @@ pub enum FallbackTriggerCauseV1 {
 ///
 /// A variant whose cause is `Unrelated` is listed too, although the lookup
 /// would also classify an unlisted name as `Unrelated`. The unit tests of the
-/// parent module therefore require exactly one row for every variant's name
-/// and no other row, so a missing, misspelled or stale row fails there.
+/// parent module therefore require exactly one row for the name of every
+/// variant in their own hand-kept list, and no other row, so a missing,
+/// misspelled or stale row fails there. That list is not compiler-checked:
+/// the exhaustive matches of the public integration test are what force a
+/// new variant to be noticed.
 pub(super) const HOST_CAUSES: [(&str, Cause); 21] = [
     ("InvalidManifest", Cause::InvalidManifest),
     ("InvalidBundleContent", Cause::Unrelated),
