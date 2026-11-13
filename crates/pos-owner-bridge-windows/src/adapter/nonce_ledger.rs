@@ -65,8 +65,9 @@ pub(super) struct Probe(pub(super) std::process::Child);
 #[cfg(test)]
 impl Drop for Probe {
     fn drop(&mut self) {
-        let _killed = self.0.kill();
-        let _waited = self.0.wait();
+        // Wait only for a probe that was killed: one that cannot be killed
+        // must not turn a failed assertion into a silent hang.
+        let _retired = self.0.kill().and_then(|()| self.0.wait());
     }
 }
 

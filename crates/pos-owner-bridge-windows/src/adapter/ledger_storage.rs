@@ -795,7 +795,15 @@ mod native_tests {
                 ));
                 let deadline = Instant::now() + Duration::from_secs(30);
                 loop {
-                    let observed = fs::read(&marker).unwrap_or_default();
+                    let read = fs::read(&marker);
+                    assert!(
+                        matches!(
+                            read.as_ref().err().map(io::Error::kind),
+                            None | Some(io::ErrorKind::NotFound)
+                        ),
+                        "storage probe marker could not be read"
+                    );
+                    let observed = read.unwrap_or_default();
                     assert!(
                         name.as_bytes().starts_with(&observed),
                         "storage probe marker mismatch"

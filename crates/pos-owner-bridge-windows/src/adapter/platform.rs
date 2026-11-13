@@ -9,6 +9,11 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 /// admits this target. The gate starts no ceremony and activates nothing:
 /// #399 supplies the actual owner adapter and E15 still gates production.
 ///
+/// This gate looks at the target operating system only. `Ok(())` is not a
+/// desktop-profile verdict: OS build, product type, architecture and CPU
+/// features are refused by [`require_windows_profile`], which
+/// `WindowsOwnerHost::start` applies before any owner work.
+///
 /// # Errors
 ///
 /// Returns `Unavailable(PlatformUnsupported)` only if the shared platform
