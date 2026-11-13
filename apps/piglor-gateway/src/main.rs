@@ -186,27 +186,7 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             }
         }
         Some("provision-local-principal") => {
-            #[cfg(target_os = "linux")]
-            {
-                let Some(sqlite_path) = args.get(2) else {
-                    return Err("provision-local-principal requires an SQLite path".into());
-                };
-                if args.len() != 3 {
-                    return Err("provision-local-principal accepts exactly an SQLite path".into());
-                }
-                provision_local_principal_from_credentials(
-                    sqlite_path,
-                    &credential_directory_from(
-                        credential_directory,
-                        LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY,
-                    )?,
-                )
-                .map_err(Into::into)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Err("Local Principal provisioning requires Linux systemd credentials".into())
-            }
+            provision_local_principal_command(args, credential_directory)
         }
         Some("fork-admission-provision") => Err(
             "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
@@ -232,6 +212,32 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             );
             Ok(())
         }
+    }
+}
+
+/// `provision-local-principal <sqlite-path>`, only under its systemd unit (#1361).
+fn provision_local_principal_command(
+    args: &[String],
+    credential_directory: Option<OsString>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(sqlite_path) = args.get(2) else {
+            return Err("provision-local-principal requires an SQLite path".into());
+        };
+        if args.len() != 3 {
+            return Err("provision-local-principal accepts exactly an SQLite path".into());
+        }
+        provision_local_principal_from_credentials(
+            sqlite_path,
+            &credential_directory_from(credential_directory, LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY)?,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop((args, credential_directory));
+        Err("Local Principal provisioning requires Linux systemd credentials".into())
     }
 }
 
