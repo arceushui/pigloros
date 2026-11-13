@@ -503,7 +503,6 @@ fn gateway_authorization_for(
         Arc::new(LocalAuthenticationAdapter::new(authenticated)),
         authority,
         registry,
-        Arc::new(crate::denial_evidence::VolatileDenialEvidence::default()),
     ))
 }
 

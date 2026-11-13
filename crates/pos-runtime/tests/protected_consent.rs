@@ -2260,6 +2260,24 @@ impl pos_core::AuthorityPersistencePortV1 for LostOutcomePorts<'_> {
     ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
         pos_core::AuthorityPersistencePortV1::load_authority(&*self.0, leaf_grant_id)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::record_authorization_denial(&mut *self.0, permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, pos_core::AuthorityPersistenceErrorV1>
+    {
+        pos_core::AuthorityPersistencePortV1::load_authorization_denials(&*self.0, from, limit)
+    }
 }
 
 /// Recovery of an in-doubt protected pass resubmits inside the consent token

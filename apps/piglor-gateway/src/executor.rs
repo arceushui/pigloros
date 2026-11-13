@@ -6,6 +6,7 @@
 use crate::{
     authorization::{
         GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
+        PendingAuthorityDenial, RecordedAuthorityDenial,
     },
     AdmittedAction, EventNotice,
 };
@@ -1473,6 +1474,20 @@ impl StoreExecutor {
             PurgeActionReceiptsCommand { limit, reply }
         )))
     }
+    /// Durably record one pending authority denial in its own store command.
+    pub(crate) async fn record_authority_denial(
+        &self,
+        authorization: Arc<GatewayAuthorization>,
+        pending: PendingAuthorityDenial,
+    ) -> Result<Option<RecordedAuthorityDenial>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            DenialEvidenceCommand {
+                authorization,
+                pending,
+                reply
+            }
+        )))
+    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -2188,6 +2203,46 @@ impl WorkerCommandV1 for PurgeActionReceiptsCommand {
             ),
         };
         drop(self.reply.send(result));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// Append one pending denial's ADN1 record to the host's authority store.
+///
+/// It runs as its own Write-class command, after the caller released the
+/// commit fence, so an authority replacement never waits behind it. A store
+/// without the authority ports, or a failed write, records nothing and
+/// replies `None`: the denial is then not answered.
+struct DenialEvidenceCommand {
+    authorization: Arc<GatewayAuthorization>,
+    pending: PendingAuthorityDenial,
+    reply: oneshot::Sender<Result<Option<RecordedAuthorityDenial>, StoreExecutorError>>,
+}
+
+impl WorkerCommandV1 for DenialEvidenceCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            authorization,
+            pending,
+            reply,
+        } = *self;
+        let recorded = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| {
+                        authorization.record_denial(ports, &pending)
+                    })
+                })
+                .ok()
+                .and_then(Result::ok),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+        };
+        drop(reply.send(Ok(recorded)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -3115,13 +3170,7 @@ fn execute_host_action_admission(
                                 .with_scheduled_admission(|ports| admission.admit(ports))
                                 .map_err(host_action_error)
                                 .and_then(|admitted| {
-                                    admitted.map_err(|error| {
-                                        commit_fence_refusal(
-                                            context.authorization,
-                                            &decision,
-                                            error,
-                                        )
-                                    })
+                                    admitted.map_err(|error| commit_fence_refusal(&decision, error))
                                 })
                                 .and_then(|admitted| {
                                     committed_action(sender, context.timeline, &admitted)
@@ -3271,22 +3320,23 @@ fn retain_admitted_action_release(
 }
 
 /// Type a store refusal at the commit fence. A revocation or expiry the
-/// store composed from the persisted authority chain is an authority denial
-/// of the decision just rechecked: its durable evidence is recorded before
-/// the typed denial is returned. Every other refusal keeps its own error.
+/// store composed from the persisted authority chain is a pending authority
+/// denial of the decision just rechecked; the Gateway records its evidence in
+/// a separate store command after it releases the commit fence. Every other
+/// refusal keeps its own error.
 fn commit_fence_refusal(
-    authorization: &GatewayAuthorization,
     decision: &GatewayAuthorizationDecision,
     error: HumanActionAdmissionErrorV1,
 ) -> ActionCommandError {
     match error {
         HumanActionAdmissionErrorV1::NotAdmitted(outcome) => commit_fence_authority(&outcome)
+            .and_then(|(authority, safe_error)| {
+                GatewayAuthorization::deny_at_commit_fence(decision, authority, safe_error)
+            })
             .map_or_else(
                 || ActionCommandError::Admission(HumanActionAdmissionErrorV1::NotAdmitted(outcome)),
-                |(authority, safe_error)| {
-                    ActionCommandError::Authorization(
-                        authorization.deny_at_commit_fence(decision, authority, safe_error),
-                    )
+                |pending| {
+                    ActionCommandError::Authorization(GatewayAuthorizationError::Denied(pending))
                 },
             ),
         other => ActionCommandError::Admission(other),
@@ -4598,6 +4648,32 @@ mod tests {
             receiver,
         );
         Ok(())
+    }
+
+    #[test]
+    fn expired_denial_evidence_command_replies_without_recording() {
+        let timeline = TimelineId::new();
+        let authorization = Arc::new(test_authorization_for(EntityId::new()));
+        let Err(crate::authorization::GatewayAuthorizationError::Denied(pending)) = authorization
+            .authorize(GatewayAuthorizationRequest::action(
+                EntityId::new(),
+                timeline,
+                "world.action.v1",
+                "world.action.v1.submit",
+                WallTime::now(),
+            ))
+        else {
+            std::panic::resume_unwind(Box::new("an unknown actor is denied"));
+        };
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::DenialEvidenceCommand {
+                authorization,
+                pending,
+                reply,
+            })),
+            receiver,
+        );
     }
 
     #[test]

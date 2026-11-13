@@ -1,15 +1,17 @@
 use ciborium::Value;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, EntityId, Hash,
-    PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, DELEGATE_ACTION_V1,
-    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS,
-    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
-    MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
+    AuthorizationDenialRecordV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
+    DelegationChainV1, EntityId, Hash, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AUTHORIZATION_DENIAL_RECORD_BYTES, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
+    MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES,
+    MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES,
+    MAX_PRINCIPAL_RECORD_BYTES,
 };
 use ulid::Ulid;
 
@@ -286,7 +288,45 @@ fn decision_for(
         ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))),
         decision
     );
+    let (reported, expiry) =
+        AuthorityEvaluatorV1::authorize_with_expiry(request, &chain, &trusted_registry);
+    assert_eq!(reported, decision);
+    assert_eq!(
+        expiry.is_some(),
+        decision.outcome() == AuthorizationOutcomeV1::Expired
+    );
     decision
+}
+
+/// The lapsed evidence the evaluator reports beside one decision.
+fn expiry_for(
+    request: &AuthorizationRequestV1,
+    chain: &[CapabilityGrantV1],
+) -> Option<AuthorizationExpiryV1> {
+    let decision = decision_for(request, chain);
+    let mut capability_bindings: Vec<_> = chain
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect();
+    capability_bindings.sort_unstable();
+    let consent_bindings = match request.consent() {
+        ConsentEvidenceV1::Resolved { grants } => grants
+            .iter()
+            .map(ConsentGrantRefV1::binding_digest)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        hash(7),
+        vec![request.authenticated().registry_binding_digest()],
+        capability_bindings,
+        consent_bindings,
+    ));
+    let chain = ok(DelegationChainV1::try_from_grants(chain.to_vec()));
+    let (reported, expiry) =
+        AuthorityEvaluatorV1::authorize_with_expiry(request, &chain, &registry);
+    assert_eq!(reported, decision);
+    expiry
 }
 
 fn encode_value(value: &Value) -> CanonicalBytes {
@@ -2373,4 +2413,133 @@ fn ancestor_changes_invalidate_every_descendant() {
         .outcome(),
         AuthorizationOutcomeV1::ParentInvalid
     );
+}
+
+#[test]
+fn the_evaluator_names_the_evidence_an_expired_decision_found_lapsed() {
+    let principal = principal(1);
+    let actor = entity(10);
+
+    let mut draft = request_draft(authenticated(principal.clone()), actor);
+    draft.at_time = WallTime::from_micros(100);
+    assert_eq!(
+        expiry_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]),
+        Some(AuthorizationExpiryV1::AuthenticationEvidence)
+    );
+
+    let mut expired_consent = consent_draft_for(8, entity(99));
+    expired_consent.status = ConsentGrantStatusV1::Expired;
+    expired_consent.valid_until = WallTime::from_micros(50);
+    let mut draft = request_draft(authenticated(principal.clone()), entity(99));
+    draft.consent = ConsentEvidenceV1::Resolved {
+        grants: vec![ok(ConsentGrantRefV1::try_from_draft(expired_consent))],
+    };
+    assert_eq!(
+        expiry_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]),
+        Some(AuthorizationExpiryV1::Consent)
+    );
+
+    let mut expired_grant = grant_draft(
+        2,
+        principal.clone(),
+        AuthorityGranteeV1::Principal(principal.clone()),
+        scope(vec![actor], vec!["read"], None),
+    );
+    expired_grant.valid_until_position = Seq::from_u64(50);
+    assert_eq!(
+        expiry_for(
+            &request(principal.clone(), actor),
+            &[ok(CapabilityGrantV1::try_from_draft(expired_grant))]
+        ),
+        Some(AuthorizationExpiryV1::Grant)
+    );
+
+    let active = root_grant(principal.clone(), vec![actor]);
+    assert_eq!(
+        expiry_for(&request(principal, actor), std::slice::from_ref(&active)),
+        None
+    );
+}
+
+#[test]
+fn a_denial_record_binds_only_a_denied_decision_without_payload() {
+    let principal = principal(1);
+    let actor = entity(10);
+    let grant = root_grant(principal.clone(), vec![actor]);
+    let active = decision_for(
+        &request(principal.clone(), actor),
+        std::slice::from_ref(&grant),
+    );
+    assert!(active.is_allowed());
+    assert_eq!(
+        AuthorizationDenialRecordV1::from_decision(&active, hash(40)),
+        None
+    );
+
+    let denied = decision_for(
+        &request(principal, entity(11)),
+        std::slice::from_ref(&grant),
+    );
+    let record = AuthorizationDenialRecordV1::from_decision(&denied, hash(40));
+    let Some(record) = record else {
+        std::panic::resume_unwind(Box::new("a denied decision has a record"));
+    };
+    assert_eq!(record.request_digest(), denied.request_digest());
+    assert_eq!(record.operation_binding(), hash(40));
+    assert_eq!(record.outcome(), denied.outcome());
+    assert_eq!(record.error(), denied.error());
+
+    let fenced = AuthorizationDenialRecordV1::with_outcome(
+        &active,
+        hash(41),
+        AuthorizationOutcomeV1::RevokedAtFence,
+        Some(AuthorityErrorV1::RevokedAtFence),
+    );
+    let expired = AuthorizationDenialRecordV1::with_outcome(
+        &active,
+        hash(42),
+        AuthorizationOutcomeV1::Expired,
+        None,
+    );
+    for record in [Some(record), fenced, expired] {
+        let Some(record) = record else {
+            std::panic::resume_unwind(Box::new("a denied outcome has a record"));
+        };
+        let bytes = record.encode();
+        assert_eq!(bytes.len(), AUTHORIZATION_DENIAL_RECORD_BYTES);
+        assert_eq!(ok(AuthorizationDenialRecordV1::decode(&bytes)), record);
+    }
+
+    let valid = ok(expired.ok_or("expired record")).encode();
+    let mutate = |at: usize, value: u8| {
+        let mut bytes = valid;
+        bytes[at] = value;
+        bytes
+    };
+    let malformed: [&[u8]; 6] = [
+        &valid[..AUTHORIZATION_DENIAL_RECORD_BYTES - 1],
+        &mutate(0, b'X'),
+        &mutate(4, 2),
+        &mutate(69, 200),
+        &mutate(69, AuthorizationOutcomeV1::Active.code()),
+        &mutate(70, 200),
+    ];
+    for bytes in malformed {
+        assert_eq!(
+            AuthorizationDenialRecordV1::decode(bytes),
+            Err(pos_core::AuthorityPersistenceErrorV1::InvalidRecord)
+        );
+    }
+
+    let registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        hash(7),
+        vec![hash(8)],
+        Vec::new(),
+        Vec::new(),
+    ));
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    let denial = ok(expired.ok_or("expired record"));
+    let permit = host.authorize_denial(denial);
+    assert_eq!(permit.persistence_binding(), host.persistence_binding());
+    assert_eq!(permit.record(), &denial);
 }

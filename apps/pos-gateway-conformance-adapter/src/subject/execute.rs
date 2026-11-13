@@ -9,7 +9,7 @@ use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
 use piglor_gateway::{
     gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
-    GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter, VolatileDenialEvidence,
+    GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
 use pos_core::{
@@ -254,7 +254,6 @@ fn pinned_authorization(
                         Arc::new(LocalAuthenticationAdapter::new(authenticated)),
                         view,
                         registry,
-                        Arc::new(VolatileDenialEvidence::default()),
                     )
                 })
         })

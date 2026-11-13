@@ -11,7 +11,6 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
-pub mod denial_evidence;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
@@ -38,12 +37,8 @@ pub use authorization::{
     GatewayAuthenticationRequest, GatewayAuthorityDenial, GatewayAuthorization,
     GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
     GatewayAuthorizationRequest, GatewayAuthorizationTarget, LocalAuthenticationAdapter,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use denial_evidence::VolatileDenialEvidence;
-pub use denial_evidence::{
-    FileDenialEvidenceLog, GatewayDenialEvidenceError, GatewayDenialEvidencePort,
-    GatewayDenialRecordV1,
+    PendingAuthorityDenial, RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
+    MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
@@ -1629,10 +1624,11 @@ pub enum GatewayError {
     #[error("timeline dependency set is exhausted")]
     DependencySetExhausted,
     /// The provider-neutral host authority denied the operation; the
-    /// denial's family selects its public problem and its durable evidence
-    /// was recorded before this error was returned.
+    /// denial's family selects its public problem. Only a
+    /// [`RecordedAuthorityDenial`], whose ADN1 record the store committed,
+    /// can carry it.
     #[error("{0}")]
-    AuthorizationDenied(GatewayAuthorityDenial),
+    AuthorizationDenied(RecordedAuthorityDenial),
     /// The provider-neutral host authorization boundary is unavailable.
     #[error("authorization unavailable")]
     AuthorizationUnavailable,
@@ -1640,6 +1636,10 @@ pub enum GatewayError {
     /// fails closed without answering the denial.
     #[error("authorization evidence unavailable")]
     AuthorizationEvidenceUnavailable,
+    /// This Principal, or the host, reached its denial-record bound for the
+    /// current window; the denial is not recorded or answered as a denial.
+    #[error("authorization denial limit reached")]
+    DenialRecordLimitReached,
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1828,7 +1828,6 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
 /// The Gateway error family of a not-admitted store outcome.
 #[derive(Clone, Copy)]
 enum NotAdmitted {
-    AuthorityDenied,
     PolicyUnavailable,
     LimitReached,
     HostFault,
@@ -1841,12 +1840,14 @@ enum NotAdmitted {
 /// `PipelineOutcomeV1` variant fails to compile until it is routed here.
 const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     match outcome {
-        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            NotAdmitted::AuthorityDenied
-        }
         PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
         PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
-        PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
+        // The executor turns a store revocation or expiry into a pending
+        // denial that is answered only once recorded; one that arrives here
+        // unrecorded is a host fault, never an answered denial.
+        PipelineOutcomeV1::AuthorityRevoked
+        | PipelineOutcomeV1::AuthorityExpired
+        | PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
         PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
@@ -1859,8 +1860,9 @@ const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     }
 }
 
-/// A store outcome names no protected record: authority failures reuse the
-/// authorization errors, the dependency faults are a host fault and a
+/// A store outcome names no protected record: an unavailable policy reuses the
+/// authorization error, an unrecorded authority denial and the dependency
+/// faults are a host fault and a
 /// permanent per-Timeline limit, and a stale cursor or domain state is one shape.
 fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
     not_admitted_error(not_admitted_family(outcome), maximum)
@@ -1869,9 +1871,6 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
 /// The stable Gateway error of one family; the match has no wildcard.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
     match family {
-        NotAdmitted::AuthorityDenied => {
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
-        }
         NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
         NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
         NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
@@ -3045,10 +3044,10 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
+        // A request envelope bound to another read is malformed input, not
+        // an authority decision, so it is never answered as a denial.
         if !request.targets_read(target_timeline, from_seq, limit) {
-            return Err(GatewayError::AuthorizationDenied(
-                GatewayAuthorityDenial::Unauthorized,
-            ));
+            return Err(GatewayError::InvalidAuthorizationRequest);
         }
         // The public request is an input envelope, not authority to choose the
         // operation being authorized. Rebuild the complete read semantics from
@@ -3065,7 +3064,10 @@ impl Gateway {
         );
         let fence = authorization.commit_fence().await;
         if let Err(error) = authorization.authorize(request) {
-            return Err(map_authorization_error(error));
+            // The denial's evidence is written after the fence is released,
+            // so an authority replacement never waits behind it.
+            drop(fence);
+            return Err(self.authorization_failure(authorization, error).await);
         }
         let page = normalize_protected_read_error(
             match self
@@ -3171,18 +3173,18 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         let fence = authorization.commit_fence().await;
-        let decision = match authorization
-            .authorize(GatewayAuthorizationRequest::action(
-                request.proposal.actor_entity_id,
-                timeline,
-                request.proposal.event_type.as_str(),
-                request.proposal.capability.as_str(),
-                WallTime::now(),
-            ))
-            .map_err(map_authorization_error)
-        {
+        let decision = match authorization.authorize(GatewayAuthorizationRequest::action(
+            request.proposal.actor_entity_id,
+            timeline,
+            request.proposal.event_type.as_str(),
+            request.proposal.capability.as_str(),
+            WallTime::now(),
+        )) {
             Ok(decision) => decision,
-            Err(error) => return Err(error),
+            Err(error) => {
+                drop(fence);
+                return Err(self.authorization_failure(&authorization, error).await);
+            }
         };
         let maximum = self.limits.max_events_per_timeline;
         let admitted = self
@@ -3204,9 +3206,51 @@ impl Gateway {
             )
             .await;
         drop(fence);
-        admitted
-            .map(|(action, _decision)| action)
-            .map_err(|error| action_command_error(error, maximum))
+        match admitted {
+            Ok((action, _decision)) => Ok(action),
+            Err(executor::ActionCommandError::Authorization(error)) => {
+                Err(self.authorization_failure(&authorization, error).await)
+            }
+            Err(error) => Err(action_command_error(error, maximum)),
+        }
+    }
+
+    /// Answer one failed authorization. A denied decision is answered only
+    /// after its ADN1 record is committed in the authority store by its own
+    /// store command, outside the commit fence; a Principal or host over its
+    /// denial-record bound is answered `resource-limit-exceeded` without a
+    /// store write; every other failure keeps its stable error.
+    async fn authorization_failure(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        error: GatewayAuthorizationError,
+    ) -> GatewayError {
+        match error {
+            GatewayAuthorizationError::Denied(pending) => {
+                self.recorded_denial(authorization, pending).await
+            }
+            other => map_authorization_error(other),
+        }
+    }
+
+    /// Record one pending denial under the denial-record bound and answer it.
+    async fn recorded_denial(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        pending: PendingAuthorityDenial,
+    ) -> GatewayError {
+        if !authorization.admit_denial_record(&pending) {
+            return GatewayError::DenialRecordLimitReached;
+        }
+        match self
+            .store
+            .record_authority_denial(Arc::clone(authorization), pending)
+            .await
+        {
+            Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
+            Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
+            Err(error) => error.into(),
+        }
     }
 
     /// Submit a proposed action without an idempotency key or cursor.
@@ -3475,15 +3519,15 @@ impl Gateway {
     }
 }
 
-const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+/// The stable error of an authorization failure that is not answered as a
+/// recorded denial: a denial that has not been recorded fails closed as
+/// unavailable evidence.
+fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
-        GatewayAuthorizationError::Denied(denial) => GatewayError::AuthorizationDenied(denial),
-        GatewayAuthorizationError::EvidenceUnavailable => {
-            GatewayError::AuthorizationEvidenceUnavailable
-        }
+        GatewayAuthorizationError::Denied(_) => GatewayError::AuthorizationEvidenceUnavailable,
     }
 }
 
@@ -4279,7 +4323,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             revoked,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
         ));
 
         let denied = gateway
@@ -4294,7 +4338,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             denied,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4618,9 +4662,7 @@ mod tests {
                     "boundary-denied-actor",
                 )
                 .await,
-            Err(GatewayError::AuthorizationDenied(
-                GatewayAuthorityDenial::Unauthorized
-            ))
+            Err(GatewayError::AuthorizationDenied(denial)) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
         assert!(matches!(
             gateway
@@ -4768,7 +4810,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             denied,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
         let invalid_timeline = gateway
             .read_events_page_authorized(
@@ -4798,7 +4840,7 @@ mod tests {
                 .test_err();
             assert!(matches!(
                 mismatched_range,
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+                GatewayError::InvalidAuthorizationRequest
             ));
         }
 
@@ -4864,9 +4906,7 @@ mod tests {
             gateway
                 .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
                 .await,
-            Err(GatewayError::AuthorizationDenied(
-                GatewayAuthorityDenial::Unauthorized
-            ))
+            Err(GatewayError::AuthorizationEvidenceUnavailable)
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4927,7 +4967,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             substituted_operation,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4939,10 +4979,7 @@ mod tests {
         let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [],
-            crate::authorization::test_expired_authorization_for(
-                actor,
-                Arc::new(crate::denial_evidence::VolatileDenialEvidence::default()),
-            ),
+            crate::authorization::test_expired_authorization_for(actor),
         );
         let timeline = gateway.create_timeline("expired-read").await.test_ok();
         let request =
@@ -4953,7 +4990,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             error,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -7517,7 +7554,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             error,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
         let valid = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
@@ -7596,7 +7633,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             err,
-            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
 
         // Approver rejection

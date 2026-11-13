@@ -9,10 +9,10 @@ use std::{num::NonZeroUsize, sync::Arc};
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash, Kind,
-    PrincipalRefV1, ProposedAction, Seq, TimelineId, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDenialRecordV1,
+    CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
+    ErasureRecoveryLimitsV1, Hash, Kind, PrincipalRefV1, ProposedAction, Seq, TimelineId, WallTime,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
@@ -23,10 +23,6 @@ use crate::{
         test_authorization_for, test_authorization_reject_after_first_for,
         test_expired_authorization_for, test_expired_grant_authorization_for,
         test_revoked_authority_for, GatewayAuthorizationRequest, LocalAuthenticationAdapter,
-    },
-    denial_evidence::{
-        FileDenialEvidenceLog, GatewayDenialEvidencePort, GatewayDenialRecordV1,
-        VolatileDenialEvidence,
     },
     executor, gateway_empty_action_registry, gateway_with_erasure_host_and_authorization,
     AdmittedAction, Gateway, GatewayAuthorityDenial, GatewayAuthorization, GatewayError,
@@ -417,9 +413,7 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
         assert!(
             matches!(
                 other_actor,
-                Err(GatewayError::AuthorizationDenied(
-                    GatewayAuthorityDenial::Unauthorized
-                ))
+                Err(GatewayError::AuthorizationDenied(denial)) if denial.denial() == GatewayAuthorityDenial::Unauthorized
             ),
             "{name}"
         );
@@ -434,7 +428,7 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
         assert!(
             matches!(
                 revoked,
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+                GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
             ),
             "{name}"
         );
@@ -445,7 +439,7 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
         assert!(
             matches!(
                 retry,
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+                GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
             ),
             "{name}"
         );
@@ -473,7 +467,7 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
 
     let expired = fixture_with(
         host(&StoreConfig::Memory)?,
-        test_expired_authorization_for(actor, Arc::new(VolatileDenialEvidence::default())),
+        test_expired_authorization_for(actor),
         actor,
         EntityId::new(),
     )
@@ -481,7 +475,7 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
     let outcome = rejected(submit(&expired, 1, Some("expired"), None).await?)?;
     assert!(matches!(
         outcome,
-        GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
+        GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthenticated
     ));
     assert_eq!(committed_events(&expired).await?, 0);
     expired.gateway.shutdown().await?;
@@ -523,7 +517,7 @@ async fn a_revocation_race_never_commits_after_the_revocation_is_installed() -> 
                     assert!(
                         matches!(
                             error,
-                            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+                            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
                         ),
                         "{name}"
                     );
@@ -533,7 +527,7 @@ async fn a_revocation_race_never_commits_after_the_revocation_is_installed() -> 
         assert!(
             matches!(
                 after,
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+                GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
             ),
             "{name}"
         );
@@ -767,8 +761,14 @@ async fn a_fork_admits_at_its_logical_head() -> TestResult {
 fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
     use pos_core::PipelineOutcomeV1;
     let cases = [
-        (PipelineOutcomeV1::AuthorityRevoked, "authority revoked"),
-        (PipelineOutcomeV1::AuthorityExpired, "authority revoked"),
+        (
+            PipelineOutcomeV1::AuthorityRevoked,
+            "human action admission is unavailable",
+        ),
+        (
+            PipelineOutcomeV1::AuthorityExpired,
+            "human action admission is unavailable",
+        ),
         (
             PipelineOutcomeV1::PolicyIndeterminate,
             "authorization unavailable",
@@ -899,20 +899,21 @@ fn every_authorization_failure_maps_to_a_stable_gateway_error() {
         mapped(Failure::RequestUnavailable),
         GatewayError::InvalidAuthorizationRequest
     ));
-    for denial in [
-        GatewayAuthorityDenial::Unauthenticated,
-        GatewayAuthorityDenial::Unauthorized,
-        GatewayAuthorityDenial::Revoked,
-        GatewayAuthorityDenial::ConsentInvalid,
-        GatewayAuthorityDenial::RevocationStateStale,
-    ] {
-        assert!(matches!(
-            mapped(Failure::Denied(denial)),
-            GatewayError::AuthorizationDenied(mapped_denial) if mapped_denial == denial
-        ));
-    }
+    // A denial that never reached its store record is not answered as one.
+    let actor = EntityId::new();
+    let Err(Failure::Denied(pending)) =
+        test_authorization_for(actor).authorize(GatewayAuthorizationRequest::action(
+            EntityId::new(),
+            TimelineId::new(),
+            EVENT_TYPE_ACTION,
+            CAPABILITY,
+            WallTime::now(),
+        ))
+    else {
+        std::panic::resume_unwind(Box::new("an unknown actor is denied"));
+    };
     assert!(matches!(
-        mapped(Failure::EvidenceUnavailable),
+        mapped(Failure::Denied(pending)),
         GatewayError::AuthorizationEvidenceUnavailable
     ));
 }
@@ -1120,16 +1121,11 @@ impl AuthorityHistory {
         Ok(state.view(self.root.grant_id())?)
     }
 
-    fn authorization(
-        &self,
-        view: AuthorityViewV1,
-        evidence: Arc<dyn GatewayDenialEvidencePort>,
-    ) -> GatewayAuthorization {
+    fn authorization(&self, view: AuthorityViewV1) -> GatewayAuthorization {
         GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(self.authenticated.clone())),
             view,
             self.registry.clone(),
-            evidence,
         )
     }
 }
@@ -1144,7 +1140,7 @@ async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> Test
         assert_eq!(learned.authority().revocations().len(), 1, "{name}");
         let fixture = fixture_with(
             host(&backend.config)?,
-            history.authorization(learned.clone(), Arc::new(VolatileDenialEvidence::default())),
+            history.authorization(learned.clone()),
             actor,
             EntityId::new(),
         )
@@ -1170,17 +1166,11 @@ async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> Test
     Ok(())
 }
 
-/// A durable denial log in `directory` and its path, for a restart check.
-fn denial_log(
-    directory: &tempfile::TempDir,
-) -> TestResult<(Arc<FileDenialEvidenceLog>, std::path::PathBuf)> {
-    let path = directory.path().join("denials.log");
-    Ok((Arc::new(FileDenialEvidenceLog::open(&path)?), path))
-}
-
-/// The denial records a fresh process finds in the log after a restart.
-fn records_after_restart(path: &std::path::Path) -> TestResult<Vec<GatewayDenialRecordV1>> {
-    Ok(FileDenialEvidenceLog::open(path)?.records()?)
+/// The ADN1 denial records a fresh process finds in the authority store.
+fn denials_after_restart(config: &StoreConfig) -> TestResult<Vec<AuthorizationDenialRecordV1>> {
+    Ok(host(config)?
+        .command_sender()?
+        .with_scheduled_admission(|ports| ports.load_authorization_denials(0, 16))??)
 }
 
 fn sqlite_config(directory: &tempfile::TempDir, name: &str) -> TestResult<StoreConfig> {
@@ -1198,11 +1188,10 @@ fn sqlite_config(directory: &tempfile::TempDir, name: &str) -> TestResult<StoreC
 async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestResult {
     let directory = tempfile::tempdir()?;
     let config = sqlite_config(&directory, "shared-authority.sqlite")?;
-    let (evidence, log) = denial_log(&directory)?;
     let actor = EntityId::new();
     let body = EntityId::new();
     let history = AuthorityHistory::new(actor)?;
-    let authorization = history.authorization(history.view(&[])?, evidence);
+    let authorization = history.authorization(history.view(&[])?);
     let first = fixture_with(host(&config)?, authorization.clone(), actor, body).await?;
     admitted(submit(&first, 1, Some("before"), None).await?)?;
     let timeline = first.timeline;
@@ -1245,15 +1234,16 @@ async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestR
     let outcome = rejected(submit(&restarted, 2, Some("after"), None).await?)?;
     assert!(matches!(
         outcome,
-        GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+        GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
     ));
     assert_eq!(committed_events(&restarted).await?, 1);
     assert_eq!(restarted.authorization.audits().len(), 1);
     restarted.gateway.shutdown().await?;
     drop(restarted);
 
-    // The denial was durable before the answer and survives the restart.
-    let records = records_after_restart(&log)?;
+    // The denial was committed in the authority store before the answer and
+    // survives the restart.
+    let records = denials_after_restart(&config)?;
     assert_eq!(records.len(), 1);
     assert_eq!(
         records[0].outcome(),
@@ -1269,26 +1259,19 @@ async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestR
 /// Submit one action through a Gateway whose authority denies it, then
 /// restart and return the typed denial with the records the log still holds.
 async fn denied_with_durable_evidence(
-    authorization: impl FnOnce(EntityId, Arc<dyn GatewayDenialEvidencePort>) -> GatewayAuthorization,
-) -> TestResult<(GatewayError, Vec<GatewayDenialRecordV1>)> {
+    authorization: impl FnOnce(EntityId) -> GatewayAuthorization,
+) -> TestResult<(GatewayError, Vec<AuthorizationDenialRecordV1>)> {
     let directory = tempfile::tempdir()?;
     let config = sqlite_config(&directory, "denied.sqlite")?;
-    let (evidence, log) = denial_log(&directory)?;
-    let evidence: Arc<dyn GatewayDenialEvidencePort> = evidence;
     let actor = EntityId::new();
-    let fixture = fixture_with(
-        host(&config)?,
-        authorization(actor, evidence),
-        actor,
-        EntityId::new(),
-    )
-    .await?;
+    let fixture =
+        fixture_with(host(&config)?, authorization(actor), actor, EntityId::new()).await?;
     let outcome = rejected(submit(&fixture, 1, Some("denied"), None).await?)?;
     assert_eq!(committed_events(&fixture).await?, 0);
     assert!(fixture.authorization.audits().is_empty());
     fixture.gateway.shutdown().await?;
     drop(fixture);
-    Ok((outcome, records_after_restart(&log)?))
+    Ok((outcome, denials_after_restart(&config)?))
 }
 
 #[tokio::test]
@@ -1296,7 +1279,7 @@ async fn expired_authentication_evidence_is_unauthenticated_with_durable_evidenc
     let (outcome, records) = denied_with_durable_evidence(test_expired_authorization_for).await?;
     assert!(matches!(
         outcome,
-        GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
+        GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthenticated
     ));
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -1313,7 +1296,7 @@ async fn an_expired_grant_is_revoked_with_durable_evidence() -> TestResult {
         denied_with_durable_evidence(test_expired_grant_authorization_for).await?;
     assert!(matches!(
         outcome,
-        GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+        GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
     ));
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -1321,5 +1304,111 @@ async fn an_expired_grant_is_revoked_with_durable_evidence() -> TestResult {
         pos_core::AuthorizationOutcomeV1::Expired
     );
     assert_eq!(records[0].error(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_store_that_refuses_the_denial_record_never_answers_the_denial() -> TestResult {
+    let mut foreign = host(&StoreConfig::Memory)?;
+    let registry = AuthorityRegistrySnapshotV1::try_new(
+        Hash::from_bytes([9; 32]),
+        vec![Hash::from_bytes([10; 32])],
+        vec![Hash::from_bytes([11; 32])],
+        Vec::new(),
+    )?;
+    let other_host = AuthorityPersistenceHostV1::new(&registry);
+    foreign
+        .command_sender()?
+        .with_scheduled_admission(|ports| {
+            ports.bind_authority_persistence(other_host.persistence_binding())
+        })??;
+    let actor = EntityId::new();
+    let fixture = fixture_with(
+        foreign,
+        test_authorization_for(actor),
+        actor,
+        EntityId::new(),
+    )
+    .await?;
+    let timeline = fixture.timeline.to_string();
+
+    let outcome = fixture
+        .gateway
+        .read_events_page_authorized(
+            &timeline,
+            0,
+            1,
+            GatewayAuthorizationRequest::read(
+                EntityId::new(),
+                fixture.timeline,
+                0,
+                1,
+                WallTime::now(),
+            ),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        Err(GatewayError::AuthorizationEvidenceUnavailable)
+    ));
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_denial_flood_is_bounded_before_any_store_write() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let config = sqlite_config(&directory, "flood.sqlite")?;
+    let fixture = fixture(&config).await?;
+    let timeline = fixture.timeline.to_string();
+    let outsider = EntityId::new();
+    let read = || {
+        fixture.gateway.read_events_page_authorized(
+            &timeline,
+            0,
+            1,
+            GatewayAuthorizationRequest::read(outsider, fixture.timeline, 0, 1, WallTime::now()),
+        )
+    };
+    for _ in 0..crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE {
+        assert!(matches!(
+            read().await,
+            Err(GatewayError::AuthorizationDenied(denial))
+                if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
+    }
+    assert!(matches!(
+        read().await,
+        Err(GatewayError::DenialRecordLimitReached)
+    ));
+
+    // A denial whose store command cannot run is answered with the store's
+    // error, never as a denial.
+    fixture.gateway.shutdown().await?;
+    let lapsed = fixture
+        .gateway
+        .read_events_page_authorized(
+            &timeline,
+            0,
+            1,
+            GatewayAuthorizationRequest::read(
+                EntityId::new(),
+                fixture.timeline,
+                0,
+                1,
+                WallTime::now(),
+            ),
+        )
+        .await;
+    assert!(matches!(lapsed, Err(GatewayError::StoreExecutorClosed)));
+    drop(fixture);
+
+    // Only the admitted denials were written.
+    assert_eq!(
+        u32::try_from(denials_after_restart(&config)?.len())?,
+        crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE
+    );
     Ok(())
 }

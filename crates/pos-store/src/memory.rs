@@ -270,6 +270,8 @@ pub struct MemoryStore {
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
     authority_state: AuthorityPersistenceStateV1,
+    /// ADN1 authorization-denial records in the order they were recorded.
+    authorization_denials: Vec<pos_core::AuthorizationDenialRecordV1>,
     /// Host-published ADR-021 admission fences keyed by Timeline.
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
@@ -790,6 +792,7 @@ impl MemoryStore {
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
+            authorization_denials: Vec::new(),
             pipeline_admission_fences: HashMap::new(),
             counterfactual_forks: HashMap::new(),
             counterfactual_generation_floors: HashMap::new(),
@@ -3721,6 +3724,31 @@ impl AuthorityPersistencePortV1 for MemoryStore {
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.authority_state.resolve(leaf_grant_id)
+    }
+
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        self.authorization_denials.push(*permit.record());
+        Ok(())
+    }
+
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, AuthorityPersistenceErrorV1> {
+        Ok(self
+            .authorization_denials
+            .iter()
+            .skip(usize::try_from(from).unwrap_or(usize::MAX))
+            .take(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+            .copied()
+            .collect())
     }
 }
 

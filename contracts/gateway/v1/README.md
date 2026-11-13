@@ -61,10 +61,14 @@ lookup answers `not-found-or-unavailable` and never reveals whether the resource
 An authority decision precedes any protected lookup, so a caller without a read grant receives
 the same answer for an unknown Timeline as for an existing one. A missing Principal, or
 authentication evidence outside its validity window, is `401 unauthenticated`; a missing grant
-or capability is `403 unauthorized`; a grant or consent revoked at the evaluation or commit
-fence, or expired, is `403 revoked`; absent or unbound consent is `403 consent-invalid`; a host
-that cannot vouch for its revocation state, or cannot durably record the denial, is
-`503 temporarily-unavailable` (retryable). Every denial is durably recorded before it is answered.
+or capability is `403 unauthorized`; a grant, a delegation parent or consent that was revoked at
+the evaluation or commit fence, or expired, is `403 revoked`; absent or unbound consent is
+`403 consent-invalid`; a host that cannot vouch for its revocation state, or cannot durably
+record the denial, is `503 temporarily-unavailable` (retryable). Every denial is committed as a
+payload-free record in the host's authority store before it is answered. Denial records are
+bounded per Principal (`principal_denial_records_per_minute`) and per host
+(`denial_records_per_minute`); a denial over either bound is `429 resource-limit-exceeded`
+(retryable) and is neither recorded nor answered as a denial.
 
 ## Idempotency
 

@@ -2523,6 +2523,10 @@ impl SqliteStore {
                      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                      state_cbor BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS authority_denials (
+                     sequence INTEGER PRIMARY KEY,
+                     adn1 BLOB NOT NULL CHECK (length(adn1) = 71)
+                 );
                  COMMIT;",
             )
             .map_err(Self::into_storage_error)
@@ -2582,24 +2586,42 @@ impl SqliteStore {
     }
 
     fn validate_authority_schema(&self) -> Result<(), CoreError> {
+        [
+            (
+                "authority_state",
+                &[
+                    "singleton integer primary key check (singleton = 1)",
+                    "schema_version integer not null check (schema_version = 1)",
+                    "state_cbor blob not null",
+                ][..],
+            ),
+            (
+                "authority_denials",
+                &[
+                    "sequence integer primary key",
+                    "adn1 blob not null check (length(adn1) = 71)",
+                ][..],
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(table, required)| self.validate_authority_table(table, required))
+    }
+
+    fn validate_authority_table(&self, table: &str, required: &[&str]) -> Result<(), CoreError> {
         let sql = self
             .conn
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authority_state'",
-                [],
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
                 |row| row.get::<_, String>(0),
             )
             .map_err(Self::into_storage_error)?;
         let normalized = normalize_schema_sql(&sql);
-        for required in [
-            "singleton integer primary key check (singleton = 1)",
-            "schema_version integer not null check (schema_version = 1)",
-            "state_cbor blob not null",
-        ] {
+        for required in required {
             if !normalized.contains(&normalize_schema_sql(required)) {
-                return Err(CoreError::Storage(
-                    "SQLite authority_state table has an incompatible schema".to_owned(),
-                ));
+                return Err(CoreError::Storage(format!(
+                    "SQLite {table} table has an incompatible schema"
+                )));
             }
         }
         Ok(())
@@ -14555,6 +14577,57 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
     }
+
+    /// One autocommit `INSERT` is its own committed transaction; inside an
+    /// outer transaction it would not commit before the host answers, so it
+    /// fails closed instead.
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding())
+            || !self.conn.is_autocommit()
+        {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        self.conn
+            .execute(
+                "INSERT INTO authority_denials (adn1) VALUES (?1)",
+                params![permit.record().encode().as_slice()],
+            )
+            .map(|_| ())
+            .or(Err(AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, AuthorityPersistenceErrorV1> {
+        self.conn
+            .prepare_cached(
+                "SELECT adn1 FROM authority_denials ORDER BY sequence LIMIT ?1 OFFSET ?2",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        params![
+                            i64::try_from(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+                                .unwrap_or(i64::MAX),
+                            i64::try_from(from).unwrap_or(i64::MAX)
+                        ],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .or(Err(AuthorityPersistenceErrorV1::Unavailable))
+            .and_then(|rows| {
+                rows.iter()
+                    .map(Vec::as_slice)
+                    .map(pos_core::AuthorizationDenialRecordV1::decode)
+                    .collect()
+            })
+    }
 }
 
 /// Resolve each coordinator WKE1 against this transaction's key registry,
@@ -16930,6 +17003,41 @@ mod tests {
         assert_eq!(
             write_fork_admission_wall_fence(&store.conn, u64::MAX),
             Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        );
+    }
+
+    #[test]
+    fn sqlite_denial_record_inside_an_outer_transaction_fails_closed() {
+        let mut store = tests::new_store();
+        let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            Hash::from_bytes([7; 32]),
+            vec![Hash::from_bytes([8; 32])],
+            Vec::new(),
+            Vec::new(),
+        )
+        .test_ok();
+        let host = pos_core::AuthorityPersistenceHostV1::new(&registry);
+        let mut bytes = [0_u8; pos_core::AUTHORIZATION_DENIAL_RECORD_BYTES];
+        bytes[..4].copy_from_slice(b"ADN1");
+        bytes[4] = 1;
+        bytes[69] = pos_core::AuthorizationOutcomeV1::Expired.code();
+        bytes[70] = u8::MAX;
+        let record = pos_core::AuthorizationDenialRecordV1::decode(&bytes).test_ok();
+        store
+            .bind_authority_persistence(host.persistence_binding())
+            .test_ok();
+        store.conn.execute_batch("BEGIN").test_ok();
+        assert_eq!(
+            store.record_authorization_denial(host.authorize_denial(record)),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        store.conn.execute_batch("ROLLBACK").test_ok();
+        store
+            .record_authorization_denial(host.authorize_denial(record))
+            .test_ok();
+        assert_eq!(
+            store.load_authorization_denials(0, 1).test_ok(),
+            vec![record]
         );
     }
 

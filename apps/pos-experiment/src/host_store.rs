@@ -197,6 +197,24 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
             ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
                 self.$field.load_authority(leaf_grant_id)
             }
+
+            fn record_authorization_denial(
+                &mut self,
+                permit: pos_core::AuthorizationDenialPermitV1,
+            ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+                self.$field.record_authorization_denial(permit)
+            }
+
+            fn load_authorization_denials(
+                &self,
+                from: u64,
+                limit: usize,
+            ) -> Result<
+                Vec<pos_core::AuthorizationDenialRecordV1>,
+                pos_core::AuthorityPersistenceErrorV1,
+            > {
+                self.$field.load_authorization_denials(from, limit)
+            }
         }
     };
 }
@@ -416,6 +434,24 @@ impl pos_core::AuthorityPersistencePortV1 for HostedExperimentStore {
         leaf_grant_id: pos_core::Hash,
     ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
         self.with_admission(|store| store.load_authority(leaf_grant_id))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+        self.with_admission(|store| store.record_authorization_denial(permit))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<pos_core::AuthorizationDenialRecordV1>, pos_core::AuthorityPersistenceErrorV1>
+    {
+        self.with_admission(|store| store.load_authorization_denials(from, limit))
             .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
     }
 }
@@ -990,6 +1026,14 @@ mod host_store_tests {
             store.load_authority(grant.grant_id())?.revocation_epoch(),
             1
         );
+        let mut bytes = [0_u8; pos_core::AUTHORIZATION_DENIAL_RECORD_BYTES];
+        bytes[..4].copy_from_slice(b"ADN1");
+        bytes[4] = 1;
+        bytes[69] = pos_core::AuthorizationOutcomeV1::Expired.code();
+        bytes[70] = u8::MAX;
+        let denial = pos_core::AuthorizationDenialRecordV1::decode(&bytes)?;
+        store.record_authorization_denial(authority.authorize_denial(denial))?;
+        assert_eq!(store.load_authorization_denials(0, 8)?, vec![denial]);
         Ok(())
     }
 

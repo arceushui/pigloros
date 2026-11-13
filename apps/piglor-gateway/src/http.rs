@@ -680,7 +680,7 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
         }
         GatewayError::Consent(_) => (Code::ConsentInvalid, StatusCode::FORBIDDEN, false),
         GatewayError::LedgerWriteDisabled => (Code::Unauthorized, StatusCode::FORBIDDEN, false),
-        GatewayError::AuthorizationDenied(denial) => denial_problem(*denial),
+        GatewayError::AuthorizationDenied(recorded) => denial_problem(recorded.denial()),
         GatewayError::ActionAuthorizationUnavailable | GatewayError::AuthorizationUnavailable => {
             (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
         }
@@ -735,7 +735,7 @@ const fn bound_problem(error: &GatewayError) -> ProblemShape {
             StatusCode::TOO_MANY_REQUESTS,
             false,
         ),
-        GatewayError::StoreExecutorSaturated => (
+        GatewayError::StoreExecutorSaturated | GatewayError::DenialRecordLimitReached => (
             Code::ResourceLimitExceeded,
             StatusCode::TOO_MANY_REQUESTS,
             true,
@@ -905,12 +905,27 @@ mod tests {
         )
     }
 
+    /// A test-only recorded denial for problem-mapping cases.
+    const fn recorded(denial: GatewayAuthorityDenial) -> crate::RecordedAuthorityDenial {
+        crate::RecordedAuthorityDenial::recorded_for_test(denial)
+    }
+
+    /// A host-backed Gateway, so a denial's ADN1 record has an authority store.
     fn authority_test_app(actor: EntityId) -> Router {
-        let gateway = Gateway::new_with_world_bodies_and_authorization(
-            open_store(StoreConfig::Memory).test_ok(),
-            [],
-            crate::authorization::test_authorization_for(actor),
-        );
+        authority_app(crate::authorization::test_authorization_for(actor))
+    }
+
+    fn authority_app(authorization: crate::GatewayAuthorization) -> Router {
+        let gateway = crate::gateway_with_erasure_host_and_authorization(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok(),
+            [test_world_body()],
+            authorization,
+        )
+        .test_ok();
         router(AppState {
             gateway,
             ledger_view: LedgerView::default(),
@@ -1718,7 +1733,7 @@ osf_link = \"https://osf.io/example\"\n";
 
     /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn problem_cases() -> [(GatewayError, &'static str, bool); 24] {
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 25] {
         [
             (
                 GatewayError::DependencySetExhausted,
@@ -1774,33 +1789,42 @@ osf_link = \"https://osf.io/example\"\n";
                 false,
             ),
             (
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized),
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthorized)),
                 "unauthorized",
                 false,
             ),
             (
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated),
+                GatewayError::AuthorizationDenied(recorded(
+                    GatewayAuthorityDenial::Unauthenticated,
+                )),
                 "unauthenticated",
                 false,
             ),
             (
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked),
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked)),
                 "revoked",
                 false,
             ),
             (
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::ConsentInvalid),
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::ConsentInvalid)),
                 "consent-invalid",
                 false,
             ),
             (
-                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::RevocationStateStale),
+                GatewayError::AuthorizationDenied(recorded(
+                    GatewayAuthorityDenial::RevocationStateStale,
+                )),
                 "temporarily-unavailable",
                 true,
             ),
             (
                 GatewayError::AuthorizationEvidenceUnavailable,
                 "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::DenialRecordLimitReached,
+                "resource-limit-exceeded",
                 true,
             ),
             (
@@ -2389,15 +2413,9 @@ osf_link = \"https://osf.io/example\"\n";
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn unknown_and_unauthorized_timelines_answer_identically_without_a_read_grant() {
         let actor = test_action_actor();
-        let app = router(AppState {
-            gateway: Gateway::new_with_world_bodies_and_authorization(
-                open_store(StoreConfig::Memory).test_ok(),
-                [],
-                crate::authorization::test_action_only_authorization_for(actor),
-            ),
-            ledger_view: LedgerView::default(),
-            ledger_write: LedgerWriteMode::Disabled,
-        });
+        let app = authority_app(crate::authorization::test_action_only_authorization_for(
+            actor,
+        ));
         let (_status, created) = json_request(
             app.clone(),
             "POST",
@@ -2669,13 +2687,17 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::DependencySetExhausted.into_response();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked).into_response();
+        let r = GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked))
+            .into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
-            .into_response();
+        let r =
+            GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthenticated))
+                .into_response();
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::RevocationStateStale)
-            .into_response();
+        let r = GatewayError::AuthorizationDenied(recorded(
+            GatewayAuthorityDenial::RevocationStateStale,
+        ))
+        .into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
             "world.unknown".into(),
