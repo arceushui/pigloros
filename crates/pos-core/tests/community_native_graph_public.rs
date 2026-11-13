@@ -692,6 +692,25 @@ fn node_identities_and_horizon_are_validated() {
     for input in invalid {
         assert_eq!(check(input), Err(Error::InvalidBinding));
     }
+    // With no inputs, only the node's own identities can refuse it.
+    let empty = NodeInput {
+        input_index: Index::Empty,
+        ..base
+    };
+    assert_eq!(check(empty), Ok(()));
+    let unidentified = [
+        NodeInput {
+            store_incarnation: [0; 16],
+            ..empty
+        },
+        NodeInput {
+            producer_ordinal: 0,
+            ..empty
+        },
+    ];
+    for input in unidentified {
+        assert_eq!(check(input), Err(Error::InvalidBinding));
+    }
     for horizon in [0, u64::MAX / 2 + 1] {
         let input = NodeInput {
             evidence_not_after_micros: horizon,

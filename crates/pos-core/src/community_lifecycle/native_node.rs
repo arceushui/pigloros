@@ -25,7 +25,8 @@ const MAX_NODE: usize = 1_048_576;
 pub const MAX_COMMUNITY_DIRECT_INPUTS_V1: usize = 256;
 /// Maximum expanded inputs of one grouped input index.
 pub const MAX_COMMUNITY_EXPANDED_INPUTS_V1: usize = 4096;
-const MAX_GROUPS: usize = MAX_COMMUNITY_EXPANDED_INPUTS_V1 / MAX_COMMUNITY_DIRECT_INPUTS_V1;
+// 4096 expanded inputs in 256-input chunks.
+const MAX_GROUPS: usize = 16;
 const MAX_RULE_BYTES: usize = 64;
 
 /// Closed native node kinds with their fixed rule and class.
