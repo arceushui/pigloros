@@ -698,10 +698,13 @@ jobs:
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
+      # Library and binary targets only: the shim's test targets depend on
+      # pos-crypto, whose C build cannot target MSVC from this Linux runner.
+      # The native owner-bridge-windows job lints every target with these flags.
       - name: Cross-target lint the Windows owner shim
         run: >
           cargo clippy -p pos-owner-bridge-windows --target x86_64-pc-windows-msvc
-          --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+          --all-features --locked -- -D warnings -W clippy::pedantic
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
       - name: Exercise Windows shim coverage exclusions with real metadata
