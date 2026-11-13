@@ -29,13 +29,19 @@ use crate::memory::MemoryStore;
 /// Preferred CBOR encoding of the empty scope-member array.
 const EMPTY_SCOPE_ROWS: [u8; 1] = [0x80];
 
-/// Closed bootstrap request: the original control identity and the real
-/// first admitted Timeline/generation that anchor native metadata.
+/// Closed bootstrap request: the original control identity and the
+/// Timeline/generation that anchor native metadata.
+///
+/// ADR-129 §3 commits CMA1 at bootstrap, and its T/G are "the real first
+/// admitted Timeline/generation". The anchor pair is therefore
+/// caller-asserted by the trusted composition until the first generation
+/// initialization (CGI1) binds it; this type does not verify that pair
+/// against an admitted generation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityBootstrapRequestV1 {
-    control_id: [u8; 16],
-    anchor_timeline: TimelineId,
-    anchor_generation: [u8; 16],
+    pub(super) control_id: [u8; 16],
+    pub(super) anchor_timeline: TimelineId,
+    pub(super) anchor_generation: [u8; 16],
 }
 
 impl CommunityBootstrapRequestV1 {
@@ -85,13 +91,15 @@ pub enum CommunityDomainOpenedV1 {
     Existing,
 }
 
-struct BootstrapRecordV1 {
-    request: CommunityBootstrapRequestV1,
-    protection_id: [u8; 16],
-    copy_id: [u8; 16],
-    anchor: Zeroizing<Vec<u8>>,
-    selection: SealedMetadataV1,
-    key_copy: SealedMetadataV1,
+/// Retained bootstrap records; later community operations extend the domain
+/// from sibling modules, so fields are visible within `community` only.
+pub(super) struct BootstrapRecordV1 {
+    pub(super) request: CommunityBootstrapRequestV1,
+    pub(super) protection_id: [u8; 16],
+    pub(super) copy_id: [u8; 16],
+    pub(super) anchor: Zeroizing<Vec<u8>>,
+    pub(super) selection: SealedMetadataV1,
+    pub(super) key_copy: SealedMetadataV1,
 }
 
 impl BootstrapRecordV1 {
@@ -113,15 +121,23 @@ impl BootstrapRecordV1 {
 ///
 /// It exposes no key, material, record or State getter. Opening it requires
 /// a current metadata-service decision over its own persisted authority.
+///
+/// Fields are visible within the sealed `community` module only, so each
+/// later lifecycle operation adds its own sibling module and `impl` block.
 pub struct MemoryCommunityDomainV1 {
-    store: MemoryStore,
-    store_incarnation: [u8; 16],
-    keys: BTreeMap<[u8; 16], VaultKeyV1>,
-    bootstrap: Option<BootstrapRecordV1>,
+    pub(super) store: MemoryStore,
+    pub(super) store_incarnation: [u8; 16],
+    pub(super) keys: BTreeMap<[u8; 16], VaultKeyV1>,
+    pub(super) bootstrap: Option<BootstrapRecordV1>,
 }
 
 impl MemoryCommunityDomainV1 {
     /// Take ownership of a store as a new, empty protected domain.
+    ///
+    /// The domain is proven empty by construction: community key, anchor,
+    /// selection and copy records live only in this domain, never in the
+    /// `MemoryStore`, so a fresh domain holds none of them whatever the store
+    /// already contains. The store contributes only its authority records.
     ///
     /// The trusted composition provisions the store incarnation, so it can
     /// persist the exact metadata grant for this resource before handing the
@@ -233,13 +249,14 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<(), Error> {
         self.keys
             .get(&record.protection_id)
+            .filter(|key| key_matches(key, record))
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|key| {
                 self.verify_anchor(binding, record)
                     .and_then(|()| key.open(&record.selection))
                     .and_then(|selection| self.verify_selection(binding, &selection))
                     .and_then(|()| key.open(&record.key_copy))
-                    .and_then(|copy| verify_copy(&copy, record))
+                    .and_then(|copy| verify_copy(&copy, record, key))
             })
     }
 
@@ -260,6 +277,8 @@ impl MemoryCommunityDomainV1 {
             .ok_or(Error::EvidenceUnavailable)
     }
 
+    /// Check the initial CSI1 bootstrap committed: no producer, no Timeline
+    /// floors and the installed policy's metadata horizon.
     fn verify_selection(
         &self,
         binding: CommunityDomainBindingV1<'_>,
@@ -272,6 +291,10 @@ impl MemoryCommunityDomainV1 {
                 selection.store_incarnation == self.store_incarnation
                     && selection.installed_catalogue_digest == binding.installed_catalogue_digest
                     && selection.native_profile_digest == binding.native_profile_digest
+                    && selection.highest_native_producer_ordinal == 0
+                    && selection.timeline_floors.is_empty()
+                    && selection.metadata_not_after_micros
+                        == binding.metadata_policy.as_input().metadata_not_after_micros
             })
             .map(drop)
             .ok_or(Error::EvidenceUnavailable)
@@ -441,10 +464,36 @@ fn key_copy_descriptor(
     }
 }
 
-fn verify_copy(plaintext: &[u8], record: &BootstrapRecordV1) -> Result<(), Error> {
+/// The retained key is exactly the bootstrap intent for this record and its
+/// material is the material that intent names.
+fn key_matches(key: &VaultKeyV1, record: &BootstrapRecordV1) -> bool {
+    let intent = key.intent().as_input();
+    key.material_matches_intent()
+        && intent.protection_operation_id == record.protection_id
+        && intent.parent_operation
+            == CommunityArtifactOperationV1::Control(record.request.control_id)
+        && intent.timeline == record.request.anchor_timeline
+        && intent.generation == record.request.anchor_generation
+        && intent.purpose == CommunityArtifactPurposeV1::LifecycleControl
+        && intent.scope_set_digest == scope_set_digest(&EMPTY_SCOPE_ROWS)
+}
+
+/// The initial key-vault copy descriptor names this record's copy, this
+/// exact key intent and the empty bootstrap scope.
+fn verify_copy(
+    plaintext: &[u8],
+    record: &BootstrapRecordV1,
+    key: &VaultKeyV1,
+) -> Result<(), Error> {
     CommunityCopyInventoryV1::from_canonical_cbor(plaintext)
         .ok()
-        .filter(|copy| copy.as_input().copy_id == record.copy_id)
+        .filter(|copy| {
+            let copy = copy.as_input();
+            copy.copy_id == record.copy_id
+                && copy.holder == CommunityCopyHolderV1::KeyVault
+                && copy.holder_digest == key.intent().digest()
+                && copy.scope_set_digest == scope_set_digest(&EMPTY_SCOPE_ROWS)
+        })
         .map(drop)
         .ok_or(Error::EvidenceUnavailable)
 }

@@ -74,6 +74,24 @@ impl VaultKeyV1 {
         &self.intent
     }
 
+    /// Whether the retained material is the material named by the intent.
+    pub(super) fn material_matches_intent(&self) -> bool {
+        self.cipher.material_digest() == self.intent.as_input().material_fingerprint
+    }
+
+    /// Replace the intent while keeping this exact material, so tests can
+    /// prove a mismatched intent is refused even when AEAD would succeed.
+    #[cfg(test)]
+    pub(super) fn with_intent(self, input: CommunityKeyIntentInputV1) -> Result<Self, Error> {
+        CommunityKeyIntentV1::new(input).and_then(|intent| {
+            CommunityKeyUseV1::new(&intent, 0).map(|credits| Self {
+                intent,
+                credits,
+                cipher: self.cipher,
+            })
+        })
+    }
+
     /// Highest committed encryption ordinal.
     #[cfg(test)]
     pub(super) const fn burned_credits(&self) -> u32 {
@@ -81,13 +99,16 @@ impl VaultKeyV1 {
     }
 }
 
-/// Fresh nonzero 16-byte identity from the OS CSPRNG.
+/// Fresh 16-byte identity from the OS CSPRNG.
+///
+/// An all-zero draw is not special-cased here: every record that carries
+/// the identity (CKP1, CSM1, CCI1) refuses a zero identity, so the bootstrap
+/// fails closed with `InvalidBinding` instead of using it.
 pub(super) fn fresh_identity() -> Result<[u8; 16], Error> {
     let mut identity = [0_u8; 16];
     SysRng
         .try_fill_bytes(&mut identity)
         .ok()
-        .filter(|&()| identity != [0; 16])
         .map(|()| identity)
         .ok_or(Error::StorageUnavailable)
 }

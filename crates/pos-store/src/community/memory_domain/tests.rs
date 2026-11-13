@@ -8,10 +8,13 @@ use std::error::Error as StdError;
 use ciborium::Value;
 use pos_core::community_lifecycle::{
     CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
-    CommunityCopyHolderV1, CommunityCopyInventoryV1, CommunityCopyStateV1,
+    CommunityCopyHolderV1, CommunityCopyInventoryInputV1, CommunityCopyInventoryV1,
+    CommunityCopyStateV1, CommunityGenerationIdsV1, CommunityKeyIntentInputV1,
     CommunityLifecycleErrorV1 as Error, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
     CommunityMetadataPolicyV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
-    CommunityMetadataScopeV1, CommunityScopeMembersV1, CommunitySelectionV1,
+    CommunityMetadataScopeV1, CommunityRecordKindsV1, CommunityScopeMembersV1,
+    CommunitySelectionInputV1, CommunitySelectionV1, CommunityTimelineFloorV1,
+    CommunityTimelineFloorsV1,
 };
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
@@ -27,8 +30,9 @@ use ulid::Ulid;
 use super::super::private_hash::{plaintext_commitment, private_digest, scope_set_digest};
 use super::super::vault::VaultKeyV1;
 use super::{
-    bootstrap_intent, BootstrapRecordIds, BootstrapRecordV1, CommunityBootstrapRequestV1,
-    CommunityDomainBindingV1, CommunityDomainOpenedV1, MemoryCommunityDomainV1,
+    bootstrap_intent, key_copy_descriptor, BootstrapRecordIds, BootstrapRecordV1,
+    CommunityBootstrapRequestV1, CommunityDomainBindingV1, CommunityDomainOpenedV1,
+    MemoryCommunityDomainV1,
 };
 use crate::memory::MemoryStore;
 
@@ -308,6 +312,16 @@ fn oracle(domain: &[u8], preimage: &[u8]) -> Hash {
     Hash::from_bytes(*blake3::hash(&input).as_bytes())
 }
 
+/// ADR-129 §2, written out independently: `H(M, bytes)` is BLAKE3 of ASCII
+/// `PiglorOS.Community.<M>.v1`, one zero byte, then the bytes.
+fn adr_h(m: &str, bytes: &[u8]) -> Hash {
+    let mut input = b"PiglorOS.Community.".to_vec();
+    input.extend_from_slice(m.as_bytes());
+    input.extend_from_slice(b".v1\0");
+    input.extend_from_slice(bytes);
+    Hash::from_bytes(*blake3::hash(&input).as_bytes())
+}
+
 fn array(bytes: &[u8]) -> Fallible<Vec<Value>> {
     match ciborium::from_reader(bytes)? {
         Value::Array(values) => Ok(values),
@@ -368,10 +382,7 @@ fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> Tes
     assert_eq!(intent.timeline, anchor_timeline());
     assert_eq!(intent.generation, ANCHOR_GENERATION);
     assert!(intent.purpose == CommunityArtifactPurposeV1::LifecycleControl);
-    assert_eq!(
-        intent.scope_set_digest,
-        oracle(b"PiglorOS.Community.ScopeSet.v1", &[0x80])
-    );
+    assert_eq!(intent.scope_set_digest, adr_h("ScopeSet", &[0x80]));
     assert_eq!(intent.evidence_not_after_micros, HORIZON);
     assert_eq!(
         intent
@@ -447,10 +458,7 @@ fn owner_commitment_matches_the_independent_adr128_preimage() -> TestResult {
         private_digest(b"PiglorOS.Community.Test.v1", &[b"ab", b"c"]),
         oracle(b"PiglorOS.Community.Test.v1", b"abc")
     );
-    assert_eq!(
-        scope_set_digest(&[0x80]),
-        oracle(b"PiglorOS.Community.ScopeSet.v1", &[0x80])
-    );
+    assert_eq!(scope_set_digest(&[0x80]), adr_h("ScopeSet", &[0x80]));
     Ok(())
 }
 
@@ -802,5 +810,163 @@ fn bootstrap_key_is_decrypt_only_and_burns_a_credit_per_attempt() -> TestResult 
         world.key()?.intent().as_input().material_fingerprint
     );
     assert_eq!(other.burned_credits(), 0);
+    Ok(())
+}
+
+const FLOOR: [CommunityTimelineFloorV1<'static>; 1] = [CommunityTimelineFloorV1 {
+    timeline: anchor_timeline(),
+    highest_pass_ordinal: 0,
+    active_generation: None,
+    closed_generations: CommunityGenerationIdsV1::from_ids(&[]),
+    selected_head: None,
+    closed: false,
+}];
+
+/// One field of the reinstalled key or record that differs from bootstrap.
+#[derive(Clone, Copy, Debug)]
+enum Tamper {
+    Nothing,
+    IntentId,
+    IntentParent,
+    IntentTimeline,
+    IntentGeneration,
+    IntentPurpose,
+    IntentScope,
+    IntentFingerprint,
+    SelectionOrdinal,
+    SelectionFloors,
+    SelectionHorizon,
+    CopyId,
+    CopyHolder,
+    CopyHolderDigest,
+    CopyScope,
+}
+
+fn tamper_intent(intent: &mut CommunityKeyIntentInputV1, tamper: Tamper) {
+    match tamper {
+        Tamper::IntentId => intent.protection_operation_id = [0x99; 16],
+        Tamper::IntentParent => {
+            intent.parent_operation = CommunityArtifactOperationV1::Control([0xc3; 16]);
+        }
+        Tamper::IntentTimeline => {
+            intent.timeline = TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16]));
+        }
+        Tamper::IntentGeneration => intent.generation = [0x9b; 16],
+        Tamper::IntentPurpose => {
+            intent.purpose = CommunityArtifactPurposeV1::ExecutionState;
+            intent.allowed_record_kinds =
+                CommunityRecordKindsV1::empty().with(CommunityArtifactKindV1::StateContent);
+        }
+        Tamper::IntentScope => intent.scope_set_digest = Hash::from_bytes([43; 32]),
+        Tamper::IntentFingerprint => intent.material_fingerprint = Hash::from_bytes([44; 32]),
+        _ => {}
+    }
+}
+
+fn tamper_selection(selection: &mut CommunitySelectionInputV1<'static>, tamper: Tamper) {
+    match tamper {
+        Tamper::SelectionOrdinal => selection.highest_native_producer_ordinal = 1,
+        Tamper::SelectionFloors => {
+            selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR)
+        }
+        Tamper::SelectionHorizon => selection.metadata_not_after_micros = HORIZON - 1,
+        _ => {}
+    }
+}
+
+fn tamper_copy(copy: &mut CommunityCopyInventoryInputV1, tamper: Tamper) {
+    match tamper {
+        Tamper::CopyId => copy.copy_id = [0x98; 16],
+        Tamper::CopyHolder => copy.holder = CommunityCopyHolderV1::Staging,
+        Tamper::CopyHolderDigest => copy.holder_digest = Hash::from_bytes([45; 32]),
+        Tamper::CopyScope => copy.scope_set_digest = Hash::from_bytes([46; 32]),
+        _ => {}
+    }
+}
+
+/// Replace the bootstrap key and both sealed records with consistent ones
+/// built under fresh material, differing only in `tamper`, so every check
+/// other than the tampered one would pass and AEAD opening still succeeds.
+fn reinstall(world: &mut World, tamper: Tamper) -> TestResult {
+    let record = world.record()?;
+    let ids = BootstrapRecordIds {
+        request: record.request,
+        protection_id: record.protection_id,
+        copy_id: record.copy_id,
+    };
+    let original = *world.key()?.intent().as_input();
+    let provisioned = VaultKeyV1::provision(original)?;
+    let mut intent = *provisioned.intent().as_input();
+    tamper_intent(&mut intent, tamper);
+    let mut key = provisioned.with_intent(intent)?;
+    let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
+        store_incarnation: INCARNATION,
+        metadata_anchor_timeline: anchor_timeline(),
+        metadata_anchor_generation: ANCHOR_GENERATION,
+        protection_operation_id: ids.protection_id,
+        scope_members: CommunityScopeMembersV1::from_members(&[]),
+        metadata_not_after_micros: HORIZON,
+    })?;
+    let mut selection = CommunitySelectionInputV1 {
+        store_incarnation: INCARNATION,
+        installed_catalogue_digest: CATALOGUE,
+        native_profile_digest: NATIVE,
+        highest_native_producer_ordinal: 0,
+        timeline_floors: CommunityTimelineFloorsV1::from_floors(&[]),
+        metadata_not_after_micros: HORIZON,
+    };
+    tamper_selection(&mut selection, tamper);
+    let selection = CommunitySelectionV1::new(selection)?.to_canonical_cbor();
+    let sealed_selection = key.seal(&scope, CommunityMetadataSchemaV1::Csi1, &selection)?;
+    let mut copy = key_copy_descriptor(&ids, &key, HORIZON);
+    tamper_copy(&mut copy, tamper);
+    let copy = CommunityCopyInventoryV1::new(copy)?.to_canonical_cbor();
+    let sealed_copy = key.seal(&scope, CommunityMetadataSchemaV1::Cci1, &copy)?;
+    key.close();
+    world.domain.keys.insert(ids.protection_id, key);
+    let record = world.record_mut()?;
+    record.selection = sealed_selection;
+    record.key_copy = sealed_copy;
+    Ok(())
+}
+
+#[test]
+fn reinstalled_consistent_key_and_records_still_resolve() -> TestResult {
+    let mut world = bootstrapped()?;
+    reinstall(&mut world, Tamper::Nothing)?;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> TestResult {
+    for tamper in [
+        Tamper::IntentId,
+        Tamper::IntentParent,
+        Tamper::IntentTimeline,
+        Tamper::IntentGeneration,
+        Tamper::IntentPurpose,
+        Tamper::IntentScope,
+        Tamper::IntentFingerprint,
+        Tamper::SelectionOrdinal,
+        Tamper::SelectionFloors,
+        Tamper::SelectionHorizon,
+        Tamper::CopyId,
+        Tamper::CopyHolder,
+        Tamper::CopyHolderDigest,
+        Tamper::CopyScope,
+    ] {
+        let mut world = bootstrapped()?;
+        reinstall(&mut world, tamper)?;
+        let decision = world.decision()?;
+        assert_eq!(
+            world.open_with(request()?, &decision),
+            Err(Error::EvidenceUnavailable),
+            "{tamper:?}"
+        );
+    }
     Ok(())
 }

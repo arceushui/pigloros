@@ -5,6 +5,13 @@
 //! preimage is fed as borrowed slices of zeroizing staging plus fixed stack
 //! scratch: no intermediate concatenation buffer is allocated. Stack scratch
 //! inside the hash implementation is not wiped and is not claimed to be.
+//! The returned 32-byte digest is itself a plain stack value: it is the
+//! owner commitment that is stored beside the ciphertext, not a secret, so it
+//! is deliberately not wiped.
+//!
+//! Items are `pub(super)`: the narrowest visibility that serves the sealed
+//! `community` module. (`pub(crate)` here would only widen it, and Clippy's
+//! `redundant_pub_crate` refuses it inside this private module.)
 
 use pos_core::community_lifecycle::CommunityArtifactKindV1;
 use pos_core::Hash;

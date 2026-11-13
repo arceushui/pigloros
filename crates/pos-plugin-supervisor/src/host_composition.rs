@@ -40,6 +40,12 @@ pub use pos_store::community::{
 /// }
 /// ```
 ///
+/// ```compile_fail,E0599
+/// fn leak(host: &pos_plugin_supervisor::host_composition::CommunityLifecycleHostV1<'_>) {
+///     let _ = host.nonce();
+/// }
+/// ```
+///
 /// ```compile_fail,E0616
 /// fn leak(host: &pos_plugin_supervisor::host_composition::CommunityLifecycleHostV1<'_>) {
 ///     let _ = &host.domain;

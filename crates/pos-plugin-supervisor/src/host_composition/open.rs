@@ -17,7 +17,9 @@ impl<'a> CommunityLifecycleHostV1<'a> {
     /// bootstrapped with exactly one key intent, its CMA1 anchor and encrypted
     /// CSI1. An existing domain is verified instead; the original control
     /// identity resolves its original bootstrap without new material. No
-    /// guest permit or State is issued.
+    /// guest permit or State is issued. The request's anchor Timeline and
+    /// generation are caller-asserted by the trusted composition until the
+    /// first generation initialization binds them (ADR-129 §3).
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a missing, revoked or foreign
