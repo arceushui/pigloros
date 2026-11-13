@@ -2,7 +2,7 @@ name: owner-bridge-windows
 
 on:
   push:
-    branches: [diag/535-cc-full]
+    branches: [diag/535-cc-host]
   workflow_call:
   workflow_dispatch:
 
@@ -54,6 +54,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }
           cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored
           if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }
+      - name: Start host load observer (diagnostic)
+        shell: pwsh
+        run: |
+          $script = @'
+          $out = Join-Path $env:RUNNER_TEMP 'host-load.log'
+          try { $mp = Get-MpComputerStatus; "HOST defender_rtp=$($mp.RealTimeProtectionEnabled) quick_scan_age=$($mp.QuickScanAge) full_scan_running=$($mp.FullScanAge)" | Add-Content $out } catch { "HOST defender=unknown" | Add-Content $out }
+          $prev = @{}
+          $end = [DateTime]::UtcNow.AddMinutes(25)
+          while ([DateTime]::UtcNow -lt $end) {
+            $now = [DateTime]::UtcNow.ToString('o')
+            $rows = @()
+            foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+              try {
+                $cpu = $p.TotalProcessorTime.TotalMilliseconds
+                $key = "$($p.Id)"
+                if ($prev.ContainsKey($key)) { $rows += [pscustomobject]@{ Name = $p.ProcessName; Id = $p.Id; Delta = [int]($cpu - $prev[$key]); IO = $p.PagedMemorySize64 } }
+                $prev[$key] = $cpu
+              } catch {}
+            }
+            $top = ($rows | Sort-Object Delta -Descending | Select-Object -First 6 | ForEach-Object { "$($_.Name):$($_.Id):$($_.Delta)ms" }) -join ' '
+            try { $q = (Get-Counter '\PhysicalDisk(_Total)\Avg. Disk Queue Length','\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples | ForEach-Object { [math]::Round($_.CookedValue, 1) }; $load = "diskq=$($q[0]) cpu=$($q[1])" } catch { $load = 'load=unknown' }
+            "HOST time=$now $load top=$top" | Add-Content $out
+            Start-Sleep -Seconds 4
+          }
+          '@
+          $path = Join-Path $env:RUNNER_TEMP 'host-load.ps1'
+          Set-Content -LiteralPath $path -Value $script -Encoding utf8
+          Start-Process pwsh -ArgumentList '-NoProfile', '-File', $path -WindowStyle Hidden
       - name: Measure only shim source coverage
         id: coverage
         shell: pwsh
@@ -213,3 +241,7 @@ jobs:
           name: owner-windows-failed-diagnostic-${{ github.sha }}
           path: ${{ runner.temp }}/owner-windows-failed-diagnostic/
           if-no-files-found: error
+      - name: Print host load observer (diagnostic)
+        if: ${{ always() }}
+        shell: pwsh
+        run: Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'host-load.log') -ErrorAction SilentlyContinue
