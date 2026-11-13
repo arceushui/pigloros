@@ -343,18 +343,11 @@ pub enum ErasureHostErrorV1 {
 }
 
 impl ErasureHostErrorV1 {
-    /// Return the stable public error code.
+    /// Return the stable public error code: the variant's declaration index,
+    /// so a new variant is only ever appended.
     #[must_use]
     pub const fn code(self) -> u64 {
-        match self {
-            Self::RecoveryUnavailable => 0,
-            Self::AccessFrozen => 1,
-            Self::StaleGeneration => 2,
-            Self::AuthorizationDenied => 3,
-            Self::Conflict => 4,
-            Self::AdapterFailure => 5,
-            Self::ModeBindingStale => 6,
-        }
+        self as u64
     }
 }
 

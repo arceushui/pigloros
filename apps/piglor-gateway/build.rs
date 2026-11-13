@@ -16,30 +16,43 @@ pub mod compiler;
 const DECLARATION: &str = "../../contracts/gateway/v1/execution-mode-profiles.json";
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let declaration = read_declaration()?;
+    let source = render(&compiler::compile(&declaration)?)?;
+    write_table(&source)
+}
+
+/// Read the public declaration and ask Cargo to rebuild when it or the
+/// compiler changes.
+fn read_declaration() -> Result<String, Box<dyn Error>> {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let declaration_path = manifest.join(DECLARATION);
     println!("cargo:rerun-if-changed={}", declaration_path.display());
     println!("cargo:rerun-if-changed=src/mode_profile/declaration.rs");
     println!("cargo:rerun-if-changed=src/mode_profile/gmp1.rs");
     println!("cargo:rerun-if-changed=src/mode_profile/compiler.rs");
-    let json = fs::read_to_string(&declaration_path)?;
-    let compiled = compiler::compile(&json)?;
-    let mut source = String::new();
-    for (mode_profile_id, bytes) in &compiled {
-        let name = mode_profile_id.replace('-', "_").to_uppercase();
-        let literal = bytes
-            .iter()
-            .map(|byte| format!("0x{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        writeln!(
-            source,
-            "/// Canonical GMP1 bytes of `{mode_profile_id}`.\npub(super) const {name}: &[u8] = &[{literal}];"
-        )?;
-    }
-    fs::write(
-        PathBuf::from(env::var("OUT_DIR")?).join("gateway_mode_profiles.rs"),
-        source,
-    )?;
-    Ok(())
+    Ok(fs::read_to_string(&declaration_path)?)
+}
+
+/// One `pub(super) const` byte table per compiled profile.
+fn render(compiled: &[(String, Vec<u8>)]) -> Result<String, std::fmt::Error> {
+    compiled
+        .iter()
+        .try_fold(String::new(), |mut source, (mode_profile_id, bytes)| {
+            let name = mode_profile_id.replace('-', "_").to_uppercase();
+            let literal = bytes
+                .iter()
+                .map(|byte| format!("0x{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                source,
+                "/// Canonical GMP1 bytes of `{mode_profile_id}`.\npub(super) const {name}: &[u8] = &[{literal}];"
+            )
+            .map(|()| source)
+        })
+}
+
+fn write_table(source: &str) -> Result<(), Box<dyn Error>> {
+    let out = PathBuf::from(env::var("OUT_DIR")?);
+    Ok(fs::write(out.join("gateway_mode_profiles.rs"), source)?)
 }
