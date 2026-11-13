@@ -35,14 +35,18 @@ type TransportResult<T> = Result<T, SystemdTransientUnitTransportError>;
 
 impl SystemdTransientUnitTransport {
     /// Reference the unit, then run `bind`. A failed `bind` releases the
-    /// reference again, best effort: nothing will read the unit's result.
+    /// reference again, best effort: nothing will read the unit's result. So
+    /// does a `bind` that is cut off or dropped, from a task on the same
+    /// connection.
     pub(crate) async fn pinned<T>(
         &self,
         unit: &TransientServiceUnitName,
         bind: impl Future<Output = TransportResult<T>>,
     ) -> TransportResult<T> {
         pin_with(ManagerProxy::new(&self.connection).await, unit).await?;
+        let mut guard = PinGuard(Some((self.connection.clone(), unit.clone())));
         let bound = bind.await;
+        guard.disarm();
         if bound.is_err() {
             self.unpin(unit).await.ok();
         }
@@ -120,11 +124,37 @@ impl SystemdTransientUnitTransport {
     }
 }
 
+/// A reference whose `bind` has not finished; dropped armed, it is released
+/// by a task on the connection that took it.
+struct PinGuard(Option<(zbus::Connection, TransientServiceUnitName)>);
+
+impl PinGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PinGuard {
+    fn drop(&mut self) {
+        if let (Some((connection, unit)), Ok(runtime)) =
+            (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move {
+                unpin_with(ManagerProxy::new(&connection).await, &unit)
+                    .await
+                    .ok();
+            });
+        }
+    }
+}
+
 async fn pin_with(
     proxy: zbus::Result<ManagerProxy<'_>>,
     unit: &TransientServiceUnitName,
 ) -> TransportResult<()> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    // Bound to a local so the call's temporaries drop before `proxy` (the
+    // tail-expression drop order that Rust 2024 changes).
     let referenced = proxy
         .ref_unit(unit.as_str().to_owned())
         .await
@@ -137,6 +167,7 @@ async fn unpin_with(
     unit: &TransientServiceUnitName,
 ) -> TransportResult<()> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    // Bound to a local for the same drop order as `pin_with`.
     let released = proxy
         .unref_unit(unit.as_str().to_owned())
         .await

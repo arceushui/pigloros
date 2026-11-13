@@ -288,6 +288,7 @@ mod cases {
                         unit: UnitState::NotStarted,
                         cgroup: None,
                         evidence: None,
+                        started: None,
                     });
                 }
                 let cgroup = lock(&self.cgroup).take().ok_or_else(|| ExecuteFailure {
@@ -295,6 +296,7 @@ mod cases {
                     unit: UnitState::Unknown,
                     cgroup: None,
                     evidence: None,
+                    started: None,
                 })?;
                 let bound = if self.behaviour == Behaviour::Substitutes {
                     (cgroup.identity().0, cgroup.identity().1 + 1)
@@ -315,6 +317,7 @@ mod cases {
                             unit: UnitState::Killed,
                             cgroup: Some(cgroup),
                             evidence: None,
+                            started: None,
                         })
                     }
                     Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
@@ -1598,6 +1601,15 @@ mod cases {
         }
 
         #[test]
+        fn a_settling_unit_leaves_the_stop_half_of_its_grace() {
+            let now = Instant::now();
+            let grace = now + Duration::from_millis(100);
+            assert_eq!(settle_deadline(now, grace), now + Duration::from_millis(50));
+            // Past the grace deadline nothing is waited for.
+            assert_eq!(settle_deadline(grace, now), grace);
+        }
+
+        #[test]
         fn a_release_outcome_joins_both_execution_results() {
             let executed: Result<AttemptExecution<(), (), ReleaseResources>, _> =
                 Err(ExecuteFailure {
@@ -1605,6 +1617,7 @@ mod cases {
                     unit: UnitState::Killed,
                     cgroup: Some(()),
                     evidence: None,
+                    started: None,
                 });
             let joined = with_release(executed, ReleaseOutcome::new(Some([3; 32]), None, None));
             let failure = joined.err();
@@ -1695,6 +1708,7 @@ mod cases {
             let mut progress = AttemptProgress::<SystemdVerifiedStart>::Failed {
                 error: ExecuteError::HostTimeout,
                 unit: UnitState::Killed,
+                started: None,
                 evidence: Some(unreleased()),
             };
             let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
@@ -1721,6 +1735,67 @@ mod cases {
             Ok(())
         }
 
+        #[tokio::test]
+        async fn a_unit_that_failed_after_its_release_is_read_by_its_observed_invocation(
+        ) -> TestResult {
+            let fixture = manager(1).await?;
+            let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
+            let started = SystemdVerifiedStart::for_test(
+                unit.clone(),
+                "/org/freedesktop/systemd1/unit/attempt",
+            )?;
+            let observed = crate::ObservedUnit::new(crate::KernelObservation::fixture([7; 16]));
+            let release = ReleaseOutcome::new(Some([3; 32]), Some(observed), None);
+            let mut progress = AttemptProgress::Failed {
+                error: ExecuteError::HostTimeout,
+                unit: UnitState::Killed,
+                started: Some(started),
+                evidence: Some(ResourceEvidence::new(None, release)),
+            };
+            conclude(
+                &fixture.transport,
+                &mut progress,
+                &unit,
+                Some(&fixture.bound),
+                Instant::now(),
+            )
+            .await;
+            let AttemptProgress::Failed {
+                evidence: Some(evidence),
+                ..
+            } = progress
+            else {
+                return Err("the progress changed".into());
+            };
+            let terminal = evidence.terminal().ok_or("not concluded")?;
+            // The exact unit was read; the fake manager serves no result.
+            assert!(matches!(
+                terminal.service(),
+                Err(TerminalServiceError::Read(_))
+            ));
+            Ok(())
+        }
+
+        #[test]
+        fn terminal_evidence_is_recorded_once() {
+            let terminal = |unpinned| {
+                crate::TerminalResources::new(
+                    Err(crate::AttemptCgroupError::InvalidPath),
+                    None,
+                    Err(TerminalServiceError::Unstarted),
+                    unpinned,
+                )
+            };
+            let mut evidence = unreleased();
+            evidence.conclude(terminal(Ok(())));
+            evidence.conclude(terminal(Err(
+                crate::SystemdTransientUnitTransportError::ActivationUnset,
+            )));
+            assert!(evidence
+                .terminal()
+                .is_some_and(|terminal| terminal.unpinned().is_ok()));
+        }
+
         /// An unpinned unit: no cgroup was bound, so `RefUnit` never ran and
         /// nothing is read or released.
         #[tokio::test]
@@ -1730,6 +1805,7 @@ mod cases {
             let mut progress = AttemptProgress::<SystemdVerifiedStart>::Failed {
                 error: ExecuteError::HostTimeout,
                 unit: UnitState::Unknown,
+                started: None,
                 evidence: Some(unreleased()),
             };
             let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;

@@ -156,6 +156,7 @@ impl TerminalResources {
     }
 
     /// The limit-event counters after exit (TME1 `terminal`).
+    #[must_use = "the terminal counters decide the attempt's limit events"]
     pub const fn terminal(&self) -> &Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
         &self.terminal
     }
@@ -169,12 +170,14 @@ impl TerminalResources {
 
     /// The unit's `Result`, `ExecMainCode` and `ExecMainStatus` (TME1
     /// `service`).
+    #[must_use = "a missing service result is evidence in itself"]
     pub const fn service(&self) -> &Result<SystemdUnitResultObservation, TerminalServiceError> {
         &self.service
     }
 
     /// Whether `UnrefUnit` released the unit's pin. A failure leaves the unit
     /// loaded, which the teardown's absence wait then reports.
+    #[must_use = "an unreleased pin keeps the unit loaded through teardown"]
     pub const fn unpinned(&self) -> &Result<(), SystemdTransientUnitTransportError> {
         &self.unpinned
     }
@@ -222,8 +225,11 @@ impl ResourceEvidence {
         self.0.terminal.as_ref()
     }
 
-    /// Record the terminal evidence, once, before teardown.
+    /// Record the terminal evidence before teardown. It is read once: a
+    /// later record is dropped and never replaces the first.
     pub(crate) fn conclude(&mut self, terminal: TerminalResources) {
-        self.0.terminal = Some(terminal);
+        if self.0.terminal.is_none() {
+            self.0.terminal = Some(terminal);
+        }
     }
 }

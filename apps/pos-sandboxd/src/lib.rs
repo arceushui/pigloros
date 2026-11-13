@@ -281,9 +281,9 @@ pub use execute::{
 };
 #[cfg(target_os = "linux")]
 pub use kernel_observation::{
-    observe_unit, BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
-    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext, ObservedUnit,
-    ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
+    BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
+    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext,
+    ObservedStateDigest, ObservedUnit, ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
 };
 #[cfg(target_os = "linux")]
 pub use lifecycle::{

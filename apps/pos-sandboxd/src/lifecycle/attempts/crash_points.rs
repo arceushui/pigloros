@@ -469,6 +469,7 @@ mod cases {
                             unit: UnitState::Unknown,
                             cgroup: None,
                             evidence: None,
+                            started: None,
                         })
                     }
                     Err(error) => {
@@ -477,6 +478,7 @@ mod cases {
                             unit: UnitState::NotStarted,
                             cgroup: None,
                             evidence: None,
+                            started: None,
                         })
                     }
                 };

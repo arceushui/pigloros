@@ -112,7 +112,7 @@ pub trait ObservedReadback {
 /// No kernel observation could be made, so nothing may be released.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("the observed readback set is unavailable")]
-pub struct ObservedReadbackUnavailable(#[from] pub KernelObservationError);
+pub struct ObservedReadbackUnavailable(#[from] pub(crate) KernelObservationError);
 
 /// Why the last-moment recheck refused the release. The release barrier only
 /// reports that it refused; this keeps the cause for the attempt lifecycle
@@ -178,6 +178,16 @@ where
             root,
             observed,
             cancelled,
+        }
+    }
+
+    /// Why a release was refused: cancellation, once requested, outranks
+    /// every other refusal (R9: a cancelled attempt reports `Cancelled`).
+    fn cancelled_or(&self, refusal: RecheckRefusal) -> RecheckRefusal {
+        if self.cancelled.load(Ordering::SeqCst) {
+            RecheckRefusal::Cancelled
+        } else {
+            refusal
         }
     }
 
@@ -321,9 +331,10 @@ where
     /// Verify the held launcher, then observe the unit's kernel state and
     /// freeze it: the KOE1 observation, made once `ReadyV1` was accepted.
     fn launcher_then_frozen(&self, ready1_digest: [u8; 32]) -> Result<(), RecheckRefusal> {
+        // The ReadyV1 was accepted whatever follows: KOE1 status 2 needs it.
+        self.ready.set(Some(ready1_digest));
         verify_launcher(&self.launcher.file, &self.launcher.facts)
             .map_err(|_| RecheckRefusal::UnitChanged)?;
-        self.ready.set(Some(ready1_digest));
         let root = (self.check.root)().map_err(RecheckRefusal::Root)?;
         let observed = self.observe(&root).map_err(RecheckRefusal::Observation)?;
         *self.frozen.borrow_mut() = Some(observed);
@@ -334,6 +345,8 @@ where
     /// observation: then its KOE1 digest.
     fn observed_again(&self, root: &CheckedRoot) -> Result<[u8; 32], RecheckRefusal> {
         let again = self.observe(root).map_err(RecheckRefusal::Observation)?;
+        // Bound to a local so the `RefCell` borrow ends before `again` drops
+        // (the tail-expression drop order that Rust 2024 changes).
         let digest = self
             .frozen
             .borrow()
@@ -376,7 +389,7 @@ where
 {
     fn recheck(&self, ready1_digest: [u8; 32]) -> Result<ReleaseBinding, ReleaseBarrierError> {
         self.rechecked(ready1_digest).map_err(|refusal| {
-            *self.refusal.borrow_mut() = Some(refusal);
+            *self.refusal.borrow_mut() = Some(self.check.cancelled_or(refusal));
             ReleaseBarrierError::Recheck
         })
     }

@@ -162,6 +162,8 @@ pub enum AttemptProgress<S> {
         error: ExecuteError,
         /// What is known of the unit.
         unit: UnitState,
+        /// The verified start, once the unit's start completed.
+        started: Option<S>,
         /// The resource evidence, once the launcher barrier existed: what it
         /// established, the pre-release evidence once read, and the terminal
         /// evidence of a unit whose cgroup was bound.
@@ -190,9 +192,10 @@ impl<S> AttemptProgress<S> {
                 started, evidence, ..
             } => Some((Some(&*started), evidence)),
             Self::Failed {
+                started,
                 evidence: Some(evidence),
                 ..
-            } => Some((None, evidence)),
+            } => Some((started.as_ref(), evidence)),
             _ => None,
         }
     }
@@ -382,7 +385,7 @@ type Recheck<'a> = &'a (dyn Fn() -> Result<CheckedRoot, ImageActivationError> + 
 
 /// The result of one execution step.
 type Executed<S, C> =
-    Result<AttemptExecution<S, C, ResourceEvidence>, ExecuteFailure<C, ResourceEvidence>>;
+    Result<AttemptExecution<S, C, ResourceEvidence>, ExecuteFailure<C, ResourceEvidence, S>>;
 
 /// The execution and terminal cleanup of one attempt, behind one port.
 trait AttemptSteps<I: AdmittedInput>: Sync {
@@ -490,6 +493,7 @@ where
                     unit: UnitState::NotStarted,
                     cgroup: None,
                     evidence: None,
+                    started: None,
                 }),
             }
         }
@@ -505,7 +509,7 @@ where
     ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
     {
         let unit = directory.intent().unit_name().clone();
-        let settle_by = deadlines.shutdown().grace();
+        let settle_by = settle_deadline(Instant::now(), deadlines.shutdown().grace());
         async move {
             conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
             finish_with(self.transport, directory, cgroup, root, deadlines).await
@@ -516,7 +520,10 @@ where
 /// The production execution's result with what its launcher barrier
 /// established.
 fn with_release<S, C>(
-    executed: Result<AttemptExecution<S, C, ReleaseResources>, ExecuteFailure<C, ReleaseResources>>,
+    executed: Result<
+        AttemptExecution<S, C, ReleaseResources>,
+        ExecuteFailure<C, ReleaseResources, S>,
+    >,
     release: ReleaseOutcome,
 ) -> Executed<S, C> {
     match executed {
@@ -533,8 +540,19 @@ fn with_release<S, C>(
             unit: failure.unit,
             cgroup: failure.cgroup,
             evidence: Some(ResourceEvidence::new(failure.evidence, release)),
+            started: failure.started,
         }),
     }
+}
+
+/// How long an unsettled unit's result may be read again before teardown.
+///
+/// R9 §4.6.6 reads the result after exit and before `StopUnit`, but leaves
+/// the wait for a settling unit open. The wait takes at most half of the
+/// time left before the stop's grace deadline, so the stop always keeps the
+/// other half for the graceful stop that precedes escalation.
+fn settle_deadline(now: Instant, grace: Instant) -> Instant {
+    now + grace.saturating_duration_since(now) / 2
 }
 
 /// Read the terminal evidence of a pinned unit, before its teardown.
@@ -1353,6 +1371,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 AttemptProgress::Failed {
                     error,
                     unit,
+                    started: None,
                     evidence,
                 },
                 None,
@@ -1380,6 +1399,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
             AttemptProgress::Failed {
                 error: failure.error,
                 unit: failure.unit,
+                started: failure.started,
                 evidence: failure.evidence,
             },
             failure.cgroup,

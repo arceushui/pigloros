@@ -57,8 +57,7 @@ pub struct DeviceNumber {
 
 impl DeviceNumber {
     /// The pair, if it is within the kernel's 12-bit major and 20-bit minor.
-    #[must_use]
-    pub const fn new(major: u32, minor: u32) -> Option<Self> {
+    pub(crate) const fn new(major: u32, minor: u32) -> Option<Self> {
         if major <= MAX_MAJOR && minor <= MAX_MINOR {
             Some(Self { major, minor })
         } else {
@@ -162,8 +161,15 @@ impl ProviderNamespaces {
     /// # Errors
     /// Fails when `/proc/self` or one of its namespaces cannot be read.
     pub fn observe() -> Result<Self, KernelObservationError> {
-        open("/proc/self", DIRECTORY, Mode::empty())
+        Self::observe_at("/proc/self")
+    }
+
+    /// The namespaces of the procfs process directory at `procdir`, which is
+    /// trusted only on procfs, as a unit's is.
+    fn observe_at(procdir: &str) -> Result<Self, KernelObservationError> {
+        open(procdir, DIRECTORY, Mode::empty())
             .map_err(KernelObservationError::ProcDirectory)
+            .and_then(|procdir| procfs(procdir.as_fd()).map(|()| procdir))
             .and_then(|procdir| NamespaceSet::read(procdir.as_fd()))
             .map(Self)
     }
@@ -399,6 +405,40 @@ impl KernelObservation {
         self.work
     }
 
+    /// A synthetic observation of the unit with `invocation_id`.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn fixture(invocation_id: [u8; 16]) -> Self {
+        let identity = KernelIdentity {
+            device: DeviceNumber { major: 0, minor: 4 },
+            inode: 4_026_532_001,
+        };
+        Self {
+            invocation_id,
+            main_pid: 4242,
+            launcher: FdIdentity {
+                mount_id: 303,
+                inode: 12,
+            },
+            adapter: FdIdentity {
+                mount_id: 301,
+                inode: 57,
+            },
+            root: RootIdentity::FIXTURE,
+            cgroup: KernelIdentity {
+                device: DeviceNumber {
+                    major: 0,
+                    minor: 26,
+                },
+                inode: 5678,
+            },
+            namespaces: NamespaceSet([identity; 6]),
+            provider_namespaces: NamespaceSet([identity; 6]),
+            observed_fdl1_digest: [0x88; 32],
+            work: None,
+        }
+    }
+
     /// The same observation of another `MainPID`.
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -418,8 +458,8 @@ pub struct ObservedUnit {
 
 impl ObservedUnit {
     /// An observation that holds no `/work` handle.
-    #[must_use]
-    pub const fn new(observation: KernelObservation) -> Self {
+    #[cfg(test)]
+    pub(crate) const fn new(observation: KernelObservation) -> Self {
         Self {
             observation,
             work: None,
@@ -721,7 +761,7 @@ fn member(cgroup: BorrowedFd<'_>, main_pid: u32) -> Result<(), KernelObservation
 ///
 /// # Errors
 /// Any failed step; the observation is then unavailable.
-pub fn observe_unit(
+fn observe_unit(
     unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
     context: &ObservationContext<'_>,
     provider: &ProviderNamespaces,
@@ -771,11 +811,24 @@ fn observe_unit_in(
     })
 }
 
-/// The production [`ObservedReadback`]: the R9 §4.4 procedure over procfs,
-/// against the provider's namespaces retained at startup.
+/// The KOE1 self-digest of a frozen kernel observation: the
+/// `observed_state_digest` that `ReleaseV1` binds (ADR-069 R9 §4.4).
 ///
-/// `digest` yields the KOE1 self-digest of a frozen observation, which the
-/// KOE1 encoder supplies.
+/// The KOE1 record encoder implements it. Until one exists no
+/// [`KernelObservedReadback`] can be built, so nothing is released.
+pub trait ObservedStateDigest {
+    /// The KOE1 self-digest of `observation`, made once the `ReadyV1` whose
+    /// digest is `ready1_digest` was accepted.
+    fn observed_state_digest(
+        &self,
+        ready1_digest: [u8; 32],
+        observation: &KernelObservation,
+    ) -> [u8; 32];
+}
+
+/// The production [`ObservedReadback`]: the R9 §4.4 procedure over procfs,
+/// against the provider's namespaces retained at startup, with the KOE1
+/// self-digest from `D`.
 pub struct KernelObservedReadback<D> {
     provider: ProviderNamespaces,
     digest: D,
@@ -789,20 +842,18 @@ impl<D> KernelObservedReadback<D> {
     }
 }
 
-impl<D> ObservedReadback for KernelObservedReadback<D>
-where
-    D: Fn([u8; 32], &KernelObservation) -> [u8; 32],
-{
+impl<D: ObservedStateDigest> ObservedReadback for KernelObservedReadback<D> {
     fn observe(
         &self,
         unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
-        observe_unit(unit, context, &self.provider).map_err(ObservedReadbackUnavailable)
+        observe_unit(unit, context, &self.provider).map_err(ObservedReadbackUnavailable::from)
     }
 
     fn digest(&self, ready1_digest: [u8; 32], observation: &KernelObservation) -> [u8; 32] {
-        (self.digest)(ready1_digest, observation)
+        self.digest
+            .observed_state_digest(ready1_digest, observation)
     }
 }
 

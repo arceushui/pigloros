@@ -394,3 +394,76 @@ fn a_cgroup_view_reports_the_bound_identity() -> TestResult {
     );
     Ok(())
 }
+
+/// R9 §4.4: every one of the six namespace types must differ from the
+/// provider's; sharing any single one is refused.
+#[test]
+fn sharing_any_single_namespace_type_with_the_provider_is_refused() -> TestResult {
+    let own = *ProviderNamespaces::observe()?.namespaces();
+    let foreign = NamespaceSet::for_test_shifted(&own);
+    assert!(own.isolated_from(&foreign));
+    for shared in 0..NAMESPACES.len() {
+        let mut provider = foreign;
+        provider.0[shared] = own.0[shared];
+        assert!(!own.isolated_from(&provider), "{}", NAMESPACES[shared]);
+        let (_directory, cgroup) = cgroup_listing(own_pid())?;
+        assert_eq!(
+            observe_unit(
+                &this_unit(),
+                &context(&cgroup, false)?,
+                &ProviderNamespaces::for_test(provider)
+            )
+            .err(),
+            Some(KernelObservationError::SharedNamespace),
+            "{}",
+            NAMESPACES[shared]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_providers_own_process_directory_is_trusted_only_on_procfs() -> TestResult {
+    let fake = tempfile::tempdir()?;
+    let path = fake.path().to_str().ok_or("path")?;
+    assert_eq!(
+        ProviderNamespaces::observe_at(path),
+        Err(KernelObservationError::NotProcfs)
+    );
+    assert!(matches!(
+        ProviderNamespaces::observe_at("/nonexistent-proc-self"),
+        Err(KernelObservationError::ProcDirectory(_))
+    ));
+    assert_eq!(
+        ProviderNamespaces::observe_at("/proc/self"),
+        ProviderNamespaces::observe()
+    );
+    Ok(())
+}
+
+/// The process list is matched line by line, exactly: neither a prefix nor
+/// an extension of the PID is a member, and a last line without a newline
+/// still counts.
+#[test]
+fn a_process_list_matches_whole_lines_only() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let listed = |body: &str, pid: u32| -> TestResult<Result<(), KernelObservationError>> {
+        std::fs::write(directory.path().join("cgroup.procs"), body)?;
+        Ok(member(File::open(directory.path())?.as_fd(), pid))
+    };
+    assert_eq!(
+        listed("123\n", 12)?,
+        Err(KernelObservationError::NotInCgroup)
+    );
+    assert_eq!(
+        listed("12\n", 123)?,
+        Err(KernelObservationError::NotInCgroup)
+    );
+    assert_eq!(
+        listed("1\n312\n", 12)?,
+        Err(KernelObservationError::NotInCgroup)
+    );
+    assert_eq!(listed("1\n12", 12)?, Ok(()));
+    assert_eq!(listed("12\n1\n", 12)?, Ok(()));
+    Ok(())
+}

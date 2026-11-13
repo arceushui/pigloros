@@ -155,8 +155,23 @@ fn observation(main_pid: u32) -> TestResult<KernelObservation> {
         [7; 32],
         false,
     );
-    let observed = crate::observe_unit(&unit, &context, &provider)?;
+    let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
+    let observed = readback.observe(&unit, &context)?;
     Ok(*observed.observation())
+}
+
+/// The KOE1 digest stand-in: a fixed value for any accepted `ReadyV1`.
+struct FixedDigest;
+
+impl crate::ObservedStateDigest for FixedDigest {
+    fn observed_state_digest(
+        &self,
+        ready1_digest: [u8; 32],
+        _observation: &KernelObservation,
+    ) -> [u8; 32] {
+        assert_ne!(ready1_digest, [0; 32]);
+        OBSERVED_READBACK
+    }
 }
 
 /// How the fake observation behaves after `ReadyV1`.
@@ -971,6 +986,10 @@ async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest()
             .await,
         Err(BarrierError::Refused(RecheckRefusal::UnitChanged))
     ));
+    // The ReadyV1 was accepted before the launcher check refused it.
+    let evidence = barrier.evidence();
+    assert!(evidence.ready1_digest().is_some());
+    assert!(evidence.observation().is_none());
     drop(barrier);
     assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
     Ok(())
@@ -1233,6 +1252,26 @@ mod kernel_observation {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancellation_outranks_a_refusal_made_before_it_was_checked() -> TestResult {
+        let attempt =
+            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+        let mut barrier = barrier_with(&attempt, Refusal::Cancelled, TestIdentity::new(own_pid()))?;
+        // The first observation fails before the binding reads the flag.
+        barrier.check.observed = TestObserved::new(Observing::Unavailable)?;
+        let launcher = launcher(&mut barrier)?;
+        let released = barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::Cancelled))
+        ));
+        drop(barrier);
+        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unreleased_barrier_has_no_evidence() -> TestResult {
         let (mut barrier, _attempt) =
             barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
@@ -1294,13 +1333,7 @@ mod kernel_observation {
         let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
             own.namespaces(),
         ));
-        let readback = crate::KernelObservedReadback::new(
-            provider,
-            |ready: [u8; 32], _: &KernelObservation| {
-                assert_ne!(ready, [0; 32]);
-                OBSERVED_READBACK
-            },
-        );
+        let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
         let check = AuthorityCheck::new(
             root_check(Refusal::None, &attempt),
             readback,

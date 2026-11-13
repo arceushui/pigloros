@@ -408,10 +408,11 @@ pub enum UnitState {
 /// A failed execution, the state of its unit and its retained cgroup.
 ///
 /// Like any error, it is `Send`, `Sync` or `'static` only when the cgroup
-/// handle `C` and the evidence `E` are; the production types are all three.
+/// handle `C`, the evidence `E` and the verified start `S` are; the
+/// production types are all three.
 #[derive(Debug, thiserror::Error)]
 #[error("execution failed with the unit {unit:?}")]
-pub struct ExecuteFailure<C, E = ()> {
+pub struct ExecuteFailure<C, E = (), S = ()> {
     /// Why the execution failed.
     #[source]
     pub error: ExecuteError,
@@ -425,6 +426,9 @@ pub struct ExecuteFailure<C, E = ()> {
     pub cgroup: Option<C>,
     /// The pre-release resource evidence, once it was taken.
     pub evidence: Option<E>,
+    /// The verified start, once the unit's start completed: the exact unit
+    /// object whose result the terminal evidence reads.
+    pub started: Option<S>,
 }
 
 /// How a released attempt ended.
@@ -602,6 +606,7 @@ where
                 unit: UnitState::NotStarted,
                 cgroup: None,
                 evidence: None,
+                started: None,
             }),
     )
     .and_then(|()| async move {
@@ -614,7 +619,8 @@ where
 }
 
 /// The failure of an execution over the host `H`.
-type Failure<H> = ExecuteFailure<<H as UnitHost>::Cgroup, <H as UnitHost>::Evidence>;
+type Failure<H> =
+    ExecuteFailure<<H as UnitHost>::Cgroup, <H as UnitHost>::Evidence, <H as UnitHost>::Started>;
 
 /// The wall-clock bounds of one attempt: the unit's watchdog deadline for the
 /// steps before and during the run, and a fixed bound (the watchdog clamped to
@@ -653,6 +659,7 @@ where
         unit: UnitState::NotStarted,
         cgroup: None,
         evidence: None,
+        started: None,
     })?;
     let Prepared {
         attempt,
@@ -690,7 +697,7 @@ where
             Submission::Confirmed,
             bounds,
         );
-        return Err(with_evidence(aborted.await, evidence));
+        return Err(reached(aborted.await, started, Some(evidence)));
     }
     let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
     let (network, finish) = match supervised {
@@ -704,7 +711,7 @@ where
                 Submission::Confirmed,
                 bounds,
             );
-            return Err(with_evidence(aborted.await, evidence));
+            return Err(reached(aborted.await, started, Some(evidence)));
         }
     };
     let ending = finish.ending();
@@ -756,7 +763,8 @@ where
         Err(error) => {
             let unit = attempt.unit_name();
             let cgroup = Some(cgroup);
-            Err(abort(host, unit, cgroup, error, Submission::Confirmed, bounds).await)
+            let aborted = abort(host, unit, cgroup, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
         }
     }
 }
@@ -792,10 +800,16 @@ fn instant_at_monotonic(target_ns: u64) -> Option<Instant> {
         .and_then(|origin| origin.checked_add(Duration::from_nanos(target_ns)))
 }
 
-/// `failure` with the pre-release evidence taken before it.
-fn with_evidence<C, E>(failure: ExecuteFailure<C, E>, evidence: E) -> ExecuteFailure<C, E> {
+/// `failure` with the verified start and any pre-release evidence taken
+/// before it.
+fn reached<C, E, S>(
+    failure: ExecuteFailure<C, E, S>,
+    started: S,
+    evidence: Option<E>,
+) -> ExecuteFailure<C, E, S> {
     ExecuteFailure {
-        evidence: Some(evidence),
+        evidence,
+        started: Some(started),
         ..failure
     }
 }
@@ -819,6 +833,7 @@ where
             unit: UnitState::NotStarted,
             cgroup: None,
             evidence: None,
+            started: None,
         });
     }
     let unit = attempt.unit_name();
@@ -857,11 +872,13 @@ where
         Some(Ok(cgroup)) => Ok((started, cgroup)),
         Some(Err(error)) => {
             let error = ExecuteError::Cgroup(Box::new(error));
-            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+            let aborted = abort(host, unit, None, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
         }
         None => {
             let error = ExecuteError::HostTimeout;
-            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+            let aborted = abort(host, unit, None, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
         }
     }
 }
@@ -1301,6 +1318,7 @@ where
         },
         cgroup,
         evidence: None,
+        started: None,
     }
 }
 

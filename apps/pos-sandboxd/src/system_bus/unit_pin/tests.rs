@@ -301,6 +301,31 @@ async fn a_refused_reference_binds_nothing() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_bind_cut_off_mid_way_releases_its_reference() -> TestResult {
+    let fixture = Fixture::new(&["inactive"]).await?;
+    let bind = std::future::pending::<TransportResult<()>>();
+    let cut = tokio::time::timeout(
+        Duration::from_millis(50),
+        fixture.transport.pinned(fixture.unit(), bind),
+    )
+    .await;
+    assert!(cut.is_err());
+    // The release runs on a task over the same connection.
+    let released = tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.calls().map(|calls| calls.len()).unwrap_or_default() < 2 {
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    })
+    .await;
+    assert!(released.is_ok());
+    assert_eq!(
+        fixture.calls()?,
+        [named("ref", fixture.unit()), named("unref", fixture.unit())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unbuildable_manager_proxy_neither_pins_nor_unpins() -> TestResult {
     let fixture = Fixture::new(&["inactive"]).await?;
     let unit = fixture.unit();
@@ -461,7 +486,13 @@ async fn a_unit_that_settles_late_is_read_once_settled() -> TestResult {
 #[tokio::test]
 async fn a_unit_that_never_settles_has_no_result() -> TestResult {
     let fixture = Fixture::new(&["deactivating"]).await?;
+    let began = Instant::now();
     let terminal = fixture.conclude(Some(&fixture.started)).await;
+    // The wait ends at its deadline (200 ms), leaving the rest of the stop
+    // budget to the teardown.
+    let waited = began.elapsed();
+    assert!(waited >= Duration::from_millis(200));
+    assert!(waited < Duration::from_millis(200) + 30 * SETTLE_POLL);
     assert!(matches!(
         terminal.service(),
         Err(TerminalServiceError::Read(

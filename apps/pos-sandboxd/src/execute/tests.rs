@@ -614,7 +614,8 @@ impl LocalNetworkPort for TornDownNetwork {
     }
 }
 
-type Outcome = Result<AttemptExecution<String, FakeCgroup, u64>, ExecuteFailure<FakeCgroup, u64>>;
+type Outcome =
+    Result<AttemptExecution<String, FakeCgroup, u64>, ExecuteFailure<FakeCgroup, u64, String>>;
 
 fn root_for(
     log: &Log,
@@ -643,8 +644,8 @@ fn names(entries: &[&str]) -> Vec<String> {
 }
 
 fn failure<T>(
-    result: Result<T, ExecuteFailure<FakeCgroup, u64>>,
-) -> TestResult<ExecuteFailure<FakeCgroup, u64>> {
+    result: Result<T, ExecuteFailure<FakeCgroup, u64, String>>,
+) -> TestResult<ExecuteFailure<FakeCgroup, u64, String>> {
     result
         .err()
         .ok_or_else(|| "the execution unexpectedly succeeded".into())
@@ -750,7 +751,7 @@ impl Scenario {
             .await
     }
 
-    async fn fails(&mut self) -> TestResult<ExecuteFailure<FakeCgroup, u64>> {
+    async fn fails(&mut self) -> TestResult<ExecuteFailure<FakeCgroup, u64, String>> {
         let outcome = self.air_gapped().await?;
         failure(outcome)
     }
@@ -1005,7 +1006,7 @@ async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
 
 async fn recheck_failure(
     substitute: impl FnOnce(&AdmittedAttempt) -> Result<CheckedRoot, ImageActivationError>,
-) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64>)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     let job = scenario.job(
         ATTEMPT,
@@ -1102,7 +1103,9 @@ async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy(
 }
 
 /// Run an Air-Gapped attempt whose host fails with `faults`.
-async fn faulted(faults: &[Fault]) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64>)> {
+async fn faulted(
+    faults: &[Fault],
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     let failed = scenario.fails().await?;
@@ -1182,7 +1185,7 @@ fn release_fault(refuse_release: bool) -> BarrierFault {
 async fn timed_out(
     faults: &[Fault],
     refuse_release: bool,
-) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64>)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     scenario.barrier.fault = release_fault(refuse_release);
@@ -1196,6 +1199,7 @@ async fn a_start_that_never_answers_is_cut_off_and_the_unit_killed() -> TestResu
     let (scenario, failed) = timed_out(&[Fault::HangStart], false).await?;
     assert!(matches!(failed.error, ExecuteError::HostTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
+    assert!(failed.started.is_none());
     assert!(scenario
         .entries()
         .ends_with(&names(&["start", "kill", "stop"])));
@@ -1207,6 +1211,9 @@ async fn a_cgroup_bind_that_never_answers_is_cut_off_and_the_unit_killed() -> Te
     let (_scenario, failed) = timed_out(&[Fault::HangBind], false).await?;
     assert!(matches!(failed.error, ExecuteError::HostTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
+    // The start completed, so it is known; no cgroup was bound.
+    assert!(failed.started.is_some());
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1342,7 +1349,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
 async fn local_failure<N: LocalNetworkPort + Sync>(
     network: &N,
     admission_attempt: [u8; 16],
-) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64>)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup, u64, String>)> {
     let plan = plan()?;
     let admission = crate::test_fixtures::admission(
         admission_attempt,
@@ -1403,7 +1410,7 @@ async fn a_network_that_cannot_be_established_never_submits_a_unit() -> TestResu
 async fn teardowns(
     configure: impl FnOnce(&mut Scenario),
     network_attempt: [u8; 16],
-) -> TestResult<(usize, ExecuteFailure<FakeCgroup, u64>)> {
+) -> TestResult<(usize, ExecuteFailure<FakeCgroup, u64, String>)> {
     let torn_down = Arc::new(AtomicUsize::new(0));
     let network = TornDownNetwork {
         torn_down: Arc::clone(&torn_down),
@@ -1712,6 +1719,7 @@ fn the_failure_names_its_cause_and_the_unit_state() {
         unit: UnitState::KillFailed,
         cgroup: None,
         evidence: None,
+        started: None,
     };
     assert_eq!(
         failure.to_string(),
@@ -1784,6 +1792,11 @@ mod release_evidence {
         assert!(matches!(failed.error, ExecuteError::Barrier(_)));
         assert_eq!(failed.evidence, scenario.host.activated);
         assert!(failed.cgroup.is_some());
+        // The verified start travels with the failure, for the result read.
+        assert_eq!(
+            failed.started.as_deref(),
+            Some(TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str())
+        );
         Ok(())
     }
 
@@ -1806,6 +1819,7 @@ mod release_evidence {
         assert_eq!(failed.unit, UnitState::Killed);
         assert!(failed.cgroup.is_some());
         assert!(failed.evidence.is_none());
+        assert!(failed.started.is_some());
         assert!(!scenario.entries().iter().any(|entry| entry == "release"));
         Ok(())
     }
