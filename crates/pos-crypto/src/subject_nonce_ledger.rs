@@ -263,8 +263,14 @@ fn append_row(output: &mut Vec<u8>, row: &SubjectNonceLedgerRowV1, identity: &[u
     output.push(0x87);
     output.extend_from_slice(identity);
     subject_cbor::byte_string(output, &row.root_material_digest);
+    append_store_file_id(output, row.store_file_id);
+    subject_cbor::unsigned(output, row.data_next);
+    subject_cbor::unsigned(output, row.bootstrap_next);
+}
+
+fn append_store_file_id(output: &mut Vec<u8>, store_file_id: SubjectStoreFileIdV1) {
     output.push(0x83);
-    match row.store_file_id {
+    match store_file_id {
         SubjectStoreFileIdV1::Linux { device, inode } => {
             subject_cbor::unsigned(output, LINUX_STORE_FILE_TAG);
             subject_cbor::unsigned(output, device);
@@ -279,8 +285,6 @@ fn append_row(output: &mut Vec<u8>, row: &SubjectNonceLedgerRowV1, identity: &[u
             subject_cbor::unsigned(output, file_index);
         }
     }
-    subject_cbor::unsigned(output, row.data_next);
-    subject_cbor::unsigned(output, row.bootstrap_next);
 }
 
 fn read_row(
@@ -293,19 +297,7 @@ fn read_row(
     }
     let epoch = reader.unsigned()?;
     let root_material_digest = reader.bytes()?;
-    reader.fixed_array(3)?;
-    let store_file_id = match reader.unsigned()? {
-        LINUX_STORE_FILE_TAG => SubjectStoreFileIdV1::Linux {
-            device: reader.unsigned()?,
-            inode: reader.unsigned()?,
-        },
-        WINDOWS_STORE_FILE_TAG => SubjectStoreFileIdV1::Windows {
-            volume_serial: u32::try_from(reader.unsigned()?)
-                .map_err(|_| SubjectNonceLedgerErrorV1::InvalidRow)?,
-            file_index: reader.unsigned()?,
-        },
-        _ => return Err(SubjectNonceLedgerErrorV1::UnsupportedPlatform),
-    };
+    let store_file_id = read_store_file_id(reader)?;
     Ok(SubjectNonceLedgerRowV1 {
         owner_id,
         epoch,
@@ -314,4 +306,22 @@ fn read_row(
         data_next: reader.unsigned()?,
         bootstrap_next: reader.unsigned()?,
     })
+}
+
+fn read_store_file_id(
+    reader: &mut Reader<'_, SubjectNonceLedgerErrorV1>,
+) -> Result<SubjectStoreFileIdV1, SubjectNonceLedgerErrorV1> {
+    reader.fixed_array(3)?;
+    match reader.unsigned()? {
+        LINUX_STORE_FILE_TAG => Ok(SubjectStoreFileIdV1::Linux {
+            device: reader.unsigned()?,
+            inode: reader.unsigned()?,
+        }),
+        WINDOWS_STORE_FILE_TAG => Ok(SubjectStoreFileIdV1::Windows {
+            volume_serial: u32::try_from(reader.unsigned()?)
+                .map_err(|_| SubjectNonceLedgerErrorV1::InvalidRow)?,
+            file_index: reader.unsigned()?,
+        }),
+        _ => Err(SubjectNonceLedgerErrorV1::UnsupportedPlatform),
+    }
 }
