@@ -16,9 +16,9 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
-// Array, kind and the larger producer form, a 16-byte control ID, plus
-// Timeline, generation, role and slot.
-const MAX_LOCATOR_BYTES: usize = 1 + 2 * 17 + 1 + 17 + 2 * 3;
+// Array head (1), Timeline and generation (2 x 17), kind (1), the larger
+// producer form, a 16-byte control ID (17), and u16 role and slot (2 x 3).
+const MAX_LOCATOR_BYTES: usize = 59;
 
 /// `[store_incarnation, producer_ordinal, node_ordinal, CPN1_digest]`.
 ///
