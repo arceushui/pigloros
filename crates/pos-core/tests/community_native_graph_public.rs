@@ -904,6 +904,21 @@ fn node_decoding_rejects_malformed_references_and_locators() -> TestResult {
     for (index, error) in cases {
         assert_eq!(decode_with(11, index)?, Some(error));
     }
+    // The widest valid locator is exactly 59 bytes; 60 bytes are refused.
+    let widest = encode(&Value::Array(vec![
+        bytes(&[1; 16]),
+        bytes(&GENERATION),
+        uint(1),
+        bytes(&[6; 16]),
+        uint(65_535),
+        uint(65_535),
+    ]))?;
+    assert_eq!(widest.len(), 59);
+    assert_eq!(decode_with(11, index_with_locator(&widest)?)?, None);
+    assert_eq!(
+        decode_with(11, index_with_locator(&[0x86; 60])?)?,
+        Some(Error::BoundsExceeded)
+    );
     let native_locator = index_with_locator(&encode(&locator_value(uint(0), uint(4), 1, false))?)?;
     assert_eq!(decode_with(11, native_locator.clone())?, None);
     let mut node = direct_node_value()?;
