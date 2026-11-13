@@ -3375,7 +3375,12 @@ impl Gateway {
         .await
         .is_err()
         {
-            report_unfinished_operations();
+            use std::io::Write as _;
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "piglor-gateway shutdown: admitted operations still running at the shutdown \
+                 deadline were abandoned"
+            ));
         }
     }
 
@@ -3678,16 +3683,6 @@ impl Gateway {
             authorization_required: false,
         }
     }
-}
-
-/// Report admitted operations still running at the shutdown deadline.
-fn report_unfinished_operations() {
-    use std::io::Write as _;
-    drop(writeln!(
-        std::io::stderr().lock(),
-        "piglor-gateway shutdown: admitted operations still running at the shutdown deadline \
-         were abandoned"
-    ));
 }
 
 /// Whole seconds until a retry may succeed: a partial second rounds up, and
