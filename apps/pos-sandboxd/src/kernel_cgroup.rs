@@ -11,6 +11,7 @@ use zbus::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 
+mod effective_limits;
 mod kill;
 mod limit_events;
 #[cfg(target_os = "linux")]
@@ -18,6 +19,10 @@ mod shutdown;
 #[cfg(target_os = "linux")]
 pub use shutdown::{AttemptShutdownDeadlines, AttemptShutdownError};
 
+pub use effective_limits::{
+    EffectiveCgroupLimits, EffectiveKernelLimit, EffectiveLimitError, EffectiveLimitMismatch,
+    EffectiveLimitSource, EffectiveLimitVerdict, WorkCapacity,
+};
 pub use limit_events::{
     AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
     AttemptLimitEventSource,

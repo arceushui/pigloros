@@ -30,6 +30,7 @@ use pos_crypto::plugin_manifest::{
 };
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 use pos_crypto::signing::generate_keypair;
+use pos_plugin_content::validate_plugin_bundle_content_v1;
 use pos_plugin_release::{BundleAddressV1, LocalOciPublisherV1, ReleaseSourceV1};
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::{
@@ -40,7 +41,7 @@ use pos_store::plugin_trust_registry::{
 };
 
 use super::encoding::{Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE};
-use super::release::{address_of, closure, make_draft, PrivateRoot, Shape};
+use super::release::{address_of, closure, make_draft, FixtureContent, PrivateRoot, Shape};
 use super::spy_registry::SpyRegistry;
 use super::BoxResult;
 use crate::{
@@ -74,6 +75,14 @@ pub fn wall(utc: i64) -> BoxResult<WallSource> {
     Ok(ScriptedTrustedWallSourceV1::from_micros([u64::try_from(
         utc,
     )? * 1_000_000]))
+}
+
+/// Sample a trusted UTC second for direct registry boundary tests.
+///
+/// # Errors
+/// Returns the scripted wall or trusted time error.
+pub fn trusted_utc(utc: i64) -> BoxResult<TrustedUtcSecondV1> {
+    Ok(TrustedUtcSecondV1::from_source(&mut wall(utc)?)?)
 }
 
 /// A one-Event activation input on `timeline`, distinguished by `tag`.
@@ -144,7 +153,8 @@ fn publish_signed(
     store: &LocalOciPublisherV1,
     shape: Shape,
 ) -> BoxResult<PublishedPluginReleaseV1> {
-    let draft = make_draft(shape)?;
+    let content = FixtureContent::new(shape.component);
+    let draft = make_draft(shape, &content)?;
     let published = publish_plugin_release_v1(keys, signer, shape.epoch, &draft, store)?;
     Ok(published)
 }
@@ -348,6 +358,25 @@ impl World {
         publish_signed(&mut self.keys, &self.publisher, &self.store, shape)
     }
 
+    /// Sign and publish the supplied test content under the normal publisher key.
+    ///
+    /// # Errors
+    /// Returns the draft or publication error.
+    pub fn publish_with_content(
+        &mut self,
+        shape: Shape,
+        content: &FixtureContent,
+    ) -> BoxResult<PublishedPluginReleaseV1> {
+        let draft = make_draft(shape, content)?;
+        Ok(publish_plugin_release_v1(
+            &mut self.keys,
+            &self.publisher,
+            shape.epoch,
+            &draft,
+            &self.store,
+        )?)
+    }
+
     /// Sign and publish a release with `signer`, registered for the shape's
     /// owner and epoch (see `register`).
     ///
@@ -384,7 +413,8 @@ impl World {
     /// # Errors
     /// Returns the draft, closure, or store error.
     pub fn publish_raw(&self, pmf1: &[u8], component: &[u8]) -> BoxResult<BundleAddressV1> {
-        let bundle = closure(&make_draft(Shape::first())?, pmf1, component)?;
+        let content = FixtureContent::new(Shape::first().component);
+        let bundle = closure(&make_draft(Shape::first(), &content)?, pmf1, component)?;
         Ok(address_of(self.store.publish(&bundle)?))
     }
 
@@ -397,9 +427,11 @@ impl World {
         shape: Shape,
         signature: [u8; 64],
     ) -> BoxResult<BundleAddressV1> {
-        let draft = make_draft(shape)?;
+        let content = FixtureContent::new(shape.component);
+        let draft = make_draft(shape, &content)?;
         let pmf1 = draft.unsigned()?.with_signature(shape.epoch, signature)?;
-        self.publish_raw(&pmf1, shape.component)
+        let bundle = closure(&draft, &pmf1, shape.component)?;
+        Ok(address_of(self.store.publish(&bundle)?))
     }
 
     /// The signature bytes of the other owner's own valid release.
@@ -411,8 +443,12 @@ impl World {
             owner: OTHER_OWNER,
             ..self.first_shape()
         };
-        let signature =
-            sign_plugin_release_v1(&mut self.keys, &self.other, 1, &make_draft(shape)?)?;
+        let signature = sign_plugin_release_v1(
+            &mut self.keys,
+            &self.other,
+            1,
+            &make_draft(shape, &FixtureContent::new(shape.component))?,
+        )?;
         Ok(*signature.signature())
     }
 
@@ -742,6 +778,7 @@ impl World {
         let material = self.material()?;
         let authorization = material.evidence.authorize_release(&projection)?;
         let proof = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+        let content = validate_plugin_bundle_content_v1(&bundle)?;
         let mut source = wall(material.utc)?;
         let utc = TrustedUtcSecondV1::from_source(&mut source)?;
         Ok(self.registry.rollback(
@@ -749,7 +786,7 @@ impl World {
             &material.tps1,
             &material.evidence,
             &projection,
-            &proof,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
@@ -784,13 +821,14 @@ impl World {
             epoch: claim.epoch(),
             public_key: authorization.resolved_public_key(),
         });
+        let content = validate_plugin_bundle_content_v1(&bundle)?;
         let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
         Ok(self.registry.admit(
             &self.anchor,
             &material.tps1,
             &material.evidence,
             &projection,
-            &proof,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))

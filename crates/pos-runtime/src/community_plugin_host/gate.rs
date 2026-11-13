@@ -3,8 +3,8 @@
 //! The gate runs once per Plugin per Tick Boundary, before any invocation of that Plugin at
 //! that Tick. It re-reads the release closure, re-verifies the PTR1 and PRV1 histories from the
 //! composition's material, asks the registry's read-only `evaluate_current_release`, and
-//! re-verifies the PMF1 release signature. It writes nothing, reads no clock, and caches
-//! nothing. Linux only, like the registry port.
+//! re-verifies the PMF1 release signature and checks the same closure's content. It writes
+//! nothing, reads no clock, and caches nothing. Linux only, like the registry port.
 
 use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
@@ -12,10 +12,11 @@ use pos_crypto::plugin_manifest::verify_plugin_release_signature_v1;
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::{validate_plugin_bundle_content_v1, PluginBundleContentErrorV1};
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
 use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryV1, TrustedUtcSecondV1};
 
-use super::error::CommunityPluginHostErrorV1;
+use super::error::{BundleContentReasonV1, CommunityPluginHostErrorV1};
 
 mod mapping;
 mod material;
@@ -53,7 +54,8 @@ const COMPONENT_MEMBER: &str = "component";
 /// `ArtifactTrustDenied{TrustStateUnavailable}` before any other step. The steps are: read the
 /// verified closure; project the complete PMF1; require the expected identity; read the trust
 /// material; verify PTR1 and PRV1; evaluate the release through the registry; re-verify the
-/// PMF1 release signature. A registry denial therefore wins over a signature fault.
+/// PMF1 release signature; validate the content. A registry denial therefore wins over a
+/// signature fault, which in turn wins over a content fault.
 ///
 /// # Errors
 /// Returns the closed host error that decision 3 of ADR-061 revision 7 assigns to the first
@@ -95,16 +97,48 @@ pub fn gate_community_release_v1(
             pass.tick(),
         )
         .map_err(host_error_for_registry_v1)?;
-    verify_signature(&bundle, &evidence, &projection)?;
+    verify_release_artifacts(&bundle, &evidence, &projection)?;
     let gated = GatedCommunityReleaseV1::new(
         execution,
         component_bytes(&bundle),
         evaluation.tps1_digest(),
         pass.utc().as_i64(),
         pass.tick(),
+        pos_plugin_release::ContentValidationV1::BasicPackageV1,
     );
     let authorization = CommunityPassAuthorizationV1::issue(&gated, pass);
     Ok((gated, authorization))
+}
+
+/// Verify the signature before validating the same closure's content.
+fn verify_release_artifacts(
+    bundle: &VerifiedReleaseBundleV1,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> Result<(), CommunityPluginHostErrorV1> {
+    verify_signature(bundle, evidence, projection)?;
+    validate_plugin_bundle_content_v1(bundle)
+        .map(|_| ())
+        .map_err(host_error_for_content_v1)
+}
+
+pub(super) const fn host_error_for_content_v1(
+    error: PluginBundleContentErrorV1,
+) -> CommunityPluginHostErrorV1 {
+    let reason = match error {
+        PluginBundleContentErrorV1::Manifest(_) => {
+            return CommunityPluginHostErrorV1::InvalidManifest
+        }
+        PluginBundleContentErrorV1::BoundsExceeded { .. } => BundleContentReasonV1::BoundsExceeded,
+        PluginBundleContentErrorV1::UnsupportedFormat { .. } => {
+            BundleContentReasonV1::UnsupportedFormat
+        }
+        PluginBundleContentErrorV1::Malformed { .. } => BundleContentReasonV1::Malformed,
+        PluginBundleContentErrorV1::ReferenceMismatch { .. } => {
+            BundleContentReasonV1::ReferenceMismatch
+        }
+    };
+    CommunityPluginHostErrorV1::InvalidBundleContent { reason }
 }
 
 /// Gate one release for the first Driver of a Plugin (ADR-061 revision 8 decision 5).

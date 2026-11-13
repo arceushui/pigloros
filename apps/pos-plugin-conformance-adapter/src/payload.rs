@@ -311,6 +311,20 @@ pub struct RefusedV1 {
     pub index: Option<JsonU64>,
 }
 
+impl RefusedV1 {
+    /// Check the conditional fields and the closed content-refusal reasons.
+    fn is_valid(&self) -> bool {
+        let name = self.error.as_str();
+        let basis = matches!(
+            name,
+            "ArtifactTrustDenied" | "ArtifactRevoked" | "InvalidBundleContent"
+        );
+        let index = matches!(name, "CapabilityDenied" | "MissingFeature");
+        let content_reason_valid = valid_content_basis(name, self.basis.as_ref());
+        self.basis.is_some() == basis && self.index.is_some() == index && content_reason_valid
+    }
+}
+
 /// Expect `failed`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -430,16 +444,11 @@ pub enum ExpectV1 {
 
 impl ExpectV1 {
     /// Whether the conditional keys of the expectation are present exactly when required:
-    /// `basis` for `ArtifactTrustDenied` and `ArtifactRevoked`, `index` for `CapabilityDenied`
-    /// and `MissingFeature`.
+    /// `basis` for trust, revocation, and content refusals; `index` for capability and feature
+    /// refusals. Content bases use the four closed ADR-061 R12 reasons.
     fn is_valid(&self) -> bool {
         match self {
-            Self::Refused(refused) => {
-                let name = refused.error.as_str();
-                let basis = matches!(name, "ArtifactTrustDenied" | "ArtifactRevoked");
-                let index = matches!(name, "CapabilityDenied" | "MissingFeature");
-                refused.basis.is_some() == basis && refused.index.is_some() == index
-            }
+            Self::Refused(refused) => refused.is_valid(),
             Self::Committed(_)
             | Self::Failed(_)
             | Self::Trapped(_)
@@ -448,6 +457,15 @@ impl ExpectV1 {
             | Self::Digest(_) => true,
         }
     }
+}
+
+/// Content refusals carry one of the closed basic-package reasons.
+fn valid_content_basis(name: &str, basis: Option<&Text>) -> bool {
+    name != "InvalidBundleContent"
+        || matches!(
+            basis.map(Text::as_str),
+            Some("BoundsExceeded" | "UnsupportedFormat" | "Malformed" | "ReferenceMismatch")
+        )
 }
 
 /// One sub-case.

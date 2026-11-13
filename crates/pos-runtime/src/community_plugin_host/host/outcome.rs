@@ -47,6 +47,8 @@ pub struct MemberPassV1 {
     /// The gate's summary, or the closed error that refused the member (or, after an offer
     /// failure, the `InvalidInvocation` that refused the pass).
     pub gate: Result<GateSummaryV1, CommunityPluginHostErrorV1>,
+    /// The actual gate fact, retained even if a later authorization offer fails.
+    pub content_validation: ContentValidationV1,
     /// The invocation ID the Driver built in this pass, if it got that far.
     pub invocation_id: Option<[u8; 16]>,
     /// The failure this pass produced for the member, never an earlier pass's.

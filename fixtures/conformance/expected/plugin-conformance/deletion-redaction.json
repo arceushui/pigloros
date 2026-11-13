@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-deletion-redaction",
   "family": "deletion-redaction",
-  "input_blake3_digest": "04816db3d06f3ee3a45317ceefe1cc96279e8d4d91aa64d45f2b2248abf6678c",
+  "input_blake3_digest": "5cfe5863388c3f0cdb19711e433eece606ee83b86e68ebfed8d230ca7c1654cb",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

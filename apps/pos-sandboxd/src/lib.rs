@@ -346,15 +346,18 @@ pub use hardening::{
 pub use kernel_cgroup::{
     AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError,
     AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
-    AttemptLimitEventSource, BoundAttemptCgroup,
+    AttemptLimitEventSource, BoundAttemptCgroup, EffectiveCgroupLimits, EffectiveKernelLimit,
+    EffectiveLimitError, EffectiveLimitMismatch, EffectiveLimitSource, EffectiveLimitVerdict,
+    WorkCapacity,
 };
 #[cfg(target_os = "linux")]
 pub use kernel_cgroup::{AttemptShutdownDeadlines, AttemptShutdownError};
 pub use system_bus::{
     SystemdAttemptUnitAbsenceObservation, SystemdAttemptUnitObservation, SystemdJobFailure,
-    SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
-    SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
-    TransientServiceUnitNameError,
+    SystemdMainExit, SystemdServiceResult, SystemdStartJob, SystemdStopJobCompleted,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdUnitOutcome,
+    SystemdUnitResultError, SystemdUnitResultObservation, SystemdVerifiedStart,
+    TransientServiceUnitName, TransientServiceUnitNameError,
 };
 #[cfg(target_os = "linux")]
 pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};

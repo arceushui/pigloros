@@ -116,8 +116,7 @@ pub struct CommunityInvocationReceiptV1 {
     pub guest_error: Option<GuestPluginErrorV1>,
     /// What became of the staged result.
     pub disposition: ReceiptDispositionV1,
-    /// What was checked about the release content: until #574 the constant
-    /// `NotPerformed` (ADR-061 revision 7 decision 12).
+    /// The content fact issued by the execution gate.
     pub content_validation: ContentValidationV1,
 }
 

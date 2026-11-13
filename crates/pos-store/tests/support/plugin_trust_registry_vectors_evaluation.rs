@@ -64,8 +64,8 @@ fn an_evaluation_reports_the_retained_facts_and_changes_nothing() -> TestResult 
         .ok_or("no pointer")?;
     assert_eq!(evaluation.scope(), "scope");
     assert_eq!(evaluation.plugin_id(), "plugin-a");
-    assert_eq!(evaluation.pmf1_digest(), [0x01; 32]);
-    assert_eq!(evaluation.release_digest(), [0x11; 32]);
+    assert_eq!(evaluation.pmf1_digest(), release_one().pmf1_digest()?);
+    assert_eq!(evaluation.release_digest(), release_one().release_digest()?);
     assert_eq!(evaluation.previous_release_digest(), None);
     assert_eq!(evaluation.pmf1_digest(), decision.pmf1_digest());
     assert_eq!(evaluation.release_digest(), decision.release_digest());
@@ -270,7 +270,7 @@ fn release_authorization_precedes_the_tps1_artifact_denial_and_the_floor_plan() 
     let one = release_one();
     // The retained TPS1 denies the release digest, and the release also has an unknown key.
     let denying = TpsSpec {
-        extra_artifacts: vec![one.release_digest()],
+        extra_artifacts: vec![one.release_digest()?],
         ..tps_after(&genesis)
     };
     let adopted = h.env.material(&spec(1, 2).at(51, 6), &denying)?;
@@ -395,14 +395,17 @@ fn only_the_active_release_of_a_plugin_id_evaluates() -> TestResult {
     h.admit(&genesis, &two, 2)??;
     h.assert_evaluate_denied(&genesis, &one, RegistryError::ReleaseNotActive)?;
     let successor = h.evaluate(&genesis, &two)??;
-    assert_eq!(successor.pmf1_digest(), [0x03; 32]);
-    assert_eq!(successor.release_digest(), [0x12; 32]);
-    assert_eq!(successor.previous_release_digest(), Some([0x11; 32]));
+    assert_eq!(successor.pmf1_digest(), release_two().pmf1_digest()?);
+    assert_eq!(successor.release_digest(), release_two().release_digest()?);
+    assert_eq!(
+        successor.previous_release_digest(),
+        Some(release_one().release_digest()?)
+    );
     // A rollback restores the predecessor.
     h.rollback(&genesis, &one, 3)??;
     h.assert_evaluate_denied(&genesis, &two, RegistryError::ReleaseNotActive)?;
     let restored = h.evaluate(&genesis, &one)??;
-    assert_eq!(restored.pmf1_digest(), [0x01; 32]);
+    assert_eq!(restored.pmf1_digest(), release_one().pmf1_digest()?);
     assert_eq!(
         restored.activation_event(),
         h.active("plugin-a")?.activation_event()
@@ -430,7 +433,7 @@ fn an_adopted_revocation_refuses_the_release_although_its_receipt_is_unchanged()
     };
     let artifact = Spec {
         epochs: 2,
-        revoked_artifacts: vec![one.release_digest()],
+        revoked_artifacts: vec![one.release_digest()?],
         ..Spec::default().at(51, 6)
     };
     // A revocation that first takes effect at the evaluation Tick already refuses.
@@ -471,7 +474,7 @@ fn a_revocation_that_takes_effect_after_the_evaluation_tick_does_not_refuse() ->
     let pending = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![one.release_digest()],
+            revoked_artifacts: vec![one.release_digest()?],
             revocation_tick: 7,
             ..Spec::default().at(51, 6)
         },
@@ -486,7 +489,11 @@ fn a_revocation_that_takes_effect_after_the_evaluation_tick_does_not_refuse() ->
 fn a_tps1_only_artifact_denial_refuses_the_release() -> TestResult {
     let one = release_one();
     // The PMF1 digest, the release digest, and a descriptor digest.
-    for denied in [[0x01; 32], [0x11; 32], [0x30; 32]] {
+    for denied in [
+        release_one().pmf1_digest()?,
+        release_one().release_digest()?,
+        release_one().descriptor_digests()?[0],
+    ] {
         let mut h = admitted()?;
         let genesis = h.env.genesis()?;
         let tps = TpsSpec {
@@ -506,13 +513,14 @@ fn a_tps1_only_artifact_denial_refuses_the_release() -> TestResult {
 
 #[test]
 fn an_expired_unknown_or_ungranted_release_is_refused_without_any_adoption() -> TestResult {
-    let h = admitted()?;
+    let mut h = Harness::<Store>::open()?;
     let genesis = h.env.genesis()?;
-    let at_sixty = h.same_policy(60, 5)?;
     let short_lived = ManifestSpec {
         not_after: 55,
         ..release_one()
     };
+    h.admit(&genesis, &short_lived, 1)??;
+    let at_sixty = h.same_policy(60, 5)?;
     h.assert_evaluate_denied(
         &at_sixty,
         &short_lived,
@@ -707,13 +715,13 @@ fn scopes_evaluate_independently() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        &one.release_proof()?,
+        (&one.release_proof()?, &one.content_proof()?),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
     let in_other = evaluate_in(&h, &other, &other_genesis, &one)??;
     assert_eq!(in_other.scope(), "other-scope");
-    assert_eq!(in_other.pmf1_digest(), [0x01; 32]);
+    assert_eq!(in_other.pmf1_digest(), release_one().pmf1_digest()?);
     assert_eq!(h.evaluate(&genesis, &one)??.scope(), "scope");
     // Replacing the release in the first scope leaves the second scope's pointer alone.
     h.admit(&genesis, &two, 3)??;
@@ -761,7 +769,7 @@ fn the_policy_facts_follow_the_retained_policy_after_an_adoption() -> TestResult
     h.advance(&newer)??;
     let decision = h
         .store
-        .retained_release_decision("scope", one.pmf1_digest())?
+        .retained_release_decision("scope", one.pmf1_digest()?)?
         .ok_or("no decision")?;
     let evaluation = h.evaluate(&newer, &one)??;
     // The release facts are the decision's.

@@ -1,7 +1,7 @@
 //! R8-W2: the evaluation world, with a fake member and a fake Driver that stages one draft, on
 //! the shared signed-release test world (installed at second 50 and Tick 5).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
@@ -13,7 +13,7 @@ use pos_plugin_publisher::test_support::{
     world::World,
     BoxResult,
 };
-use pos_plugin_release::LocalOciPublisherV1;
+use pos_plugin_release::{ContentValidationV1, LocalOciPublisherV1};
 use pos_store::plugin_trust_registry::PluginTrustCommitOutcomeV1;
 
 use super::*;
@@ -133,6 +133,9 @@ struct FakeMember {
     source: LocalOciPublisherV1,
     address: BundleAddressV1,
     material: FixedTrustMaterialSourceV1,
+    offers: Rc<Cell<usize>>,
+    offer_result: Result<(), CommunityPluginHostErrorV1>,
+    refusals: Rc<RefCell<Vec<CommunityPluginHostErrorV1>>>,
     calls: Rc<Cell<usize>>,
 }
 
@@ -167,11 +170,13 @@ impl CommunityPluginMemberV1 for FakeMember {
         _authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), CommunityPluginHostErrorV1> {
         self.calls.set(self.calls.get() + 1);
-        Ok(())
+        self.offers.set(self.offers.get() + 1);
+        self.offer_result
     }
 
-    fn record_refusal(&self, _error: CommunityPluginHostErrorV1) {
+    fn record_refusal(&self, error: CommunityPluginHostErrorV1) {
         self.calls.set(self.calls.get() + 1);
+        self.refusals.borrow_mut().push(error);
     }
 
     fn close_pass(&self) {
@@ -244,6 +249,9 @@ impl Rig {
             source: self.publisher.root.store()?,
             address: self.address.clone(),
             material: FixedTrustMaterialSourceV1::new(self.material.clone()),
+            offers: Rc::default(),
+            offer_result: Ok(()),
+            refusals: Rc::default(),
             calls: Rc::default(),
         })
     }
@@ -357,6 +365,94 @@ fn staged_world() -> BoxResult<(Rig, CommunityPluginHostV1<FakeMember>)> {
     let member = rig.member()?;
     register_staging(&mut rig, member.plugin)?;
     Ok((rig, CommunityPluginHostV1::new(vec![member])))
+}
+
+#[test]
+fn unavailable_trusted_time_reports_and_records_every_member_refusal() -> TestResult {
+    let mut rig = Rig::ready()?;
+    let members = members(&rig, 2)?;
+    register_staging(&mut rig, members[0].plugin)?;
+    let ids: Vec<_> = members.iter().map(|member| member.plugin).collect();
+    let offers: Vec<_> = members
+        .iter()
+        .map(|member| Rc::clone(&member.offers))
+        .collect();
+    let refusals: Vec<_> = members
+        .iter()
+        .map(|member| Rc::clone(&member.refusals))
+        .collect();
+    let mut host = CommunityPluginHostV1::new(members);
+    let outcome = rig
+        .eval
+        .run_pass(
+            &mut host,
+            &mut ScriptedTrustedWallSourceV1::from_micros([]),
+            TICK,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+    assert!(matches!(outcome.result, PassResultV1::Refused));
+    assert_eq!(outcome.gates.len(), 2);
+    for (entry, (id, recorded)) in outcome.gates.iter().zip(ids.iter().zip(refusals)) {
+        assert_eq!(entry.plugin, *id);
+        assert_eq!(entry.gate.as_ref().err(), Some(&TSU));
+        assert_eq!(entry.content_validation, ContentValidationV1::NotPerformed);
+        assert_eq!(*recorded.borrow(), vec![TSU]);
+    }
+    assert!(offers.iter().all(|count| count.get() == 0));
+    assert!(rig
+        .eval
+        .committed_events()
+        .map_err(|e| format!("{e:?}"))?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn failed_authorization_offer_refuses_pass_and_never_offers_later_members() -> TestResult {
+    let mut rig = Rig::ready()?;
+    let mut members = members(&rig, 3)?;
+    register_staging(&mut rig, members[0].plugin)?;
+    members[1].offer_result = Err(CommunityPluginHostErrorV1::InvalidInvocation);
+    let ids: Vec<_> = members.iter().map(|member| member.plugin).collect();
+    let offers: Vec<_> = members
+        .iter()
+        .map(|member| Rc::clone(&member.offers))
+        .collect();
+    let refusals = Rc::clone(&members[1].refusals);
+    let mut host = CommunityPluginHostV1::new(members);
+    let outcome = rig
+        .eval
+        .run_pass(&mut host, &mut one_second(), TICK)
+        .map_err(|e| format!("{e:?}"))?;
+    assert!(matches!(outcome.result, PassResultV1::Refused));
+    assert_eq!(outcome.gates.len(), 3);
+    for (entry, id) in outcome.gates.iter().zip(ids) {
+        assert_eq!(entry.plugin, id);
+        assert_eq!(
+            entry.content_validation,
+            ContentValidationV1::BasicPackageV1
+        );
+    }
+    assert!(outcome.gates[0].gate.is_ok());
+    assert_eq!(
+        outcome.gates[1].gate.as_ref().err(),
+        Some(&CommunityPluginHostErrorV1::InvalidInvocation)
+    );
+    assert!(outcome.gates[2].gate.is_ok());
+    assert_eq!(
+        offers.iter().map(|count| count.get()).collect::<Vec<_>>(),
+        vec![1, 1, 0]
+    );
+    assert_eq!(
+        *refusals.borrow(),
+        vec![CommunityPluginHostErrorV1::InvalidInvocation]
+    );
+    assert!(rig
+        .eval
+        .committed_events()
+        .map_err(|e| format!("{e:?}"))?
+        .is_empty());
+    Ok(())
 }
 
 #[test]

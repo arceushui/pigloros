@@ -122,7 +122,7 @@ fn output_text(observation: &SubjectObservation) -> TestResult<String> {
 /// R8-F7b: the log text `drive` is in no committed Event payload or state of the real worker.
 /// The control searches the outcome record for the Plugin ID text it holds: the scan finds it
 /// there, so the sub-case is written as `{"id","kind":"mismatch"}` and never as an `absent`
-/// entry (the Event type is not in the `POB1` outcome record, so `drive` itself is not used).
+/// entry (the Event type is not in the `POB2` outcome record, so `drive` itself is not used).
 #[test]
 fn the_log_text_is_absent_from_events_and_state_but_a_scan_finds_the_outcome_text() -> TestResult {
     let family = FixtureFamily::DeletionRedaction;
