@@ -160,33 +160,8 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
                 ledger_write,
             ))
         }
-        Some("provision-local-fork-authority") => {
-            #[cfg(target_os = "linux")]
-            {
-                let Some(sqlite_path) = args.get(2) else {
-                    return Err("provision-local-fork-authority requires an SQLite path".into());
-                };
-                if args.len() != 3 {
-                    return Err(
-                        "provision-local-fork-authority accepts exactly an SQLite path".into(),
-                    );
-                }
-                provision_local_fork_admission_authority(
-                    sqlite_path,
-                    &credential_directory_from(
-                        credential_directory,
-                        PROVISION_CREDENTIAL_DIRECTORY,
-                    )?,
-                )
-                .map_err(Into::into)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Err("fork admission requires Linux Unix peer credentials".into())
-            }
-        }
-        Some("provision-local-principal") => {
-            provision_local_principal_command(args, credential_directory)
+        Some(command @ ("provision-local-fork-authority" | "provision-local-principal")) => {
+            provision_command(command, args, credential_directory)
         }
         Some("fork-admission-provision") => Err(
             "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
@@ -215,29 +190,41 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
     }
 }
 
-/// `provision-local-principal <sqlite-path>`, only under its systemd unit (#1361).
-fn provision_local_principal_command(
+/// `provision-local-fork-authority <sqlite-path>` and `provision-local-principal
+/// <sqlite-path>`: one-shot provisioning, only under each command's systemd unit.
+fn provision_command(
+    command: &str,
     args: &[String],
     credential_directory: Option<OsString>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "linux")]
     {
         let Some(sqlite_path) = args.get(2) else {
-            return Err("provision-local-principal requires an SQLite path".into());
+            return Err(format!("{command} requires an SQLite path").into());
         };
         if args.len() != 3 {
-            return Err("provision-local-principal accepts exactly an SQLite path".into());
+            return Err(format!("{command} accepts exactly an SQLite path").into());
         }
-        provision_local_principal_from_credentials(
-            sqlite_path,
-            &credential_directory_from(credential_directory, LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY)?,
-        )
-        .map_err(Into::into)
+        let provisioned = if command == "provision-local-principal" {
+            provision_local_principal_from_credentials(
+                sqlite_path,
+                &credential_directory_from(
+                    credential_directory,
+                    LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY,
+                )?,
+            )
+        } else {
+            provision_local_fork_admission_authority(
+                sqlite_path,
+                &credential_directory_from(credential_directory, PROVISION_CREDENTIAL_DIRECTORY)?,
+            )
+        };
+        provisioned.map_err(Into::into)
     }
     #[cfg(not(target_os = "linux"))]
     {
         drop((args, credential_directory));
-        Err("Local Principal provisioning requires Linux systemd credentials".into())
+        Err(format!("{command} requires Linux systemd credentials").into())
     }
 }
 

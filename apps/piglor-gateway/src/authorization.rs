@@ -230,17 +230,6 @@ pub enum GatewayAuthorizationTarget {
     Operation { timeline_id: Option<TimelineId> },
 }
 
-impl GatewayAuthorizationTarget {
-    /// The Timeline the operation targets, if it names one.
-    #[must_use]
-    pub const fn timeline_id(self) -> Option<TimelineId> {
-        match self {
-            Self::Action { timeline_id } | Self::Read { timeline_id, .. } => Some(timeline_id),
-            Self::Operation { timeline_id } => timeline_id,
-        }
-    }
-}
-
 /// One protected Gateway operation, keyed by the capability `resource` and
 /// `action` a Principal's grant must cover, and the `purpose` it is
 /// evaluated for (#1361).
@@ -1291,26 +1280,7 @@ fn fallback_to_grant_policy_revision(value: Hash, fallback: Hash) -> Hash {
 fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.GatewayAuthorizationRequest.v1\0");
-    match request.target {
-        GatewayAuthorizationTarget::Action { timeline_id } => {
-            hasher.update(&[0]);
-            hasher.update(&timeline_bytes(timeline_id));
-        }
-        GatewayAuthorizationTarget::Read {
-            timeline_id,
-            from_position,
-            limit,
-        } => {
-            hasher.update(&[1]);
-            hasher.update(&timeline_id.inner().to_bytes());
-            hasher.update(&from_position.as_u64().to_be_bytes());
-            hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
-        }
-        GatewayAuthorizationTarget::Operation { timeline_id } => {
-            hasher.update(&[2]);
-            digest_optional_fixed(&mut hasher, timeline_id.map(timeline_bytes));
-        }
-    }
+    digest_target(&mut hasher, request.target);
     hasher.update(&entity_bytes(request.actor_entity_id));
     digest_optional_fixed(&mut hasher, request.subject_id.map(entity_bytes));
     digest_optional_fixed(&mut hasher, request.participant_id.map(entity_bytes));
@@ -1358,6 +1328,30 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
         hasher.update(constraint.as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Bind the exact protected target of one request.
+fn digest_target(hasher: &mut blake3::Hasher, target: GatewayAuthorizationTarget) {
+    match target {
+        GatewayAuthorizationTarget::Action { timeline_id } => {
+            hasher.update(&[0]);
+            hasher.update(&timeline_bytes(timeline_id));
+        }
+        GatewayAuthorizationTarget::Read {
+            timeline_id,
+            from_position,
+            limit,
+        } => {
+            hasher.update(&[1]);
+            hasher.update(&timeline_id.inner().to_bytes());
+            hasher.update(&from_position.as_u64().to_be_bytes());
+            hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
+        }
+        GatewayAuthorizationTarget::Operation { timeline_id } => {
+            hasher.update(&[2]);
+            digest_optional_fixed(hasher, timeline_id.map(timeline_bytes));
+        }
+    }
 }
 
 fn entity_bytes(value: EntityId) -> [u8; 16] {
@@ -2040,26 +2034,6 @@ mod tests {
         assert_eq!(audit.request_digest(), decision.request_digest());
         assert_eq!(audit.decision_digest(), decision.decision_digest());
         assert_eq!(audit.event_id(), None);
-        assert_eq!(
-            GatewayAuthorizationTarget::Action {
-                timeline_id: fixture.target_timeline,
-            }
-            .timeline_id(),
-            Some(fixture.target_timeline)
-        );
-        assert_eq!(
-            GatewayAuthorizationTarget::Read {
-                timeline_id: fixture.target_timeline,
-                from_position: Seq::from_u64(3),
-                limit: 2,
-            }
-            .timeline_id(),
-            Some(fixture.target_timeline)
-        );
-        assert_eq!(
-            GatewayAuthorizationTarget::Operation { timeline_id: None }.timeline_id(),
-            None
-        );
     }
 
     #[test]
@@ -2086,7 +2060,17 @@ mod tests {
         assert_eq!(request.resource, "scenario");
         assert_eq!(request.action, "create");
         assert_eq!(request.purpose, "operation");
-        assert_eq!(request.target.timeline_id(), None);
+        assert_eq!(
+            request.target,
+            GatewayAuthorizationTarget::Operation { timeline_id: None }
+        );
+        let bound = GatewayAuthorizationRequest::operation(
+            request.actor_entity_id,
+            custom,
+            Some(TimelineId::new()),
+            request.at_time,
+        );
+        assert_ne!(operation_binding(&request), operation_binding(&bound));
     }
 
     /// Authorize `request`, require a pending denial and check that its ADN1

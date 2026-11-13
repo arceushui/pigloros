@@ -224,9 +224,6 @@ fn open_with_credentials(
         |tuple, proof| host.reconcile_fork_delivery_startup(&session, tuple, proof),
     )
     .map_err(io::Error::other)?;
-    // D1 on #302: the Local Principal the store records protects every
-    // HTTP route of this Gateway; an unprovisioned store answers them `401`.
-    let authorization = crate::local_principal::load_host_local_principal(&mut host)?;
     let session_identity = session.identity();
     let slot = ForkAdmissionSlotV1::new(
         session,
@@ -234,10 +231,16 @@ fn open_with_credentials(
         credentials.policy().clone(),
         profile.into_sources(),
     );
-    let (gateway, submitter) =
-        Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
-            .map_err(io::Error::other)?;
-    let gateway = gateway.require_authorization(authorization);
+    // D1 on #302: the Local Principal the store records protects every
+    // HTTP route of this Gateway; an unprovisioned store answers them `401`.
+    let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host)
+        .and_then(|authorization| {
+            Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
+                .map(|(gateway, submitter)| {
+                    (gateway.require_authorization(authorization), submitter)
+                })
+                .map_err(io::Error::other)
+        })?;
     let coordinator = LocalForkAdmissionCoordinatorV1::new(
         credentials,
         record,

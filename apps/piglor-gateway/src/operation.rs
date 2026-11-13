@@ -15,7 +15,7 @@
 //! composition requires one (an unprovisioned host) answers every protected
 //! operation `401 unauthenticated`.
 
-use std::{convert::Infallible, marker::PhantomData};
+use std::{convert::Infallible, future::Future, marker::PhantomData};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use pos_core::{EntityId, TimelineId, WallTime};
@@ -99,6 +99,24 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
         gateway
             .authorize_operation(O::OPERATION, self.actor_entity_id, target_timeline)
             .await
+    }
+
+    /// Authorize the operation, then run `operation` under the permit, so
+    /// no authority replacement lands while it runs.
+    ///
+    /// # Errors
+    /// Returns the failures of [`Self::authorize`], before `operation` is
+    /// polled, or the error of `operation`.
+    pub async fn run<T>(
+        self,
+        gateway: &Gateway,
+        target_timeline: Option<TimelineId>,
+        operation: impl Future<Output = Result<T, GatewayError>>,
+    ) -> Result<T, GatewayError> {
+        let permit = self.authorize(gateway, target_timeline).await?;
+        let output = operation.await;
+        drop(permit);
+        output
     }
 }
 

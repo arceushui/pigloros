@@ -1103,9 +1103,8 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
-    /// Whether every protected operation needs [`Self::authorization`]: set
-    /// by an authorized composition and by [`Self::require_authorization`],
-    /// so a composition without its authorizer fails closed (`401`).
+    /// Whether protected operations need [`Self::authorization`] (always set
+    /// with it), so a composition without its authorizer fails closed.
     authorization_required: bool,
 }
 
@@ -2654,7 +2653,7 @@ impl Gateway {
     /// fails closed without it.
     #[must_use]
     pub const fn has_authorization(&self) -> bool {
-        self.authorization.is_some() || self.authorization_required
+        self.authorization_required
     }
 
     /// Bind this Gateway's protected operations to the host-pinned Local

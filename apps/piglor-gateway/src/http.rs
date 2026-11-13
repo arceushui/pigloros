@@ -223,9 +223,13 @@ async fn create_timeline(
     authority: OperationAuthority<CreateTimelineOperation>,
     ContractJson(body): ContractJson<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let permit = authority.authorize(&state.gateway, None).await?;
-    let tl = state.gateway.create_timeline(&body.name).await?;
-    drop(permit);
+    let tl = authority
+        .run(
+            &state.gateway,
+            None,
+            state.gateway.create_timeline(&body.name),
+        )
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -571,14 +575,17 @@ async fn post_signal(
     authority: OperationAuthority<AppendSignalOperation>,
     ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let timeline = crate::parse_timeline_id(&id)?;
-    let permit = authority.authorize(&state.gateway, Some(timeline)).await?;
     let entity_id = body.entity_id.clone();
-    let event = state
-        .gateway
-        .append_signal(&id, &entity_id, &body.into_signal())
+    // A malformed Timeline ID binds no target and is refused by the append.
+    let event = authority
+        .run(
+            &state.gateway,
+            crate::parse_timeline_id(&id).ok(),
+            state
+                .gateway
+                .append_signal(&id, &entity_id, &body.into_signal()),
+        )
         .await?;
-    drop(permit);
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
@@ -587,19 +594,31 @@ async fn post_ledger_prediction(
     authority: OperationAuthority<CreatePredictionOperation>,
     ContractJson(body): ContractJson<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let permit = authority.authorize(&state.gateway, None).await?;
-    let ledger = match &state.ledger_write {
+    let prediction_id = authority
+        .run(
+            &state.gateway,
+            None,
+            register_prediction(&state.ledger_write, body),
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "prediction_id": prediction_id })),
+    ))
+}
+
+/// Register one validated prediction when Ledger writes are enabled.
+async fn register_prediction(
+    ledger_write: &LedgerWriteMode,
+    body: NewPrediction,
+) -> Result<String, GatewayError> {
+    let ledger = match ledger_write {
         LedgerWriteMode::Disabled => return Err(GatewayError::LedgerWriteDisabled),
         LedgerWriteMode::Unconfigured => return Err(GatewayError::LedgerUnavailable),
         LedgerWriteMode::Ready(ledger) => ledger,
     };
     body.validate()?;
-    let prediction_id = ledger.register(body).await?;
-    drop(permit);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "prediction_id": prediction_id })),
-    ))
+    ledger.register(body).await
 }
 
 impl IntoResponse for GatewayError {
