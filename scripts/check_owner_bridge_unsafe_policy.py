@@ -1546,7 +1546,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
-    expected = "c1c027e0bfe94959430e05a5827c7251d5aa6ccb0cb1fe124116d236fb0f2a1d"
+    expected = "e5ee0b830e733fc4c6bc4eb99f76abd7716d0fd4b828d7164b68fbe836ac448d"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
         found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
     module = sources.get(prefix + "ffi/mod.rs", "")

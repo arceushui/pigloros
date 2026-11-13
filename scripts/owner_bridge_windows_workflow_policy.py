@@ -81,6 +81,19 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      "if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }\n"
                                                      'cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored\n'
                                                      "if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }\n"},
+                                             {'name': 'Stop the storage service before timed native fixtures',
+                                              'shell': 'pwsh',
+                                              'run': '# On hosted runners StorSvc takes a full core and the disk queue for\n'
+                                                     '# about 45 s some ten minutes into the job, which starves whichever\n'
+                                                     '# timed fixture is running. Deadlines stay fixed; the host is quiet.\n'
+                                                     '$service = Get-Service -Name StorSvc -ErrorAction SilentlyContinue\n'
+                                                     'if ($service) {\n'
+                                                     '  Set-Service -Name StorSvc -StartupType Disabled\n'
+                                                     '  Stop-Service -Name StorSvc -Force\n'
+                                                     '  Write-Output "HOST_QUIESCE service=StorSvc before=$($service.Status) after=$((Get-Service -Name StorSvc).Status)"\n'
+                                                     '} else {\n'
+                                                     "  Write-Output 'HOST_QUIESCE service=StorSvc absent'\n"
+                                                     '}\n'},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',
                                               'shell': 'pwsh',
@@ -285,7 +298,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
            'path': '${{ runner.temp }}/owner-windows-failed-diagnostic/',
            'if-no-files-found': 'error'}}])
 
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '21f69c4e90dc236a557fe8ef035d85a7fde97525267df540eb8ccbd838ac472e',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd578b761eb71e7f97e0bca67bdce4da343306b071aa87f6f0aff0ca15f7d685a',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
 

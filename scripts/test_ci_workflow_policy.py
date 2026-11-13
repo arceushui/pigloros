@@ -847,7 +847,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 
     def test_desktop_observer_cannot_change_native_evidence_or_control_processes(self) -> None:
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
-        coverage = native["jobs"]["owner-bridge-windows"]["steps"][8]
+        coverage = native["jobs"]["owner-bridge-windows"]["steps"][9]
         for before, after in (
             ("--include-ignored", "--include-ignored --skip native"),
             (" --nocapture", ""),
@@ -855,9 +855,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             ("[System.IO.File]::WriteAllText($marker, 'stop')", "Write-Output 'not stopped'"),
         ):
             changed = copy.deepcopy(native)
-            run = changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"]
+            run = changed["jobs"]["owner-bridge-windows"]["steps"][9]["run"]
             self.assertEqual(run.count(before), 1)
-            changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"] = run.replace(before, after)
+            changed["jobs"]["owner-bridge-windows"]["steps"][9]["run"] = run.replace(before, after)
             with self.assertRaises(native_policy.PolicyError):
                 native_policy.check(changed)
         self.assertIn("cargo llvm-cov", coverage["run"])
