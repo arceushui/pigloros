@@ -19,7 +19,9 @@ impl<'a> CommunityLifecycleHostV1<'a> {
     /// identity resolves its original bootstrap without new material. No
     /// guest permit or State is issued. The request's anchor Timeline and
     /// generation are caller-asserted by the trusted composition until the
-    /// first generation initialization binds them (ADR-129 §3).
+    /// first generation initialization binds them (ADR-129 §3); A2's
+    /// `initialize` MUST check the stored anchor against the first admitted
+    /// Timeline/generation when it writes CGI1 and fail closed on mismatch.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a missing, revoked or foreign

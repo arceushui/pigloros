@@ -36,7 +36,9 @@ const EMPTY_SCOPE_ROWS: [u8; 1] = [0x80];
 /// admitted Timeline/generation". The anchor pair is therefore
 /// caller-asserted by the trusted composition until the first generation
 /// initialization (CGI1) binds it; this type does not verify that pair
-/// against an admitted generation.
+/// against an admitted generation. A2 (initialize) MUST check the stored
+/// anchor against the first admitted Timeline/generation when it writes
+/// CGI1 and fail closed on any mismatch.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityBootstrapRequestV1 {
     pub(super) control_id: [u8; 16],
@@ -98,6 +100,7 @@ pub(super) struct BootstrapRecordV1 {
     pub(super) protection_id: [u8; 16],
     pub(super) copy_id: [u8; 16],
     pub(super) anchor: Zeroizing<Vec<u8>>,
+    pub(super) authority_request_digest: Hash,
     pub(super) selection: SealedMetadataV1,
     pub(super) key_copy: SealedMetadataV1,
 }
@@ -121,6 +124,12 @@ impl BootstrapRecordV1 {
 ///
 /// It exposes no key, material, record or State getter. Opening it requires
 /// a current metadata-service decision over its own persisted authority.
+///
+/// ADR-129 says missing or stale metadata authority "closes the context".
+/// This crate reads that as per-call fail-closed: every operation re-checks
+/// authority against the store's current head and refuses with
+/// `EvidenceUnavailable`. Nothing is latched; restoring a revoked grant is
+/// itself an explicit authority act recorded in the same store.
 ///
 /// Fields are visible within the sealed `community` module only, so each
 /// later lifecycle operation adds its own sibling module and `impl` block.
@@ -188,7 +197,9 @@ impl MemoryCommunityDomainV1 {
     /// Bootstrap a proven-empty domain, or verify an existing one.
     ///
     /// `decision` must be an active metadata-service decision for the policy
-    /// leaf grant at this store's current authority head.
+    /// leaf grant at this store's current authority head. A missing, stale or
+    /// denied decision refuses this call only (per-call fail-closed, no
+    /// latch); see the type documentation.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a stale, foreign or denied decision
@@ -225,6 +236,8 @@ impl MemoryCommunityDomainV1 {
             })
     }
 
+    /// Per-call fail-closed authority check against the current head; it
+    /// latches nothing, so each later operation repeats it.
     fn admit(
         &self,
         policy: &CommunityMetadataPolicyV1,
@@ -249,7 +262,13 @@ impl MemoryCommunityDomainV1 {
     ) -> Result<(), Error> {
         self.keys
             .get(&record.protection_id)
-            .filter(|key| key_matches(key, record))
+            .filter(|key| {
+                key_matches(
+                    key,
+                    record,
+                    binding.metadata_policy.as_input().metadata_not_after_micros,
+                )
+            })
             .ok_or(Error::EvidenceUnavailable)
             .and_then(|key| {
                 self.verify_anchor(binding, record)
@@ -362,6 +381,7 @@ impl MemoryCommunityDomainV1 {
                         protection_id: ids.protection_id,
                         copy_id: ids.copy_id,
                         anchor: anchor.to_canonical_cbor(),
+                        authority_request_digest,
                         selection,
                         key_copy,
                     },
@@ -466,7 +486,11 @@ fn key_copy_descriptor(
 
 /// The retained key is exactly the bootstrap intent for this record and its
 /// material is the material that intent names.
-fn key_matches(key: &VaultKeyV1, record: &BootstrapRecordV1) -> bool {
+///
+/// Purpose is not compared separately: CKP1 admits a kind only under a
+/// purpose that permits it, and only `LifecycleControl` permits the exact
+/// control kind set, so the kind comparison already fixes the purpose.
+fn key_matches(key: &VaultKeyV1, record: &BootstrapRecordV1, horizon: u64) -> bool {
     let intent = key.intent().as_input();
     key.material_matches_intent()
         && intent.protection_operation_id == record.protection_id
@@ -474,8 +498,11 @@ fn key_matches(key: &VaultKeyV1, record: &BootstrapRecordV1) -> bool {
             == CommunityArtifactOperationV1::Control(record.request.control_id)
         && intent.timeline == record.request.anchor_timeline
         && intent.generation == record.request.anchor_generation
-        && intent.purpose == CommunityArtifactPurposeV1::LifecycleControl
         && intent.scope_set_digest == scope_set_digest(&EMPTY_SCOPE_ROWS)
+        && intent.evidence_not_after_micros == horizon
+        && intent.allowed_record_kinds == control_kinds()
+        && intent.member_slots == CommunityMemberSlotsV1::empty()
+        && intent.authority_request_digest == record.authority_request_digest
 }
 
 /// The initial key-vault copy descriptor names this record's copy, this

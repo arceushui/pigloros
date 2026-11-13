@@ -10,9 +10,9 @@ use pos_core::community_lifecycle::{
     CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
     CommunityCopyHolderV1, CommunityCopyInventoryInputV1, CommunityCopyInventoryV1,
     CommunityCopyStateV1, CommunityGenerationIdsV1, CommunityKeyIntentInputV1,
-    CommunityLifecycleErrorV1 as Error, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
-    CommunityMetadataPolicyV1, CommunityMetadataSchemaV1, CommunityMetadataScopeInputV1,
-    CommunityMetadataScopeV1, CommunityRecordKindsV1, CommunityScopeMembersV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataAnchorV1,
+    CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1, CommunityMetadataSchemaV1,
+    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityScopeMembersV1,
     CommunitySelectionInputV1, CommunitySelectionV1, CommunityTimelineFloorV1,
     CommunityTimelineFloorsV1,
 };
@@ -989,16 +989,22 @@ fn reinstalled_consistent_key_and_records_still_resolve() -> TestResult {
 
 #[test]
 fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> TestResult {
-    let intents: [IntentEdit; 7] = [
+    let intents: [IntentEdit; 10] = [
         |intent| intent.protection_operation_id = [0x99; 16],
         |intent| intent.parent_operation = CommunityArtifactOperationV1::Control([0xc3; 16]),
         |intent| intent.timeline = TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16])),
         |intent| intent.generation = [0x9b; 16],
         |intent| {
-            intent.purpose = CommunityArtifactPurposeV1::ExecutionState;
-            intent.allowed_record_kinds =
-                CommunityRecordKindsV1::empty().with(CommunityArtifactKindV1::StateContent);
+            intent.allowed_record_kinds = intent
+                .allowed_record_kinds
+                .with(CommunityArtifactKindV1::BoundedRecordBundle);
         },
+        |intent| intent.evidence_not_after_micros = HORIZON - 1,
+        |intent| {
+            intent.member_slots = CommunityMemberSlotsV1::new(&[0])
+                .unwrap_or_else(|_| CommunityMemberSlotsV1::empty());
+        },
+        |intent| intent.authority_request_digest = Hash::from_bytes([47; 32]),
         |intent| intent.scope_set_digest = Hash::from_bytes([43; 32]),
         |intent| intent.material_fingerprint = Hash::from_bytes([44; 32]),
     ];
