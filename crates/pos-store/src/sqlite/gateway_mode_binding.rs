@@ -20,7 +20,11 @@ use pos_core::{
     GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeMigrationPermitV1,
     GatewayModeProfileRefV1, GatewayModeRotationPermitV1, Seq, TimelineId,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{
+    params,
+    types::{FromSql, FromSqlError, FromSqlResult, ValueRef},
+    Connection, OptionalExtension,
+};
 
 use super::{SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 
@@ -144,6 +148,27 @@ const POPULATED_STORE_SQL: &str = "SELECT EXISTS (SELECT 1 FROM timelines)
      OR EXISTS (SELECT 1 FROM fork_admissions)
      OR EXISTS (SELECT 1 FROM fork_principal_owner_bindings)";
 
+/// A stored binding epoch: an `SQLite` integer of at least 1.
+struct SqlEpochV1(NonZeroU64);
+
+impl FromSql for SqlEpochV1 {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).and_then(|stored| {
+            u64::try_from(stored)
+                .ok()
+                .and_then(NonZeroU64::new)
+                .map(Self)
+                .ok_or(FromSqlError::OutOfRange(stored))
+        })
+    }
+}
+
+/// The `SQLite` integer of a `u64` value; values beyond `i64::MAX` saturate
+/// and are refused by the column checks or later reads.
+fn sql_integer(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 /// One raw `gateway_mode_binding` or history row before identifier checks.
 struct BindingRowV1 {
     epoch: NonZeroU64,
@@ -173,7 +198,7 @@ fn read_binding_row(conn: &Connection) -> rusqlite::Result<Option<BindingRowV1>>
         [],
         |row| {
             Ok(BindingRowV1 {
-                epoch: row.get(0)?,
+                epoch: row.get::<_, SqlEpochV1>(0)?.0,
                 profile_id: row.get(1)?,
                 profile_digest: row.get(2)?,
             })
@@ -205,14 +230,19 @@ fn write_binding(
              binding_epoch = excluded.binding_epoch,
              profile_id = excluded.profile_id,
              profile_digest = excluded.profile_digest",
-        params![epoch.get(), profile.profile_id(), digest],
+        params![sql_integer(epoch.get()), profile.profile_id(), digest],
     )
     .and_then(|_| {
         conn.execute(
             "INSERT INTO gateway_mode_binding_history
              (binding_epoch, profile_id, profile_digest, kind)
              VALUES (?1, ?2, ?3, ?4)",
-            params![epoch.get(), profile.profile_id(), digest, kind.code()],
+            params![
+                sql_integer(epoch.get()),
+                profile.profile_id(),
+                digest,
+                kind.code()
+            ],
         )
     })
     .map(|_| GatewayModeBindingRecordV1::new(profile.clone(), epoch))
@@ -282,8 +312,8 @@ pub(super) fn commit_epoch_at(
              WHERE timeline_id = ?1 AND first_local_seq <= ?2
              ORDER BY first_local_seq DESC LIMIT 1
          ) WHERE last_local_seq >= ?2",
-        params![timeline.to_string(), local_seq],
-        |row| row.get(0),
+        params![timeline.to_string(), sql_integer(local_seq)],
+        |row| row.get::<_, SqlEpochV1>(0).map(|epoch| epoch.0),
     )
     .optional()
     .map_err(|error| CoreError::Storage(error.to_string()))
@@ -309,7 +339,7 @@ pub(super) fn record_commit_epoch_in_transaction(
     conn.query_row(
         "SELECT binding_epoch FROM gateway_mode_binding WHERE singleton = 1",
         [],
-        |row| row.get(0),
+        |row| row.get::<_, SqlEpochV1>(0).map(|epoch| epoch.0),
     )
     .optional()
     .map_err(|error| CoreError::Storage(error.to_string()))
@@ -322,9 +352,9 @@ pub(super) fn record_commit_epoch_in_transaction(
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     timeline.to_string(),
-                    first_local_seq.as_u64(),
-                    last_local_seq.as_u64(),
-                    epoch.get()
+                    sql_integer(first_local_seq.as_u64()),
+                    sql_integer(last_local_seq.as_u64()),
+                    sql_integer(epoch.get())
                 ],
             )
             .map(drop)
@@ -415,7 +445,7 @@ impl GatewayModeBindingPortV1 for SqliteStore {
                     .query_map([], |row| {
                         Ok((
                             BindingRowV1 {
-                                epoch: row.get(0)?,
+                                epoch: row.get::<_, SqlEpochV1>(0)?.0,
                                 profile_id: row.get(1)?,
                                 profile_digest: row.get(2)?,
                             },
