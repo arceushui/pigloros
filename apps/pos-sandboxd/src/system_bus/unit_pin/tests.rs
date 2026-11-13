@@ -30,6 +30,8 @@ struct Bus {
     /// How long a `RefUnit` reply is held back.
     ref_delay: Duration,
     refuse_unref: bool,
+    /// How long an `UnrefUnit` reply is held back.
+    unref_delay: Duration,
     /// Successive `ActiveState` reads; the last one repeats.
     states: VecDeque<String>,
     activated_us: u64,
@@ -65,10 +67,14 @@ impl Manager {
         }
     }
 
-    fn unref_unit(&self, name: &str) -> fdo::Result<()> {
-        let mut bus = self.0.lock().map_err(failed)?;
-        bus.calls.push(format!("unref {name}"));
-        if bus.refuse_unref {
+    async fn unref_unit(&self, name: &str) -> fdo::Result<()> {
+        let (refused, delay) = {
+            let mut bus = self.0.lock().map_err(failed)?;
+            bus.calls.push(format!("unref {name}"));
+            (bus.refuse_unref, bus.unref_delay)
+        };
+        tokio::time::sleep(delay).await;
+        if refused {
             Err(fdo::Error::Failed("not referenced".to_owned()))
         } else {
             Ok(())
@@ -235,14 +241,16 @@ impl Fixture {
         self.calls()
     }
 
+    /// Once at least `count` calls arrived.
+    async fn reached(&self, count: usize) {
+        while self.calls().map(|calls| calls.len()).unwrap_or_default() < count {
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    }
+
     /// The calls once at least `count` arrived, then settled.
     async fn calls_after(&self, count: usize) -> TestResult<Vec<String>> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while self.calls().map(|calls| calls.len()).unwrap_or_default() < count {
-                tokio::time::sleep(SETTLE_POLL).await;
-            }
-        })
-        .await?;
+        tokio::time::timeout(Duration::from_secs(5), self.reached(count)).await?;
         self.settled_calls().await
     }
 
@@ -350,13 +358,38 @@ async fn a_bind_cut_off_mid_way_releases_its_reference() -> TestResult {
 #[tokio::test]
 async fn a_reference_cut_off_before_its_reply_is_released() -> TestResult {
     let fixture = Fixture::new(&["inactive"]).await?;
-    fixture.set(|bus| bus.ref_delay = Duration::from_millis(300))?;
-    let cut = tokio::time::timeout(
-        Duration::from_millis(50),
-        fixture.transport.pinned(fixture.unit(), async { Ok(()) }),
-    )
-    .await;
-    assert!(cut.is_err());
+    fixture.set(|bus| bus.ref_delay = Duration::from_secs(1))?;
+    // Cut off once the manager holds the request, before its reply.
+    tokio::select! {
+        _ = fixture.transport.pinned(fixture.unit(), async { Ok(()) }) => {
+            return Err("the reference was answered before it was cut off".into());
+        }
+        () = fixture.reached(1) => {}
+    }
+    assert_eq!(
+        fixture.calls_after(2).await?,
+        [named("ref", fixture.unit()), named("unref", fixture.unit())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_release_cut_off_before_its_reply_is_sent_once() -> TestResult {
+    let fixture = Fixture::new(&["inactive"]).await?;
+    fixture.set(|bus| bus.unref_delay = Duration::from_secs(1))?;
+    let (failing, failed) = tokio::sync::oneshot::channel();
+    let bind = async move {
+        failing.send(()).ok();
+        Err::<(), _>(SystemdTransientUnitTransportError::CgroupUnitMismatch)
+    };
+    // Cut off at the first wait after the failed bind: the release.
+    tokio::select! {
+        biased;
+        _ = fixture.transport.pinned(fixture.unit(), bind) => {
+            return Err("the release was answered before it was cut off".into());
+        }
+        _ = failed => {}
+    }
     assert_eq!(
         fixture.calls_after(2).await?,
         [named("ref", fixture.unit()), named("unref", fixture.unit())]

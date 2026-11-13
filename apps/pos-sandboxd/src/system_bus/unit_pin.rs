@@ -36,10 +36,11 @@ type TransportResult<T> = Result<T, SystemdTransientUnitTransportError>;
 impl SystemdTransientUnitTransport {
     /// Reference the unit, then run `bind`. A failed `bind` releases the
     /// reference again, best effort: nothing will read the unit's result. So
-    /// does a reference or a `bind` that is cut off or dropped, from a task
-    /// on the same connection: `RefUnit` may have been sent with its reply
-    /// never awaited, and releasing a unit that was not referenced is
-    /// harmless.
+    /// does a reference or a `bind` that is cut off or dropped: `RefUnit`
+    /// may have been sent with its reply never awaited, and releasing a unit
+    /// that was not referenced is harmless. Every release runs once, on a
+    /// task over the same connection, so cutting off the wait for it neither
+    /// leaks the pin nor repeats the release.
     pub(crate) async fn pinned<T>(
         &self,
         unit: &TransientServiceUnitName,
@@ -51,10 +52,15 @@ impl SystemdTransientUnitTransport {
             return Err(refused);
         }
         let bound = bind.await;
-        guard.disarm();
-        if bound.is_err() {
-            self.unpin(unit).await.ok();
+        let release = if bound.is_err() {
+            guard.release()
+        } else {
+            None
+        };
+        if let Some(release) = release {
+            release.await.ok();
         }
+        guard.disarm();
         bound
     }
 
@@ -137,19 +143,24 @@ impl PinGuard {
     fn disarm(&mut self) {
         self.0 = None;
     }
+
+    /// Release the reference now, once, from a task that outlives whoever
+    /// awaits it.
+    fn release(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        match (self.0.take(), tokio::runtime::Handle::try_current()) {
+            (Some((connection, unit)), Ok(runtime)) => Some(runtime.spawn(async move {
+                unpin_with(ManagerProxy::new(&connection).await, &unit)
+                    .await
+                    .ok();
+            })),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for PinGuard {
     fn drop(&mut self) {
-        if let (Some((connection, unit)), Ok(runtime)) =
-            (self.0.take(), tokio::runtime::Handle::try_current())
-        {
-            runtime.spawn(async move {
-                unpin_with(ManagerProxy::new(&connection).await, &unit)
-                    .await
-                    .ok();
-            });
-        }
+        drop(self.release());
     }
 }
 
