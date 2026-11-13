@@ -155,7 +155,6 @@ impl TerminalResources {
     }
 
     /// The limit-event counters after exit (TME1 `terminal`).
-    #[must_use]
     pub const fn terminal(&self) -> &Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
         &self.terminal
     }
@@ -169,58 +168,61 @@ impl TerminalResources {
 
     /// The unit's `Result`, `ExecMainCode` and `ExecMainStatus` (TME1
     /// `service`).
-    #[must_use]
     pub const fn service(&self) -> &Result<SystemdUnitResultObservation, TerminalServiceError> {
         &self.service
     }
 
     /// Whether `UnrefUnit` released the unit's pin. A failure leaves the unit
     /// loaded, which the teardown's absence wait then reports.
-    #[must_use]
     pub const fn unpinned(&self) -> &Result<(), SystemdTransientUnitTransportError> {
         &self.unpinned
     }
 }
 
 /// The resource evidence of one attempt that reached its unit start.
+///
+/// It is boxed: it travels inside every execution result.
 #[derive(Debug)]
-pub struct ResourceEvidence {
+pub struct ResourceEvidence(Box<Phases>);
+
+#[derive(Debug)]
+struct Phases {
     resources: Option<ReleaseResources>,
     release: ReleaseOutcome,
     terminal: Option<TerminalResources>,
 }
 
 impl ResourceEvidence {
-    pub(crate) const fn new(resources: Option<ReleaseResources>, release: ReleaseOutcome) -> Self {
-        Self {
+    pub(crate) fn new(resources: Option<ReleaseResources>, release: ReleaseOutcome) -> Self {
+        Self(Box::new(Phases {
             resources,
             release,
             terminal: None,
-        }
+        }))
     }
 
     /// The pre-release evidence; `None` when the execution failed before it
     /// was read.
     #[must_use]
     pub const fn resources(&self) -> Option<&ReleaseResources> {
-        self.resources.as_ref()
+        self.0.resources.as_ref()
     }
 
     /// What the launcher barrier established.
     #[must_use]
     pub const fn release(&self) -> &ReleaseOutcome {
-        &self.release
+        &self.0.release
     }
 
     /// The terminal evidence; `None` when no cgroup was bound, so nothing
     /// was pinned or measured.
     #[must_use]
     pub const fn terminal(&self) -> Option<&TerminalResources> {
-        self.terminal.as_ref()
+        self.0.terminal.as_ref()
     }
 
     /// Record the terminal evidence, once, before teardown.
     pub(crate) fn conclude(&mut self, terminal: TerminalResources) {
-        self.terminal = Some(terminal);
+        self.0.terminal = Some(terminal);
     }
 }

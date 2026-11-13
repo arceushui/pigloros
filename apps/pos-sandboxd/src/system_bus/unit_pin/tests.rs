@@ -197,7 +197,7 @@ impl Fixture {
         Ok(())
     }
 
-    fn unit(&self) -> &TransientServiceUnitName {
+    const fn unit(&self) -> &TransientServiceUnitName {
         &self.started.unit_name
     }
 

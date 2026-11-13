@@ -92,10 +92,7 @@ impl SystemdTransientUnitTransport {
     ) -> TerminalResources {
         let terminal = cgroup.capture_limit_events();
         let work_after = work.map(WorkUsage::observe);
-        let service = match started {
-            Some(started) => self.settled_result(started, settle_by).await,
-            None => Err(TerminalServiceError::Unstarted),
-        };
+        let service = self.settled_result(started, settle_by).await;
         let unpinned = self.unpin(unit).await;
         TerminalResources::new(terminal, work_after, service, unpinned)
     }
@@ -103,9 +100,12 @@ impl SystemdTransientUnitTransport {
     /// The unit's result once it settled, or the last failure at `settle_by`.
     async fn settled_result(
         &self,
-        started: &SystemdVerifiedStart,
+        started: Option<&SystemdVerifiedStart>,
         settle_by: Instant,
     ) -> Result<SystemdUnitResultObservation, TerminalServiceError> {
+        let Some(started) = started else {
+            return Err(TerminalServiceError::Unstarted);
+        };
         loop {
             let read = self.read_unit_result(started).await;
             let unsettled = matches!(read, Err(SystemdUnitResultError::NotSettled { .. }));
@@ -122,10 +122,11 @@ async fn pin_with(
     unit: &TransientServiceUnitName,
 ) -> TransportResult<()> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
-    proxy
+    let referenced = proxy
         .ref_unit(unit.as_str().to_owned())
         .await
-        .map_err(SystemdTransientUnitTransportError::UnitRef)
+        .map_err(SystemdTransientUnitTransportError::UnitRef);
+    referenced
 }
 
 async fn unpin_with(
@@ -133,10 +134,11 @@ async fn unpin_with(
     unit: &TransientServiceUnitName,
 ) -> TransportResult<()> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
-    proxy
+    let released = proxy
         .unref_unit(unit.as_str().to_owned())
         .await
-        .map_err(SystemdTransientUnitTransportError::UnitUnref)
+        .map_err(SystemdTransientUnitTransportError::UnitUnref);
+    released
 }
 
 /// `ActiveEnterTimestampMonotonic` in nanoseconds; zero is no activation.

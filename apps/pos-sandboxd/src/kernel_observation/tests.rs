@@ -279,7 +279,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
     let (_directory, cgroup) = cgroup_listing(own_pid())?;
     let context = context(&cgroup, false)?;
     let provider = foreign_provider()?;
-    let unreadable = || Err(KernelObservationError::Identity);
+    let unreadable = || Err::<(u32, [u8; 16]), _>(KernelObservationError::Identity);
     assert_eq!(
         observe_unit(&unreadable, &context, &provider).err(),
         Some(KernelObservationError::Identity)
@@ -287,7 +287,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
     let reads = std::cell::Cell::new(0_u8);
     let drifting = || {
         reads.set(reads.get().wrapping_add(1));
-        Ok((own_pid(), [reads.get(); 16]))
+        Ok::<_, KernelObservationError>((own_pid(), [reads.get(); 16]))
     };
     assert_eq!(
         observe_unit(&drifting, &context, &provider).err(),
@@ -306,7 +306,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
         observe_unit(&failing_again, &context, &provider).err(),
         Some(KernelObservationError::Identity)
     );
-    let no_main = || Ok((0, INVOCATION));
+    let no_main = || Ok::<_, KernelObservationError>((0, INVOCATION));
     assert_eq!(
         observe_unit(&no_main, &context, &provider).err(),
         Some(KernelObservationError::NoMainProcess)

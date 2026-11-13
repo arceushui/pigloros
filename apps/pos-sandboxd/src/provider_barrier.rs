@@ -276,7 +276,7 @@ where
 
     /// Why `/proc/<main_pid>/exe` could not be observed again: the unit
     /// changed if its `MainPID` did, and otherwise its launcher is gone.
-    fn unreadable(&self, main_pid: u32) -> RecheckRefusal {
+    const fn unreadable(&self, main_pid: u32) -> RecheckRefusal {
         if main_pid == self.snapshot.main_pid {
             RecheckRefusal::ExecutableUnreadable
         } else {
@@ -334,8 +334,8 @@ where
     /// observation: then its KOE1 digest.
     fn observed_again(&self, root: &CheckedRoot) -> Result<[u8; 32], RecheckRefusal> {
         let again = self.observe(root).map_err(RecheckRefusal::Observation)?;
-        let frozen = self.frozen.borrow();
-        frozen
+        self.frozen
+            .borrow()
             .as_ref()
             .zip(self.ready.get())
             .filter(|(frozen, _)| frozen.observation() == again.observation())

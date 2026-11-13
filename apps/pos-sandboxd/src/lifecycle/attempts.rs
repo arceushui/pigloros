@@ -184,7 +184,7 @@ pub enum AttemptProgress<S> {
 impl<S> AttemptProgress<S> {
     /// The verified start, if known, and the resource evidence of an
     /// execution that reached its launcher barrier.
-    fn reached(&mut self) -> Option<(Option<&S>, &mut ResourceEvidence)> {
+    const fn reached(&mut self) -> Option<(Option<&S>, &mut ResourceEvidence)> {
         match self {
             Self::Executed {
                 started, evidence, ..
@@ -495,21 +495,18 @@ where
         }
     }
 
-    fn finish<'a>(
+    async fn finish<'a>(
         &'a self,
         progress: &'a mut AttemptProgress<SystemdVerifiedStart>,
         directory: PreparedAttemptDirectory,
         cgroup: Option<crate::BoundAttemptCgroup>,
         root: Option<I::Root>,
         deadlines: AttemptCleanupDeadlines,
-    ) -> impl Future<Output = Result<CompletedAttemptCleanup, AttemptCleanupError>> + Send + 'a
-    {
-        async move {
-            let unit = directory.intent().unit_name().clone();
-            let settle_by = deadlines.shutdown().grace();
-            conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
-            finish_with(self.transport, directory, cgroup, root, deadlines).await
-        }
+    ) -> Result<CompletedAttemptCleanup, AttemptCleanupError> {
+        let unit = directory.intent().unit_name().clone();
+        let settle_by = deadlines.shutdown().grace();
+        conclude(self.transport, progress, &unit, cgroup.as_ref(), settle_by).await;
+        finish_with(self.transport, directory, cgroup, root, deadlines).await
     }
 }
 

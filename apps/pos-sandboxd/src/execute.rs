@@ -76,7 +76,7 @@ const EMPTY_POLL: Duration = Duration::from_millis(10);
 /// How long after the watchdog deadline `D` the broker escalates (ADR-069 R9
 /// §4.6.5, `G`): systemd's `RuntimeMaxUSec` stops the unit at `D`, so a kill
 /// at `D` itself would race the enforcer it backs up.
-pub(crate) const ESCALATION_GRACE: Duration = Duration::from_secs(1);
+const ESCALATION_GRACE: Duration = Duration::from_secs(1);
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
