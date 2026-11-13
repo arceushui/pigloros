@@ -867,7 +867,7 @@ fn tamper_selection(selection: &mut CommunitySelectionInputV1<'static>, tamper: 
     match tamper {
         Tamper::SelectionOrdinal => selection.highest_native_producer_ordinal = 1,
         Tamper::SelectionFloors => {
-            selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR)
+            selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR);
         }
         Tamper::SelectionHorizon => selection.metadata_not_after_micros = HORIZON - 1,
         _ => {}
