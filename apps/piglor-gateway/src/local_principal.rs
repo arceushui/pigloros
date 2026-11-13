@@ -755,11 +755,28 @@ mod tests {
         assert_eq!(scope.purposes(), ["operation", "read"]);
         assert_eq!(scope.actor_entity_ids(), [actor()?]);
         assert_eq!(built.grant.grant_id(), local_principal_grant_id());
-        // The registry digest commits to the whole document.
-        assert_ne!(
-            built.grant.authority_registry_digest(),
-            served_provision()?.grant.authority_registry_digest()
-        );
+        // The registry digest commits to the whole document: every field,
+        // even at equal set sizes.
+        assert_eq!(MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES, 16_384);
+        let digest =
+            |provision: &LocalPrincipalProvisionV1| provision.grant.authority_registry_digest();
+        let create = provision([GatewayOperationV1::CREATE_TIMELINE])?;
+        for other in [
+            provision([GatewayOperationV1::READ_EVENTS])?,
+            LocalPrincipalProvisionV1::try_new(
+                &PrincipalRefV1::try_new(Ulid::from_string(PRINCIPAL)?.to_bytes(), "other")?,
+                [actor()?],
+                [GatewayOperationV1::CREATE_TIMELINE],
+            )?,
+            LocalPrincipalProvisionV1::try_new(
+                &principal()?,
+                [EntityId::new()],
+                [GatewayOperationV1::CREATE_TIMELINE],
+            )?,
+            served_provision()?,
+        ] {
+            assert_ne!(digest(&create), digest(&other));
+        }
         Ok(())
     }
 
@@ -1150,6 +1167,23 @@ mod tests {
         // An exact retry succeeds unchanged.
         provision_local_principal_from_credentials(path, &credentials)?;
         assert!(load_local_principal(&SqliteStore::open(path)?)?.is_some());
+
+        // The credential bound is 16 KiB, exact: a padded document at the
+        // bound is read, one byte over it is refused.
+        let padded = |size: usize| -> TestResult<Vec<u8>> {
+            let mut text = document(&actor, "\"timeline.create\"").into_bytes();
+            let padding = size
+                .checked_sub(text.len() + 2)
+                .ok_or("the document fits the bound")?;
+            text.push(b'#');
+            text.extend(std::iter::repeat_n(b'x', padding));
+            text.push(b'\n');
+            Ok(text)
+        };
+        install(&padded(MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES)?)?;
+        provision_local_principal_from_credentials(path, &credentials)?;
+        install(&padded(MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES + 1)?)?;
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
 
         install(document(&actor, "\"timeline.events.read\"").as_bytes())?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
