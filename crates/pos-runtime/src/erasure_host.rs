@@ -6332,6 +6332,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_stale_mode_binding_keeps_its_own_host_error() {
+        assert_eq!(
+            map_store_error(&CoreError::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale
+        );
+        assert_eq!(
+            map_store_error(&CoreError::Storage(String::new())),
+            ErasureHostErrorV1::AdapterFailure
+        );
+    }
+
     impl pos_core::GatewayModeBindingPortV1 for FaultStoreV1 {
         fn bind_empty_store_mode(
             &mut self,
