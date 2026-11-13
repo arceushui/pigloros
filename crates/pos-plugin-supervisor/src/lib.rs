@@ -45,7 +45,8 @@
 //! orchestration that activates an owner-declared fallback at a Tick Boundary (#667).
 //!
 //! The [`host_composition`] module holds the ADR-133 community lifecycle facade,
-//! [`CommunityLifecycleHostV1`], which coordinates Store persistence and Runtime authority.
+//! [`CommunityLifecycleHostV1`], which coordinates the sealed Store domain and its installed
+//! metadata authority.
 //!
 //! [`CommunityPluginSubjectOutcomeV1`] is the stable per-Plugin outcome record of a host pass
 //! for the #194 subject adapter, which owns the EAI1/EAO1 wire code (#585). See the README.

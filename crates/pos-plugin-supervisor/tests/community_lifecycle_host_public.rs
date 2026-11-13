@@ -1,7 +1,7 @@
 //! ADR-133 `CommunityLifecycleHostV1::open_memory` at its public seam.
 //!
-//! The host composes the real Runtime metadata authority with the real Store
-//! retained-Memory domain over a `MemoryStore` grant chain.
+//! The host hands the installed metadata authority to the real Store
+//! retained-Memory domain, which evaluates it over a `MemoryStore` grant chain.
 
 use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1,
@@ -18,7 +18,7 @@ use pos_plugin_supervisor::host_composition::{
     CommunityBootstrapRequestV1, CommunityDomainOpenedV1 as Opened, CommunityInstalledCatalogueV1,
     CommunityLifecycleHostV1, MemoryCommunityDomainV1,
 };
-use pos_runtime::community_plugin_host::{
+use pos_store::community::{
     metadata_resource, CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
 };
 use pos_store::memory::MemoryStore;

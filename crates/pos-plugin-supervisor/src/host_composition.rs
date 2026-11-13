@@ -2,8 +2,10 @@
 //!
 //! [`CommunityLifecycleHostV1`] owns the installed authority catalogue and
 //! exclusive use of one concrete protected domain. Store keeps sealed
-//! persistence and the key vault, Runtime derives the current metadata-service
-//! decision, and this module only coordinates them. It is distinct from the
+//! persistence and the key vault, and the domain itself evaluates its current
+//! metadata-service authority from the installed inputs (ADR-129 §3: the
+//! concrete owner obtains it); this module only hands the installed authority
+//! to the domain, never a decision. It is distinct from the
 //! bounded worker and worker-protocol modules, and it grants no
 //! caller-asserted authority, raw backend access or qualification.
 //!
