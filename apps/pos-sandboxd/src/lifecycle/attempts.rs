@@ -555,9 +555,18 @@ async fn conclude(
     let Some(cgroup) = cgroup else {
         return;
     };
-    let work = evidence.release().work();
+    let release = evidence.release();
+    let invocation = release
+        .observation()
+        .map(crate::KernelObservation::invocation_id);
     let terminal = transport
-        .conclude(unit, started, cgroup, work, settle_by)
+        .conclude(
+            unit,
+            started.zip(invocation),
+            cgroup,
+            release.work(),
+            settle_by,
+        )
         .await;
     evidence.conclude(terminal);
 }

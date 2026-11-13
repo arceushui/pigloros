@@ -121,7 +121,8 @@ impl ReleaseOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalServiceError {
     /// The execution failed before a verified start reached the lifecycle,
-    /// so no exact unit object is known to read.
+    /// or no kernel observation recorded the attempt's `InvocationID`, so no
+    /// exact unit invocation is known to read.
     #[error("no verified start is known for the unit")]
     Unstarted,
     /// The result could not be read over the retained connection; the pin

@@ -79,13 +79,14 @@ impl SystemdTransientUnitTransport {
     /// cgroup counters, its `/work` usage, its settled result and the release
     /// of its pin, in that order.
     ///
-    /// `started` is `None` when the execution failed before a verified start
-    /// reached the lifecycle; the result is then missing. An unsettled result
-    /// is read again until `settle_by`.
+    /// `started` is the verified start and the `InvocationID` the frozen
+    /// kernel observation recorded, which the result must belong to. It is
+    /// `None` when either is unknown; the result is then missing. An
+    /// unsettled result is read again until `settle_by`.
     pub(crate) async fn conclude(
         &self,
         unit: &TransientServiceUnitName,
-        started: Option<&SystemdVerifiedStart>,
+        started: Option<(&SystemdVerifiedStart, [u8; 16])>,
         cgroup: &BoundAttemptCgroup,
         work: Option<&File>,
         settle_by: Instant,
@@ -100,14 +101,14 @@ impl SystemdTransientUnitTransport {
     /// The unit's result once it settled, or the last failure at `settle_by`.
     async fn settled_result(
         &self,
-        started: Option<&SystemdVerifiedStart>,
+        started: Option<(&SystemdVerifiedStart, [u8; 16])>,
         settle_by: Instant,
     ) -> Result<SystemdUnitResultObservation, TerminalServiceError> {
-        let Some(started) = started else {
+        let Some((started, invocation)) = started else {
             return Err(TerminalServiceError::Unstarted);
         };
         loop {
-            let read = self.read_unit_result(started).await;
+            let read = self.read_unit_result(started, invocation).await;
             let unsettled = matches!(read, Err(SystemdUnitResultError::NotSettled { .. }));
             if !unsettled || Instant::now() >= settle_by {
                 return read.map_err(TerminalServiceError::from);

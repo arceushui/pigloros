@@ -212,7 +212,13 @@ impl Fixture {
     async fn conclude(&self, started: Option<&SystemdVerifiedStart>) -> TerminalResources {
         let settle_by = Instant::now() + Duration::from_millis(200);
         self.transport
-            .conclude(self.unit(), started, &self.cgroup, None, settle_by)
+            .conclude(
+                self.unit(),
+                started.map(|started| (started, INVOCATION)),
+                &self.cgroup,
+                None,
+                settle_by,
+            )
             .await
     }
 }
@@ -388,7 +394,7 @@ async fn an_exited_unit_is_measured_read_and_then_unpinned() -> TestResult {
         .transport
         .conclude(
             fixture.unit(),
-            Some(&fixture.started),
+            Some((&fixture.started, INVOCATION)),
             &fixture.cgroup,
             Some(&work),
             settle_by,
