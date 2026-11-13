@@ -130,6 +130,8 @@ fn selection_has_the_exact_wire_and_roundtrips_borrowed_rows() -> TestResult {
     assert!(Generations::from_ids(&[]).is_empty());
     assert!(Floors::from_floors(&[]).is_empty());
     assert!(Generations::from_ids(&CLOSED) != Generations::from_ids(&CLOSED[..1]));
+    assert!(rows == Floors::from_floors(&floors));
+    assert!(rows != Floors::from_floors(&floors[..1]));
     Ok(())
 }
 

@@ -93,7 +93,8 @@ impl CommunityMemberSlotsV1 {
         } else if self.0 >> slot != 0 {
             Err(Error::InvalidBinding)
         } else {
-            Ok(Self(self.0 | (1 << slot)))
+            // Every bit at or above `slot` is clear, so adding sets exactly it.
+            Ok(Self(self.0 + (1 << slot)))
         }
     }
 
