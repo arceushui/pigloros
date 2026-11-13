@@ -102,7 +102,7 @@ const fn locator() -> Locator {
 }
 
 /// One reference of each variant, in canonical (code-first) order.
-fn refs() -> [TypedRef<'static>; 4] {
+const fn refs() -> [TypedRef<'static>; 4] {
     [
         TypedRef::Native(native(9, 0, 11)),
         TypedRef::Factual {
@@ -396,7 +396,7 @@ fn empty_and_grouped_nodes_have_the_exact_wire() -> TestResult {
 }
 
 #[test]
-fn group_counts_are_exact_chunks_of_256() -> TestResult {
+fn group_counts_are_exact_chunks_of_256() {
     let groups: Vec<NativeRef> = (1..=17).map(|producer| native(producer, 0, 40)).collect();
     let check = |count: usize, total: u64| {
         Node::new(node_input(
@@ -418,11 +418,10 @@ fn group_counts_are_exact_chunks_of_256() -> TestResult {
     assert_eq!(check(1, 256), Err(Error::BoundsExceeded));
     assert_eq!(check(17, 4097), Err(Error::BoundsExceeded));
     assert_eq!(check(16, u64::MAX), Err(Error::BoundsExceeded));
-    Ok(())
 }
 
 #[test]
-fn direct_index_holds_one_to_256_ordered_references() -> TestResult {
+fn direct_index_holds_one_to_256_ordered_references() {
     let many: Vec<TypedRef<'static>> = (1..=257)
         .map(|producer| TypedRef::Native(native(producer, 0, 41)))
         .collect();
@@ -454,7 +453,6 @@ fn direct_index_holds_one_to_256_ordered_references() -> TestResult {
         TypedRef::Native(native(5, 0, 2)),
     ];
     assert_eq!(check(&ordered), Ok(()));
-    Ok(())
 }
 
 #[test]
@@ -1075,7 +1073,7 @@ const fn counts() -> Counts {
     }
 }
 
-const fn root_input<'a>(roots: NativeRefs<'a>, graph_counts: Counts) -> RootInput<'a> {
+const fn root_input(roots: NativeRefs<'_>, graph_counts: Counts) -> RootInput<'_> {
     RootInput {
         store_incarnation: INCARNATION,
         timeline: timeline(1),
@@ -1126,7 +1124,7 @@ fn graph_root_has_the_exact_wire_digest_and_roundtrips() -> TestResult {
 }
 
 #[test]
-fn graph_root_counts_are_bounded_by_the_profile_maxima() -> TestResult {
+fn graph_root_counts_are_bounded_by_the_profile_maxima() {
     let roots = [native(1, 0, 50)];
     let refs = NativeRefs::from_references(&roots);
     assert_eq!(Root::new(root_input(refs, counts())).map(drop), Ok(()));
@@ -1171,7 +1169,6 @@ fn graph_root_counts_are_bounded_by_the_profile_maxima() -> TestResult {
             Some(Error::BoundsExceeded)
         );
     }
-    Ok(())
 }
 
 #[test]
