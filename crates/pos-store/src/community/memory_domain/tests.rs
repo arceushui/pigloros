@@ -884,7 +884,9 @@ struct Tamper {
 fn replacement_key(world: &World, edit: Option<IntentEdit>) -> Fallible<VaultKeyV1> {
     let provisioned = VaultKeyV1::provision(*world.key()?.intent().as_input())?;
     let mut intent = *provisioned.intent().as_input();
-    edit.into_iter().for_each(|edit| edit(&mut intent));
+    if let Some(edit) = edit {
+        edit(&mut intent);
+    }
     Ok(provisioned.with_intent(intent)?)
 }
 
@@ -914,7 +916,9 @@ fn sealed_selection(
         timeline_floors: CommunityTimelineFloorsV1::from_floors(&[]),
         metadata_not_after_micros: HORIZON,
     };
-    edit.into_iter().for_each(|edit| edit(&mut selection));
+    if let Some(edit) = edit {
+        edit(&mut selection);
+    }
     let bytes = CommunitySelectionV1::new(selection)?.to_canonical_cbor();
     let scope = bootstrap_scope(protection_id)?;
     Ok(key.seal(&scope, CommunityMetadataSchemaV1::Csi1, &bytes)?)
@@ -926,7 +930,9 @@ fn sealed_copy(
     edit: Option<CopyEdit>,
 ) -> Fallible<super::SealedMetadataV1> {
     let mut copy = key_copy_descriptor(ids, key, HORIZON);
-    edit.into_iter().for_each(|edit| edit(&mut copy));
+    if let Some(edit) = edit {
+        edit(&mut copy);
+    }
     let bytes = CommunityCopyInventoryV1::new(copy)?.to_canonical_cbor();
     let scope = bootstrap_scope(ids.protection_id)?;
     Ok(key.seal(&scope, CommunityMetadataSchemaV1::Cci1, &bytes)?)
