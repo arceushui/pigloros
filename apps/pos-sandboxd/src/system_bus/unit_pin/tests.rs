@@ -241,16 +241,20 @@ impl Fixture {
         self.calls()
     }
 
-    /// Once at least `count` calls arrived.
-    async fn reached(&self, count: usize) {
-        while self.calls().map(|calls| calls.len()).unwrap_or_default() < count {
-            tokio::time::sleep(SETTLE_POLL).await;
-        }
+    /// Once at least `count` calls arrived, or after five seconds.
+    async fn reached(&self, count: usize) -> TestResult {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.calls()?.len() < count {
+                tokio::time::sleep(SETTLE_POLL).await;
+            }
+            TestResult::Ok(())
+        })
+        .await?
     }
 
     /// The calls once at least `count` arrived, then settled.
     async fn calls_after(&self, count: usize) -> TestResult<Vec<String>> {
-        tokio::time::timeout(Duration::from_secs(5), self.reached(count)).await?;
+        self.reached(count).await?;
         self.settled_calls().await
     }
 
@@ -364,7 +368,7 @@ async fn a_reference_cut_off_before_its_reply_is_released() -> TestResult {
         _ = fixture.transport.pinned(fixture.unit(), async { Ok(()) }) => {
             return Err("the reference was answered before it was cut off".into());
         }
-        () = fixture.reached(1) => {}
+        reached = fixture.reached(1) => reached?,
     }
     assert_eq!(
         fixture.calls_after(2).await?,
@@ -388,7 +392,7 @@ async fn a_release_cut_off_before_its_reply_is_sent_once() -> TestResult {
         _ = fixture.transport.pinned(fixture.unit(), bind) => {
             return Err("the release was answered before it was cut off".into());
         }
-        _ = failed => {}
+        bound = tokio::time::timeout(Duration::from_secs(5), failed) => bound??,
     }
     assert_eq!(
         fixture.calls_after(2).await?,
