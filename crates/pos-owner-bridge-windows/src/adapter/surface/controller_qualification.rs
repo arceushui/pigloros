@@ -61,12 +61,9 @@ impl Surface {
         &mut self,
         ceremony: &CeremonyId,
     ) -> Option<(PreEnvironmentRetention, bool)> {
-        self.controller_creation_custody(ceremony, true)
-            .and_then(|state| {
-                self.native
-                    .recordless_controller_completion()
-                    .map(|result| (state, result))
-            })
+        let state = self.controller_creation_custody(ceremony, true)?;
+        let result = self.native.recordless_controller_completion()?;
+        Some((state, result))
     }
 
     pub(in crate::adapter) fn lose_pending_controller_parent(
