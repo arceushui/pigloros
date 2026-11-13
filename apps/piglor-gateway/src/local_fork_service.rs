@@ -140,6 +140,84 @@ pub async fn serve_managed_local_fork_admission(
     .await
 }
 
+/// Running local Fork-admission listener owned by the Gateway process.
+///
+/// The type exposes lifecycle only; its credential, session, journal, and
+/// protocol values remain private to this crate.
+pub(super) struct LocalForkAdmissionListenerV1 {
+    stopping: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    socket_path: Option<PathBuf>,
+}
+
+/// How long shutdown waits for the listener thread to finish its in-flight
+/// request (ADR-109 revision 9, Decision 1 item 8 step 2).
+///
+/// It covers one worst-case request so a legitimate one is not truncated: the
+/// 5 s frame read, up to four 5 s executor admission waits (claim, execute,
+/// cancel or recover, mark), and the 5 s response write.
+const LISTENER_STOP_DEADLINE: Duration = Duration::from_secs(30);
+
+impl LocalForkAdmissionListenerV1 {
+    /// Stop accepting new local admission requests, join the worker, and
+    /// unlink the socket pathname this listener bound (ADR-109 revision 9,
+    /// Decision 1 item 8 step 2).
+    ///
+    /// An in-flight request finishes its remaining commands first, because
+    /// the executor is still open, and a started executor command is awaited
+    /// to completion (Decision 1 item 5). Only this join is bounded: it runs on
+    /// a detached joiner thread, so a wedged worker cannot hang process
+    /// shutdown; after `LISTENER_STOP_DEADLINE` the socket is unlinked anyway
+    /// and the stop reports `TimedOut`.
+    pub(super) async fn stop(self) -> io::Result<()> {
+        self.stop_within(LISTENER_STOP_DEADLINE).await
+    }
+
+    async fn stop_within(mut self, deadline: Duration) -> io::Result<()> {
+        self.stopping.store(true, Ordering::Release);
+        let worker = self.worker.take();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // The joiner is detached on purpose: if the worker is wedged past the
+        // deadline, the joiner stays blocked on it until process exit rather
+        // than holding up shutdown. A late send to the dropped receiver is
+        // ignored.
+        drop(thread::spawn(move || {
+            drop(sender.send(join_listener_worker(worker)));
+        }));
+        let joined = tokio::time::timeout(deadline, receiver)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Fork-admission listener did not stop",
+                )
+            })
+            .and_then(|received| received.map_err(io::Error::other).flatten());
+        let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
+        joined.and(unlinked)
+    }
+}
+
+fn join_listener_worker(worker: Option<JoinHandle<()>>) -> io::Result<()> {
+    worker.map_or(Ok(()), |worker| {
+        worker
+            .join()
+            .map_err(|_| io::Error::other("Fork-admission listener worker panicked"))
+    })
+}
+
+impl Drop for LocalForkAdmissionListenerV1 {
+    /// Never blocks: a listener dropped without `stop` (a cancelled
+    /// serve future or an unwinding panic) signals stop, detaches a worker
+    /// that is still running (it exits after its in-flight request), and
+    /// removes the pathname at most once. After `stop` both are already gone.
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        drop(self.worker.take());
+        drop(self.socket_path.take().map(fs::remove_file));
+    }
+}
+
 /// Provision the empty `SQLite` store with the host credentials in one protected
 /// systemd credential directory.
 ///
