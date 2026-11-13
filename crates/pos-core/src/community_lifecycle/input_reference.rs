@@ -498,7 +498,9 @@ impl<'a> CommunityTypedInputRefsV1<'a> {
             return Err(Error::BoundsExceeded);
         }
         let mut previous: Option<Zeroizing<Vec<u8>>> = None;
-        self.iter().try_for_each(|row| {
+        // A named iterator is dropped before `previous`, in either edition.
+        let mut rows = self.iter();
+        rows.try_for_each(|row| {
             row.and_then(|reference| {
                 reference.validate().and_then(|()| {
                     let mut encoded = Zeroizing::new(Vec::with_capacity(256));
