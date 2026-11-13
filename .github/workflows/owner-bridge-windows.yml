@@ -2,7 +2,7 @@ name: owner-bridge-windows
 
 on:
   push:
-    branches: [diag/535-cc-host]
+    branches: [diag/535-cc-full]
   workflow_call:
   workflow_dispatch:
 
@@ -54,18 +54,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }
           cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored
           if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }
-      - name: Quiesce background servicing before native fixtures (diagnostic)
-        shell: pwsh
-        run: |
-          foreach ($name in 'wuauserv', 'UsoSvc', 'BITS', 'DoSvc', 'DiagTrack', 'SysMain', 'WSearch', 'TrustedInstaller', 'InstallService') {
-            try {
-              $service = Get-Service -Name $name -ErrorAction Stop
-              $before = $service.Status
-              Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue
-              Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
-              Write-Output "HOST_QUIESCE service=$name before=$before after=$((Get-Service -Name $name).Status)"
-            } catch { Write-Output "HOST_QUIESCE service=$name absent" }
-          }
       - name: Start host load observer (diagnostic)
         shell: pwsh
         run: |
