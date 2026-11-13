@@ -1216,14 +1216,16 @@ mod tests {
     #[tokio::test]
     async fn a_revocation_takes_effect_before_the_next_mutation() -> TestResult {
         let provision = served_provision()?;
-        let served = served_store(&provision)?;
-        let authorization = served.authorization()?;
         let Served {
             _directory,
             gateway,
             app,
             ..
-        } = served;
+        } = served_store(&provision)?;
+        let authorization = gateway
+            .authorization
+            .clone()
+            .ok_or("a provisioned host has an authorizer")?;
         let actor = actor()?;
         assert_eq!(create(&app, Some(actor)).await?.0, StatusCode::CREATED);
 
