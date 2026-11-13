@@ -16,17 +16,20 @@ use pos_core::community_lifecycle::{
     CommunitySelectionInputV1, CommunitySelectionV1, CommunityTimelineFloorV1,
     CommunityTimelineFloorsV1,
 };
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
     AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
     CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, EntityId,
     Hash, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use ulid::Ulid;
 
+use super::super::metadata_authority::{
+    CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
+};
 use super::super::private_hash::{plaintext_commitment, private_digest, scope_set_digest};
 use super::super::vault::VaultKeyV1;
 use super::{
@@ -86,11 +89,29 @@ fn resource(incarnation: [u8; 16]) -> String {
     format!("community-metadata:{}", hex(&incarnation))
 }
 
-fn grant(grant_id: Hash, seq: u64) -> Fallible<CapabilityGrantV1> {
+/// The metadata grant's scope: resource incarnation, actions and purpose.
+#[derive(Clone, Copy)]
+struct Scope {
+    incarnations: &'static [[u8; 16]],
+    actions: &'static [&'static str],
+    purpose: &'static str,
+}
+
+const FULL: Scope = Scope {
+    incarnations: &[INCARNATION],
+    actions: &["inspect", "write"],
+    purpose: "owner-enforcement",
+};
+
+fn grant(grant_id: Hash, seq: u64, scope: Scope) -> Fallible<CapabilityGrantV1> {
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec![resource(INCARNATION)],
-        actions: vec!["inspect".to_owned(), "write".to_owned()],
-        purposes: vec!["owner-enforcement".to_owned()],
+        resources: scope.incarnations.iter().copied().map(resource).collect(),
+        actions: scope
+            .actions
+            .iter()
+            .map(|action| (*action).to_owned())
+            .collect(),
+        purposes: vec![scope.purpose.to_owned()],
         audiences: vec![AUDIENCE.to_owned()],
         actor_entity_ids: vec![actor()],
         subject_ids: vec![],
@@ -172,90 +193,119 @@ struct World {
     domain: MemoryCommunityDomainV1,
     policy: CommunityMetadataPolicyV1,
     registry: AuthorityRegistrySnapshotV1,
+    owner: AuthenticatedPrincipalResultV1,
     host: AuthorityPersistenceHostV1,
     grants: Vec<CapabilityGrantV1>,
 }
 
 impl World {
     fn new(grant_ids: &[Hash]) -> Fallible<Self> {
+        Self::scoped(grant_ids, FULL)
+    }
+
+    fn scoped(grant_ids: &[Hash], scope: Scope) -> Fallible<Self> {
         let grants = grant_ids
             .iter()
             .zip(1..)
-            .map(|(id, seq)| grant(*id, seq))
+            .map(|(id, seq)| grant(*id, seq, scope))
             .collect::<Fallible<Vec<_>>>()?;
         let registry = registry_for(&grants)?;
         let host = AuthorityPersistenceHostV1::new(&registry);
         let domain = domain_with(&host, &grants)?;
+        Self::assemble(domain, registry, host, grants)
+    }
+
+    fn assemble(
+        domain: MemoryCommunityDomainV1,
+        registry: AuthorityRegistrySnapshotV1,
+        host: AuthorityPersistenceHostV1,
+        grants: Vec<CapabilityGrantV1>,
+    ) -> Fallible<Self> {
         Ok(Self {
             domain,
             policy: policy(SCHEMAS)?,
             registry,
+            owner: owner()?,
             host,
             grants,
         })
     }
 
-    fn decision_for(&self, leaf: Hash) -> Fallible<AuthorizationDecisionV1> {
-        self.decision_as(leaf, "write")
+    /// The installed authority, with trusted wall samples at 500 micros.
+    fn authority_with(&self, audience: &str, samples: &[u64]) -> CommunityMetadataAuthorityV1 {
+        CommunityMetadataAuthorityV1::new(
+            CommunityMetadataAuthorityInputV1 {
+                registry: self.registry.clone(),
+                principal: self.owner.clone(),
+                actor_entity_id: actor(),
+                principal_role: AuthorityRoleV1::Actor,
+                audience: audience.to_owned(),
+                consent_policy_revision: CONSENT_REVISION,
+                capability_policy_revision: POLICY_REVISION,
+            },
+            ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
+        )
     }
 
-    fn decision_as(&self, leaf: Hash, action: &str) -> Fallible<AuthorizationDecisionV1> {
-        let persisted = self.domain.store.load_authority(leaf)?;
-        let request = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
-            authenticated: owner()?,
-            actor_entity_id: actor(),
-            subject_id: None,
-            participant_id: None,
-            plugin_id: None,
-            installation_id: None,
-            principal_role: AuthorityRoleV1::Actor,
-            resource: resource(INCARNATION),
-            data_category: "community.owner-metadata".to_owned(),
-            action: action.to_owned(),
-            purpose: "owner-enforcement".to_owned(),
-            audience: AUDIENCE.to_owned(),
-            at_time: WallTime::from_micros(500),
-            authority_timeline: authority_timeline(),
-            at_position: persisted.head_position(),
-            consent_timeline: None,
-            consent_at_position: None,
-            use_count: 1,
-            budget: 1,
-            consent_policy_revision: CONSENT_REVISION,
-            capability_policy_revision: POLICY_REVISION,
-            revocation_epoch: persisted.revocation_epoch(),
-            revocation_state_current: true,
-            authority_registry_digest: REGISTRY,
-            consent: ConsentEvidenceV1::NotRequired,
-            environment_constraints: vec![],
-        })?;
-        Ok(AuthorityEvaluatorV1::authorize(
-            &request,
-            persisted.chain(),
-            &self.registry,
-        ))
+    fn authority(&self) -> CommunityMetadataAuthorityV1 {
+        self.authority_with(AUDIENCE, &[500])
     }
 
-    fn decision(&self) -> Fallible<AuthorizationDecisionV1> {
-        self.decision_for(LEAF)
+    /// The exact request the domain must build for `action`, written out
+    /// independently from ADR-129 §3 and the installed inputs.
+    fn expected_request(&self, action: &str) -> Fallible<AuthorizationRequestV1> {
+        let persisted = self.domain.store.load_authority(LEAF)?;
+        Ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated: self.owner.clone(),
+                actor_entity_id: actor(),
+                subject_id: None,
+                participant_id: None,
+                plugin_id: None,
+                installation_id: None,
+                principal_role: AuthorityRoleV1::Actor,
+                resource: resource(INCARNATION),
+                data_category: "community.owner-metadata".to_owned(),
+                action: action.to_owned(),
+                purpose: "owner-enforcement".to_owned(),
+                audience: AUDIENCE.to_owned(),
+                at_time: WallTime::from_micros(500),
+                authority_timeline: authority_timeline(),
+                at_position: persisted.head_position(),
+                consent_timeline: None,
+                consent_at_position: None,
+                use_count: 1,
+                budget: 1,
+                consent_policy_revision: CONSENT_REVISION,
+                capability_policy_revision: POLICY_REVISION,
+                revocation_epoch: persisted.revocation_epoch(),
+                revocation_state_current: true,
+                authority_registry_digest: REGISTRY,
+                consent: ConsentEvidenceV1::NotRequired,
+                environment_constraints: vec![],
+            },
+        )?)
     }
 
-    fn open_with(
+    fn open_as(
         &mut self,
         request: CommunityBootstrapRequestV1,
-        decision: &AuthorizationDecisionV1,
+        authority: &mut CommunityMetadataAuthorityV1,
     ) -> Result<CommunityDomainOpenedV1, Error> {
         let binding = CommunityDomainBindingV1 {
             metadata_policy: &self.policy,
             installed_catalogue_digest: CATALOGUE,
             native_profile_digest: NATIVE,
         };
-        self.domain.open(binding, request, decision)
+        self.domain.open(binding, authority, request)
     }
 
-    fn open(&mut self, request: CommunityBootstrapRequestV1) -> Fallible<CommunityDomainOpenedV1> {
-        let decision = self.decision()?;
-        Ok(self.open_with(request, &decision)?)
+    fn open(
+        &mut self,
+        request: CommunityBootstrapRequestV1,
+    ) -> Result<CommunityDomainOpenedV1, Error> {
+        let mut authority = self.authority();
+        self.open_as(request, &mut authority)
     }
 
     fn record(&self) -> Fallible<&BootstrapRecordV1> {
@@ -361,11 +411,7 @@ fn bytes_of(value: &Value) -> Fallible<&[u8]> {
 }
 
 fn assert_unavailable(world: &mut World) -> TestResult {
-    let decision = world.decision()?;
-    assert_eq!(
-        world.open_with(request()?, &decision),
-        Err(Error::EvidenceUnavailable)
-    );
+    assert_eq!(world.open(request()?), Err(Error::EvidenceUnavailable));
     Ok(())
 }
 
@@ -395,7 +441,6 @@ fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
 #[test]
 fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> TestResult {
     let world = bootstrapped()?;
-    let decision = world.decision()?;
     assert!(world.domain.is_bootstrapped());
     assert_eq!(world.domain.keys.len(), 1);
     let record = world.record()?;
@@ -422,7 +467,14 @@ fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> Tes
         intent.material_fingerprint,
         pos_crypto::key_roles::key_material_digest(&[0; 32])
     );
-    assert_eq!(intent.authority_request_digest, decision.request_digest());
+    assert_eq!(
+        intent.authority_request_digest,
+        world.expected_request("write")?.binding_digest()
+    );
+    assert_ne!(
+        intent.authority_request_digest,
+        world.expected_request("inspect")?.binding_digest()
+    );
     assert_eq!(key.burned_credits(), 2);
     assert_ne!(record.protection_id, record.copy_id);
     assert_ne!(
@@ -570,92 +622,101 @@ fn retrying_the_original_control_resolves_without_new_material() -> TestResult {
     let other = CommunityBootstrapRequestV1::new([0xc2; 16], anchor_timeline(), ANCHOR_GENERATION)?;
     assert_eq!(world.open(other)?, CommunityDomainOpenedV1::Existing);
     let moved = CommunityBootstrapRequestV1::new(CONTROL, anchor_timeline(), [0x9b; 16])?;
-    let decision = world.decision()?;
-    assert_eq!(world.open_with(moved, &decision), Err(Error::Conflict));
+    assert_eq!(world.open(moved), Err(Error::Conflict));
     assert_eq!(world.domain.keys.len(), 1);
     assert_eq!(world.key()?.intent().digest(), intent);
     Ok(())
 }
 
-#[test]
-fn missing_grant_is_unavailable_and_creates_nothing() -> TestResult {
-    let granted = World::new(&[LEAF])?;
-    let decision = granted.decision()?;
-    let mut world = World::new(&[OTHER_LEAF])?;
-    assert_eq!(
-        world.open_with(request()?, &decision),
-        Err(Error::EvidenceUnavailable)
-    );
+fn assert_nothing_created(world: &World) {
     assert!(!world.domain.is_bootstrapped());
     assert!(world.domain.keys.is_empty());
-    Ok(())
 }
 
 #[test]
-fn revoked_grant_decision_is_unavailable() -> TestResult {
-    let mut world = World::new(&[LEAF])?;
-    world.revoke(0, 2, 1)?;
-    assert!(!world.decision()?.is_allowed());
+fn missing_grant_is_unavailable_and_creates_nothing() -> TestResult {
+    let mut world = World::new(&[OTHER_LEAF])?;
     assert_unavailable(&mut world)?;
-    assert!(world.domain.keys.is_empty());
+    assert_nothing_created(&world);
     Ok(())
 }
 
 #[test]
-fn denied_decision_for_the_current_leaf_and_head_is_unavailable() -> TestResult {
+fn revoked_grant_is_unavailable_including_after_a_successful_use() -> TestResult {
+    let mut revoked = World::new(&[LEAF])?;
+    revoked.revoke(0, 2, 1)?;
+    assert_unavailable(&mut revoked)?;
+    assert_nothing_created(&revoked);
+
+    let mut world = bootstrapped()?;
+    world.revoke(0, 2, 1)?;
+    assert_unavailable(&mut world)?;
+    Ok(())
+}
+
+#[test]
+fn an_inspect_grant_cannot_create_and_a_write_grant_cannot_reopen() -> TestResult {
+    let inspect = Scope {
+        actions: &["inspect"],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], inspect)?;
+    assert_unavailable(&mut world)?;
+    assert_nothing_created(&world);
+
+    let write = Scope {
+        actions: &["write"],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], write)?;
+    assert_eq!(
+        world.open(request()?),
+        Ok(CommunityDomainOpenedV1::Bootstrapped)
+    );
+    assert_unavailable(&mut world)?;
+    Ok(())
+}
+
+#[test]
+fn a_grant_for_another_incarnation_or_purpose_is_refused() -> TestResult {
+    for scope in [
+        Scope {
+            incarnations: &[[0x5b; 16]],
+            ..FULL
+        },
+        Scope {
+            purpose: "owner-recovery",
+            ..FULL
+        },
+    ] {
+        let mut world = World::scoped(&[LEAF], scope)?;
+        assert_unavailable(&mut world)?;
+        assert_nothing_created(&world);
+    }
+    Ok(())
+}
+
+#[test]
+fn installed_principal_wall_audience_and_validity_are_required() -> TestResult {
     let mut world = World::new(&[LEAF])?;
-    let decision = world.decision_as(LEAF, "dispose")?;
-    assert_eq!(
-        decision.outcome(),
-        AuthorizationOutcomeV1::IndeterminateFailClosed
-    );
-    assert_eq!(decision.grant_id(), Some(LEAF));
-    assert_eq!(
-        decision.at_position(),
-        world
-            .domain
-            .metadata_authority(&world.policy)?
-            .head_position()
-    );
-    assert_eq!(
-        world.open_with(request()?, &decision),
-        Err(Error::EvidenceUnavailable)
-    );
-    assert!(world.domain.keys.is_empty());
-    Ok(())
-}
-
-#[test]
-fn decision_for_another_leaf_is_unavailable() -> TestResult {
-    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
-    let decision = world.decision_for(OTHER_LEAF)?;
-    assert!(decision.is_allowed());
-    assert_eq!(
-        decision.at_position(),
-        world
-            .domain
-            .metadata_authority(&world.policy)?
-            .head_position()
-    );
-    assert_eq!(
-        world.open_with(request()?, &decision),
-        Err(Error::EvidenceUnavailable)
-    );
-    assert!(world.domain.keys.is_empty());
-    Ok(())
-}
-
-#[test]
-fn stale_decision_is_unavailable() -> TestResult {
-    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
-    let stale = world.decision()?;
-    assert!(stale.is_allowed());
-    world.revoke(1, 3, 1)?;
-    assert_eq!(
-        world.open_with(request()?, &stale),
-        Err(Error::EvidenceUnavailable)
-    );
-    assert!(world.domain.keys.is_empty());
+    for (audience, samples) in [
+        (AUDIENCE, vec![]),
+        ("", vec![500]),
+        ("another-owner", vec![500]),
+        (AUDIENCE, vec![2_000_000]),
+    ] {
+        let mut authority = world.authority_with(audience, &samples);
+        assert_eq!(
+            world.open_as(request()?, &mut authority),
+            Err(Error::EvidenceUnavailable)
+        );
+    }
+    world.policy = CommunityMetadataPolicyV1::new(CommunityMetadataPolicyInputV1 {
+        metadata_owner_registry_binding: Hash::from_bytes([48; 32]),
+        ..*world.policy.as_input()
+    })?;
+    assert_unavailable(&mut world)?;
+    assert_nothing_created(&world);
     Ok(())
 }
 
@@ -751,7 +812,7 @@ fn missing_or_conflicting_selection_is_unavailable() -> TestResult {
     assert_unavailable(&mut world)?;
     world.record_mut()?.selection.commitment = commitment;
 
-    let decision = world.decision()?;
+    let mut authority = world.authority();
     let policy = policy(SCHEMAS)?;
     for (catalogue, native) in [
         (Hash::from_bytes([41; 32]), NATIVE),
@@ -763,7 +824,7 @@ fn missing_or_conflicting_selection_is_unavailable() -> TestResult {
             native_profile_digest: native,
         };
         assert_eq!(
-            world.domain.open(binding, request()?, &decision),
+            world.domain.open(binding, &mut authority, request()?),
             Err(Error::EvidenceUnavailable)
         );
     }
@@ -776,9 +837,16 @@ fn missing_or_conflicting_selection_is_unavailable() -> TestResult {
 
 #[test]
 fn selection_from_another_incarnation_is_unavailable() -> TestResult {
-    let mut world = bootstrapped()?;
-    let decision = world.decision()?;
     let foreign = [0x5b; 16];
+    let both = Scope {
+        incarnations: &[INCARNATION, [0x5b; 16]],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], both)?;
+    assert_eq!(
+        world.open(request()?),
+        Ok(CommunityDomainOpenedV1::Bootstrapped)
+    );
     world.domain.store_incarnation = foreign;
     world.record_mut()?.anchor = CommunityMetadataAnchorV1::new(
         foreign,
@@ -787,11 +855,7 @@ fn selection_from_another_incarnation_is_unavailable() -> TestResult {
         &world.policy,
     )?
     .to_canonical_cbor();
-    assert_eq!(
-        world.open_with(request()?, &decision),
-        Err(Error::EvidenceUnavailable)
-    );
-    Ok(())
+    assert_unavailable(&mut world)
 }
 
 #[test]
@@ -1036,9 +1100,8 @@ fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> Tes
     for (index, tamper) in cases.enumerate() {
         let mut world = bootstrapped()?;
         reinstall(&mut world, tamper)?;
-        let decision = world.decision()?;
         assert_eq!(
-            world.open_with(request()?, &decision),
+            world.open(request()?),
             Err(Error::EvidenceUnavailable),
             "tamper case {index}"
         );

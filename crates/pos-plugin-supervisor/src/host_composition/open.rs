@@ -1,9 +1,6 @@
 //! `open_memory`: construct the host over a retained-Memory domain.
 
 use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
-use pos_runtime::community_plugin_host::{
-    CommunityMetadataActionV1, CommunityMetadataPurposeV1, CommunityMetadataUseV1,
-};
 use pos_store::community::{
     CommunityBootstrapRequestV1, CommunityDomainOpenedV1, MemoryCommunityDomainV1,
 };
@@ -40,25 +37,7 @@ impl<'a> CommunityLifecycleHostV1<'a> {
         &mut self,
         request: CommunityBootstrapRequestV1,
     ) -> Result<CommunityDomainOpenedV1, Error> {
-        let metadata_use = CommunityMetadataUseV1 {
-            store_incarnation: self.domain.store_incarnation(),
-            action: if self.domain.is_bootstrapped() {
-                CommunityMetadataActionV1::Inspect
-            } else {
-                CommunityMetadataActionV1::Write
-            },
-            purpose: CommunityMetadataPurposeV1::OwnerEnforcement,
-        };
-        let catalogue = &mut self.catalogue;
-        self.domain
-            .metadata_authority(&catalogue.metadata_policy)
-            .and_then(|persisted| {
-                catalogue.metadata_authority.authorize(
-                    &catalogue.metadata_policy,
-                    &persisted,
-                    metadata_use,
-                )
-            })
-            .and_then(|decision| self.domain.open(catalogue.binding(), request, &decision))
+        let (binding, authority) = self.catalogue.domain_parts();
+        self.domain.open(binding, authority, request)
     }
 }

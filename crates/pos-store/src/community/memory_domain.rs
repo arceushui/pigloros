@@ -21,6 +21,7 @@ use pos_core::{
 };
 use zeroize::Zeroizing;
 
+use super::metadata_authority::{CommunityMetadataAuthorityV1, MetadataActionV1};
 use super::private_hash::scope_set_digest;
 use super::sealer::SealedMetadataV1;
 use super::vault::{fresh_identity, VaultKeyV1};
@@ -122,8 +123,9 @@ impl BootstrapRecordV1 {
 
 /// Sealed retained-Memory community domain.
 ///
-/// It exposes no key, material, record or State getter. Opening it requires
-/// a current metadata-service decision over its own persisted authority.
+/// It exposes no key, material, record or State getter. Every operation
+/// evaluates its own metadata-service authority from the installed inputs
+/// over its own persisted grant chain; it never accepts a decision.
 ///
 /// ADR-129 says missing or stale metadata authority "closes the context".
 /// This crate reads that as per-call fail-closed: every operation re-checks
@@ -181,10 +183,7 @@ impl MemoryCommunityDomainV1 {
 
     /// Load the policy's current persisted grant chain from this domain's
     /// own authority store.
-    ///
-    /// # Errors
-    /// Returns `EvidenceUnavailable` when the grant chain cannot be resolved.
-    pub fn metadata_authority(
+    fn metadata_authority(
         &self,
         policy: &CommunityMetadataPolicyV1,
     ) -> Result<PersistedAuthorityV1, Error> {
@@ -196,30 +195,66 @@ impl MemoryCommunityDomainV1 {
 
     /// Bootstrap a proven-empty domain, or verify an existing one.
     ///
-    /// `decision` must be an active metadata-service decision for the policy
-    /// leaf grant at this store's current authority head. A missing, stale or
-    /// denied decision refuses this call only (per-call fail-closed, no
-    /// latch); see the type documentation.
+    /// The domain evaluates its own metadata-service authority: it loads the
+    /// policy's current grant chain and asks `authority` for the exact
+    /// request this operation needs (write to bootstrap, inspect to reopen)
+    /// on this domain's resource. No decision is accepted from the caller:
+    ///
+    /// ```compile_fail,E0308
+    /// use pos_store::community::{
+    ///     CommunityBootstrapRequestV1, CommunityDomainBindingV1, MemoryCommunityDomainV1,
+    /// };
+    /// fn forge(
+    ///     domain: &mut MemoryCommunityDomainV1,
+    ///     binding: CommunityDomainBindingV1<'_>,
+    ///     request: CommunityBootstrapRequestV1,
+    ///     decoded: &pos_core::AuthorizationDecisionV1,
+    /// ) {
+    ///     let _ = domain.open(binding, decoded, request);
+    /// }
+    /// ```
+    ///
+    /// A missing, revoked or out-of-scope grant refuses this call only
+    /// (per-call fail-closed, no latch); see the type documentation.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` for a stale, foreign or denied decision
-    /// and for a missing or conflicting anchor, key intent, CSI1 or copy
-    /// record; `Conflict` when the control identity names another request.
+    /// Returns `EvidenceUnavailable` when current authority does not allow the
+    /// exact request, and for a missing or conflicting anchor, key intent,
+    /// CSI1 or copy record; `Conflict` when the control identity names
+    /// another request.
     pub fn open(
         &mut self,
         binding: CommunityDomainBindingV1<'_>,
+        authority: &mut CommunityMetadataAuthorityV1,
         request: CommunityBootstrapRequestV1,
-        decision: &AuthorizationDecisionV1,
     ) -> Result<CommunityDomainOpenedV1, Error> {
-        self.admit(binding.metadata_policy, decision)
-            .and_then(|()| {
-                if self.is_bootstrapped() {
-                    self.reopen(binding, request)
-                } else {
+        if self.is_bootstrapped() {
+            self.admit(
+                binding.metadata_policy,
+                authority,
+                MetadataActionV1::Inspect,
+            )
+            .and_then(|_| self.reopen(binding, request))
+        } else {
+            self.admit(binding.metadata_policy, authority, MetadataActionV1::Write)
+                .and_then(|decision| {
                     self.create(binding, request, decision.request_digest())
                         .map(|()| CommunityDomainOpenedV1::Bootstrapped)
-                }
-            })
+                })
+        }
+    }
+
+    /// Per-call fail-closed evaluation of the exact request against the
+    /// chain loaded now; it latches nothing, so each operation repeats it.
+    fn admit(
+        &self,
+        policy: &CommunityMetadataPolicyV1,
+        authority: &mut CommunityMetadataAuthorityV1,
+        action: MetadataActionV1,
+    ) -> Result<AuthorizationDecisionV1, Error> {
+        self.metadata_authority(policy).and_then(|persisted| {
+            authority.authorize(policy, &persisted, self.store_incarnation, action)
+        })
     }
 
     fn reopen(
@@ -234,25 +269,6 @@ impl MemoryCommunityDomainV1 {
                 self.verify(binding, record)
                     .and_then(|()| record.classify(request))
             })
-    }
-
-    /// Per-call fail-closed authority check against the current head; it
-    /// latches nothing, so each later operation repeats it.
-    fn admit(
-        &self,
-        policy: &CommunityMetadataPolicyV1,
-        decision: &AuthorizationDecisionV1,
-    ) -> Result<(), Error> {
-        self.metadata_authority(policy).and_then(|current| {
-            if decision.is_allowed()
-                && decision.grant_id() == Some(current.leaf_grant_id())
-                && decision.at_position() == current.head_position()
-            {
-                Ok(())
-            } else {
-                Err(Error::EvidenceUnavailable)
-            }
-        })
     }
 
     fn verify(

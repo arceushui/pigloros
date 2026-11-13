@@ -35,6 +35,11 @@ mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
 mod unit_absence;
 pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
+mod unit_result;
+pub use unit_result::{
+    SystemdMainExit, SystemdServiceResult, SystemdUnitOutcome, SystemdUnitResultError,
+    SystemdUnitResultObservation,
+};
 #[cfg(target_os = "linux")]
 mod unit_teardown;
 #[cfg(target_os = "linux")]

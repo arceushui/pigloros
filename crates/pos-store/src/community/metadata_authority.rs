@@ -1,14 +1,18 @@
-//! ADR-129 §3 metadata-only service authority for the community owner.
+//! ADR-129 §3 metadata-only service authority, evaluated by the domain.
 //!
-//! The installed composition pins the authenticated owner principal, the
-//! trusted registry snapshot, policy revisions and the audience. Each use
-//! evaluates the exact `community-metadata:<incarnation>` resource against the
-//! store's current persisted grant chain with a fresh trusted wall sample. A
-//! stored decision, caller time or decoded record is never the current one.
+//! "Before decoding CNE1, the concrete owner obtains current metadata-only
+//! service authority from its pinned authenticated registry binding and actual
+//! persisted grant/revocation state." The concrete owner is the sealed domain,
+//! so evaluation happens here: the domain loads its own current grant chain,
+//! builds the exact request (its own incarnation's resource, the closed
+//! category, the action its operation needs, the purpose and a fresh trusted
+//! wall sample) and runs the pinned evaluator. No caller-built or decoded
+//! decision is ever accepted.
 //!
-//! The decision permits only private inspection, writing or disposition of
-//! closed structural metadata schemas. It cannot decrypt State, observation or
-//! guest payloads and is not a requesting principal's data-use decision.
+//! The installed inputs (principal, actor, role, audience, policy revisions
+//! and registry snapshot) are fixed at the trusted composition root. The
+//! decision permits only private inspection or writing of closed structural
+//! metadata; it cannot decrypt State, observation or guest payloads.
 
 use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMetadataPolicyV1,
@@ -21,49 +25,22 @@ use pos_core::{
 };
 
 const DATA_CATEGORY: &str = "community.owner-metadata";
+const PURPOSE: &str = "owner-enforcement";
 
-/// Closed metadata-service actions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommunityMetadataActionV1 {
+/// Closed metadata-service action a domain operation needs.
+#[derive(Clone, Copy)]
+pub(super) enum MetadataActionV1 {
     /// Private inspection of closed metadata schemas.
     Inspect,
     /// Writing closed metadata schemas.
     Write,
-    /// Authorized disposition, including of frozen metadata.
-    Dispose,
 }
 
-impl CommunityMetadataActionV1 {
-    /// Exact authority action string.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
+impl MetadataActionV1 {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
             Self::Write => "write",
-            Self::Dispose => "dispose",
-        }
-    }
-}
-
-/// Closed metadata-service purposes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommunityMetadataPurposeV1 {
-    /// Ordinary owner enforcement.
-    OwnerEnforcement,
-    /// Owner recovery of an original outcome.
-    OwnerRecovery,
-    /// Owner disposition of retained metadata.
-    OwnerDisposition,
-}
-
-impl CommunityMetadataPurposeV1 {
-    /// Exact authority purpose string.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OwnerEnforcement => "owner-enforcement",
-            Self::OwnerRecovery => "owner-recovery",
-            Self::OwnerDisposition => "owner-disposition",
         }
     }
 }
@@ -86,18 +63,10 @@ pub struct CommunityMetadataAuthorityInputV1 {
     pub capability_policy_revision: Hash,
 }
 
-/// One requested metadata-service use of one protected store.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommunityMetadataUseV1 {
-    /// Store incarnation naming the metadata resource.
-    pub store_incarnation: [u8; 16],
-    /// Closed action.
-    pub action: CommunityMetadataActionV1,
-    /// Closed purpose.
-    pub purpose: CommunityMetadataPurposeV1,
-}
-
 /// Installed metadata-only service authority with its trusted wall source.
+///
+/// It has no public evaluation method: only the domain evaluates it, over
+/// the grant chain it loads itself, so no decision crosses the API.
 pub struct CommunityMetadataAuthorityV1 {
     input: CommunityMetadataAuthorityInputV1,
     wall: Box<dyn TrustedWallSourceV1>,
@@ -116,21 +85,22 @@ impl CommunityMetadataAuthorityV1 {
         }
     }
 
-    /// Evaluate one current metadata-service use.
+    /// Evaluate the exact metadata request for `store_incarnation` against
+    /// the chain the domain has just loaded, and return only an active
+    /// decision.
     ///
-    /// `persisted` must be the store's current chain for the policy's leaf
-    /// grant, loaded under the same exclusive store use as the operation.
-    ///
-    /// # Errors
-    /// Returns `EvidenceUnavailable` when the installed principal is not the
-    /// policy's registry binding, the chain is not the policy's leaf grant,
-    /// no trusted wall sample exists, the request is invalid or the current
-    /// decision is anything other than active.
-    pub fn authorize(
+    /// The request asserts `revocation_state_current: true`. That is
+    /// legitimate here: `persisted` and its revocation epoch were read fresh
+    /// from the store, with revocation fences applied, under the domain's
+    /// exclusive use for this same operation; every grant and revocation
+    /// advances the authority head, which becomes the request position; and
+    /// each operation reloads and re-evaluates rather than reusing a decision.
+    pub(super) fn authorize(
         &mut self,
         policy: &CommunityMetadataPolicyV1,
         persisted: &PersistedAuthorityV1,
-        metadata_use: CommunityMetadataUseV1,
+        store_incarnation: [u8; 16],
+        action: MetadataActionV1,
     ) -> Result<AuthorizationDecisionV1, Error> {
         let pinned = policy.as_input();
         if self.input.principal.registry_binding_digest() != pinned.metadata_owner_registry_binding
@@ -141,7 +111,7 @@ impl CommunityMetadataAuthorityV1 {
         self.wall
             .sample()
             .ok()
-            .and_then(|at_time| self.request(persisted, metadata_use, at_time))
+            .and_then(|at_time| self.request(persisted, store_incarnation, action, at_time))
             .map(|request| {
                 AuthorityEvaluatorV1::authorize(&request, persisted.chain(), &self.input.registry)
             })
@@ -152,7 +122,8 @@ impl CommunityMetadataAuthorityV1 {
     fn request(
         &self,
         persisted: &PersistedAuthorityV1,
-        metadata_use: CommunityMetadataUseV1,
+        store_incarnation: [u8; 16],
+        action: MetadataActionV1,
         at_time: WallTime,
     ) -> Option<AuthorizationRequestV1> {
         persisted.chain().grants().last().and_then(|leaf| {
@@ -164,10 +135,10 @@ impl CommunityMetadataAuthorityV1 {
                 plugin_id: None,
                 installation_id: None,
                 principal_role: self.input.principal_role,
-                resource: metadata_resource(metadata_use.store_incarnation),
+                resource: metadata_resource(store_incarnation),
                 data_category: DATA_CATEGORY.to_owned(),
-                action: metadata_use.action.as_str().to_owned(),
-                purpose: metadata_use.purpose.as_str().to_owned(),
+                action: action.as_str().to_owned(),
+                purpose: PURPOSE.to_owned(),
                 audience: self.input.audience.clone(),
                 at_time,
                 authority_timeline: leaf.issuance_timeline(),
@@ -189,7 +160,8 @@ impl CommunityMetadataAuthorityV1 {
     }
 }
 
-/// Exact `community-metadata:<incarnation32>` resource, lowercase hex.
+/// Exact `community-metadata:<incarnation32>` resource, lowercase hex. The
+/// trusted composition scopes the metadata grant to this resource.
 #[must_use]
 pub fn metadata_resource(store_incarnation: [u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
