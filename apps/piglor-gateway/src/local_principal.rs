@@ -936,6 +936,7 @@ mod tests {
             .await
             .is_err());
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
@@ -999,6 +1000,7 @@ mod tests {
         );
         drop(permit);
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
@@ -1011,6 +1013,7 @@ mod tests {
         assert!(permit.decision().is_none());
         drop(permit);
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
@@ -1040,6 +1043,7 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(problem["code"], "unauthorized");
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
@@ -1062,6 +1066,7 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(problem["code"], "revoked");
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 
