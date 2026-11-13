@@ -130,6 +130,11 @@ pub enum SystemdUnitOutcome {
     Success,
     /// `success` after `SIGHUP`, `SIGINT`, `SIGPIPE` or `SIGTERM`, which
     /// systemd counts as a clean exit for a non-oneshot service.
+    ///
+    /// A `SIGTERM` here cannot be told apart from a stop the daemon itself
+    /// requested, such as a cancel or a shutdown. Callers must not read it as
+    /// the payload ending on its own, and must apply their own cancel
+    /// precedence first (R9: a revocation cancel yields SPY1 `Cancelled`).
     CleanSignal { signal: u8 },
     /// `exit-code` with a nonzero main exit status.
     ExitCode { status: u8 },
@@ -221,11 +226,25 @@ pub enum SystemdUnitResultError {
         source: Box<zbus::Error>,
     },
     /// The unit had not settled, so its result could still change.
+    ///
+    /// Each `InvocationID` is validated as its snapshot is read, before this
+    /// check, so a malformed ID is reported as `InvocationIdMalformed` even
+    /// for an unsettled unit. `NotSettled` therefore does not imply that the
+    /// ID was well formed or matched.
     #[error("systemd unit is {active_state:?}, not inactive or failed")]
     NotSettled { active_state: String },
     /// `ActiveState` or `InvocationID` changed while the result was read.
     #[error("systemd unit state changed while its result was read")]
     StateChanged,
+    /// The unit's `InvocationID` is not exactly 16 bytes, or is all zero.
+    ///
+    /// This takes precedence over `NotSettled`, `StateChanged` and
+    /// `InvocationMismatch`.
+    #[error("systemd returned a malformed InvocationID")]
+    InvocationIdMalformed,
+    /// The unit is running a different invocation than the attempt started.
+    #[error("systemd unit InvocationID differs from the attempt's invocation")]
+    InvocationMismatch,
     /// systemd reported a `Result` outside its `service_result_table`.
     #[error("systemd returned unknown service Result {0:?}")]
     UnknownResult(String),
@@ -247,11 +266,20 @@ pub enum SystemdUnitResultError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UnitState {
     active_state: String,
-    invocation_id: Vec<u8>,
+    invocation_id: [u8; 16],
 }
 
 impl UnitState {
-    fn settled(self, after: &Self) -> Result<Self, SystemdUnitResultError> {
+    /// Check, in order: a settled `ActiveState`, an identical state in both
+    /// snapshots, and the attempt's `InvocationID`.
+    ///
+    /// `InvocationMismatch` is reported only when both snapshots carry the
+    /// same ID; an ID that changes between them is `StateChanged`.
+    fn settled(
+        self,
+        after: &Self,
+        invocation_id: [u8; 16],
+    ) -> Result<Self, SystemdUnitResultError> {
         if !SETTLED_STATES.contains(&self.active_state.as_str()) {
             return Err(SystemdUnitResultError::NotSettled {
                 active_state: self.active_state,
@@ -260,8 +288,19 @@ impl UnitState {
         if self != *after {
             return Err(SystemdUnitResultError::StateChanged);
         }
+        if self.invocation_id != invocation_id {
+            return Err(SystemdUnitResultError::InvocationMismatch);
+        }
         Ok(self)
     }
+}
+
+/// One exactly 16-byte, nonzero systemd `InvocationID`.
+fn invocation_id(raw: &[u8]) -> Result<[u8; 16], SystemdUnitResultError> {
+    <[u8; 16]>::try_from(raw)
+        .ok()
+        .filter(|id| *id != [0; 16])
+        .ok_or(SystemdUnitResultError::InvocationIdMalformed)
 }
 
 /// The terminal result read from the exact verified attempt unit object.
@@ -319,10 +358,10 @@ impl SystemdUnitResultObservation {
         &self.state.active_state
     }
 
-    /// Return the `InvocationID` bytes, unchanged across the snapshot.
+    /// Return the attempt's `InvocationID`, unchanged across the snapshot.
     #[must_use]
-    pub fn invocation_id(&self) -> &[u8] {
-        &self.state.invocation_id
+    pub const fn invocation_id(&self) -> [u8; 16] {
+        self.state.invocation_id
     }
 
     /// Return the systemd `Result` value.
@@ -352,38 +391,54 @@ impl SystemdTransientUnitTransport {
     /// One `GetAll` of the `Service` interface returns `Result`,
     /// `ExecMainCode` and `ExecMainStatus` together. A `GetAll` of the `Unit`
     /// interface before and after must report the same settled
-    /// `ActiveState` (`inactive` or `failed`) and `InvocationID`. Every read
-    /// targets the exact object path verified at start, never a name lookup,
-    /// and nothing is cached. The caller reads after the main exit, while the
-    /// unit is still loaded.
+    /// `ActiveState` (`inactive` or `failed`) and `InvocationID`, and that
+    /// `InvocationID` must equal `invocation_id`, the attempt's invocation
+    /// captured at start. A reused unit path therefore cannot substitute a
+    /// later run, or a unit that never ran. Every read targets the exact
+    /// object path verified at start, never a name lookup, and nothing is
+    /// cached. The caller reads after the main exit, while the unit is still
+    /// loaded.
+    ///
+    /// Like the rest of this transport, the proxy addresses the well-known
+    /// name `org.freedesktop.systemd1`. It assumes the transport's bus
+    /// connection only lets the real manager own that name; this method does
+    /// not pin the owner's unique name.
     ///
     /// # Errors
     /// Rejects a proxy or snapshot failure, a missing or wrongly typed
-    /// property, an unsettled or changing unit, an unknown `Result` or
-    /// `ExecMainCode`, an out-of-range status, or a `Result` that
-    /// contradicts the main exit.
+    /// property, an unsettled or changing unit, a malformed or different
+    /// `InvocationID`, an unknown `Result` or `ExecMainCode`, an out-of-range
+    /// status, or a `Result` that contradicts the main exit.
+    ///
+    /// A malformed `InvocationID` is detected while each snapshot is read, so
+    /// it wins over `NotSettled`: an unsettled unit with a zero ID reports
+    /// `InvocationIdMalformed`, and `NotSettled` does not imply a valid ID.
+    /// `InvocationMismatch` needs the same ID in both snapshots; an ID that
+    /// changes between them is `StateChanged`.
     pub async fn read_unit_result(
         &self,
         started: &SystemdVerifiedStart,
+        invocation_id: [u8; 16],
     ) -> Result<SystemdUnitResultObservation, SystemdUnitResultError> {
         let properties = PropertiesProxy::builder(&self.connection)
             .destination(SYSTEMD_DESTINATION)
             .path(started.unit_path.clone())
             .build()
             .await;
-        read_with_proxy(properties, started).await
+        read_with_proxy(properties, started, invocation_id).await
     }
 }
 
 async fn read_with_proxy(
     properties: zbus::Result<PropertiesProxy<'_>>,
     started: &SystemdVerifiedStart,
+    invocation_id: [u8; 16],
 ) -> Result<SystemdUnitResultObservation, SystemdUnitResultError> {
     let properties = properties.map_err(SystemdUnitResultError::Proxy)?;
     let before = read_unit_state(&properties).await?;
     let mut service = snapshot(&properties, SERVICE_INTERFACE).await?;
     let after = read_unit_state(&properties).await?;
-    let state = before.settled(&after)?;
+    let state = before.settled(&after, invocation_id)?;
     let result: String = take(&mut service, "Result")?;
     let code = take(&mut service, "ExecMainCode")?;
     let status = take(&mut service, "ExecMainStatus")?;
@@ -395,10 +450,10 @@ async fn read_unit_state(
 ) -> Result<UnitState, SystemdUnitResultError> {
     let mut unit = snapshot(properties, UNIT_INTERFACE).await?;
     let active_state = take(&mut unit, "ActiveState")?;
-    let invocation_id = take(&mut unit, "InvocationID")?;
+    let raw: Vec<u8> = take(&mut unit, "InvocationID")?;
     Ok(UnitState {
         active_state,
-        invocation_id,
+        invocation_id: invocation_id(&raw)?,
     })
 }
 
@@ -449,6 +504,8 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
     type Read = Result<SystemdUnitResultObservation, SystemdUnitResultError>;
+    /// Builds the outcome of a `Result` that carries the recorded main exit.
+    type Recorded = fn(SystemdMainExit) -> SystemdUnitOutcome;
 
     const UNIT_PATH: &str =
         "/org/freedesktop/systemd1/unit/pigloros_2dattempt_2d40404040404040404040404040404040_2eservice";
@@ -657,7 +714,7 @@ mod tests {
         .await?;
         let transport = SystemdTransientUnitTransport { connection: client };
         let started = started()?;
-        let observed = transport.read_unit_result(&started).await;
+        let observed = transport.read_unit_result(&started, INVOCATION).await;
         Ok(observed)
     }
 
@@ -744,7 +801,7 @@ mod tests {
             ("core-dump", CLD_DUMPED, 6, signaled(6, true)),
             ("core-dump", CLD_DUMPED, 25, file_size(true)),
         ];
-        let recorded: [(&str, fn(SystemdMainExit) -> SystemdUnitOutcome); 7] = [
+        let recorded: [(&str, Recorded); 7] = [
             ("timeout", |main| SystemdUnitOutcome::Timeout { main }),
             ("oom-kill", |main| SystemdUnitOutcome::OomKill { main }),
             ("resources", |main| SystemdUnitOutcome::Resources { main }),
@@ -889,11 +946,75 @@ mod tests {
                 "{state}: {observed:?}"
             );
         }
-        let unit = UnitFixture::new(vec![("inactive".to_owned(), Vec::new())]);
+        let unit = UnitFixture::new(vec![("inactive".to_owned(), INVOCATION.to_vec())]);
         let observed =
             read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await??;
         assert_eq!(observed.active_state(), "inactive");
-        assert!(observed.invocation_id().is_empty());
+        assert_eq!(observed.invocation_id(), INVOCATION);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_malformed_invocation_id_wins_over_an_unsettled_state() -> TestResult {
+        for (state, raw) in [("activating", vec![0; 16]), ("active", Vec::new())] {
+            let unit = UnitFixture::new(vec![(state.to_owned(), raw)]);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(observed, Err(SystemdUnitResultError::InvocationIdMalformed)),
+                "{state}: {observed:?}"
+            );
+        }
+        let unit = UnitFixture::new(vec![
+            ("failed".to_owned(), vec![0x33; 16]),
+            ("failed".to_owned(), vec![0x22; 16]),
+        ]);
+        let observed = read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+        assert!(
+            matches!(observed, Err(SystemdUnitResultError::StateChanged)),
+            "{observed:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_result_is_bound_to_the_attempts_exact_invocation() -> TestResult {
+        let malformed = [
+            Vec::new(),
+            vec![0; 16],
+            vec![0x11; 15],
+            vec![0x11; 17],
+            vec![0x11; 32],
+        ];
+        let mut one_bit = [0; 16];
+        one_bit[15] = 1;
+        assert_eq!(invocation_id(&one_bit)?, one_bit);
+        for raw in malformed {
+            for states in [
+                vec![("failed".to_owned(), raw.clone())],
+                vec![
+                    ("failed".to_owned(), INVOCATION.to_vec()),
+                    ("failed".to_owned(), raw.clone()),
+                ],
+            ] {
+                let unit = UnitFixture::new(states);
+                let observed =
+                    read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+                assert!(
+                    matches!(observed, Err(SystemdUnitResultError::InvocationIdMalformed)),
+                    "{raw:?}: {observed:?}"
+                );
+            }
+        }
+        for other in [vec![0x22; 16], one_bit.to_vec()] {
+            let unit = UnitFixture::new(vec![("failed".to_owned(), other.clone())]);
+            let observed =
+                read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
+            assert!(
+                matches!(observed, Err(SystemdUnitResultError::InvocationMismatch)),
+                "{other:?}: {observed:?}"
+            );
+        }
         Ok(())
     }
 
@@ -904,7 +1025,6 @@ mod tests {
             ("active".to_owned(), INVOCATION.to_vec()),
             ("inactive".to_owned(), INVOCATION.to_vec()),
             ("failed".to_owned(), vec![0x22; 16]),
-            ("failed".to_owned(), Vec::new()),
         ] {
             let unit = UnitFixture::new(vec![settled.clone(), after.clone()]);
             let observed =
@@ -979,9 +1099,15 @@ mod tests {
         let transport = SystemdTransientUnitTransport { connection: client };
         let mut other = started()?;
         other.unit_path = OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/other")?;
-        assert_property(&transport.read_unit_result(&other).await, UNIT_INTERFACE);
+        assert_property(
+            &transport.read_unit_result(&other, INVOCATION).await,
+            UNIT_INTERFACE,
+        );
         let started = started()?;
-        assert!(transport.read_unit_result(&started).await.is_ok());
+        assert!(transport
+            .read_unit_result(&started, INVOCATION)
+            .await
+            .is_ok());
         Ok(())
     }
 
@@ -989,7 +1115,7 @@ mod tests {
     async fn a_proxy_construction_failure_is_classified() -> TestResult {
         let failed = Err(zbus::Error::InvalidField);
         assert!(matches!(
-            read_with_proxy(failed, &started()?).await,
+            read_with_proxy(failed, &started()?, INVOCATION).await,
             Err(SystemdUnitResultError::Proxy(zbus::Error::InvalidField))
         ));
         Ok(())

@@ -5,11 +5,17 @@
 //! a retained directory handle, then compares both with the requested
 //! [`SystemdServiceLimits`]. A match is readback evidence only: it does not by
 //! itself prove that the kernel enforced a ceiling against a payload.
+//!
+//! The cgroup values are the leaf cgroup's own configured limits, not the
+//! effective minimum over its ancestors. A tighter ancestor limit therefore
+//! still compares as a mismatch, which is the conservative direction.
 
 use std::fs::File;
 use std::io::Read;
 
-use rustix::fs::{fstatfs, openat2, statx, AtFlags, Mode, OFlags, StatxAttributes, StatxFlags};
+use rustix::fs::{
+    fstatfs, openat2, statx, AtFlags, FileType, Mode, OFlags, StatxAttributes, StatxFlags,
+};
 use rustix::io::Errno;
 use rustix::param::page_size;
 
@@ -23,6 +29,10 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
 const MIN_CPU_PERIOD_MICROSECONDS: u64 = 1_000;
 const CGROUP_SOURCE_COUNT: usize = 4;
+/// Read-only, non-blocking and close-on-exec, like every retained cgroup read.
+const SOURCE_OPEN_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NONBLOCK);
 
 /// One exact observation of an effective ELM1 operating limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,8 +160,8 @@ pub enum EffectiveLimitError {
     /// The retained `/work` directory could not be described by `statx`.
     #[error("failed to statx the retained /work directory")]
     WorkStatx(#[source] Errno),
-    /// The retained `/work` directory is not the root of its mount.
-    #[error("the retained /work directory is not a mount root")]
+    /// The retained `/work` handle is not a directory at the root of its mount.
+    #[error("the retained /work handle is not a directory mount root")]
     WorkNotMountRoot,
     /// The manager-reported cgroup path no longer names any directory.
     ///
@@ -356,14 +366,31 @@ fn statfs_fields(directory: &File) -> Result<StatfsFields, Errno> {
     })
 }
 
-/// Whether the kernel reports the handle as the root of its mount.
+/// Whether the kernel reports the handle as a directory that is the root of
+/// its mount.
 fn is_mount_root(directory: &File) -> Result<bool, Errno> {
     statx(directory, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS).map(|status| {
-        status
-            .stx_attributes_mask
-            .contains(StatxAttributes::MOUNT_ROOT)
-            && status.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+        is_directory_mount_root(
+            status.stx_mask,
+            status.stx_mode,
+            status.stx_attributes_mask,
+            status.stx_attributes,
+        )
     })
+}
+
+/// Whether one `statx` result reports its type as a directory and reports
+/// the mount-root attribute as both supported and set.
+fn is_directory_mount_root(
+    mask: u32,
+    mode: u16,
+    attributes_mask: StatxAttributes,
+    attributes: StatxAttributes,
+) -> bool {
+    mask & StatxFlags::TYPE.bits() != 0
+        && FileType::from_raw_mode(u32::from(mode)) == FileType::Directory
+        && attributes_mask.contains(StatxAttributes::MOUNT_ROOT)
+        && attributes.contains(StatxAttributes::MOUNT_ROOT)
 }
 
 /// The typed result of comparing effective kernel limits with a request.
@@ -450,20 +477,24 @@ impl BoundAttemptCgroup {
         }
     }
 
+    fn open_effective_source(&self, property: &'static str) -> Result<File, EffectiveLimitError> {
+        openat2(
+            &self.directory,
+            property,
+            SOURCE_OPEN_FLAGS,
+            Mode::empty(),
+            RESOLVE_CHILD,
+        )
+        .map(File::from)
+        .map_err(|error| EffectiveLimitError::Open { property, error })
+    }
+
     fn read_effective_source(
         &self,
         source: EffectiveLimitSource,
     ) -> Result<Vec<u8>, EffectiveLimitError> {
         let property = source.name();
-        let mut file = openat2(
-            &self.directory,
-            property,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-            RESOLVE_CHILD,
-        )
-        .map(File::from)
-        .map_err(|error| EffectiveLimitError::Open { property, error })?;
+        let mut file = self.open_effective_source(property)?;
         let mut raw = Vec::new();
         (&mut file)
             .take(MAX_SOURCE_BYTES + 1)
@@ -574,10 +605,12 @@ const fn cpu_quota(per_million: u64, period: u64) -> u64 {
 mod tests {
     use std::error::Error;
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, MetadataExt};
     use std::path::{Path, PathBuf};
 
     use pos_reference::sandbox_provider_protocol::SandboxLimit;
+    use rustix::fs::fcntl_getfl;
+    use rustix::io::{fcntl_getfd, FdFlags};
     use zbus::OwnedObjectPath;
 
     use crate::CgroupRoot;
@@ -706,15 +739,16 @@ mod tests {
     #[test]
     fn exact_kernel_values_and_work_capacity_match_the_request() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
-        let (bound, _directory) = fixture(temporary.path())?;
+        let (bound, directory) = fixture(temporary.path())?;
         let limits = bound.read_effective_limits()?;
+        let metadata = fs::metadata(&directory)?;
+        assert_eq!(limits.cgroup_identity(), (metadata.dev(), metadata.ino()));
         assert_eq!(
             limits.unit_name(),
             &TransientServiceUnitName::from_attempt_id([1; 16])?
         );
         assert_eq!(limits.unit_path(), "/org/freedesktop/systemd1/unit/test");
         assert_eq!(limits.control_group(), "/system.slice/test.service");
-        assert!(limits.cgroup_identity().1 > 0);
         assert_eq!(limits.cpu_period_microseconds(), CPU_PERIOD);
         for source in CGROUP_SOURCES {
             assert_eq!(limits.raw(source), Some(exact_bytes(source).as_slice()));
@@ -997,6 +1031,29 @@ mod tests {
     }
 
     #[test]
+    fn only_a_typed_directory_with_the_mount_root_attribute_qualifies() {
+        let typed = StatxFlags::TYPE.bits();
+        let directory = 0o040_755;
+        let regular = 0o100_644;
+        let root = StatxAttributes::MOUNT_ROOT;
+        let none = StatxAttributes::empty();
+        assert!(is_directory_mount_root(typed, directory, root, root));
+        for (mask, mode, attributes_mask, attributes) in [
+            (0, directory, root, root),
+            (typed, regular, root, root),
+            (typed, directory, none, root),
+            (typed, directory, root, none),
+        ] {
+            assert!(!is_directory_mount_root(
+                mask,
+                mode,
+                attributes_mask,
+                attributes
+            ));
+        }
+    }
+
+    #[test]
     fn cpu_quota_handles_the_largest_share_without_overflow() {
         for period in [
             MIN_CPU_PERIOD_MICROSECONDS,
@@ -1131,6 +1188,20 @@ mod tests {
                 Err(EffectiveLimitError::TooLong { .. })
             ));
             fs::write(&path, exact_bytes(source))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sources_open_read_only_non_blocking_and_close_on_exec() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let (bound, _directory) = fixture(temporary.path())?;
+        for source in CGROUP_SOURCES {
+            let file = bound.open_effective_source(source.name())?;
+            assert!(fcntl_getfd(&file)?.contains(FdFlags::CLOEXEC));
+            let status = fcntl_getfl(&file)?;
+            assert!(status.contains(OFlags::NONBLOCK));
+            assert!(!status.intersects(OFlags::WRONLY | OFlags::RDWR));
         }
         Ok(())
     }

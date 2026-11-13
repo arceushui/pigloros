@@ -72,7 +72,8 @@ const CPU_QUOTA_LIMIT_ID: usize = 3;
 /// quota stays exact only when the share divides 10^9 microseconds; any
 /// other share would be raised to 1 ms and enforced more loosely.
 const fn is_below_systemd_cpu_minimum(per_million: u64) -> bool {
-    per_million < 1_000 || (per_million < 10_000 && !1_000_000_000_u64.is_multiple_of(per_million))
+    // 10_000 itself divides 10^9, so the band ends at 9_999 inclusive.
+    per_million < 1_000 || (per_million <= 9_999 && !1_000_000_000_u64.is_multiple_of(per_million))
 }
 
 /// Whether systemd cannot store `value` for ELM1 limit `id` exactly.
