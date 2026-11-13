@@ -871,7 +871,8 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let active = crate::test_fixtures::active()?;
     let released = Arc::clone(&barrier.released);
     assert_eq!(active.attempt_id(), ATTEMPT);
-    let _release = barrier.release(&active);
+    let directory = File::open("/")?;
+    let _release = barrier.release(&active, CgroupView::new(directory.as_fd(), FAKE_CGROUP));
     let seen = released.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(
@@ -1708,6 +1709,7 @@ fn the_failure_names_its_cause_and_the_unit_state() {
         error: ExecuteError::ModeMismatch,
         unit: UnitState::KillFailed,
         cgroup: None,
+        evidence: None,
     };
     assert_eq!(
         failure.to_string(),

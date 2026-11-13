@@ -155,7 +155,8 @@ fn observation(main_pid: u32) -> TestResult<KernelObservation> {
         [7; 32],
         false,
     );
-    Ok(*crate::observe_unit(&unit, &context, &provider)?.observation())
+    let observed = crate::observe_unit(&unit, &context, &provider)?;
+    Ok(*observed.observation())
 }
 
 /// How the fake observation behaves after `ReadyV1`.
@@ -771,8 +772,7 @@ async fn a_dropped_release_leaves_the_barrier_usable() -> TestResult {
     // The caller gives up while the manager does not answer.
     assert!(tokio::time::timeout(
         Duration::from_millis(100),
-        barrier.release(&attempt),
-        cgroup_view()
+        barrier.release(&attempt, cgroup_view())
     )
     .await
     .is_err());
