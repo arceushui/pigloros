@@ -823,6 +823,7 @@ pub fn migrate_gateway_mode_v1(
 /// A unit-test binding of the compiled `id` at epoch 1 with `grants`, for
 /// in-crate fixtures that never open a bound store.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn test_binding(
     id: GatewayModeProfileIdV1,
     grants: impl IntoIterator<Item = GatewayNetworkGrantV1>,
@@ -842,6 +843,7 @@ pub(crate) fn test_binding(
 /// Bind an empty unit-test store to the compiled `id`, as the first `serve`
 /// does, so offline-writer tests can run against it.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn bind_test_store(
     store: &mut dyn GatewayModeBindingPortV1,
     id: GatewayModeProfileIdV1,

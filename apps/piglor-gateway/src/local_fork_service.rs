@@ -18,10 +18,10 @@ use std::{
 
 use piglor_ledger::LedgerView;
 use pos_core::ForkAdmissionHostRecordV1;
-use pos_runtime::ErasureExecutionHostV1;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::{
     sqlite::SqliteStore, ForkAdmissionAuthoritySessionV1, ForkEventAuthorityErrorV1,
-    ForkEventPermitIssuerV1,
+    ForkEventPermitIssuerV1, StoreConfig,
 };
 
 use crate::{
@@ -34,30 +34,30 @@ use crate::{
         open_fork_admission_session, reconcile_startup, LocalForkAdmissionCoordinatorV1,
     },
     local_fork_listener::bind_pathname_listener,
-    mode_profile::{attach_offline_writer_v1, GatewayModeBindingV1, GatewayModeStoreLockV1},
+    mode_profile::{
+        attach_offline_writer_v1, bind_gateway_mode_v1, GatewayModeBindingV1,
+        GatewayModeProfileIdV1, GatewayModeStoreLockV1, GatewayServeCompositionV1,
+    },
     router_for_addr,
     startup::{
-        announce_listening, announce_mode_binding, bound_router, shutdown_or_stale,
-        stale_binding_exit, stop_after_bind_failure,
+        announce_listening, announce_mode_binding, bound_router, open_recovered_erasure_host,
+        shutdown_or_stale, stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
     },
-    AppState, Gateway, LedgerWriteMode, OwnTracksOwnerKey,
+    AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 
 type ServeError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The managed credentials of one local Fork-admission deployment (FACR1,
 /// FAHK1 and the FCP1 classifier profile), decoded before the database opens.
-pub struct LocalForkAdmissionCredentialsV1 {
+struct LocalForkAdmissionCredentialsV1 {
     credentials: LocalForkAuthenticationCredentialsV1,
     profile: ForkClassifierProfileV1,
 }
 
 /// Load and validate the managed credentials in the validated systemd
 /// credential directory (ADR-107 r6 startup step 1).
-///
-/// # Errors
-/// Returns an error when a credential is missing, unprotected or invalid.
-pub fn load_local_fork_admission_credentials(
+fn load_local_fork_admission_credentials(
     credential_directory: &Path,
 ) -> io::Result<LocalForkAdmissionCredentialsV1> {
     managed_credentials(credential_directory).map(|(credentials, profile)| {
@@ -71,91 +71,73 @@ pub fn load_local_fork_admission_credentials(
 /// One local Fork-admission deployment ready to serve: the recovered erasure
 /// host of its store, already bound to its execution mode, the decoded
 /// managed credentials, and the ADR-109 pathname socket.
-pub struct LocalForkAdmissionStartV1<'a> {
-    /// The one recovered host the HTTP Gateway and the listener share.
-    pub host: ErasureExecutionHostV1,
-    /// The decoded managed credentials.
-    pub credentials: LocalForkAdmissionCredentialsV1,
+struct LocalForkAdmissionStartV1<'a> {
+    host: ErasureExecutionHostV1,
+    credentials: LocalForkAdmissionCredentialsV1,
+    socket_path: &'a Path,
+}
+
+/// One managed local Fork-admission deployment of `serve`.
+pub struct ManagedLocalForkAdmissionV1<'a> {
+    /// The TCP HTTP bind.
+    pub addr: SocketAddr,
+    /// The one `SQLite` database the HTTP Gateway and the listener share.
+    pub sqlite_path: &'a str,
+    /// The validated systemd credential directory.
+    pub credential_directory: &'a Path,
     /// The ADR-109 pathname socket.
     pub socket_path: &'a Path,
+    /// The requested execution-mode profile.
+    pub profile: GatewayModeProfileIdV1,
+    /// The composition the startup predicates already accepted.
+    pub composition: &'a GatewayServeCompositionV1,
+    /// The `OwnTracks` owner key, when the deployment composes ingress.
+    pub owntracks_owner_key: Option<&'a OwnTracksOwnerKey>,
+    /// The curated ledger source.
+    pub ledger: LedgerConfig,
 }
 
-/// Running local Fork-admission listener owned by the Gateway process.
+/// Serve a managed local Fork-admission deployment.
 ///
-/// The type exposes lifecycle only; its credential, session, journal, and
-/// protocol values remain private to this crate.
-pub(super) struct LocalForkAdmissionListenerV1 {
-    stopping: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    socket_path: Option<PathBuf>,
-}
-
-/// How long shutdown waits for the listener thread to finish its in-flight
-/// request (ADR-109 revision 9, Decision 1 item 8 step 2).
+/// ADR-134 §4 order after the lock: decode the managed credentials before
+/// the database opens (ADR-107 r6), recover the host with the closed
+/// composition and bind it to its execution mode, load the ledger, then
+/// serve.
 ///
-/// It covers one worst-case request so a legitimate one is not truncated: the
-/// 5 s frame read, up to four 5 s executor admission waits (claim, execute,
-/// cancel or recover, mark), and the 5 s response write.
-const LISTENER_STOP_DEADLINE: Duration = Duration::from_secs(30);
-
-impl LocalForkAdmissionListenerV1 {
-    /// Stop accepting new local admission requests, join the worker, and
-    /// unlink the socket pathname this listener bound (ADR-109 revision 9,
-    /// Decision 1 item 8 step 2).
-    ///
-    /// An in-flight request finishes its remaining commands first, because
-    /// the executor is still open, and a started executor command is awaited
-    /// to completion (Decision 1 item 5). Only this join is bounded: it runs on
-    /// a detached joiner thread, so a wedged worker cannot hang process
-    /// shutdown; after `LISTENER_STOP_DEADLINE` the socket is unlinked anyway
-    /// and the stop reports `TimedOut`.
-    pub(super) async fn stop(self) -> io::Result<()> {
-        self.stop_within(LISTENER_STOP_DEADLINE).await
-    }
-
-    async fn stop_within(mut self, deadline: Duration) -> io::Result<()> {
-        self.stopping.store(true, Ordering::Release);
-        let worker = self.worker.take();
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        // The joiner is detached on purpose: if the worker is wedged past the
-        // deadline, the joiner stays blocked on it until process exit rather
-        // than holding up shutdown. A late send to the dropped receiver is
-        // ignored.
-        drop(thread::spawn(move || {
-            drop(sender.send(join_listener_worker(worker)));
-        }));
-        let joined = tokio::time::timeout(deadline, receiver)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Fork-admission listener did not stop",
-                )
-            })
-            .and_then(|received| received.map_err(io::Error::other).flatten());
-        let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
-        joined.and(unlinked)
-    }
-}
-
-fn join_listener_worker(worker: Option<JoinHandle<()>>) -> io::Result<()> {
-    worker.map_or(Ok(()), |worker| {
-        worker
-            .join()
-            .map_err(|_| io::Error::other("Fork-admission listener worker panicked"))
-    })
-}
-
-impl Drop for LocalForkAdmissionListenerV1 {
-    /// Never blocks: a listener dropped without `stop` (a cancelled
-    /// serve future or an unwinding panic) signals stop, detaches a worker
-    /// that is still running (it exits after its in-flight request), and
-    /// removes the pathname at most once. After `stop` both are already gone.
-    fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        drop(self.worker.take());
-        drop(self.socket_path.take().map(fs::remove_file));
-    }
+/// # Errors
+/// Returns the first credential, store, binding, ledger or serve error.
+pub async fn serve_managed_local_fork_admission(
+    deployment: ManagedLocalForkAdmissionV1<'_>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    let credentials = load_local_fork_admission_credentials(deployment.credential_directory)?;
+    let store = if deployment.owntracks_owner_key.is_some() {
+        GatewayHostStoreV1::OwnTracks
+    } else {
+        GatewayHostStoreV1::Standard
+    };
+    let mut host = open_recovered_erasure_host(
+        StoreConfig::Sqlite {
+            path: deployment.sqlite_path.to_owned(),
+        },
+        store,
+        &ErasureCoordinatorCompositionV1::closed(),
+    )?;
+    let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)?;
+    let ledger = deployment.ledger.load(&piglor_ledger::today_utc())?;
+    serve_local_fork_admission(
+        deployment.addr,
+        LocalForkAdmissionStartV1 {
+            host,
+            credentials,
+            socket_path: deployment.socket_path,
+        },
+        &mode,
+        deployment.owntracks_owner_key,
+        shutdown,
+        ledger,
+    )
+    .await
 }
 
 /// Provision the empty `SQLite` store with the host credentials in one protected
@@ -216,7 +198,7 @@ fn provision_with_credentials(
 /// # Errors
 /// Returns the first startup, serve, listener, executor shutdown or stale
 /// binding error.
-pub async fn serve_local_fork_admission(
+async fn serve_local_fork_admission(
     addr: SocketAddr,
     start: LocalForkAdmissionStartV1<'_>,
     mode: &GatewayModeBindingV1,
@@ -417,12 +399,6 @@ fn managed_credentials(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::mode_profile::{
-        bind_gateway_mode_v1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
-    };
-    use crate::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
-    use pos_runtime::ErasureCoordinatorCompositionV1;
-    use pos_store::StoreConfig;
 
     /// Open the recovered host of `path` and run startup steps 2a to 5.
     fn open_at(
@@ -1977,38 +1953,24 @@ mod tests {
         Ok(())
     }
 
-    /// Main's managed serve sequence: decode the credentials before the
-    /// database opens, recover the host, bind its execution mode, serve.
+    /// The managed serve sequence of `main`, on the test world's paths.
     async fn serve_for_test(
         world: &World,
         credentials: &Path,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServeError> {
-        let admission = load_local_fork_admission_credentials(credentials)?;
-        let mut host = open_recovered_erasure_host(
-            StoreConfig::Sqlite {
-                path: world.path()?.to_owned(),
-            },
-            GatewayHostStoreV1::Standard,
-            &ErasureCoordinatorCompositionV1::closed(),
-        )?;
-        let mode = bind_gateway_mode_v1(
-            GatewayModeProfileIdV1::Local,
-            &fork_composition(),
-            &mut host,
-        )?;
-        let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        serve_local_fork_admission(
-            "127.0.0.1:0".parse()?,
-            LocalForkAdmissionStartV1 {
-                host,
-                credentials: admission,
+        serve_managed_local_fork_admission(
+            ManagedLocalForkAdmissionV1 {
+                addr: "127.0.0.1:0".parse()?,
+                sqlite_path: world.path()?,
+                credential_directory: credentials,
                 socket_path: &world.socket,
+                profile: GatewayModeProfileIdV1::Local,
+                composition: &fork_composition(),
+                owntracks_owner_key: None,
+                ledger: LedgerConfig::new(None, false),
             },
-            &mode,
-            None,
             shutdown,
-            ledger,
         )
         .await
     }

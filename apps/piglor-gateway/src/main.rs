@@ -22,8 +22,8 @@ macro_rules! output_stderr {
 
 #[cfg(target_os = "linux")]
 use piglor_gateway::local_fork_service::{
-    load_local_fork_admission_credentials, provision_local_fork_admission_authority,
-    serve_local_fork_admission, LocalForkAdmissionStartV1,
+    provision_local_fork_admission_authority, serve_managed_local_fork_admission,
+    ManagedLocalForkAdmissionV1,
 };
 use piglor_gateway::local_principal::local_gateway;
 #[cfg(target_os = "linux")]
@@ -553,20 +553,21 @@ async fn serve_fork_admission(
     shutdown: impl Future<Output = ()> + Send + 'static,
     environment: LedgerEnvironment,
 ) -> Result<(), RunError> {
-    let credentials = load_local_fork_admission_credentials(credential_directory)?;
-    let (host, mode) = open_bound_host(request, composition, owner_key)?;
-    let ledger = load_ledger_with_environment(environment)?;
-    serve_local_fork_admission(
-        request.args.addr,
-        LocalForkAdmissionStartV1 {
-            host,
-            credentials,
+    serve_managed_local_fork_admission(
+        ManagedLocalForkAdmissionV1 {
+            addr: request.args.addr,
+            sqlite_path: request.args.sqlite_path.as_deref().unwrap_or_default(),
+            credential_directory,
             socket_path: Path::new(FORK_ADMISSION_SOCKET),
+            profile: request.profile,
+            composition,
+            owntracks_owner_key: owner_key,
+            ledger: LedgerConfig::new(
+                environment.source.map(PathBuf::from),
+                environment.write_enabled,
+            ),
         },
-        &mode,
-        owner_key,
         shutdown,
-        ledger,
     )
     .await
 }
@@ -1915,6 +1916,7 @@ mod erasure_gate_coverage_tests {
         serve_as("gateway-mode-air-gapped-v1")?;
         assert!(serve_as("gateway-mode-local-v1").is_err());
         assert!(migrate("gateway-mode-unknown-v1", "gateway-mode-local-v1").is_err());
+        assert!(migrate("gateway-mode-air-gapped-v1", "gateway-mode-unknown-v1").is_err());
         let usage = migrate_mode(&["only-a-path".to_owned()])
             .err()
             .ok_or("migrate-mode accepted a malformed command")?;

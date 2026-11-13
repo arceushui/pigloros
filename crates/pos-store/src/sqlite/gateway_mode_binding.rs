@@ -191,18 +191,25 @@ fn settle<T>(step: BindingStep<T>) -> Result<T, GatewayModeBindingErrorV1> {
         .and_then(std::convert::identity)
 }
 
+/// Decode columns 0 to 2 of a binding or history row.
+fn binding_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BindingRowV1> {
+    row.get::<_, SqlEpochV1>(0).and_then(|epoch| {
+        row.get(1).and_then(|profile_id| {
+            row.get(2).map(|profile_digest| BindingRowV1 {
+                epoch: epoch.0,
+                profile_id,
+                profile_digest,
+            })
+        })
+    })
+}
+
 fn read_binding_row(conn: &Connection) -> rusqlite::Result<Option<BindingRowV1>> {
     conn.query_row(
         "SELECT binding_epoch, profile_id, profile_digest FROM gateway_mode_binding
          WHERE singleton = 1",
         [],
-        |row| {
-            Ok(BindingRowV1 {
-                epoch: row.get::<_, SqlEpochV1>(0)?.0,
-                profile_id: row.get(1)?,
-                profile_digest: row.get(2)?,
-            })
-        },
+        binding_row,
     )
     .optional()
 }
@@ -443,14 +450,8 @@ impl GatewayModeBindingPortV1 for SqliteStore {
             .and_then(|mut statement| {
                 statement
                     .query_map([], |row| {
-                        Ok((
-                            BindingRowV1 {
-                                epoch: row.get::<_, SqlEpochV1>(0)?.0,
-                                profile_id: row.get(1)?,
-                                profile_digest: row.get(2)?,
-                            },
-                            row.get::<_, u8>(3)?,
-                        ))
+                        binding_row(row)
+                            .and_then(|binding| row.get::<_, u8>(3).map(|kind| (binding, kind)))
                     })
                     .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
             });

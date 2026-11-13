@@ -7201,16 +7201,14 @@ impl SqliteStore {
                     timeline.to_string(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))
-            .and_then(|_| {
-                gateway_mode_binding::record_commit_epoch_in_transaction(
-                    &self.conn,
-                    self.mode_binding_epoch,
-                    timeline,
-                    head_seq.next(),
-                    new_head,
-                )
-            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        gateway_mode_binding::record_commit_epoch_in_transaction(
+            &self.conn,
+            self.mode_binding_epoch,
+            timeline,
+            head_seq.next(),
+            new_head,
+        )
     }
 
     fn compute_chain_hash_at(
