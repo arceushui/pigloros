@@ -134,6 +134,40 @@ fn policy(compiled: Hash) -> Fallible<CommunityMetadataPolicyV1> {
     )?)
 }
 
+fn registry_for(grants: &[CapabilityGrantV1]) -> Fallible<AuthorityRegistrySnapshotV1> {
+    let mut bindings = grants
+        .iter()
+        .map(CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>()?;
+    bindings.sort_unstable();
+    let owner_binding = owner()?.registry_binding_digest();
+    Ok(AuthorityRegistrySnapshotV1::try_new(
+        REGISTRY,
+        vec![owner_binding],
+        bindings,
+        vec![],
+    )?)
+}
+
+/// Persist the grants before the store becomes a domain, as a trusted
+/// composition does.
+fn domain_with(
+    host: &AuthorityPersistenceHostV1,
+    grants: &[CapabilityGrantV1],
+) -> Fallible<MemoryCommunityDomainV1> {
+    let mut store = MemoryStore::new();
+    store
+        .bind_authority_persistence(host.persistence_binding())
+        .and_then(|()| {
+            grants.iter().try_for_each(|grant| {
+                host.authorize_grant(grant)
+                    .and_then(|permit| store.issue_capability_grant(permit, grant))
+                    .map(drop)
+            })
+        })?;
+    Ok(MemoryCommunityDomainV1::new(store, INCARNATION)?)
+}
+
 struct World {
     domain: MemoryCommunityDomainV1,
     policy: CommunityMetadataPolicyV1,
@@ -149,25 +183,11 @@ impl World {
             .zip(1..)
             .map(|(id, seq)| grant(*id, seq))
             .collect::<Fallible<Vec<_>>>()?;
-        let mut bindings = grants
-            .iter()
-            .map(CapabilityGrantV1::binding_digest)
-            .collect::<Result<Vec<_>, _>>()?;
-        bindings.sort_unstable();
-        let registry = AuthorityRegistrySnapshotV1::try_new(
-            REGISTRY,
-            vec![owner()?.registry_binding_digest()],
-            bindings,
-            vec![],
-        )?;
+        let registry = registry_for(&grants)?;
         let host = AuthorityPersistenceHostV1::new(&registry);
-        let mut store = MemoryStore::new();
-        store.bind_authority_persistence(host.persistence_binding())?;
-        for grant in &grants {
-            store.issue_capability_grant(host.authorize_grant(grant)?, grant)?;
-        }
+        let domain = domain_with(&host, &grants)?;
         Ok(Self {
-            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
+            domain,
             policy: policy(SCHEMAS)?,
             registry,
             host,
@@ -848,91 +868,44 @@ const FLOOR: [CommunityTimelineFloorV1<'static>; 1] = [CommunityTimelineFloorV1 
     closed: false,
 }];
 
-/// One field of the reinstalled key or record that differs from bootstrap.
-#[derive(Clone, Copy, Debug)]
-enum Tamper {
-    Nothing,
-    IntentId,
-    IntentParent,
-    IntentTimeline,
-    IntentGeneration,
-    IntentPurpose,
-    IntentScope,
-    IntentFingerprint,
-    SelectionOrdinal,
-    SelectionFloors,
-    SelectionHorizon,
-    CopyId,
-    CopyHolder,
-    CopyHolderDigest,
-    CopyScope,
+type IntentEdit = fn(&mut CommunityKeyIntentInputV1);
+type SelectionEdit = fn(&mut CommunitySelectionInputV1<'static>);
+type CopyEdit = fn(&mut CommunityCopyInventoryInputV1);
+
+/// At most one field of the reinstalled key or records differs from
+/// bootstrap; every other binding stays consistent.
+#[derive(Clone, Copy, Default)]
+struct Tamper {
+    intent: Option<IntentEdit>,
+    selection: Option<SelectionEdit>,
+    copy: Option<CopyEdit>,
 }
 
-fn tamper_intent(intent: &mut CommunityKeyIntentInputV1, tamper: Tamper) {
-    match tamper {
-        Tamper::IntentId => intent.protection_operation_id = [0x99; 16],
-        Tamper::IntentParent => {
-            intent.parent_operation = CommunityArtifactOperationV1::Control([0xc3; 16]);
-        }
-        Tamper::IntentTimeline => {
-            intent.timeline = TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16]));
-        }
-        Tamper::IntentGeneration => intent.generation = [0x9b; 16],
-        Tamper::IntentPurpose => {
-            intent.purpose = CommunityArtifactPurposeV1::ExecutionState;
-            intent.allowed_record_kinds =
-                CommunityRecordKindsV1::empty().with(CommunityArtifactKindV1::StateContent);
-        }
-        Tamper::IntentScope => intent.scope_set_digest = Hash::from_bytes([43; 32]),
-        Tamper::IntentFingerprint => intent.material_fingerprint = Hash::from_bytes([44; 32]),
-        _ => {}
-    }
-}
-
-fn tamper_selection(selection: &mut CommunitySelectionInputV1<'static>, tamper: Tamper) {
-    match tamper {
-        Tamper::SelectionOrdinal => selection.highest_native_producer_ordinal = 1,
-        Tamper::SelectionFloors => {
-            selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR);
-        }
-        Tamper::SelectionHorizon => selection.metadata_not_after_micros = HORIZON - 1,
-        _ => {}
-    }
-}
-
-fn tamper_copy(copy: &mut CommunityCopyInventoryInputV1, tamper: Tamper) {
-    match tamper {
-        Tamper::CopyId => copy.copy_id = [0x98; 16],
-        Tamper::CopyHolder => copy.holder = CommunityCopyHolderV1::Staging,
-        Tamper::CopyHolderDigest => copy.holder_digest = Hash::from_bytes([45; 32]),
-        Tamper::CopyScope => copy.scope_set_digest = Hash::from_bytes([46; 32]),
-        _ => {}
-    }
-}
-
-/// Replace the bootstrap key and both sealed records with consistent ones
-/// built under fresh material, differing only in `tamper`, so every check
-/// other than the tampered one would pass and AEAD opening still succeeds.
-fn reinstall(world: &mut World, tamper: Tamper) -> TestResult {
-    let record = world.record()?;
-    let ids = BootstrapRecordIds {
-        request: record.request,
-        protection_id: record.protection_id,
-        copy_id: record.copy_id,
-    };
-    let original = *world.key()?.intent().as_input();
-    let provisioned = VaultKeyV1::provision(original)?;
+fn replacement_key(world: &World, edit: Option<IntentEdit>) -> Fallible<VaultKeyV1> {
+    let provisioned = VaultKeyV1::provision(*world.key()?.intent().as_input())?;
     let mut intent = *provisioned.intent().as_input();
-    tamper_intent(&mut intent, tamper);
-    let mut key = provisioned.with_intent(intent)?;
-    let scope = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
-        store_incarnation: INCARNATION,
-        metadata_anchor_timeline: anchor_timeline(),
-        metadata_anchor_generation: ANCHOR_GENERATION,
-        protection_operation_id: ids.protection_id,
-        scope_members: CommunityScopeMembersV1::from_members(&[]),
-        metadata_not_after_micros: HORIZON,
-    })?;
+    edit.into_iter().for_each(|edit| edit(&mut intent));
+    Ok(provisioned.with_intent(intent)?)
+}
+
+fn bootstrap_scope(protection_id: [u8; 16]) -> Fallible<CommunityMetadataScopeV1<'static>> {
+    Ok(CommunityMetadataScopeV1::new(
+        CommunityMetadataScopeInputV1 {
+            store_incarnation: INCARNATION,
+            metadata_anchor_timeline: anchor_timeline(),
+            metadata_anchor_generation: ANCHOR_GENERATION,
+            protection_operation_id: protection_id,
+            scope_members: CommunityScopeMembersV1::from_members(&[]),
+            metadata_not_after_micros: HORIZON,
+        },
+    )?)
+}
+
+fn sealed_selection(
+    key: &mut VaultKeyV1,
+    protection_id: [u8; 16],
+    edit: Option<SelectionEdit>,
+) -> Fallible<super::SealedMetadataV1> {
     let mut selection = CommunitySelectionInputV1 {
         store_incarnation: INCARNATION,
         installed_catalogue_digest: CATALOGUE,
@@ -941,25 +914,61 @@ fn reinstall(world: &mut World, tamper: Tamper) -> TestResult {
         timeline_floors: CommunityTimelineFloorsV1::from_floors(&[]),
         metadata_not_after_micros: HORIZON,
     };
-    tamper_selection(&mut selection, tamper);
-    let selection = CommunitySelectionV1::new(selection)?.to_canonical_cbor();
-    let sealed_selection = key.seal(&scope, CommunityMetadataSchemaV1::Csi1, &selection)?;
-    let mut copy = key_copy_descriptor(&ids, &key, HORIZON);
-    tamper_copy(&mut copy, tamper);
-    let copy = CommunityCopyInventoryV1::new(copy)?.to_canonical_cbor();
-    let sealed_copy = key.seal(&scope, CommunityMetadataSchemaV1::Cci1, &copy)?;
+    edit.into_iter().for_each(|edit| edit(&mut selection));
+    let bytes = CommunitySelectionV1::new(selection)?.to_canonical_cbor();
+    let scope = bootstrap_scope(protection_id)?;
+    Ok(key.seal(&scope, CommunityMetadataSchemaV1::Csi1, &bytes)?)
+}
+
+fn sealed_copy(
+    key: &mut VaultKeyV1,
+    ids: &BootstrapRecordIds,
+    edit: Option<CopyEdit>,
+) -> Fallible<super::SealedMetadataV1> {
+    let mut copy = key_copy_descriptor(ids, key, HORIZON);
+    edit.into_iter().for_each(|edit| edit(&mut copy));
+    let bytes = CommunityCopyInventoryV1::new(copy)?.to_canonical_cbor();
+    let scope = bootstrap_scope(ids.protection_id)?;
+    Ok(key.seal(&scope, CommunityMetadataSchemaV1::Cci1, &bytes)?)
+}
+
+fn bootstrap_ids(world: &World) -> Fallible<BootstrapRecordIds> {
+    let record = world.record()?;
+    Ok(BootstrapRecordIds {
+        request: record.request,
+        protection_id: record.protection_id,
+        copy_id: record.copy_id,
+    })
+}
+
+type Replacement = (VaultKeyV1, super::SealedMetadataV1, super::SealedMetadataV1);
+
+/// A consistent key and both sealed records under fresh material, differing
+/// from bootstrap only in `tamper`, so every check other than the tampered
+/// one passes and AEAD opening still succeeds.
+fn replacement(world: &World, tamper: Tamper) -> Fallible<Replacement> {
+    let ids = bootstrap_ids(world)?;
+    let mut key = replacement_key(world, tamper.intent)?;
+    let selection = sealed_selection(&mut key, ids.protection_id, tamper.selection)?;
+    let copy = sealed_copy(&mut key, &ids, tamper.copy)?;
     key.close();
-    world.domain.keys.insert(ids.protection_id, key);
+    Ok((key, selection, copy))
+}
+
+fn reinstall(world: &mut World, tamper: Tamper) -> TestResult {
+    let (key, selection, copy) = replacement(world, tamper)?;
     let record = world.record_mut()?;
-    record.selection = sealed_selection;
-    record.key_copy = sealed_copy;
+    let protection_id = record.protection_id;
+    record.selection = selection;
+    record.key_copy = copy;
+    world.domain.keys.insert(protection_id, key);
     Ok(())
 }
 
 #[test]
 fn reinstalled_consistent_key_and_records_still_resolve() -> TestResult {
     let mut world = bootstrapped()?;
-    reinstall(&mut world, Tamper::Nothing)?;
+    reinstall(&mut world, Tamper::default())?;
     assert_eq!(
         world.open(request()?)?,
         CommunityDomainOpenedV1::ResolvedOriginal
@@ -969,29 +978,52 @@ fn reinstalled_consistent_key_and_records_still_resolve() -> TestResult {
 
 #[test]
 fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> TestResult {
-    for tamper in [
-        Tamper::IntentId,
-        Tamper::IntentParent,
-        Tamper::IntentTimeline,
-        Tamper::IntentGeneration,
-        Tamper::IntentPurpose,
-        Tamper::IntentScope,
-        Tamper::IntentFingerprint,
-        Tamper::SelectionOrdinal,
-        Tamper::SelectionFloors,
-        Tamper::SelectionHorizon,
-        Tamper::CopyId,
-        Tamper::CopyHolder,
-        Tamper::CopyHolderDigest,
-        Tamper::CopyScope,
-    ] {
+    let intents: [IntentEdit; 7] = [
+        |intent| intent.protection_operation_id = [0x99; 16],
+        |intent| intent.parent_operation = CommunityArtifactOperationV1::Control([0xc3; 16]),
+        |intent| intent.timeline = TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16])),
+        |intent| intent.generation = [0x9b; 16],
+        |intent| {
+            intent.purpose = CommunityArtifactPurposeV1::ExecutionState;
+            intent.allowed_record_kinds =
+                CommunityRecordKindsV1::empty().with(CommunityArtifactKindV1::StateContent);
+        },
+        |intent| intent.scope_set_digest = Hash::from_bytes([43; 32]),
+        |intent| intent.material_fingerprint = Hash::from_bytes([44; 32]),
+    ];
+    let selections: [SelectionEdit; 3] = [
+        |selection| selection.highest_native_producer_ordinal = 1,
+        |selection| selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR),
+        |selection| selection.metadata_not_after_micros = HORIZON - 1,
+    ];
+    let copies: [CopyEdit; 4] = [
+        |copy| copy.copy_id = [0x98; 16],
+        |copy| copy.holder = CommunityCopyHolderV1::Staging,
+        |copy| copy.holder_digest = Hash::from_bytes([45; 32]),
+        |copy| copy.scope_set_digest = Hash::from_bytes([46; 32]),
+    ];
+    let cases = intents
+        .into_iter()
+        .map(|edit| Tamper {
+            intent: Some(edit),
+            ..Tamper::default()
+        })
+        .chain(selections.into_iter().map(|edit| Tamper {
+            selection: Some(edit),
+            ..Tamper::default()
+        }))
+        .chain(copies.into_iter().map(|edit| Tamper {
+            copy: Some(edit),
+            ..Tamper::default()
+        }));
+    for (index, tamper) in cases.enumerate() {
         let mut world = bootstrapped()?;
         reinstall(&mut world, tamper)?;
         let decision = world.decision()?;
         assert_eq!(
             world.open_with(request()?, &decision),
             Err(Error::EvidenceUnavailable),
-            "{tamper:?}"
+            "tamper case {index}"
         );
     }
     Ok(())
