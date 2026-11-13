@@ -27,28 +27,60 @@ pub(in crate::adapter) type TestResult = Result<(), Box<dyn std::error::Error>>;
 ///
 /// Fixture steps that cannot fail on a qualified runner assert through this
 /// seam instead of carrying an error branch that no hosted run can execute.
+/// It is the harness's single sanctioned failing seam: the workspace denies
+/// `panic!`, `unwrap` and `expect`, so every other fixture failure is an
+/// assertion. `resume_unwind` skips the panic hook, so the caller's location
+/// is read here and carried in the message instead.
 /// Never call it inside a native callback: an unwind must not cross the SDK.
 #[track_caller]
 pub(in crate::adapter) fn pass<T, E: std::fmt::Debug>(step: Result<T, E>) -> T {
+    let location = std::panic::Location::caller();
     match step {
         Ok(value) => value,
         Err(error) => {
-            let message = format!("native fixture step failed: {error:?}");
+            let message = format!("native fixture step failed at {location}: {error:?}");
             let _logged = writeln!(std::io::stderr(), "{message}");
             std::panic::resume_unwind(Box::new(message))
         }
     }
 }
 
-#[test]
-fn passing_fixture_step_yields_its_value() {
-    assert_eq!(pass::<_, ()>(Ok(7)), 7);
+/// Returns a caught unwind's or joined thread's value, or resumes the unwind
+/// with its original payload, which `pass` would flatten to `Any { .. }`.
+pub(in crate::adapter) fn pass_unwind<T>(attempt: std::thread::Result<T>) -> T {
+    match attempt {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[test]
-#[should_panic(expected = "native fixture step failed: \"refused\"")]
+fn passing_fixture_step_yields_its_value() {
+    assert_eq!(pass::<_, ()>(Ok(7)), 7);
+    assert_eq!(pass_unwind(Ok(7)), 7);
+}
+
+#[test]
+#[should_panic(expected = "native fixture step failed at ")]
 fn failed_fixture_step_fails_its_test() {
     pass::<(), _>(Err("refused"));
+}
+
+#[test]
+fn failed_fixture_step_names_its_caller_and_error() {
+    let unwound = std::panic::catch_unwind(|| pass::<(), _>(Err("refused")));
+    assert!(
+        unwound.is_err_and(|payload| payload
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("native_tests.rs:")
+                && message.ends_with(": \"refused\"")))
+    );
+}
+
+#[test]
+#[should_panic(expected = "modeled fixture unwind")]
+fn caught_fixture_unwind_resumes_with_its_original_payload() {
+    pass_unwind::<()>(Err(Box::new("modeled fixture unwind")));
 }
 
 mod controls;

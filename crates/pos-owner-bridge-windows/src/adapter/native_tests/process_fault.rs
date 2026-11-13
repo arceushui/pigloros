@@ -16,7 +16,7 @@ use pos_owner_bridge::listener::FixtureProfile;
 use pos_owner_bridge::{BridgeError, CleanupStore, OwnerWebSurface, SurfaceSpec, SystemClock};
 use pos_owner_bridge_codec::{CeremonyId, ControlState};
 
-use super::{pass, readiness, retirement, FixtureRoot, TestResult};
+use super::{pass, pass_unwind, readiness, retirement, FixtureRoot, TestResult};
 use crate::adapter::surface::ExitBoundary;
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::{
@@ -1203,6 +1203,7 @@ fn native_interaction_cutpoints_outlive_fixture_readiness_ceiling() -> TestResul
             false,
         ),
     ];
+    let mut outcomes = Vec::new();
     for (number, profile, drive, inject) in cases {
         crate::Native::reset_process_failure_observations();
         let mut fixture = Fixture::new(Path::new(&runtime), &root.0, number, profile);
@@ -1225,10 +1226,15 @@ fn native_interaction_cutpoints_outlive_fixture_readiness_ceiling() -> TestResul
             && fixture.reached.is_some()
             && fixture.evidence_complete;
         fixture.retire(driver, result, None);
+        outcomes.push((number, failure, observed));
+    }
+    // Every case runs and the root is removed before any failure is reported.
+    let removed = root.remove();
+    for (number, failure, observed) in outcomes {
         assert!(failure.is_none(), "case {number}: {failure:?}");
         assert!(observed, "case {number}: interaction evidence missing");
     }
-    root.remove()
+    removed
 }
 
 impl Fixture {
@@ -1258,7 +1264,7 @@ impl Fixture {
                 && self.surface.recordless_opening_ready()
             {
                 assert!(driver.generation() == 1, "unexpected recordless generation");
-                pass(self.await_recordless_controller());
+                self.await_recordless_controller();
                 let browser = pass(
                     self.surface
                         .prepare_recordless_browser()
@@ -1332,7 +1338,7 @@ impl Fixture {
         }
     }
 
-    fn await_recordless_controller(&self) -> TestResult {
+    fn await_recordless_controller(&self) {
         // Let the actual completion arrive without consuming it or advancing
         // the driver; the held callback still owns its result and STA.
         loop {
@@ -1347,7 +1353,7 @@ impl Fixture {
                     controller_held_before_exit(&crate::Native::callback_order()),
                     "recordless callback order was not established"
                 );
-                return Ok(());
+                return;
             }
             assert!(
                 Instant::now() < self.deadline,
@@ -3520,7 +3526,7 @@ impl Fixture {
             (attempt, handle, failure, reached)
         };
         self.handle = handle;
-        let step = pass(attempt);
+        let step = pass_unwind(attempt);
         assert!(failure.is_none(), "{failure:?}");
         if !reached {
             return step;
@@ -4056,7 +4062,7 @@ impl Fixture {
             (attempt, handle, failure, reached, written, presence)
         };
         self.handle = handle;
-        let step = pass(attempt);
+        let step = pass_unwind(attempt);
         assert!(failure.is_none(), "{failure:?}");
         if reached {
             self.early_presence = presence;
@@ -5720,13 +5726,9 @@ impl Fixture {
                 &mut self.store,
             ));
             if provenance.is_none() && driver.posts() == 1 && matches!(&step, Step::Pending) {
-                *provenance = Some(pass(
-                    self.surface
-                        .fresh_success_provenance(ceremony)
-                        .map_err(|()| {
-                            "fresh ceremony record or generation did not match the owner"
-                        }),
-                ));
+                *provenance = Some(pass(self.surface.fresh_success_provenance(ceremony).or(
+                    Err("provenance: fresh ceremony record or generation did not match the owner"),
+                )));
             }
             match step {
                 Step::Finished(result) => return Ok(result),

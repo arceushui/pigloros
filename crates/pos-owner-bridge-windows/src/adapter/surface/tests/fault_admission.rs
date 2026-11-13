@@ -445,7 +445,22 @@ fn fault_events_refuse_an_exit_from_another_browser() -> TestResult {
             .posted_fault_event(ProcessFaultTarget::Browser),
         Err(())
     );
+    // Positive control: the same recorded exit is accepted for its own browser.
+    let exited = fixture.surface.runtime.identity(43)?;
+    fixture.surface.identity = Some(exited);
+    assert_eq!(
+        fixture
+            .surface
+            .posted_fault_event(ProcessFaultTarget::Browser),
+        Ok(Some(ProcessFaultMark::OwnBrowserExited))
+    );
     fixture.surface.identity = None;
+    fixture.surface.recordless_fault = Some(exited);
+    assert_eq!(
+        fixture.surface.recordless_fault_event(),
+        Ok(Some(ProcessFaultMark::OwnBrowserExited))
+    );
+    fixture.surface.recordless_fault = None;
     fixture.assert_no_ceremony_data();
     retire_pending(&mut fixture)
 }
@@ -464,12 +479,16 @@ fn modeled_posted_injections_refuse_an_unreadable_reply_state() -> TestResult {
         let fixture = posted_fixture(point.generation())?;
         fixture.factory.state.set(point.state() as u32);
         fixture.factory.failure.set(Some("load_state"));
-        assert!(point
-            .invoke(&fixture.surface, Instant::now() + Duration::from_secs(10))
-            .is_err());
+        let future = || Instant::now() + Duration::from_secs(10);
+        assert_eq!(point.invoke(&fixture.surface, future()).err(), Some(()));
         assert!(spy_calls(&fixture).is_empty());
         assert_eq!(fixture.store.records_now(), [vec![0x80]]);
         assert!(!fixture.surface.idle());
+        // Positive control: the same injection reaches the native port once
+        // the reply state is readable again.
+        fixture.factory.failure.set(Some("fault_spy"));
+        assert_eq!(point.invoke(&fixture.surface, future()).err(), Some(()));
+        assert_eq!(spy_calls(&fixture), ["fault_valid"]);
         finish_posted(fixture)?;
     }
     Ok(())
@@ -480,27 +499,30 @@ fn idle_surface_refuses_every_fault_injection_exit_capture_and_finish() -> TestR
     let mut fixture = Fixture::new(Creation::Ready)?;
     let before = fixture.factory.calls.borrow().clone();
     let target = ProcessFaultTarget::Browser;
-    assert!(fixture.surface.inject_recordless_browser(seal()).is_err());
-    assert!(fixture
-        .surface
-        .inject_awaiting_load_fault(target, seal())
-        .is_err());
-    assert!(fixture
-        .surface
-        .inject_navigating_fault(target, seal())
-        .is_err());
-    assert!(fixture
-        .surface
-        .inject_before_record_fault(target, seal())
-        .is_err());
-    assert!(fixture
-        .surface
-        .inject_quarantined_fault(target, seal(), Rc::new(std::cell::Cell::new(true)))
-        .is_err());
-    assert!(fixture
-        .surface
-        .consume_exit_capture(Instant::now() + Duration::from_secs(10), false)
-        .is_err());
+    let surface = &mut fixture.surface;
+    assert_eq!(surface.inject_recordless_browser(seal()).err(), Some(()));
+    assert_eq!(
+        surface.inject_awaiting_load_fault(target, seal()).err(),
+        Some(())
+    );
+    assert_eq!(
+        surface.inject_navigating_fault(target, seal()).err(),
+        Some(())
+    );
+    assert_eq!(
+        surface.inject_before_record_fault(target, seal()).err(),
+        Some(())
+    );
+    let held = Rc::new(std::cell::Cell::new(true));
+    assert_eq!(
+        surface.inject_quarantined_fault(target, seal(), held).err(),
+        Some(())
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert_eq!(
+        surface.consume_exit_capture(deadline, false).err(),
+        Some(())
+    );
     assert_eq!(fixture.surface.finish(), Err(super::super::unavailable(())));
     fixture.surface.report_readiness_timing();
     assert_eq!(*fixture.factory.calls.borrow(), before);

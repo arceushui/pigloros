@@ -18,7 +18,7 @@ use pos_owner_bridge::{
 };
 use pos_owner_bridge_codec::CeremonyId;
 
-use crate::adapter::native_tests::pass;
+use crate::adapter::native_tests::{pass, pass_unwind};
 
 use super::{
     check_final_process_failures, competing_spec, native_zeroing_observed, readiness, Fixture,
@@ -319,7 +319,7 @@ fn run_case(
         pass(std::rc::Rc::get_mut(&mut fixture.factory).ok_or("quarantined factory still shared"))
             .stop(),
     );
-    let state = pass(pass(attempt));
+    let state = pass(pass_unwind(attempt));
     let _logged = writeln!(
         std::io::stderr(),
         "NATIVE_QUARANTINED_CLOSE case={number} result={closed:?} observation={close_observation:?}"

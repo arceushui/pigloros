@@ -20,7 +20,7 @@ use pos_owner_bridge_codec::{
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
 use super::trace::{worker_stage, Trace};
-use super::{pass, retirement, TestResult};
+use super::{pass, pass_unwind, retirement, TestResult};
 use crate::{NativeFactory, NativePulse, StaPump};
 
 const WORKERS: usize = 4;
@@ -53,7 +53,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
     }
     let mut completed = 0;
     for result in reports {
-        completed += pass(result);
+        completed += pass_unwind(result);
     }
     assert_eq!(completed, 1_000);
 }
@@ -201,7 +201,7 @@ fn run_ceremony(
     // receipt still share the original fifteen-second ceremony deadline.
     // Match product admission: do not start another ceremony while this one's
     // cancellation or browser retirement is unresolved, even after receipt.
-    let _visible = pass(acquire_foreground(surface, foreground, number));
+    let _visible = acquire_foreground(surface, foreground, number);
     let started = Instant::now();
     surface.begin_readiness_timing(number, started);
     crate::Native::readiness_navigation_case(Some((number, started)));
@@ -358,13 +358,13 @@ fn acquire_foreground<'a>(
     surface: &Surface,
     foreground: &'a Foreground,
     number: u64,
-) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
+) -> Ticket<'a> {
     let ticket = pass(foreground.request(number, Instant::now()));
     let mut trace = Trace::new(number, Instant::now());
     loop {
         trace.queued(surface);
         if pass(ticket.is_next(Instant::now())) {
-            return Ok(ticket);
+            return ticket;
         }
         pass(pump(surface));
     }
