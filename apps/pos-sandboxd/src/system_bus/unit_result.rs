@@ -965,7 +965,7 @@ mod tests {
             );
         }
         let unit = UnitFixture::new(vec![
-            ("failed".to_owned(), INVOCATION.to_vec()),
+            ("failed".to_owned(), vec![0x33; 16]),
             ("failed".to_owned(), vec![0x22; 16]),
         ]);
         let observed = read_from(unit, Some(ServiceFixture::new("success", CLD_EXITED, 0))).await?;
