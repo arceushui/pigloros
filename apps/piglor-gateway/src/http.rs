@@ -661,38 +661,14 @@ impl IntoResponse for GatewayError {
     }
 }
 
-/// Response extension of a write that this process's stale execution-mode
-/// binding refused (ADR-134 §8). The serve loop stops on it after the `503`.
-#[derive(Clone, Copy, Debug)]
-struct ModeBindingStaleResponseV1;
-
 /// Mark the response of a stale-binding refusal.
 fn mark_mode_binding_stale(mut response: Response, stale: bool) -> Response {
     if stale {
-        response.extensions_mut().insert(ModeBindingStaleResponseV1);
+        response
+            .extensions_mut()
+            .insert(crate::mode_profile::ModeBindingStaleResponseV1);
     }
     response
-}
-
-/// Fire `signal` when a response carries the stale-binding marker, so the
-/// serve loop answers that `503` and then stops and exits nonzero.
-pub(super) fn stop_on_stale_mode_binding(
-    router: Router,
-    signal: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
-) -> Router {
-    router.layer(axum::middleware::map_response(move |response: Response| {
-        let signal = std::sync::Arc::clone(&signal);
-        async move {
-            if response
-                .extensions()
-                .get::<ModeBindingStaleResponseV1>()
-                .is_some()
-            {
-                signal.fire();
-            }
-            response
-        }
-    }))
 }
 
 /// Add `Retry-After` to a response when the failure states one.
@@ -1962,7 +1938,7 @@ osf_link = \"https://osf.io/example\"\n";
             [],
         );
         let signal = binding.stale_signal();
-        let app = super::stop_on_stale_mode_binding(
+        let app = crate::startup::bound_router(
             Router::new()
                 .route("/ok", axum::routing::get(|| async { "ok" }))
                 .route(
@@ -1971,7 +1947,7 @@ osf_link = \"https://osf.io/example\"\n";
                         GatewayError::Store(CoreError::ModeBindingStale)
                     }),
                 ),
-            binding.stale_signal(),
+            &binding,
         );
         let ok = app
             .clone()
@@ -2960,13 +2936,13 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(r
             .extensions()
-            .get::<super::ModeBindingStaleResponseV1>()
+            .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
             .is_none());
         let r = GatewayError::Store(CoreError::ModeBindingStale).into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(r
             .extensions()
-            .get::<super::ModeBindingStaleResponseV1>()
+            .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
             .is_some());
         let r = GatewayError::Store(CoreError::ErasureAccessFrozen).into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);

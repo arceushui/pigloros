@@ -476,6 +476,11 @@ impl GatewayModeStaleSignalV1 {
     }
 }
 
+/// Response extension of a write that this process's stale binding refused
+/// (ADR-134 §8). The serve loop stops on it after the `503`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModeBindingStaleResponseV1;
+
 /// The §6 security-revision inputs of one bound execution mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GatewayExecutionModeRevisionV1 {

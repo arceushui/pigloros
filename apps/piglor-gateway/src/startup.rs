@@ -79,7 +79,22 @@ pub fn announce_mode_binding(mode: &GatewayModeBindingV1) {
 /// (`503`), the serve loop stops (ADR-134 §8).
 #[must_use]
 pub fn bound_router(router: Router, mode: &GatewayModeBindingV1) -> Router {
-    crate::http::stop_on_stale_mode_binding(router, mode.stale_signal())
+    let signal = mode.stale_signal();
+    router.layer(axum::middleware::map_response(
+        move |response: axum::response::Response| {
+            let signal = std::sync::Arc::clone(&signal);
+            async move {
+                if response
+                    .extensions()
+                    .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
+                    .is_some()
+                {
+                    signal.fire();
+                }
+                response
+            }
+        },
+    ))
 }
 
 /// The graceful-shutdown future of a bound Gateway: the operator's
