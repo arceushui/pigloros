@@ -504,6 +504,7 @@ fn modeled_opening_first_refuses_expiry_and_unavailable_fault_authority() -> Tes
     assert_eq!(mark, FIRST);
     assert!(!fixture.surface.recordless_opening_ready());
     assert!(fixture.surface.pending_opening_owners_retained());
+    assert!(fixture.opening_first_owners_retained(mark));
     assert_eq!(
         fixture
             .inject_opening_first_browser(browser, mark)
@@ -529,6 +530,7 @@ fn modeled_opening_first_rejects_an_unrelated_cutpoint() -> TestResult {
         result.err().map(|error| error.to_string()).as_deref(),
         Some("unexpected opening fault cutpoint")
     );
+    assert!(!fixture.opening_first_owners_retained(ProcessFaultMark::OwnBrowserExited));
     assert!(fixture.handle.is_none());
     assert!(!fixture.evidence_complete);
     assert!(fixture.surface.pending_opening_owners_retained());

@@ -199,6 +199,57 @@ fn pre_environment_competing_spec() -> SurfaceSpec {
     fixed_competing_spec(0x7c)
 }
 
+/// Whether the Surface refuses a competing opening while it retains owners.
+fn admission_blocked(surface: &mut Surface, competitor: &SurfaceSpec) -> bool {
+    surface.open(competitor).map(|admission| admission.is_err()) == Poll::Ready(true)
+}
+
+/// Whether a quarantined ceremony wiped its plan secrets; every other result
+/// keeps its plan until retirement consumes the driver.
+fn quarantine_wiped_plan(result: &CeremonyResult, driver: &CeremonyDriver) -> bool {
+    !matches!(result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear()
+}
+
+const fn step_pending(step: &Step) -> bool {
+    matches!(step, Step::Pending)
+}
+
+/// The ceremony result carried by a step that finished its ceremony.
+fn finished_result(step: Step) -> Option<CeremonyResult> {
+    match step {
+        Step::Finished(result) => Some(result),
+        Step::Pending | Step::Done => None,
+    }
+}
+
+/// Names how a caught drive attempt ended for its diagnostic line.
+const fn attempt_stage<T, E>(attempt: &std::thread::Result<Result<T, E>>) -> &'static str {
+    match attempt {
+        Ok(Ok(_)) => "driver_returned",
+        Ok(Err(_)) => "fixture_error",
+        Err(_) => "panic",
+    }
+}
+
+/// Retirement observer for cases whose result never enters quarantine.
+const fn unobserved(_: &Surface, _: &CeremonyDriver, _: &SharedLoopback) {}
+
+#[test]
+fn step_and_attempt_classifiers_distinguish_each_outcome() {
+    let lost = BridgeError::Lifecycle(pos_owner_bridge::LifecycleCode::ControllerLost);
+    assert!(step_pending(&Step::Pending));
+    assert!(!step_pending(&Step::Done));
+    assert!(readiness::step_done(&Step::Done));
+    assert!(!readiness::step_done(&Step::Pending));
+    assert_eq!(finished_result(Step::Finished(Err(lost))), Some(Err(lost)));
+    assert_eq!(finished_result(Step::Pending), None);
+    assert_eq!(finished_result(Step::Done), None);
+    assert_eq!(attempt_stage::<(), ()>(&Ok(Ok(()))), "driver_returned");
+    assert_eq!(attempt_stage::<(), ()>(&Ok(Err(()))), "fixture_error");
+    let unwound: std::thread::Result<Result<(), ()>> = Err(Box::new("modeled unwind"));
+    assert_eq!(attempt_stage(&unwound), "panic");
+}
+
 #[test]
 fn pre_environment_competitor_is_distinct_from_each_declared_case() {
     let competitor = pre_environment_competing_spec();
@@ -268,9 +319,13 @@ fn held_controller_result_requires_its_real_callback_before_exit() {
 
 #[test]
 fn callback_order_requires_actual_unique_exit_before_controller_invocation() {
-    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion, Overflow};
+    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion, DriverTimeout, Overflow};
     let late = [BrowserExit(42), ControllerCompletion(false)];
     assert!(controller_invoked_after_exit(&late, 42));
+    assert!(controller_invoked_after_exit(
+        &[DriverTimeout, BrowserExit(42), ControllerCompletion(false)],
+        42
+    ));
     assert!(!controller_invoked_after_exit(
         &[ControllerCompletion(true), BrowserExit(42)],
         42
@@ -758,8 +813,7 @@ impl Fixture {
         finish: FailureFinish,
     ) -> TestResult {
         let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-        let plan_wiped =
-            !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+        let plan_wiped = quarantine_wiped_plan(&result, &driver);
         let error = result.as_ref().err().copied();
         let complete = self.evidence_complete;
         let mark = self.trace.borrow().first().copied();
@@ -929,28 +983,18 @@ impl Fixture {
         expected: crate::adapter::surface::PreEnvironmentRetention,
     ) -> bool {
         let competitor = pre_environment_competing_spec();
-        if &competitor.ceremony_id == ceremony {
-            return false;
-        }
-        if self.surface.pre_environment_retention(ceremony) != Some(expected) {
-            return false;
-        }
-        let rejected = matches!(self.surface.open(&competitor), Poll::Ready(Err(_)));
-        let after = self.surface.pre_environment_retention(ceremony);
-        rejected && after == Some(expected)
+        &competitor.ceremony_id != ceremony
+            && self.surface.pre_environment_retention(ceremony) == Some(expected)
+            && admission_blocked(&mut self.surface, &competitor)
+            && self.surface.pre_environment_retention(ceremony) == Some(expected)
     }
 
     fn check_blocked_admission(&mut self) {
         assert!(
-            matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            admission_blocked(&mut self.surface, &competing_spec())
                 && self.surface.fault_owners_retained(),
             "a competing Surface opening was not blocked"
         );
-    }
-
-    fn observe_fault(&mut self, target: ProcessFaultTarget) -> TestResult {
-        let state = self.reached.ok_or("pre-fault state disappeared")?;
-        self.observe_fault_from(target, ProcessFaultMark::Reached(state))
     }
 
     fn observe_fault_from(
@@ -1118,8 +1162,7 @@ fn run_case(
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let slot_wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped_if_quarantined =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped_if_quarantined = quarantine_wiped_plan(&result, &driver);
     let error = result.as_ref().err().copied();
     let reached = fixture.reached;
     let complete_before_cleanup = fixture.evidence_complete;
@@ -1240,7 +1283,7 @@ fn native_interaction_cutpoints_outlive_fixture_readiness_ceiling() -> TestResul
 impl Fixture {
     fn check_recordless_admission(&mut self) {
         assert!(
-            matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            admission_blocked(&mut self.surface, &competing_spec())
                 && self.surface.recordless_fault_owners_retained(),
             "a competing recordless Surface opening was not blocked"
         );
@@ -1259,10 +1302,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if !reached_opening
-                && matches!(&step, Step::Pending)
-                && self.surface.recordless_opening_ready()
-            {
+            if !reached_opening && step_pending(&step) && self.surface.recordless_opening_ready() {
                 assert!(driver.generation() == 1, "unexpected recordless generation");
                 self.await_recordless_controller();
                 let browser = pass(
@@ -1360,17 +1400,6 @@ impl Fixture {
                 "recordless controller completion timed out"
             );
             pass(readiness::pump(&self.surface));
-        }
-    }
-
-    fn retain_recordless_until_exit(&self) {
-        if self.handle.is_none() {
-            return;
-        }
-        // A failed assertion or timeout is never permission to release the
-        // subscribed environment or its pending controller callback.
-        while !matches!(self.surface.recordless_fault_event(), Ok(Some(_))) {
-            readiness::pump_retaining(&self.surface);
         }
     }
 
@@ -1507,13 +1536,9 @@ fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) ->
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_recordless(&mut driver, inject)
     }));
-    if !matches!(&attempt, Ok(Ok(_))) {
-        fixture.retain_recordless_until_exit();
-    }
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let slot_wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped_if_quarantined =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped_if_quarantined = quarantine_wiped_plan(&result, &driver);
     let evidence_complete = fixture.evidence_complete;
     let failures = crate::Native::process_failure_observations();
     let result_error = result.as_ref().err().copied();
@@ -1558,10 +1583,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if self.reached.is_none()
-                && matches!(&step, Step::Pending)
-                && has_synthetic_success_prf(driver)
-            {
+            if self.reached.is_none() && step_pending(&step) && has_synthetic_success_prf(driver) {
                 let deadline = step_started + pos_owner_bridge::ceremony::timing::RELEASE_WINDOW;
                 self.at_success_releasing(driver, target, inject, deadline);
             }
@@ -1819,7 +1841,7 @@ fn run_success_releasing(
     let blocked = if error.is_some() {
         fixture.handle.is_some()
             && fixture.surface.release_quarantine_owners_retained()
-            && matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && admission_blocked(&mut fixture.surface, &competing_spec())
             && fixture.surface.release_quarantine_owners_retained()
     } else {
         true
@@ -1912,7 +1934,7 @@ impl Fixture {
                 &mut self.store,
             ));
             if self.exit_reached.is_none()
-                && matches!(&step, Step::Pending)
+                && step_pending(&step)
                 && has_synthetic_success_prf(driver)
                 && self.surface.exit_fault_phase_reached()
             {
@@ -1949,7 +1971,7 @@ impl Fixture {
         );
         self.exit_reached = Some(boundary);
         assert!(
-            matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            admission_blocked(&mut self.surface, &competing_spec())
                 && self.surface.exit_fault_owners_retained(),
             "a competing exit-phase Surface opening was not blocked"
         );
@@ -1992,7 +2014,7 @@ impl Fixture {
             "successful exit owners or evidence missing"
         );
         assert!(
-            matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            admission_blocked(&mut self.surface, &competing_spec())
                 && self.surface.exit_fault_owners_retained(),
             "a competing exit-phase Surface opening was not blocked"
         );
@@ -2241,9 +2263,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if reached.is_none()
-                && matches!(&step, Step::Pending)
-                && self.surface.awaiting_load_fault_ready()
+            if reached.is_none() && step_pending(&step) && self.surface.awaiting_load_fault_ready()
             {
                 let mark = pass(
                     self.surface
@@ -2268,7 +2288,7 @@ impl Fixture {
                 assert!(
                     self.evidence_complete
                         && self.surface.awaiting_load_fault_owners_retained()
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.surface.awaiting_load_fault_owners_retained(),
                     "awaiting-load owners or blocked admission missing"
                 );
@@ -2335,10 +2355,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if reached.is_none()
-                && matches!(&step, Step::Pending)
-                && self.surface.navigating_fault_ready()
-            {
+            if reached.is_none() && step_pending(&step) && self.surface.navigating_fault_ready() {
                 let mark = pass(
                     self.surface
                         .navigating_fault_state(driver.generation(), driver.posts())
@@ -2362,7 +2379,7 @@ impl Fixture {
                 assert!(
                     self.evidence_complete
                         && self.surface.navigating_fault_owners_retained()
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.surface.navigating_fault_owners_retained(),
                     "navigating owners or blocked admission missing"
                 );
@@ -2430,7 +2447,7 @@ impl Fixture {
                 &mut self.store,
             ));
             if self.reached.is_none()
-                && matches!(&step, Step::Pending)
+                && step_pending(&step)
                 && driver.posts() == 1
                 && driver.first_receipt_at().is_none()
             {
@@ -2634,8 +2651,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if !reached && matches!(&step, Step::Pending) && self.surface.recordless_opening_ready()
-            {
+            if !reached && step_pending(&step) && self.surface.recordless_opening_ready() {
                 assert!(
                     driver.generation() == 1 && driver.posts() == 0,
                     "opening generation or post count changed"
@@ -2644,7 +2660,7 @@ impl Fixture {
                 self.trace.borrow_mut().push(first);
                 assert!(
                     self.opening_first_owners_retained(first)
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.opening_first_owners_retained(first),
                     "opening owners or blocked admission missing"
                 );
@@ -2847,13 +2863,9 @@ fn run_first_opening_browser(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_first_opening_browser(&mut driver, inject)
     }));
-    if !matches!(&attempt, Ok(Ok(_))) {
-        fixture.retain_recordless_until_exit();
-    }
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped = quarantine_wiped_plan(&result, &driver);
     let failed = result.is_err();
     let complete = fixture.evidence_complete;
     let first = fixture.trace.borrow().first().copied();
@@ -3018,10 +3030,11 @@ impl Fixture {
             // Inspect after pumping and before the next driver step: that step
             // may otherwise consume READY immediately in the same call.
             if let (None, Some(receipt)) = (self.reached, driver.first_receipt_at()) {
-                let state = self
-                    .surface
-                    .reply_load_state()
-                    .map_err(|_| "ready reply read failed")?;
+                let state = pass(
+                    self.surface
+                        .reply_load_state()
+                        .map_err(|_| "ready reply read failed"),
+                );
                 if state == ControlState::Ready as u32 {
                     self.at_posted_ready(driver, target, inject, receipt);
                 }
@@ -3157,7 +3170,7 @@ impl Fixture {
                 &mut self.store,
             ));
             if self.reached.is_none()
-                && matches!(&step, Step::Pending)
+                && step_pending(&step)
                 && driver.posts() == point.post()
                 && driver.first_receipt_at().is_none()
             {
@@ -3284,9 +3297,7 @@ impl ConsumingPort<'_> {
     }
 
     fn on_consuming_with_clock(&self, clock: &dyn pos_owner_bridge::MonotonicClock) -> TestResult {
-        if *self.reached.borrow() {
-            return Err("consuming CAS was observed twice".into());
-        }
+        assert!(!*self.reached.borrow(), "consuming CAS was observed twice");
         if clock.now() >= self.deadline {
             return Err("consuming fault point expired".into());
         }
@@ -3304,11 +3315,12 @@ impl ConsumingPort<'_> {
             trace: Rc::clone(&self.trace),
             deadline: self.deadline,
         };
-        let handle = self
-            .inner
-            .borrow()
-            .inject_posted_consuming_fault(self.target, seal)
-            .map_err(|()| "consuming fault refused")?;
+        let handle = pass(
+            self.inner
+                .borrow()
+                .inject_posted_consuming_fault(self.target, seal)
+                .map_err(|()| "consuming fault refused"),
+        );
         *self.handle.borrow_mut() = Some(handle);
         self.observe_consuming(state)
     }
@@ -3326,20 +3338,20 @@ impl ConsumingPort<'_> {
             if clock.now() >= self.deadline {
                 return Err("consuming event timed out".into());
             }
-            if let Some(event) = self
-                .inner
-                .borrow()
-                .posted_fault_event(self.target)
-                .map_err(|()| "consuming fault event mismatched")?
-            {
+            if let Some(event) = pass(
+                self.inner
+                    .borrow()
+                    .posted_fault_event(self.target)
+                    .map_err(|()| "consuming fault event mismatched"),
+            ) {
                 let held = self.handle.borrow();
-                let handle = held.as_ref().ok_or("consuming fault handle missing")?;
+                let handle = pass(held.as_ref().ok_or("consuming fault handle missing"));
                 let identity = handle.identity();
-                let code = require_exit_code(
+                let code = pass(require_exit_code(
                     handle.exit_code(),
                     "consuming exit query failed",
                     "consuming exit still pending",
-                )?;
+                ));
                 if clock.now() >= self.deadline {
                     return Err("consuming event timed out".into());
                 }
@@ -3350,20 +3362,20 @@ impl ConsumingPort<'_> {
                     ProcessFaultTarget::Renderer => ProcessFaultMark::MainRendererExited,
                     ProcessFaultTarget::Browser => ProcessFaultMark::OwnBrowserExited,
                 };
-                if self.trace.borrow().as_slice()
-                    != [
-                        ProcessFaultMark::Reached(state),
-                        ProcessFaultMark::Selected(identity),
-                        ProcessFaultMark::TerminationCall,
-                        expected,
-                        ProcessFaultMark::ExitCode(0x535),
-                    ]
-                {
-                    return Err("consuming fault evidence incomplete".into());
-                }
+                assert!(
+                    self.trace.borrow().as_slice()
+                        == [
+                            ProcessFaultMark::Reached(state),
+                            ProcessFaultMark::Selected(identity),
+                            ProcessFaultMark::TerminationCall,
+                            expected,
+                            ProcessFaultMark::ExitCode(0x535),
+                        ],
+                    "consuming fault evidence incomplete"
+                );
                 return Ok(());
             }
-            readiness::pump(&self.inner.borrow())?;
+            pass(readiness::pump(&self.inner.borrow()));
         }
     }
 }
@@ -3463,7 +3475,7 @@ impl Fixture {
             } else {
                 false
             };
-            if let (Some(receipt), true) = (receipt, ready) {
+            let step = if let (Some(receipt), true) = (receipt, ready) {
                 let state = pass(
                     self.surface
                         .posted_ready_fault_state(driver.posts())
@@ -3471,23 +3483,18 @@ impl Fixture {
                 );
                 let deadline = interaction_deadline(self.deadline, receipt);
                 assert!(Instant::now() < deadline, "consuming fault point expired");
-                let step = self.consuming_step(driver, target, inject, state, deadline);
-                match step {
-                    Step::Finished(result) => return Ok(result),
-                    Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => pass(readiness::pump(&self.surface)),
-                }
+                self.consuming_step(driver, target, inject, state, deadline)
             } else {
-                let step = driver.step(&mut readiness::env(
+                driver.step(&mut readiness::env(
                     &mut self.surface,
                     &mut self.loopback,
                     &mut self.store,
-                ));
-                match step {
-                    Step::Finished(result) => return Ok(result),
-                    Step::Done => return Err("consuming driver ended without result".into()),
-                    Step::Pending => pass(readiness::pump(&self.surface)),
-                }
+                ))
+            };
+            match step {
+                Step::Finished(result) => return Ok(result),
+                Step::Done => return Err("consuming driver ended without result".into()),
+                Step::Pending => pass(readiness::pump(&self.surface)),
             }
         }
     }
@@ -3686,8 +3693,7 @@ fn run_consuming(
     let accepted = result.is_ok();
     let expected_prf = has_synthetic_success_prf(&driver);
     let prf_clear = driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped = quarantine_wiped_plan(&result, &driver);
     let slot_clear = driver.request_clear();
     let complete = fixture.evidence_complete;
     let state = fixture.reached;
@@ -3814,13 +3820,16 @@ impl BeforeRecordStore<'_, '_> {
         if clock.now() >= self.deadline {
             return Err("pre-record point expired".into());
         }
-        let browser = self
-            .surface
-            .borrow_mut()
-            .before_record_fault_state()
-            .map_err(|()| "pre-record ownership indeterminate")?;
-        let decoded = pos_owner_bridge_codec::decode_cleanup_record(record)
-            .map_err(|_| "pre-record bytes failed to decode")?;
+        let browser = pass(
+            self.surface
+                .borrow_mut()
+                .before_record_fault_state()
+                .map_err(|()| "pre-record ownership indeterminate"),
+        );
+        let decoded = pass(
+            pos_owner_bridge_codec::decode_cleanup_record(record)
+                .map_err(|_| "pre-record bytes failed to decode"),
+        );
         if self.generation != 1
             || self.posts != 0
             || decoded.ceremony_id() != self.ceremony_id
@@ -3832,20 +3841,22 @@ impl BeforeRecordStore<'_, '_> {
             return Err("pre-record proposed identity or driver state mismatched".into());
         }
         if self.target == ProcessFaultTarget::Renderer {
-            let presence = self
-                .surface
-                .borrow()
-                .early_renderer_presence()
-                .map_err(|()| "pre-record renderer snapshot unavailable or ambiguous")?;
-            if self
-                .surface
-                .borrow_mut()
-                .before_record_fault_state()
-                .map_err(|()| "pre-record state advanced")?
-                != browser
-            {
-                return Err("pre-record browser changed during renderer discovery".into());
-            }
+            let presence = pass(
+                self.surface
+                    .borrow()
+                    .early_renderer_presence()
+                    .map_err(|()| "pre-record renderer snapshot unavailable or ambiguous"),
+            );
+            let rechecked = pass(
+                self.surface
+                    .borrow_mut()
+                    .before_record_fault_state()
+                    .map_err(|()| "pre-record state advanced"),
+            );
+            assert_eq!(
+                rechecked, browser,
+                "pre-record browser changed during renderer discovery"
+            );
             self.presence = Some(presence);
         }
         if clock.now() >= self.deadline {
@@ -3867,23 +3878,21 @@ impl BeforeRecordStore<'_, '_> {
                 trace: Rc::clone(&self.trace),
                 deadline: self.deadline,
             };
-            self.handle = Some(
+            self.handle = Some(pass(
                 self.surface
                     .borrow_mut()
                     .inject_before_record_fault(self.target, seal)
-                    .map_err(|()| "pre-record fault refused")?,
-            );
-            self.observe_before_record(browser, mark)?;
+                    .map_err(|()| "pre-record fault refused"),
+            ));
+            pass(self.observe_before_record(browser, mark));
         }
         let owners_before = self.surface.borrow_mut().before_record_owners_retained();
-        let blocked = matches!(
-            self.surface.borrow_mut().open(&competing_spec()),
-            Poll::Ready(Err(_))
-        );
+        let blocked = admission_blocked(&mut self.surface.borrow_mut(), &competing_spec());
         let owners_after = self.surface.borrow_mut().before_record_owners_retained();
-        if !owners_before || !blocked || !owners_after {
-            return Err("pre-record owners or blocked admission missing".into());
-        }
+        assert!(
+            owners_before && blocked && owners_after,
+            "pre-record owners or blocked admission missing"
+        );
         Ok(())
     }
 
@@ -3905,21 +3914,22 @@ impl BeforeRecordStore<'_, '_> {
             if clock.now() >= self.deadline {
                 return Err("pre-record browser exit timed out".into());
             }
-            if let Some(event) = self
-                .surface
-                .borrow()
-                .posted_fault_event(self.target)
-                .map_err(|()| "pre-record browser exit mismatched")?
-            {
-                let handle = self
-                    .handle
-                    .as_ref()
-                    .ok_or("pre-record fault handle missing")?;
-                let code = require_exit_code(
+            if let Some(event) = pass(
+                self.surface
+                    .borrow()
+                    .posted_fault_event(self.target)
+                    .map_err(|()| "pre-record browser exit mismatched"),
+            ) {
+                let handle = pass(
+                    self.handle
+                        .as_ref()
+                        .ok_or("pre-record fault handle missing"),
+                );
+                let code = pass(require_exit_code(
                     handle.exit_code(),
                     "pre-record exit query failed",
                     "pre-record process exit pending",
-                )?;
+                ));
                 if clock.now() >= self.deadline {
                     return Err("pre-record browser exit timed out".into());
                 }
@@ -3940,14 +3950,14 @@ impl BeforeRecordStore<'_, '_> {
                     },
                     ProcessFaultMark::ExitCode(0x535),
                 ]);
-                if (self.target == ProcessFaultTarget::Browser && selected != browser)
-                    || self.trace.borrow().as_slice() != expected.as_slice()
-                {
-                    return Err("pre-record fault evidence incomplete".into());
-                }
+                assert!(
+                    (self.target != ProcessFaultTarget::Browser || selected == browser)
+                        && self.trace.borrow().as_slice() == expected.as_slice(),
+                    "pre-record fault evidence incomplete"
+                );
                 return Ok(());
             }
-            readiness::pump(&self.surface.borrow())?;
+            pass(readiness::pump(&self.surface.borrow()));
         }
     }
 }
@@ -4209,7 +4219,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if reached.is_none() && matches!(&step, Step::Pending) {
+            if reached.is_none() && step_pending(&step) {
                 if let Some(mark) = self.early_renderer_state(driver, phase) {
                     let presence = pass(
                         self.surface
@@ -4254,7 +4264,7 @@ impl Fixture {
                     assert!(
                         self.evidence_complete
                             && owners
-                            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_))),
+                            && admission_blocked(&mut self.surface, &competing_spec()),
                         "early renderer owners or blocked admission missing"
                     );
                     let owners_after = match phase {
@@ -4662,14 +4672,11 @@ fn modeled_pre_environment_verdict_refuses_missing_evidence_after_retirement() {
 
 impl Fixture {
     fn finished_driver_is_done(&mut self, driver: &mut CeremonyDriver) -> bool {
-        matches!(
-            driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            )),
-            Step::Done
-        )
+        readiness::step_done(&driver.step(&mut readiness::env(
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        )))
     }
 
     fn drive_pre_environment(
@@ -4683,7 +4690,7 @@ impl Fixture {
             &mut self.loopback,
             &mut self.store,
         ));
-        let driver_pending = matches!(initial, Step::Pending);
+        let driver_pending = step_pending(&initial);
         let initial_completion = self.surface.pre_environment_completion();
         let active_blocked = self.pre_environment_competitor_blocked(
             &CeremonyId::from_bytes([self.number; 16]),
@@ -4699,19 +4706,15 @@ impl Fixture {
         }
         let boundary_completion = self.surface.pre_environment_completion();
         let result = if matches!(case, EnvironmentCase::Timeout) {
-            let result = match driver.step(&mut readiness::env(
+            let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
                 &mut self.store,
-            )) {
-                Step::Finished(result) => result,
-                _ => readiness::cancel_driver(
-                    driver,
-                    &mut self.surface,
-                    &mut self.loopback,
-                    &mut self.store,
-                ),
-            };
+            ));
+            let result = pass(
+                finished_result(step)
+                    .ok_or("pre-environment driver outlived its readiness deadline"),
+            );
             crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
             result
         } else {
@@ -4733,30 +4736,6 @@ impl Fixture {
     }
 }
 
-// An unwound drive is cancelled so retirement still consumes a finished driver.
-fn pre_environment_drive_or_cancelled(
-    attempt: std::thread::Result<PreEnvironmentDrive>,
-    driver: &mut CeremonyDriver,
-    fixture: &mut Fixture,
-) -> PreEnvironmentDrive {
-    match attempt {
-        Ok(observation) => observation,
-        Err(_) => PreEnvironmentDrive {
-            result: readiness::cancel_driver(
-                driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            driver_pending: false,
-            active_blocked: false,
-            initial_completion: Err(()),
-            pump_failed: true,
-            boundary_completion: Err(()),
-        },
-    }
-}
-
 fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) {
     let root = pass(FixtureRoot::new());
     let callback_order_guard = CallbackOrderGuard::arm();
@@ -4764,9 +4743,6 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) {
     let mut fixture = Fixture::new(runtime, &root.0, number, FixtureProfile::Pending);
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started);
-    let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_pre_environment(&mut driver, started, case)
-    }));
     let PreEnvironmentDrive {
         result,
         driver_pending,
@@ -4774,8 +4750,9 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) {
         initial_completion,
         pump_failed,
         boundary_completion,
-    } = pre_environment_drive_or_cancelled(attempt, &mut driver, &mut fixture);
-    let initial_witness = driver_pending && matches!(initial_completion, Ok(None | Some(true)));
+    } = fixture.drive_pre_environment(&mut driver, started, case);
+    let initial_witness =
+        driver_pending && initial_completion.is_ok_and(|completion| completion != Some(false));
     let termination = result.as_ref().err().copied();
     let expected_termination = expected_pre_environment_termination(case, termination);
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
@@ -4795,7 +4772,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) {
         &mut fixture.store,
         driver,
         result,
-        |_, _, _| {},
+        unobserved,
     );
     let order = crate::Native::callback_order();
     let ordered = clean_environment_callback_order(&order, case);
@@ -5305,7 +5282,7 @@ impl Fixture {
             &mut self.loopback,
             &mut self.store,
         ));
-        let driver_pending = matches!(initial, Step::Pending);
+        let driver_pending = step_pending(&initial);
         let mut observation = self.surface.pre_environment_completion();
         let active_blocked = self.pre_environment_competitor_blocked(
             &CeremonyId::from_bytes([self.number; 16]),
@@ -5315,10 +5292,13 @@ impl Fixture {
             readiness::pump(&self.surface)?;
             observation = self.surface.pre_environment_completion();
         }
+        assert!(
+            !readiness::step_done(&initial),
+            "environment driver ended without a result"
+        );
         let result = match initial {
             Step::Finished(result) => result,
-            Step::Done => return Err("environment driver ended without a result".into()),
-            Step::Pending => readiness::cancel_driver(
+            Step::Pending | Step::Done => readiness::cancel_driver(
                 driver,
                 &mut self.surface,
                 &mut self.loopback,
@@ -5343,30 +5323,11 @@ fn run_environment_obstruction(
     };
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started);
-    let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_environment_obstruction(&mut driver)
-    }));
-    let (result, driver_pending, active_blocked, observation, failed) = match attempt {
-        Ok(Ok((result, pending, active_blocked, observation))) => {
-            (result, pending, active_blocked, observation, false)
-        }
-        _ => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            false,
-            false,
-            Err(()),
-            true,
-        ),
-    };
+    let (result, driver_pending, active_blocked, observation) =
+        pass(fixture.drive_environment_obstruction(&mut driver));
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     let result_failed = result.is_err();
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped = quarantine_wiped_plan(&result, &driver);
     fixture.surface.abandon_opening();
     let abandoned_blocked = catch_unwind(AssertUnwindSafe(|| {
         fixture.pre_environment_competitor_blocked(
@@ -5382,7 +5343,7 @@ fn run_environment_obstruction(
         &mut fixture.store,
         driver,
         result,
-        |_, _, _| {},
+        unobserved,
     );
     let order = crate::Native::creation_order();
     let outcome = environment_sdk_outcome(&order);
@@ -5398,7 +5359,7 @@ fn run_environment_obstruction(
         opening: EnvironmentOpeningEvidence {
             driver_pending,
             active_blocked,
-            attempt_failed: failed,
+            attempt_failed: false,
         },
         retirement: EnvironmentRetirementEvidence {
             no_resurrection,
@@ -5676,12 +5637,7 @@ fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> Te
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_fresh_success(&mut driver, ceremony, &mut provenance, &mut failure_stage)
     }));
-    let attempt_stage = match &attempt {
-        Ok(Ok(_)) => "driver_returned",
-        Ok(Err(_)) => "fixture_error",
-        Err(_) => "panic",
-    };
-    let _logged = writeln!(std::io::stderr(), "NATIVE_FRESH_SUCCESS case={number} attempt={attempt_stage} failure_stage={failure_stage:?} provenance={}", provenance.is_some());
+    let _logged = writeln!(std::io::stderr(), "NATIVE_FRESH_SUCCESS case={number} attempt={} failure_stage={failure_stage:?} provenance={}", attempt_stage(&attempt), provenance.is_some());
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let receipt_on_time = driver
         .first_receipt_at()
@@ -5725,7 +5681,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if provenance.is_none() && driver.posts() == 1 && matches!(&step, Step::Pending) {
+            if provenance.is_none() && driver.posts() == 1 && step_pending(&step) {
                 *provenance = Some(pass(self.surface.fresh_success_provenance(ceremony).or(
                     Err("provenance: fresh ceremony record or generation did not match the owner"),
                 )));
@@ -5756,7 +5712,7 @@ impl Fixture {
         });
         expected.is_some()
             && self.surface.controller_result_retention(ceremony) == expected
-            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && admission_blocked(&mut self.surface, &competing_spec())
             && self.surface.controller_result_retention(ceremony) == expected
             && self.surface.pending_opening_completion() == completion
             && !self.surface.idle()
@@ -5777,12 +5733,12 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
+            if step_pending(&step) && self.surface.recordless_opening_ready() {
                 assert!(
                     driver.generation() == 1
                         && driver.posts() == 0
                         && pass(self.store.records()).is_empty()
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.surface.recordless_opening_ready(),
                     "controller input did not retain active opening owners"
                 );
@@ -5790,7 +5746,7 @@ impl Fixture {
                 assert!(
                     sdk_controller_pending(&crate::Native::creation_order())
                         && self.surface.controller_creation_retention(&ceremony) == Some(Active)
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.surface.controller_creation_retention(&ceremony) == Some(Active),
                     "uninvoked controller callback and retained owners not established"
                 );
@@ -5813,7 +5769,7 @@ impl Fixture {
                     self.surface.abandon_opening();
                     *lost_blocked = self.surface.lost_controller_parent_retention(&ceremony)
                         == Some(Abandoned)
-                        && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                        && admission_blocked(&mut self.surface, &competing_spec())
                         && self.surface.lost_controller_parent_retention(&ceremony)
                             == Some(Abandoned);
                     let result = readiness::cancel_driver(
@@ -5878,8 +5834,7 @@ fn run_controller_input_case(runtime: &Path, root: &Path, number: u8, lose_paren
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     let failed = result.is_err();
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped = quarantine_wiped_plan(&result, &driver);
     fixture.surface.abandon_opening();
     let ceremony = CeremonyId::from_bytes([number; 16]);
     let blocked = if lose_parent {
@@ -5899,7 +5854,7 @@ fn run_controller_input_case(runtime: &Path, root: &Path, number: u8, lose_paren
         &mut fixture.store,
         driver,
         result,
-        |_, _, _| {},
+        unobserved,
     );
     let order = crate::Native::creation_order();
     let callback = if lose_parent {
@@ -5974,7 +5929,7 @@ impl Fixture {
                 &mut self.loopback,
                 &mut self.store,
             ));
-            if matches!(&step, Step::Pending) && self.surface.recordless_opening_ready() {
+            if step_pending(&step) && self.surface.recordless_opening_ready() {
                 break;
             }
             match step {
@@ -5985,7 +5940,7 @@ impl Fixture {
             }
         }
         let active_blocked = self.surface.controller_creation_retention(ceremony) == Some(Active)
-            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && admission_blocked(&mut self.surface, &competing_spec())
             && self.surface.controller_creation_retention(ceremony) == Some(Active)
             && crate::Native::callback_order()
                 == [crate::NativeCallbackMoment::EnvironmentCompletion(true)];
@@ -5998,7 +5953,7 @@ impl Fixture {
         self.surface.abandon_opening();
         let mut abandoned_blocked = self.surface.controller_creation_retention(ceremony)
             == Some(Abandoned)
-            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && admission_blocked(&mut self.surface, &competing_spec())
             && self.surface.controller_creation_retention(ceremony) == Some(Abandoned)
             && crate::Native::callback_order()
                 == [crate::NativeCallbackMoment::EnvironmentCompletion(true)];
@@ -6023,7 +5978,7 @@ impl Fixture {
         let no_resurrection = no_resurrection && self.finished_driver_is_done(driver);
         abandoned_blocked &= browser.is_some()
             && self.surface.recordless_fault_owners_retained()
-            && matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && admission_blocked(&mut self.surface, &competing_spec())
             && self.surface.recordless_fault_owners_retained();
         Ok((
             result,
@@ -6069,8 +6024,7 @@ fn native_outstanding_controller_callback_survives_abandonment() {
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let failed = result.is_err();
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let plan_wiped = quarantine_wiped_plan(&result, &driver);
     fixture.surface.abandon_opening();
     retirement::retire(
         &mut fixture.surface,
@@ -6078,7 +6032,7 @@ fn native_outstanding_controller_callback_survives_abandonment() {
         &mut fixture.store,
         driver,
         result,
-        |_, _, _| {},
+        unobserved,
     );
     let actual_exit = fixture.surface.recordless_fault_event().ok().flatten();
     let order = crate::Native::creation_order();

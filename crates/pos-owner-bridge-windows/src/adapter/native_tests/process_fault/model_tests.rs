@@ -371,19 +371,11 @@ impl ProcessFaultHandle for Handle {
 }
 
 #[test]
-fn modeled_fault_observer_requires_a_reached_state_and_unexpired_deadline() -> TestResult {
+fn modeled_fault_observer_requires_an_unexpired_deadline() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let (mut fixture, _model) = fixture(&root)?;
     let clock = TickingClock(FakeClock::start());
-    assert_eq!(
-        fixture
-            .observe_fault(ProcessFaultTarget::Browser)
-            .err()
-            .map(|error| error.to_string())
-            .as_deref(),
-        Some("pre-fault state disappeared")
-    );
     assert_eq!(
         fixture
             .observe_fault_with_clock(
