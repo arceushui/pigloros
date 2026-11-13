@@ -439,7 +439,7 @@ mod tests {
     use std::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use zbus::{fdo, object_server::Interface, Connection, OwnedObjectPath};
+    use zbus::{fdo, object_server::Interface, OwnedObjectPath};
 
     use crate::system_bus::test_support::peer_connections;
     use crate::system_bus::SystemdStartJob;
