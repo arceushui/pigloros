@@ -2602,3 +2602,39 @@ fn a_suppression_marker_counts_a_closed_window_without_naming_anyone() {
         );
     }
 }
+
+#[test]
+fn consent_is_valid_from_its_first_instant_until_just_before_its_end() {
+    let principal = principal(1);
+    let actor = entity(10);
+    let grant = root_grant(principal.clone(), vec![actor]);
+    let at_time = request(principal.clone(), actor).at_time();
+    let valid = |valid_from: WallTime, valid_until: WallTime| {
+        let mut consent = consent_draft_for(8, actor);
+        consent.valid_from = valid_from;
+        consent.valid_until = valid_until;
+        let mut draft = request_draft(authenticated(principal.clone()), actor);
+        draft.consent = ConsentEvidenceV1::Resolved {
+            grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
+        };
+        let request = ok(AuthorizationRequestV1::try_from_draft(draft));
+        (
+            decision_for(&request, std::slice::from_ref(&grant)).outcome(),
+            expiry_for(&request, std::slice::from_ref(&grant)),
+        )
+    };
+    let micros = at_time.as_micros();
+    let at = WallTime::from_micros;
+    let active = (AuthorizationOutcomeV1::Active, None);
+    let expired = (
+        AuthorizationOutcomeV1::Expired,
+        Some(AuthorizationExpiryV1::Consent),
+    );
+    // The window starts at `valid_from` inclusive.
+    assert_eq!(valid(at(micros - 1), at(micros + 50)), active);
+    assert_eq!(valid(at_time, at(micros + 50)), active);
+    assert_eq!(valid(at(micros + 1), at(micros + 50)), expired);
+    // The window ends at `valid_until` exclusive.
+    assert_eq!(valid(at(micros - 1), at(micros + 1)), active);
+    assert_eq!(valid(at(micros - 1), at_time), expired);
+}

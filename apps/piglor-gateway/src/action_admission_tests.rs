@@ -1766,3 +1766,71 @@ async fn a_window_timer_outliving_its_gateway_writes_nothing() -> TestResult {
     assert!(!authorization.denial_markers_in_flight());
     Ok(())
 }
+
+#[test]
+fn retry_after_rounds_a_partial_second_up_and_never_below_one() {
+    use std::time::Duration;
+    assert_eq!(crate::whole_retry_seconds(Duration::ZERO), 1);
+    assert_eq!(crate::whole_retry_seconds(Duration::from_millis(1)), 1);
+    assert_eq!(crate::whole_retry_seconds(Duration::from_secs(2)), 2);
+    assert_eq!(crate::whole_retry_seconds(Duration::from_millis(2_500)), 3);
+}
+
+#[tokio::test]
+async fn a_window_flush_refused_by_a_saturated_store_succeeds_on_its_retry() -> TestResult {
+    let fixture = fixture(&StoreConfig::Memory).await?;
+    deny_reads(
+        &fixture,
+        crate::MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE + 1,
+    )
+    .await?;
+    assert!(fixture.authorization.denial_markers_pending());
+
+    // The first flush meets a full queue behind a blocked worker and its
+    // marker is refused; the worker is released well before the retry.
+    let release = fixture
+        .gateway
+        .store
+        .block_worker_for_test()
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(fixture.gateway.store.saturate_for_test() > 0);
+    {
+        // The flush owns its weak store handle, as the window timer does.
+        let store = fixture.gateway.store.downgrade();
+        let authorization = Arc::new(fixture.authorization.clone());
+        let flush = async move {
+            crate::flush_expired_denial_window(&store, &authorization, std::time::Instant::now())
+                .await;
+        };
+        tokio::pin!(flush);
+        // The flush cannot finish while the worker is blocked: its first attempt
+        // is refused and it waits out the retry delay. A flush that skipped the
+        // retry, or retried at once, would finish here and fail this assertion.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut flush)
+                .await
+                .is_err()
+        );
+        assert!(fixture.authorization.denial_markers_pending());
+        assert!(release.send(()).is_ok());
+        // Drain the queue without polling the flush, so its retry, whose delay
+        // is already running, always meets an idle store.
+        let mut drained = false;
+        for _ in 0..2_000 {
+            if fixture.gateway.store.admitted_for_test() == 0 {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(drained, "the released worker drains its queue");
+        flush.await;
+    }
+
+    // Only the retry could have recorded the count.
+    assert!(!fixture.authorization.denial_markers_pending());
+    assert!(!fixture.authorization.denial_markers_in_flight());
+    fixture.gateway.shutdown().await?;
+    drop(fixture);
+    Ok(())
+}

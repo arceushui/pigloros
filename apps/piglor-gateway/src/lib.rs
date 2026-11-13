@@ -2676,16 +2676,7 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
-        if let Some(authorization) = &self.authorization {
-            // Record the unrecorded suppression counts once before the
-            // store stops; a count the store cannot take stays pending.
-            let store = self.store.clone();
-            let authorization = Arc::clone(authorization);
-            drop(
-                tokio::spawn(async move { flush_denial_markers(&store, &authorization).await })
-                    .await,
-            );
-        }
+        self.flush_denial_markers_before_shutdown().await;
         self.store.shutdown().await.map_err(Into::into)
     }
 
@@ -3220,43 +3211,58 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         let fence = authorization.commit_fence().await;
-        let decision = match authorization.authorize(GatewayAuthorizationRequest::action(
+        let maximum = self.limits.max_events_per_timeline;
+        let admitted = match authorization.authorize(GatewayAuthorizationRequest::action(
             request.proposal.actor_entity_id,
             timeline,
             request.proposal.event_type.as_str(),
             request.proposal.capability.as_str(),
             WallTime::now(),
         )) {
-            Ok(decision) => decision,
-            Err(error) => {
-                drop(fence);
-                return Err(self.authorization_failure(&authorization, error).await);
+            Ok(decision) => {
+                self.store
+                    .admit_action(
+                        timeline,
+                        Arc::clone(&self.action_registry),
+                        request.proposal,
+                        executor::AuthorizedActionContext::new(
+                            Arc::clone(&authorization),
+                            decision,
+                            self.bus.clone(),
+                        ),
+                        executor::ActionAttemptRequest::new(
+                            request.idempotency_key,
+                            request.observed_through,
+                        ),
+                        maximum,
+                    )
+                    .await
             }
+            Err(error) => Err(executor::ActionCommandError::Authorization(error)),
         };
-        let maximum = self.limits.max_events_per_timeline;
-        let admitted = self
-            .store
-            .admit_action(
-                timeline,
-                Arc::clone(&self.action_registry),
-                request.proposal,
-                executor::AuthorizedActionContext::new(
-                    Arc::clone(&authorization),
-                    decision,
-                    self.bus.clone(),
-                ),
-                executor::ActionAttemptRequest::new(
-                    request.idempotency_key,
-                    request.observed_through,
-                ),
-                maximum,
-            )
-            .await;
+        // A denial's evidence is written after the fence is released, so an
+        // authority replacement never waits behind it.
         drop(fence);
+        self.admission_outcome(&authorization, admitted, maximum)
+            .await
+    }
+
+    /// The answer to one admission attempt: the committed action, an
+    /// authorization failure answered through [`Self::authorization_failure`],
+    /// or the stable error of any other refusal.
+    async fn admission_outcome(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        admitted: Result<
+            (AdmittedAction, GatewayAuthorizationDecision),
+            executor::ActionCommandError,
+        >,
+        maximum: u64,
+    ) -> Result<AdmittedAction, GatewayError> {
         match admitted {
             Ok((action, _decision)) => Ok(action),
             Err(executor::ActionCommandError::Authorization(error)) => {
-                Err(self.authorization_failure(&authorization, error).await)
+                Err(self.authorization_failure(authorization, error).await)
             }
             Err(error) => Err(action_command_error(error, maximum)),
         }
@@ -3290,12 +3296,8 @@ impl Gateway {
             Ok(batch) => batch,
             Err(suppression) => {
                 self.schedule_denial_flush(authorization, suppression.flush_at);
-                let retry_after = suppression.retry_after;
                 return GatewayError::DenialRecordLimitReached {
-                    retry_after_seconds: retry_after
-                        .as_secs()
-                        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
-                        .max(1),
+                    retry_after_seconds: whole_retry_seconds(suppression.retry_after),
                 };
             }
         };
@@ -3305,6 +3307,19 @@ impl Gateway {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
             Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
             Err(error) => error.into(),
+        }
+    }
+
+    /// Record the unrecorded suppression counts once before the store stops;
+    /// a count the store cannot take stays pending.
+    async fn flush_denial_markers_before_shutdown(&self) {
+        if let Some(authorization) = &self.authorization {
+            let store = self.store.clone();
+            let authorization = Arc::clone(authorization);
+            drop(
+                tokio::spawn(async move { flush_denial_markers(&store, &authorization).await })
+                    .await,
+            );
         }
     }
 
@@ -3594,6 +3609,15 @@ impl Gateway {
             authorization_required: false,
         }
     }
+}
+
+/// Whole seconds until a retry may succeed: a partial second rounds up, and
+/// a retry is never advertised sooner than one second.
+fn whole_retry_seconds(retry_after: std::time::Duration) -> u64 {
+    retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1)
 }
 
 /// Pause before the one retry of a failed window flush.
