@@ -1930,21 +1930,20 @@ mod erasure_gate_coverage_tests {
     #[test]
     fn a_populated_unbound_store_is_refused() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     {
-        use pos_core::EventStore as _;
+        use piglor_gateway::local_principal::{
+            provision_local_principal, LocalPrincipalProvisionV1,
+        };
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("gateway.db");
         let path = database.to_string_lossy().into_owned();
-        let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
-        let timeline = store.create_timeline("unbound")?.id();
-        store.append(
-            timeline,
-            &[pos_core::EventDraft::new(
-                pos_core::EntityId::new(),
-                pos_core::Kind::new("gateway.fixture"),
-                pos_core::CanonicalBytes::from_vec(Vec::new()),
-            )],
+        provision_local_principal(
+            &mut pos_store::sqlite::SqliteStore::open(&path)?,
+            &LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([9; 16], "local")?,
+                [pos_core::EntityId::new()],
+                [piglor_gateway::GatewayOperationV1::CREATE_TIMELINE],
+            )?,
         )?;
-        drop(store);
         let refused = run_with_args_and_shutdown_with_environment(
             &[
                 "piglor-gateway".to_owned(),
