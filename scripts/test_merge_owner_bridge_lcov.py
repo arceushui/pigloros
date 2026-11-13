@@ -82,7 +82,8 @@ class OwnerBridgeLcovTests(unittest.TestCase):
         for name in ("D:/foreign/file.rs", "C:/work/repo/crates/other/src/lib.rs",
                      "C:/work/repo/crates/pos-owner-bridge-windows/src/missing.rs",
                      "C:/work/repo/crates/pos-owner-bridge-windows/src/../lib.rs",
-                     "relative/lib.rs", "C:/work/repo/crates/pos-owner-bridge-windows/src/data.json"):
+                     "relative/lib.rs", "C:/work/repo/crates/pos-owner-bridge-windows/src/data.json",
+                     "C:/work/repo/rustc/" + "8b" * 20 + "/src/lib.rs", "C:/work/repo/rustc/8b/library/core.rs"):
             native = self.native + record(name).encode()
             with self.subTest(name=name), self.assertRaises(policy.CoverageError): self.merge(native=native)
         outside = self.root.parent / (self.root.name + "-outside.rs")
@@ -94,7 +95,8 @@ class OwnerBridgeLcovTests(unittest.TestCase):
     def test_known_non_src_records_are_counted_without_replacing_package_coverage(self):
         ignored = ["C:/work/repo/crates/pos-owner-bridge-windows/tests/integration.rs",
                    "C:/work/repo/target/build/generated.rs", "C:/users/runner/.cargo/registry/dependency.rs",
-                   "C:/users/runner/.rustup/toolchains/std.rs", "/rustc/012345abcdef/library/core.rs"]
+                   "C:/users/runner/.rustup/toolchains/std.rs", "/rustc/012345abcdef/library/core.rs",
+                   "C:\\work\\repo\\rustc\\" + "8b" * 20 + "\\library\\std\\src\\thread.rs"]
         native = self.native + "".join(record(name) for name in ignored).encode()
         merged, summary = self.merge(native=native)
         self.assertEqual(summary["omitted_non_src_records"], len(ignored))
