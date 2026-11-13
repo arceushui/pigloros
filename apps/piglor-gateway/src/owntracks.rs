@@ -922,9 +922,9 @@ mod tests {
         assert!(locked.to_string().contains("lock"), "{locked}");
         drop(migrating);
         assert!(
-            super::execute(&["revoke".to_owned(), database.clone()]).is_err_and(|error| error
-                .to_string()
-                == "OwnTracks enrollment transition is unavailable")
+            super::execute(&["revoke".to_owned(), database]).is_err_and(
+                |error| error.to_string() == "OwnTracks enrollment transition is unavailable"
+            )
         );
         let unopenable =
             super::execute(&["revoke".to_owned(), directory.display().to_string()]).test_err()?;
