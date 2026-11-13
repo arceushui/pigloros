@@ -807,7 +807,7 @@ mod tests {
 
     async fn append_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
         let body = serde_json::json!({
-            "entity_id": pos_core::EntityId::new().to_string(),
+            "entity_id": fork_test_actor().to_string(),
             "dimension": "trust",
             "value": 0.4,
         });
