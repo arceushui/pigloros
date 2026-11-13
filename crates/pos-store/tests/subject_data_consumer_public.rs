@@ -178,6 +178,14 @@ impl Fixture {
 }
 
 fn fixture<S: Adapter>(store: &mut S) -> Result<Fixture, Box<dyn std::error::Error>> {
+    fixture_with_role(store, KeyRoleV1::SubjectDataEncryption)
+}
+
+/// The fixture with the subject's key registered under `role` instead.
+fn fixture_with_role<S: Adapter>(
+    store: &mut S,
+    role: KeyRoleV1,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
     let (owner, owner_identity) = signing("piglor-owner");
@@ -192,7 +200,11 @@ fn fixture<S: Adapter>(store: &mut S) -> Result<Fixture, Box<dyn std::error::Err
         ))?;
     }
     let identity = encryption_identity(SUBJECT, 1)?;
-    registry.register_key(KeyRegistrationV1::new(identity, key.digest(), None))?;
+    registry.register_key(KeyRegistrationV1::new(
+        KeyIdentityV1 { role, ..identity },
+        key.digest(),
+        None,
+    ))?;
     store.save_key_registry(&registry)?;
     let timeline = store.create_timeline("subject-data")?.id();
     let mut keys = SubjectKeyringV1::new(SUBJECT, owner_identity, owner.public_verification_key())?;
@@ -223,7 +235,7 @@ fn append<S: EventStore + ?Sized>(
 ) -> Result<Event, Refusal> {
     append_subject_preference_weights(
         store,
-        &fx.keys,
+        &mut fx.keys,
         &mut fx.nonces,
         &SubjectDataAppendV1 {
             timeline_id: fx.timeline,
@@ -500,41 +512,16 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
         Some(Refusal::InvalidSubject)
     );
 
-    // Another registered subject cannot open this subject's wrap or field.
-    let other_key = subject_key(OTHER, 1, 0x40)?;
-    let mut registry = store.load_key_registry()?.ok_or("key registry is absent")?;
-    registry.register_key(KeyRegistrationV1::new(
-        encryption_identity(OTHER, 1)?,
-        other_key.digest(),
-        None,
-    ))?;
-    store.save_key_registry(&registry)?;
-    let mut other = fx.keyring(OTHER)?;
-    assert_eq!(
-        other.unlock(fx.key.wrap.clone(), &fx.key.prf()),
-        Err(Refusal::WrapSubjectMismatch)
-    );
-    assert_eq!(
-        other.unlock(other_key.wrap.clone(), &fx.key.prf()),
-        Err(Refusal::UnlockFailed)
-    );
-    assert_eq!(
-        read(store, &other, fx.timeline),
-        field(Err(SubjectFieldReadError::KeyUnavailable))
-    );
-    assert_eq!(
-        other.unlock(other_key.wrap.clone(), &other_key.prf()),
-        Ok(encryption_identity(OTHER, 1)?)
-    );
-    assert_eq!(
-        read(store, &other, fx.timeline),
-        field(Err(SubjectFieldReadError::Integrity))
-    );
-
     // The right identity with a root the registry never registered.
     let forged = subject_key(SUBJECT, 1, 0x70)?;
     let mut mismatched = fx.keyring(SUBJECT)?;
     mismatched.unlock(forged.wrap.clone(), &forged.prf())?;
+    // An unlocked epoch never has its root replaced.
+    assert_eq!(
+        fx.keys.unlock(forged.wrap.clone(), &forged.prf()),
+        Err(Refusal::AlreadyUnlocked)
+    );
+    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
     assert_eq!(
         read(store, &mismatched, fx.timeline),
         field(Err(SubjectFieldReadError::Integrity))
@@ -546,7 +533,7 @@ fn exercise_wrong_keys<S: Adapter>(store: &mut S) -> TestResult {
         weights: b"forged",
     };
     assert_eq!(
-        append_subject_preference_weights(store, &mismatched, &mut fx.nonces, &request).err(),
+        append_subject_preference_weights(store, &mut mismatched, &mut fx.nonces, &request).err(),
         Some(Refusal::KeyNotActive)
     );
 
@@ -585,13 +572,145 @@ fn wrong_owner_epoch_and_material_are_rejected_in_both_adapters() -> TestResult 
     exercise_wrong_keys(&mut SqliteStore::open_in_memory()?)
 }
 
-/// A reservation port that hands out the forbidden counter zero.
-struct ZeroCounter;
+fn exercise_other_subject<S: Adapter>(store: &mut S) -> TestResult {
+    let mut fx = fixture(store)?;
+    let empty = store.create_timeline("no-subject-data")?.id();
+    let integrity = || field(Err(SubjectFieldReadError::Integrity));
+    let other_key = subject_key(OTHER, 1, 0x40)?;
+    let other_identity = encryption_identity(OTHER, 1)?;
+    let mut registry = store.load_key_registry()?.ok_or("key registry is absent")?;
+    registry.register_key(KeyRegistrationV1::new(
+        other_identity,
+        other_key.digest(),
+        None,
+    ))?;
+    store.save_key_registry(&registry)?;
+    let mut other = fx.keyring(OTHER)?;
+    assert_eq!(
+        other.unlock(fx.key.wrap.clone(), &fx.key.prf()),
+        Err(Refusal::WrapSubjectMismatch)
+    );
+    assert_eq!(
+        other.unlock(other_key.wrap.clone(), &fx.key.prf()),
+        Err(Refusal::UnlockFailed)
+    );
 
-impl SubjectNonceReservationPortV1 for ZeroCounter {
+    // Another subject's keyring gets the same outcome whether a value exists,
+    // and whether its own key is locked, unlocked or destroyed.
+    assert_eq!(
+        read(store, &fx.keys, empty),
+        field(Err(SubjectFieldReadError::NoValue))
+    );
+    assert_eq!(read(store, &other, empty), integrity());
+    append(store, &mut fx, 1, b"weights")?;
+    assert_eq!(read(store, &other, fx.timeline), integrity());
+    assert_eq!(
+        other.unlock(other_key.wrap.clone(), &other_key.prf()),
+        Ok(other_identity)
+    );
+    let mut retained = fx.keyring(OTHER)?;
+    retained.unlock(other_key.wrap.clone(), &other_key.prf())?;
+    assert_eq!(read(store, &other, fx.timeline), integrity());
+    let destruction = KeyDestructionRequestV1::new(
+        other_identity,
+        other_key.digest(),
+        Hash::from_bytes([5; 32]),
+    );
+    destroy_subject_key(store, &mut other, destruction)?;
+    assert_eq!(read(store, &other, fx.timeline), integrity());
+    assert_eq!(read(store, &retained, fx.timeline), integrity());
+    assert_eq!(read(store, &fx.keys, fx.timeline), present(b"weights"));
+
+    // A committed payload transplanted from another subject is not this
+    // subject's field, whether or not this subject's key is unlocked.
+    append_crafted(
+        store,
+        &fx,
+        SUBJECT,
+        (&fx.owner, fx.owner_identity),
+        &mut |input| {
+            let mut foreign = input.clone();
+            foreign.entity_id = OTHER;
+            seal(
+                &other_key,
+                1,
+                PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
+                b"foreign",
+                &foreign,
+            )
+        },
+    )?;
+    assert_eq!(read(store, &fx.keys, fx.timeline), integrity());
+    assert_eq!(read(store, &fx.keyring(SUBJECT)?, fx.timeline), integrity());
+    Ok(())
+}
+
+#[test]
+fn another_subjects_keyring_always_reads_integrity_in_both_adapters() -> TestResult {
+    exercise_other_subject(&mut MemoryStore::new())?;
+    exercise_other_subject(&mut SqliteStore::open_in_memory()?)
+}
+
+/// A faulty reservation port that always hands out the same counter.
+struct Fixed(u64);
+
+impl SubjectNonceReservationPortV1 for Fixed {
     fn reserve_data_counter(&mut self, _: KeyIdentityV1, _: Hash) -> Result<u64, Refusal> {
-        Ok(0)
+        Ok(self.0)
     }
+}
+
+fn exercise_faulty_ports<S: Adapter>(store: &mut S) -> TestResult {
+    let mut fx = fixture(store)?;
+    let request = SubjectDataAppendV1 {
+        timeline_id: fx.timeline,
+        epoch: 1,
+        signing: &fx.owner,
+        weights: b"weights",
+    };
+    let refused_reservation = Some(Refusal::NonceReservationRefused);
+
+    // Counter zero, a repeated counter and a lower counter never reach AES-GCM.
+    assert_eq!(
+        append_subject_preference_weights(store, &mut fx.keys, &mut Fixed(0), &request).err(),
+        refused_reservation
+    );
+    let committed =
+        append_subject_preference_weights(store, &mut fx.keys, &mut Fixed(9), &request)?;
+    assert_eq!(subject_data(&committed)?.ciphertext().counter(), 9);
+    for repeated in [9, 8] {
+        let mut port = Fixed(repeated);
+        assert_eq!(
+            append_subject_preference_weights(store, &mut fx.keys, &mut port, &request).err(),
+            refused_reservation
+        );
+    }
+    let higher = append_subject_preference_weights(store, &mut fx.keys, &mut Fixed(10), &request)?;
+    assert_eq!(subject_data(&higher)?.ciphertext().counter(), 10);
+
+    // A counter above the V1 cap is refused by encryption inside the combined
+    // boundary: nothing is committed, and the keyring keeps that high-water.
+    assert_eq!(
+        append_subject_preference_weights(store, &mut fx.keys, &mut Fixed(u64::MAX), &request)
+            .err(),
+        Some(Refusal::AppendRefused)
+    );
+    assert_eq!(
+        append_subject_preference_weights(store, &mut fx.keys, &mut fx.nonces, &request).err(),
+        refused_reservation
+    );
+    assert_eq!(
+        store.read_own(fx.timeline, SeqRange::all())?,
+        vec![committed, higher]
+    );
+    assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
+    Ok(())
+}
+
+#[test]
+fn faulty_reservation_port_cannot_repeat_a_counter_in_both_adapters() -> TestResult {
+    exercise_faulty_ports(&mut MemoryStore::new())?;
+    exercise_faulty_ports(&mut SqliteStore::open_in_memory()?)
 }
 
 fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
@@ -606,21 +725,17 @@ fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
         weights: b"weights",
     };
     assert_eq!(
-        append_subject_preference_weights(store, &fx.keys, &mut fx.nonces, &gateway_signed).err(),
+        append_subject_preference_weights(store, &mut fx.keys, &mut fx.nonces, &gateway_signed)
+            .err(),
         Some(Refusal::AppendRefused)
     );
-    // A refused encryption commits nothing either.
     let owner_signed = SubjectDataAppendV1 {
         signing: &fx.owner,
         ..gateway_signed
     };
-    assert_eq!(
-        append_subject_preference_weights(store, &fx.keys, &mut ZeroCounter, &owner_signed).err(),
-        Some(Refusal::AppendRefused)
-    );
     assert!(store.read_own(fx.timeline, SeqRange::all())?.is_empty());
     let committed =
-        append_subject_preference_weights(store, &fx.keys, &mut fx.nonces, &owner_signed)?;
+        append_subject_preference_weights(store, &mut fx.keys, &mut fx.nonces, &owner_signed)?;
     assert_eq!(subject_data(&committed)?.ciphertext().counter(), 2);
 
     // A missing or exhausted nonce row reserves nothing.
@@ -633,7 +748,8 @@ fn exercise_failed_appends<S: Adapter>(store: &mut S) -> TestResult {
         let mut nonces = ledger(rows)?;
         let unchanged = nonces.clone();
         assert_eq!(
-            append_subject_preference_weights(store, &fx.keys, &mut nonces, &owner_signed).err(),
+            append_subject_preference_weights(store, &mut fx.keys, &mut nonces, &owner_signed)
+                .err(),
             Some(Refusal::NonceReservationRefused)
         );
         assert_eq!(nonces, unchanged);
@@ -794,7 +910,15 @@ fn exercise_pending_destruction<S: Adapter>(store: &mut S) -> TestResult {
         fx.gateway.material_digest(),
         request.authorization_digest,
     );
-    for refused_request in [wrong_material, gateway_key] {
+    let wrong_role = KeyDestructionRequestV1::new(
+        KeyIdentityV1 {
+            role: KeyRoleV1::ExportRecipientEncryption,
+            ..request.identity
+        },
+        request.expected_material_digest,
+        request.authorization_digest,
+    );
+    for refused_request in [wrong_material, gateway_key, wrong_role] {
         assert_eq!(
             destroy_subject_key(store, &mut fx.keys, refused_request),
             Err(Refusal::DestructionRefused)
@@ -864,16 +988,19 @@ fn exercise_confirmed_destruction<S: Adapter>(store: &mut S) -> TestResult {
 
     // The destroying keyring dropped its root; a keyring that still holds the
     // root is denied by the registry. Both redact, and neither encrypts.
-    let redacted = FieldStateV1::RedactedDestroyed;
-    assert_eq!(
-        redacted.weaken_replay_claim(ErasureReplayClaimV1::Exact),
-        ErasureReplayClaimV1::StructuralOnly
-    );
-    assert_eq!(
-        read(store, &fx.keys, fx.timeline),
-        field(Ok(redacted.clone()))
-    );
-    assert_eq!(read(store, &retained, fx.timeline), field(Ok(redacted)));
+    // The delivered state itself floors an exact Replay claim.
+    for keys in [&fx.keys, &retained] {
+        let (outcome, mut delivered) = read(store, keys, fx.timeline);
+        let Some(Ok(state)) = delivered.pop() else {
+            return Err("expected one delivered field state".into());
+        };
+        assert_eq!((outcome, delivered.len()), (Ok(()), 0));
+        assert_eq!(state, FieldStateV1::RedactedDestroyed);
+        assert_eq!(
+            state.weaken_replay_claim(ErasureReplayClaimV1::Exact),
+            ErasureReplayClaimV1::StructuralOnly
+        );
+    }
     assert_eq!(
         append(store, &mut fx, 1, b"late").err(),
         Some(Refusal::KeyLocked)
@@ -885,7 +1012,7 @@ fn exercise_confirmed_destruction<S: Adapter>(store: &mut S) -> TestResult {
         weights: b"late",
     };
     assert_eq!(
-        append_subject_preference_weights(store, &retained, &mut fx.nonces, &late).err(),
+        append_subject_preference_weights(store, &mut retained, &mut fx.nonces, &late).err(),
         Some(Refusal::KeyNotActive)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
@@ -917,7 +1044,8 @@ fn exercise_erasure_boundary<S: Adapter>(store: &mut S, unbound: &mut S) -> Test
         weights: b"weights",
     };
     assert_eq!(
-        append_subject_preference_weights(unbound, &fx.keys, &mut fx.nonces, &unregistered).err(),
+        append_subject_preference_weights(unbound, &mut fx.keys, &mut fx.nonces, &unregistered)
+            .err(),
         Some(Refusal::KeyNotActive)
     );
     assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
@@ -952,6 +1080,98 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// Every byte the consumer hands to `pos-core`, a store or the nonce ledger:
+/// the committed payloads, the registry snapshot, the SNL1 artifact and the
+/// keyring's printed form.
+fn core_visible_bytes<S: Adapter>(
+    store: &S,
+    fx: &Fixture,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    for event in store.read_own(fx.timeline, SeqRange::all())? {
+        bytes.extend_from_slice(event.payload.as_slice());
+    }
+    let registry = store.load_key_registry()?.ok_or("key registry is absent")?;
+    ciborium::into_writer(&registry, &mut bytes)?;
+    bytes.extend_from_slice(fx.nonces.ledger().as_bytes());
+    bytes.extend(format!("{:?}", fx.keys).into_bytes());
+    Ok(bytes)
+}
+
+/// The private inputs the test can name. The derived subkey has no public
+/// accessor in `pos-crypto`, so no caller, this test included, can hold it.
+fn assert_no_private_bytes(bytes: &[u8], fx: &Fixture, weights: &[u8]) {
+    for private in [&fx.key.root[..], &fx.key.prf[..], weights] {
+        assert!(!contains(bytes, private));
+    }
+}
+
+fn exercise_private_bytes<S: Adapter>(store: &mut S) -> TestResult {
+    let mut fx = fixture(store)?;
+    let weights: [u8; 48] = pattern(0xc0);
+    let event = append(store, &mut fx, 1, &weights)?;
+    assert_eq!(read(store, &fx.keys, fx.timeline), present(&weights));
+    let visible = core_visible_bytes(store, &fx)?;
+    let data = subject_data(&event)?;
+    assert!(contains(&visible, data.ciphertext().ciphertext_and_tag()));
+    assert!(contains(&visible, fx.key.digest().as_bytes()));
+    assert!(contains(&visible, b"SubjectRootKeyV1(<redacted>)"));
+    assert_no_private_bytes(&visible, &fx, &weights);
+    Ok(())
+}
+
+#[test]
+fn no_private_bytes_reach_core_values_in_both_adapters() -> TestResult {
+    exercise_private_bytes(&mut MemoryStore::new())?;
+    exercise_private_bytes(&mut SqliteStore::open_in_memory()?)
+}
+
+fn exercise_wrong_role<S: Adapter>(store: &mut S) -> TestResult {
+    // The same owner, epoch and root fingerprint under another encryption role.
+    let mut fx = fixture_with_role(store, KeyRoleV1::ExportRecipientEncryption)?;
+    assert_eq!(
+        append(store, &mut fx, 1, b"weights").err(),
+        Some(Refusal::KeyNotActive)
+    );
+    let request = destruction_request(&fx, 7);
+    assert_eq!(
+        destroy_subject_key(store, &mut fx.keys, request),
+        Err(Refusal::DestructionRefused)
+    );
+    assert_eq!(next_data_counters(&fx.nonces), vec![7, 1]);
+    assert!(store.read_own(fx.timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn another_role_of_the_same_owner_and_epoch_is_refused_in_both_adapters() -> TestResult {
+    exercise_wrong_role(&mut MemoryStore::new())?;
+    exercise_wrong_role(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn unreadable_sqlite_registry_is_unavailable_rather_than_inactive() -> TestResult {
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("owner.db");
+    let path = path.to_str().ok_or("temporary path is not UTF-8")?;
+    let mut store = SqliteStore::open(path)?;
+    let mut fx = fixture(&mut store)?;
+    append(&mut store, &mut fx, 1, b"weights")?;
+    let changed = rusqlite::Connection::open(path)?
+        .execute("UPDATE key_registry SET state_cbor = x'ff'", [])?;
+    assert_eq!(changed, 1);
+    assert_eq!(
+        append(&mut store, &mut fx, 1, b"late").err(),
+        Some(Refusal::RegistryUnavailable)
+    );
+    assert_eq!(next_data_counters(&fx.nonces), vec![7, 2]);
+    assert_eq!(
+        read(&mut store, &fx.keys, fx.timeline),
+        refused(SubjectFieldOwnerReadErrorV1::ReadUnavailableBeforeDelivery)
+    );
+    Ok(())
+}
+
 #[test]
 fn reopened_sqlite_store_redacts_and_never_held_private_bytes() -> TestResult {
     let directory = tempfile::TempDir::new()?;
@@ -963,22 +1183,25 @@ fn reopened_sqlite_store_redacts_and_never_held_private_bytes() -> TestResult {
     let event = append(&mut store, &mut fx, 1, &weights)?;
     assert_eq!(read(&mut store, &fx.keys, fx.timeline), present(&weights));
 
-    // The durable bytes hold the ciphertext, and neither the root, the PRF
-    // output nor the plaintext; the keyring prints no root.
-    let mut durable = std::fs::read(path)?;
-    durable.extend(std::fs::read(format!("{path}-wal")).unwrap_or_default());
+    // While the store is open, the database file and its write-ahead log
+    // hold the ciphertext and none of the root, PRF output or plaintext.
     let data = subject_data(&event)?;
-    assert!(contains(&durable, data.ciphertext().ciphertext_and_tag()));
-    for private in [&fx.key.root[..], &fx.key.prf[..], &weights[..]] {
-        assert!(!contains(&durable, private));
-        assert!(!contains(event.payload.as_slice(), private));
-    }
-    assert!(format!("{:?}", fx.keys).contains("SubjectRootKeyV1(<redacted>)"));
+    let sealed = data.ciphertext().ciphertext_and_tag();
+    let write_ahead_log = std::fs::read(format!("{path}-wal"))?;
+    assert!(!write_ahead_log.is_empty());
+    let mut durable = std::fs::read(path)?;
+    durable.extend(write_ahead_log);
+    assert!(contains(&durable, sealed));
+    assert_no_private_bytes(&durable, &fx, &weights);
 
     // Replay on a fresh handle with no unlocked key: only the committed
     // tombstone turns the field into `RedactedDestroyed`.
     let request = destruction_request(&fx, 7);
     drop(store);
+    // After the last handle closes, the database file alone holds the same.
+    let closed = std::fs::read(path)?;
+    assert!(contains(&closed, sealed));
+    assert_no_private_bytes(&closed, &fx, &weights);
     let mut pending = SqliteStore::open(path)?;
     pending.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let locked = fx.keyring(SUBJECT)?;

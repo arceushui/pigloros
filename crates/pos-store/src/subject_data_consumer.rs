@@ -68,24 +68,37 @@ pub enum SubjectDataConsumerErrorV1 {
     /// The wrap names a subject other than the keyring's.
     #[error("subject key wrap belongs to another subject")]
     WrapSubjectMismatch,
+    /// The wrap's epoch already holds an unlocked root; it is never replaced.
+    #[error("subject key epoch is already unlocked")]
+    AlreadyUnlocked,
     /// The wrap did not authenticate under the supplied PRF output.
     #[error("subject key wrap did not open")]
     UnlockFailed,
     /// The requested epoch is not unlocked in the keyring.
     #[error("subject key epoch is locked")]
     KeyLocked,
-    /// The store's registry does not hold this exact identity and root
-    /// fingerprint as the active `SubjectDataEncryption` epoch.
+    /// The store could not load its key registry; nothing was reserved.
+    #[error("key registry is unavailable")]
+    RegistryUnavailable,
+    /// The store has no registry, or its registry does not hold this exact
+    /// owner, `SubjectDataEncryption` role, epoch and root fingerprint as the
+    /// active epoch.
     #[error("subject key is not the active encryption epoch")]
     KeyNotActive,
     /// The plaintext exceeds [`MAX_SUBJECT_FIELD_PLAINTEXT_BYTES`].
     #[error("subject field plaintext exceeds its raw cap")]
     PlaintextBoundExceeded,
-    /// No exact nonce row exists, or its data counter is exhausted.
+    /// No exact nonce row exists, its data counter is exhausted, or the port
+    /// returned a counter that is not above the last one this keyring used
+    /// for the epoch.
     #[error("subject nonce reservation was refused")]
     NonceReservationRefused,
-    /// The combined prepared append failed; no Event was committed and a
-    /// reserved counter stays spent.
+    /// The combined prepared append failed; no Event was committed and the
+    /// reserved counter stays spent. Every cause collapses here without
+    /// distinction: a registry that changed since it was loaded, a refused
+    /// encryption or signing authorization, a missing Timeline, erasure
+    /// containment, a refused encryption or signature, and any insertion or
+    /// commit failure of the store.
     #[error("subject data append was refused")]
     AppendRefused,
     /// The request names another owner or the registry refused it.
@@ -103,7 +116,15 @@ pub struct SubjectKeyringV1 {
     subject: EntityId,
     owner: OwnerIdV1,
     timeline_signing_anchor: (KeyIdentityV1, PublicKey),
-    epochs: BTreeMap<u64, (SubjectKeyWrapV1, SubjectRootKeyV1)>,
+    epochs: BTreeMap<u64, UnlockedEpoch>,
+}
+
+/// One unlocked root and the highest data counter this keyring has used with it.
+#[derive(Debug)]
+struct UnlockedEpoch {
+    wrap: SubjectKeyWrapV1,
+    root: SubjectRootKeyV1,
+    last_data_counter: u64,
 }
 
 impl SubjectKeyringV1 {
@@ -138,8 +159,10 @@ impl SubjectKeyringV1 {
     ///
     /// # Errors
     /// Returns [`SubjectDataConsumerErrorV1::WrapSubjectMismatch`] for another
-    /// subject's wrap, and [`SubjectDataConsumerErrorV1::UnlockFailed`] when
-    /// the wrap does not authenticate; neither changes the keyring.
+    /// subject's wrap, [`SubjectDataConsumerErrorV1::AlreadyUnlocked`] when
+    /// the epoch already holds a root, and
+    /// [`SubjectDataConsumerErrorV1::UnlockFailed`] when the wrap does not
+    /// authenticate; none of them changes the keyring.
     pub fn unlock(
         &mut self,
         wrap: SubjectKeyWrapV1,
@@ -149,15 +172,23 @@ impl SubjectKeyringV1 {
             return Err(SubjectDataConsumerErrorV1::WrapSubjectMismatch);
         }
         let epoch = wrap.params().epoch;
+        if self.epochs.contains_key(&epoch) {
+            return Err(SubjectDataConsumerErrorV1::AlreadyUnlocked);
+        }
         wrap.open(prf)
             .map(|root| {
-                self.epochs.insert(epoch, (wrap, root));
+                let unlocked = UnlockedEpoch {
+                    wrap,
+                    root,
+                    last_data_counter: 0,
+                };
+                self.epochs.insert(epoch, unlocked);
                 self.key_identity(epoch)
             })
             .map_err(|_| SubjectDataConsumerErrorV1::UnlockFailed)
     }
 
-    /// Drop the root held for `epoch`, if any.
+    /// Drop the root held for `epoch`, if any, with its counter high-water.
     pub fn lock(&mut self, epoch: u64) {
         self.epochs.remove(&epoch);
     }
@@ -166,7 +197,10 @@ impl SubjectKeyringV1 {
 /// Reserves the next data-use nonce counter before AES-GCM may use it.
 ///
 /// An implementation must make the reservation durable before returning and
-/// must never return the same counter twice for one identity and root.
+/// must never return the same counter twice for one identity and root. The
+/// consumer additionally refuses a counter that is not above the last one the
+/// same keyring used for the epoch since its unlock; that volatile guard does
+/// not replace the port's durable obligation.
 pub trait SubjectNonceReservationPortV1 {
     /// Reserve the next data counter of `identity` under `root_material_digest`.
     ///
@@ -245,9 +279,10 @@ pub struct SubjectDataAppendV1<'a> {
 /// Encrypt and append one `subject.data.v1` Event through the combined
 /// two-identity prepared append.
 ///
-/// The order is: raw cap, unlocked epoch, active registry identity and root
-/// fingerprint, nonce reservation, then the store's combined boundary, inside
-/// which AES-256-GCM and the Timeline signature run.
+/// The order is: raw cap, unlocked epoch, loaded registry, active registry
+/// identity and root fingerprint, nonce reservation, the keyring's counter
+/// high-water, then the store's combined boundary, inside which AES-256-GCM
+/// and the Timeline signature run.
 ///
 /// # Errors
 /// Returns the closed [`SubjectDataConsumerErrorV1`] of the first refusal. A
@@ -255,38 +290,49 @@ pub struct SubjectDataAppendV1<'a> {
 /// no Event and never returns its counter.
 pub fn append_subject_preference_weights<S: EventStore + ?Sized>(
     store: &mut S,
-    keys: &SubjectKeyringV1,
+    keys: &mut SubjectKeyringV1,
     nonces: &mut dyn SubjectNonceReservationPortV1,
     request: &SubjectDataAppendV1<'_>,
 ) -> Result<Event, SubjectDataConsumerErrorV1> {
     if request.weights.len() > MAX_SUBJECT_FIELD_PLAINTEXT_BYTES {
         return Err(SubjectDataConsumerErrorV1::PlaintextBoundExceeded);
     }
-    let Some((wrap, root)) = keys.epochs.get(&request.epoch) else {
+    let subject = keys.subject;
+    let identity = keys.key_identity(request.epoch);
+    let signing_identity = keys.timeline_signing_anchor.0;
+    let Some(unlocked) = keys.epochs.get_mut(&request.epoch) else {
         return Err(SubjectDataConsumerErrorV1::KeyLocked);
     };
-    let identity = keys.key_identity(request.epoch);
-    let digest = root.material_digest();
-    let active = store
-        .load_key_registry()
-        .ok()
-        .flatten()
-        .filter(|registry| is_active_encryption_key(registry, identity, digest));
+    let digest = unlocked.root.material_digest();
+    let Ok(loaded) = store.load_key_registry() else {
+        return Err(SubjectDataConsumerErrorV1::RegistryUnavailable);
+    };
+    let active = loaded.filter(|registry| is_active_encryption_key(registry, identity, digest));
     let Some(registry) = active else {
         return Err(SubjectDataConsumerErrorV1::KeyNotActive);
     };
     nonces
         .reserve_data_counter(identity, digest)
         .and_then(|counter| {
+            if counter > unlocked.last_data_counter {
+                unlocked.last_data_counter = counter;
+                Ok(counter)
+            } else {
+                Err(SubjectDataConsumerErrorV1::NonceReservationRefused)
+            }
+        })
+        .and_then(|counter| {
+            // Every failure of this callback is one closed refusal: the store
+            // reports it as a payload-free append failure, and no typed cause
+            // of key derivation, header or AES-GCM refusal crosses the boundary.
             let mut prepare_payload = |input: &TimelineEventEnvelopeInputV1| {
-                wrap.derive_subkey(root, SubjectKeyUseV1::Data)
+                unlocked
+                    .wrap
+                    .derive_subkey(&unlocked.root, SubjectKeyUseV1::Data)
                     .ok()
                     .zip(
-                        subject_data_public_header(
-                            keys.subject,
-                            PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
-                        )
-                        .ok(),
+                        subject_data_public_header(subject, PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG)
+                            .ok(),
                     )
                     .and_then(|(subkey, header)| {
                         SubjectCiphertextV1::encrypt(
@@ -321,14 +367,14 @@ pub fn append_subject_preference_weights<S: EventStore + ?Sized>(
                     request.timeline_id,
                     &registry,
                     EventDraft::new(
-                        keys.subject,
+                        subject,
                         Kind::new(SUBJECT_DATA_EVENT_TYPE),
                         CanonicalBytes::from_static(&[]),
                     ),
                     PreparedSubjectAppendAuthorizationV1 {
                         encryption_identity: identity,
                         encryption_material_digest: digest,
-                        signing_identity: keys.timeline_signing_anchor.0,
+                        signing_identity,
                         signing_material_digest: request.signing.material_digest(),
                         signing_public_key: request.signing.public_verification_key(),
                     },
@@ -355,8 +401,11 @@ fn is_active_encryption_key(
 /// Read the latest committed value of `field` for `subject_id` and hand its
 /// outcome to `deliver` exactly once.
 ///
-/// The latest `subject.data.v1` Event of the subject in Timeline Order is
-/// selected without fallback. It must verify under the keyring's pinned
+/// A keyring reads only its own subject: any other `subject_id` delivers
+/// `Integrity`, whatever that keyring's lock or destruction state and whether
+/// or not a value exists. The latest `subject.data.v1` Event of the subject in
+/// Timeline Order is selected without fallback. Its ciphertext must name the
+/// keyring's subject and the Event must verify under the keyring's pinned
 /// owner-process trust anchor; decryption runs inside the store's
 /// historical-decryption authorization, and `Present` moves one fresh
 /// allocation while the adapter-owned staging is wiped after the callback.
@@ -395,7 +444,7 @@ where
                 store,
                 keys,
                 registry.as_ref(),
-                latest,
+                (subject_id, latest),
                 PERSONA_PREFERENCE_WEIGHTS_FIELD_TAG,
                 deliver,
             )
@@ -409,12 +458,17 @@ fn deliver_latest<S: KeyRegistryHistoricalDecryptionPortV1>(
     store: &mut S,
     keys: &SubjectKeyringV1,
     registry: Option<&KeyRegistryStateV1>,
-    latest: Option<&Event>,
+    (subject_id, latest): (EntityId, Option<&Event>),
     field_tag: &str,
     deliver: &mut dyn FnMut(
         SubjectFieldReadResultV1,
     ) -> Result<(), SubjectFieldReadCallbackErrorV1>,
 ) -> Result<(), SubjectFieldReadCallbackErrorV1> {
+    // The requester's context is checked before any Event or key state, so
+    // another subject's keyring learns neither existence nor destruction.
+    if subject_id != keys.subject {
+        return deliver(Err(SubjectFieldReadError::Integrity));
+    }
     let Some(event) = latest else {
         return deliver(Err(SubjectFieldReadError::NoValue));
     };
@@ -422,11 +476,12 @@ fn deliver_latest<S: KeyRegistryHistoricalDecryptionPortV1>(
         return deliver(Err(SubjectFieldReadError::Integrity));
     };
     let identity = keys.key_identity(data.ciphertext().epoch());
-    let Some((wrap, root)) = keys.epochs.get(&identity.epoch) else {
+    let Some(unlocked) = keys.epochs.get(&identity.epoch) else {
         return deliver(locked_outcome(registry, identity));
     };
-    let authorized = store.with_decryption_authorization(identity, root.material_digest(), || {
-        let staged = open_subject_field(wrap, root, &data, &envelope, field_tag);
+    let digest = unlocked.root.material_digest();
+    let authorized = store.with_decryption_authorization(identity, digest, || {
+        let staged = open_subject_field(unlocked, &data, &envelope, field_tag);
         deliver(
             staged
                 .as_ref()
@@ -447,20 +502,28 @@ fn verified_subject_data(
     SubjectDataV1::from_bytes(event.payload.as_slice())
         .ok()
         .zip(TimelineEventEnvelopeV1::from_committed_event(event).ok())
-        .filter(|_| {
-            verify_committed_timeline_event_v1(event, registry, Some(keys.timeline_signing_anchor))
-                == TimelineEventVerificationV1::Verified
+        .filter(|(data, _)| {
+            data.ciphertext().subject_id() == keys.subject
+                && verify_committed_timeline_event_v1(
+                    event,
+                    registry,
+                    Some(keys.timeline_signing_anchor),
+                ) == TimelineEventVerificationV1::Verified
         })
 }
 
+/// Every failure is the one payload-free `Integrity` outcome ADR-121 allows:
+/// a typed derivation, context, authentication or bound cause never reaches
+/// the callback.
 fn open_subject_field(
-    wrap: &SubjectKeyWrapV1,
-    root: &SubjectRootKeyV1,
+    unlocked: &UnlockedEpoch,
     data: &SubjectDataV1,
     envelope: &TimelineEventEnvelopeV1,
     field_tag: &str,
 ) -> Result<Zeroizing<Vec<u8>>, SubjectFieldReadError> {
-    wrap.derive_subkey(root, SubjectKeyUseV1::Data)
+    unlocked
+        .wrap
+        .derive_subkey(&unlocked.root, SubjectKeyUseV1::Data)
         .ok()
         .and_then(|subkey| {
             data.ciphertext()
