@@ -21,8 +21,9 @@ use pos_owner_bridge_codec::CeremonyId;
 use crate::adapter::native_tests::{pass, pass_unwind};
 
 use super::{
-    check_final_process_failures, competing_spec, native_zeroing_observed, readiness, Fixture,
-    FixtureProfile, ProcessFaultMark, ProcessFaultTarget, TestResult, ZeroWitness,
+    admission_blocked, check_final_process_failures, competing_spec, native_zeroing_observed,
+    readiness, Fixture, FixtureProfile, ProcessFaultMark, ProcessFaultTarget, TestResult,
+    ZeroWitness,
 };
 
 // This is a modeled port refusal, never an SDK HRESULT or a native Close claim.
@@ -125,7 +126,7 @@ fn blocked(keeper: &mut QuarantineKeeper, fixture: &mut Fixture, folder: &Path) 
         || !folder.is_dir()
         || !folder.join("quarantine-held").is_file()
         || fixture.store.records()?.len() != 1
-        || !matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+        || !admission_blocked(&mut fixture.surface, &competing_spec())
         || fixture.store.records()?.len() != 1
         || !folder.is_dir()
     {
@@ -236,7 +237,7 @@ fn run_case(
     number: u8,
     target: ProcessFaultTarget,
     inject: bool,
-) -> Result<crate::ProcessExitState, Box<dyn std::error::Error>> {
+) -> crate::ProcessExitState {
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(
         runtime,
@@ -247,26 +248,14 @@ fn run_case(
     let _zero = ZeroWitness::arm();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now());
     let mut refused = false;
-    let attempt = catch_unwind(AssertUnwindSafe(|| {
-        drive_to_quarantine(&mut fixture, &mut driver, &mut refused)
-    }));
-    let Ok(result) = attempt else {
-        let result = readiness::cancel_driver(
-            &mut driver,
-            &mut fixture.surface,
-            &mut fixture.loopback,
-            &mut fixture.store,
-        );
-        fixture.retire(driver, result, None);
-        return Err("quarantined drive panicked".into());
-    };
-    let expected = Err(BridgeError::Quarantine(
-        QuarantineCode::ControllerCloseFailed,
-    ));
-    if result != expected {
-        fixture.retire(driver, result, None);
-        return Err("modeled close refusal did not quarantine".into());
-    }
+    let result = drive_to_quarantine(&mut fixture, &mut driver, &mut refused);
+    assert_eq!(
+        result,
+        Err(BridgeError::Quarantine(
+            QuarantineCode::ControllerCloseFailed,
+        )),
+        "modeled close refusal did not quarantine"
+    );
     let wiped = driver.request_clear()
         && driver.prf().iter().all(|byte| *byte == 0)
         && driver.plan_secrets_clear();
@@ -277,20 +266,14 @@ fn run_case(
             [number; 16],
         )));
     let held_path = folder.join("quarantine-held");
-    let held = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .share_mode(0)
-        .open(&held_path)
-    {
-        Ok(held) => held,
-        Err(error) => {
-            let _closed_or_retained = fixture.surface.close_controller();
-            fixture.retire(driver, result, None);
-            return Err(error.into());
-        }
-    };
+    let held = pass(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(&held_path),
+    );
     let mut keeper = QuarantineKeeper::new();
     // QuarantineKeeper::finish unconditionally retains a driver for this exact
     // quarantine result; it returns the input result without transformation.
@@ -329,7 +312,7 @@ fn run_case(
         pass(fixture.store.records()).is_empty() && !folder.exists(),
         "ordinary quarantine retirement was incomplete"
     );
-    Ok(state)
+    state
 }
 
 pub(super) fn run(runtime: &Path, root: &Path) {
@@ -337,8 +320,8 @@ pub(super) fn run(runtime: &Path, root: &Path) {
         (0xe0, ProcessFaultTarget::Renderer),
         (0xe2, ProcessFaultTarget::Browser),
     ] {
-        let control = pass(run_case(runtime, root, number, target, false));
-        let fault = pass(run_case(runtime, root, number + 1, target, true));
+        let control = run_case(runtime, root, number, target, false);
+        let fault = run_case(runtime, root, number + 1, target, true);
         assert_eq!(
             control, fault,
             "quarantined control and fault reached different states"
@@ -638,10 +621,10 @@ mod tests {
         let selected = super::super::fixed_competing_spec(240);
         assert!(fixture.surface.open(&selected).is_pending());
         assert!(fixture.surface.open(&selected).is_pending());
-        assert!(matches!(
-            fixture.surface.open(&selected),
-            Poll::Ready(Ok(_))
-        ));
+        assert_eq!(
+            fixture.surface.open(&selected).map(|opened| opened.is_ok()),
+            Poll::Ready(true)
+        );
         let mut refused = false;
         {
             let mut port = RefuseClose {

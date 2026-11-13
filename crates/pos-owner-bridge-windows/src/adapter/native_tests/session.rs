@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn modeled_pending_controller_and_quit_retain_owners_until_completion() {
         let native = Factory::new(Creation::Pending, FakeClock::start());
-        let factory = PendingOrBlockedFactory {
+        let mut factory = PendingOrBlockedFactory {
             native: Rc::clone(&native),
             failing: None,
             forbidden: &[
@@ -236,6 +236,7 @@ mod tests {
         assert!(!calls.contains(&"close_controller"));
         assert!(calls.contains(&"drop_environment"));
         assert!(calls.contains(&"destroy_window"));
+        assert!(factory.stop().is_ok());
     }
 
     #[test]
@@ -254,7 +255,7 @@ mod tests {
         ] {
             let native = Factory::new(Creation::Ready, FakeClock::start());
             native.failure.set(Some(failing));
-            let factory = PendingOrBlockedFactory {
+            let mut factory = PendingOrBlockedFactory {
                 native: Rc::clone(&native),
                 failing: Some(failing),
                 forbidden,
@@ -273,6 +274,7 @@ mod tests {
             );
             assert!(calls.contains(&"destroy_window"));
             assert!(!calls.contains(&"close_controller"));
+            assert!(factory.stop().is_ok(), "{failing}");
         }
     }
 
@@ -280,7 +282,7 @@ mod tests {
     fn raw_session_retains_unknown_pid_until_its_matching_exit() {
         let native = Factory::new(Creation::Ready, FakeClock::start());
         let events = Rc::new(Events::default());
-        let factory = RecoveringFactory {
+        let mut factory = RecoveringFactory {
             native: Rc::clone(&native),
             events: Rc::clone(&events),
             pumps: Cell::new(0),
@@ -303,6 +305,7 @@ mod tests {
             assert!(close < unsubscribe && unsubscribe < drop_environment);
         });
         assert!(result.is_ok(), "session creation: {result:?}");
+        assert!(factory.stop().is_ok());
     }
 
     #[test]

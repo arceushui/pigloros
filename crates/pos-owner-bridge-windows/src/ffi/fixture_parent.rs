@@ -75,41 +75,41 @@ impl crate::Native {
         use std::io::Write as _;
         let _port = Self::fixed_port_fixture();
         let parent = OwnedParent::new()?;
+        let foreground = parent.foreground()?;
         writeln!(
             std::io::stderr(),
-            "NATIVE_PARENT stage=before-child foreground={}",
-            parent.foreground()?
+            "NATIVE_PARENT stage=before-child foreground={foreground}"
         )?;
         let mut child = parent.spawn_child()?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut observation_failed = false;
         loop {
-            let status = child.try_wait().unwrap_or_else(|_| {
-                observation_failed = true;
-                None
-            });
+            let waited = child.try_wait();
+            observation_failed |= waited.is_err();
+            let status = waited.ok().flatten();
             if let Some(status) = status {
                 // Retain the child through its ordinary native retirement.
                 // A late exit still fails this deadline; killing the host
                 // would destroy its STA owners while a browser may live.
                 let late = std::time::Instant::now() >= deadline;
+                let foreground = parent.foreground()?;
                 writeln!(
                     std::io::stderr(),
-                    "NATIVE_PARENT stage=after-child foreground={}",
-                    parent.foreground()?
+                    "NATIVE_PARENT stage=after-child foreground={foreground}"
                 )?;
                 parent.finish()?;
                 validate_parent_result(observation_failed, late)?;
                 assert!(status.success());
                 return Ok(());
             }
-            if !matches!(
+            // A failed or quitting pump backs off 5 ms; a serviced pulse does
+            // not wait.
+            let serviced = matches!(
                 parent.pump(),
                 Ok(crate::NativePulse::Timer | crate::NativePulse::Dispatched)
-            ) {
-                observation_failed = true;
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            );
+            observation_failed |= !serviced;
+            std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(!serviced)));
         }
     }
 }

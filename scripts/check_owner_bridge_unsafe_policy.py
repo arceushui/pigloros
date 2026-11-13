@@ -1646,7 +1646,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "95d1a7970a1ec3695c1f484a7316ef1662b2661f26a8087b1f0feb2ac8fc9cfe":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "9546fac07956fd39c054ac7f9244737777d0979f2a9f74f7b28673e8649589b5":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1875,7 +1875,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
-    expected = "c1c027e0bfe94959430e05a5827c7251d5aa6ccb0cb1fe124116d236fb0f2a1d"
+    expected = "e5ee0b830e733fc4c6bc4eb99f76abd7716d0fd4b828d7164b68fbe836ac448d"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
         found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
     module = sources.get(prefix + "ffi/mod.rs", "")
@@ -1916,9 +1916,9 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'db38065c775cdc1c241614b6b8cd548e5ec97c19cd088328078266901e3d7a01',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '49a5dff4f570623187012eadbffc04c56d2f3deed6e07e3b21195c33ba63e6c1',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': 'ba84b7f048671f263b83c4bd81c8d8d41178a3a8ceb26f1897621031ebae56ab',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault.rs': 'cb00bce196260788ba5dd80bba78193cb5f5df127ca457b270307708a01aeb91',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests.rs': '1a47b1656b41b16ea37c93f5fc8b38a3cb603791bada1b53acdd14cc45fbef0a',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/model_tests/pending_opening_tests.rs': '817846763fdfcafff0b779934ec732e1b445b2d1f10ef9dd42d5ff911898a4ea',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/port_tests.rs': '1fc463501f4590c17e1e6f50bea051cabe5cdfa3e90e1585c6d70275718b78a5',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/pending_creation.rs': 'a1f7b119dbb611e802f89316a1f69cf271504d7c8c722839446160f19a976f74',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/exit_boundary_tests.rs': 'e8fe541efe44f7eda4565a6086fbdcf1900889af1299abc3bed72e9112b5ba92',
@@ -1927,10 +1927,10 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/native.rs': 'eb8d7692f9d9d26902b7ac929f885d7c8939bda3a4fbc08a8fe34f09d0c62f0c',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests/fault_admission.rs': '3971683f05f1bcf649c6ec5c5ac99c115c75fe3c95ec39fd2ff48cebe2cb7ae5',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/obstruction/tests.rs': 'f8b4ec091ca43d5652f3852b08ab5c1642ce1f8f269001ae886f202b7770b210',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': '26a5ff6899837a941f8ad05a942957b2c3ce2bb83ca843291c4f2ed4c9cc47f0',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/readiness.rs': 'd4a745fc844e113d43c6bd31612c63c4841c1bbba35cc72ad9feedc77cb40c9f',
     'crates/pos-owner-bridge-windows/src/ffi/window.rs': '75ab4125d3d73408247b96d86724aaf1afa9e1163ff67efe3f962c4c779e61dc',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': '9d9b29207ef872fc0ab4300a14ecd256c6e4f6ad97c8180d8b9911c255fca14e',
-    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '1210522a7014237367cf518b1a9d11d1aa2c1ea2528abbe175e96d38c691ffe0',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/session.rs': 'dfbb90c082db2ae740681117de33344e068ab798cb9dd0b6bc05923b42af8b9a',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/process_fault/quarantined.rs': '46828ff25edf3810bae3c0890b81faf3aad8632a38150e0d465f5a00d628f16c',
     'crates/pos-owner-bridge-windows/src/adapter/surface/diagnostics.rs': '6fcd4e9d65e7fd1c08aafc78ddf2772b120378addcf252dbc253148b4a3f858d',
     'crates/pos-owner-bridge-windows/src/adapter/surface/exit_boundary.rs': '1636121e22c73e504104a8e6cdd5ce2cd870042d43733e9a5d06b07fe73e247f',
     'crates/pos-owner-bridge-windows/src/adapter/surface/tests.rs': 'bd6ce6cae654ee04b191e8486c0b173a6c7eb41b1e2dfc29d91f3e4f14d99cca',

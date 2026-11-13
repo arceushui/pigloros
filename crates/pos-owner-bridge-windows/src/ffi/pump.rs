@@ -23,7 +23,7 @@ impl Apartment {
         // an existing incompatible apartment is refused.
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
             .ok()
-            .map_err(|_| unavailable())?;
+            .map_err(|_| UNAVAILABLE)?;
         Ok(Self(PhantomData))
     }
 }
@@ -73,7 +73,7 @@ impl Pump {
         // and browser-exit timeout can still advance the portable driver.
         let timer = unsafe { SetTimer(None, 0, 10, None) };
         if timer == 0 {
-            return Err(unavailable());
+            return Err(UNAVAILABLE);
         }
         Ok(Self {
             timer,
@@ -98,7 +98,7 @@ impl Pump {
         // no HWND restriction, so thread timers and COM callbacks are serviced.
         let status = unsafe { GetMessageW(&raw mut message, None, 0, 0) };
         if status.0 == -1 {
-            return Err(unavailable());
+            return Err(UNAVAILABLE);
         }
         if status.0 == 0 {
             return Ok(NativePulse::Quit);
@@ -123,7 +123,7 @@ impl Pump {
         self.token.check()?;
         if self.timer != 0 {
             // SAFETY: this thread owns the still-live timer identifier.
-            unsafe { KillTimer(None, self.timer) }.map_err(|_| unavailable())?;
+            unsafe { KillTimer(None, self.timer) }.map_err(|_| UNAVAILABLE)?;
             self.timer = 0;
         }
         Ok(())
@@ -139,9 +139,7 @@ impl Drop for Pump {
     }
 }
 
-const fn unavailable() -> NativeError {
-    NativeError {
-        operation: Operation::Sta,
-        failure: Failure::CallFailed,
-    }
-}
+const UNAVAILABLE: NativeError = NativeError {
+    operation: Operation::Sta,
+    failure: Failure::CallFailed,
+};
