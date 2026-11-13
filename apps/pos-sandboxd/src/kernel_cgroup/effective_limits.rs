@@ -5,11 +5,17 @@
 //! a retained directory handle, then compares both with the requested
 //! [`SystemdServiceLimits`]. A match is readback evidence only: it does not by
 //! itself prove that the kernel enforced a ceiling against a payload.
+//!
+//! The cgroup values are the leaf cgroup's own configured limits, not the
+//! effective minimum over its ancestors. A tighter ancestor limit therefore
+//! still compares as a mismatch, which is the conservative direction.
 
 use std::fs::File;
 use std::io::Read;
 
-use rustix::fs::{fstatfs, openat2, statx, AtFlags, Mode, OFlags, StatxAttributes, StatxFlags};
+use rustix::fs::{
+    fstatfs, openat2, statx, AtFlags, FileType, Mode, OFlags, StatxAttributes, StatxFlags,
+};
 use rustix::io::Errno;
 use rustix::param::page_size;
 
@@ -154,8 +160,8 @@ pub enum EffectiveLimitError {
     /// The retained `/work` directory could not be described by `statx`.
     #[error("failed to statx the retained /work directory")]
     WorkStatx(#[source] Errno),
-    /// The retained `/work` directory is not the root of its mount.
-    #[error("the retained /work directory is not a mount root")]
+    /// The retained `/work` handle is not a directory at the root of its mount.
+    #[error("the retained /work handle is not a directory mount root")]
     WorkNotMountRoot,
     /// The manager-reported cgroup path no longer names any directory.
     ///
@@ -360,14 +366,31 @@ fn statfs_fields(directory: &File) -> Result<StatfsFields, Errno> {
     })
 }
 
-/// Whether the kernel reports the handle as the root of its mount.
+/// Whether the kernel reports the handle as a directory that is the root of
+/// its mount.
 fn is_mount_root(directory: &File) -> Result<bool, Errno> {
     statx(directory, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS).map(|status| {
-        status
-            .stx_attributes_mask
-            .contains(StatxAttributes::MOUNT_ROOT)
-            && status.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+        is_directory_mount_root(
+            status.stx_mask,
+            status.stx_mode,
+            status.stx_attributes_mask,
+            status.stx_attributes,
+        )
     })
+}
+
+/// Whether one `statx` result reports its type as a directory and reports
+/// the mount-root attribute as both supported and set.
+fn is_directory_mount_root(
+    mask: u32,
+    mode: u16,
+    attributes_mask: StatxAttributes,
+    attributes: StatxAttributes,
+) -> bool {
+    mask & StatxFlags::TYPE.bits() != 0
+        && FileType::from_raw_mode(u32::from(mode)) == FileType::Directory
+        && attributes_mask.contains(StatxAttributes::MOUNT_ROOT)
+        && attributes.contains(StatxAttributes::MOUNT_ROOT)
 }
 
 /// The typed result of comparing effective kernel limits with a request.
@@ -1005,6 +1028,29 @@ mod tests {
             Err(EffectiveLimitError::WorkNotTmpfs)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn only_a_typed_directory_with_the_mount_root_attribute_qualifies() {
+        let typed = StatxFlags::TYPE.bits();
+        let directory = 0o040_755;
+        let regular = 0o100_644;
+        let root = StatxAttributes::MOUNT_ROOT;
+        let none = StatxAttributes::empty();
+        assert!(is_directory_mount_root(typed, directory, root, root));
+        for (mask, mode, attributes_mask, attributes) in [
+            (0, directory, root, root),
+            (typed, regular, root, root),
+            (typed, directory, none, root),
+            (typed, directory, root, none),
+        ] {
+            assert!(!is_directory_mount_root(
+                mask,
+                mode,
+                attributes_mask,
+                attributes
+            ));
+        }
     }
 
     #[test]
