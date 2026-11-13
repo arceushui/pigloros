@@ -18,7 +18,13 @@ const AIR_GAPPED_DIGEST_HEX: &str =
     "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        drop(std::fmt::Write::write_fmt(
+            &mut hex,
+            format_args!("{byte:02x}"),
+        ));
+        hex
+    })
 }
 
 fn profile(id: GatewayModeProfileIdV1) -> GatewayModeProfileV1 {

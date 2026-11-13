@@ -36,7 +36,7 @@ mod tests;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
-    fmt,
+    fmt::{self, Write as _},
     net::SocketAddr,
     num::NonZeroU64,
     str::FromStr,
@@ -232,7 +232,12 @@ impl GatewayModeProfileDigestV1 {
 
     /// Lower-case hexadecimal for operator disclosure.
     fn to_hex(self) -> String {
-        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+        self.0
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                drop(write!(hex, "{byte:02x}"));
+                hex
+            })
     }
 }
 
@@ -291,8 +296,8 @@ fn decode_gmp1(bytes: &[u8]) -> Option<Gmp1RecordV1> {
         ingress: small_list(ingress)?,
         startup_predicates: small_list(predicates)?,
         revocation_freshness: small(&freshness)?,
-        registration_profile_id: optional_text(registration)?,
-        previous_mode_profile_digest: optional_digest(previous)?,
+        registration_profile_id: optional_text(registration).ok()?,
+        previous_mode_profile_digest: optional_digest(previous).ok()?,
     };
     (header && record.validate().is_ok() && record.encode() == bytes).then_some(record)
 }
@@ -314,23 +319,26 @@ fn small_list(value: Value) -> Option<Vec<u8>> {
         .and_then(|items| items.iter().map(small).collect())
 }
 
-fn optional_text(value: Value) -> Option<Option<String>> {
+/// A text or `null` field; `Err` for any other value.
+fn optional_text(value: Value) -> Result<Option<String>, ()> {
     if value.is_null() {
-        Some(None)
+        Ok(None)
     } else {
-        text(value).map(Some)
+        text(value).map(Some).ok_or(())
     }
 }
 
-fn optional_digest(value: Value) -> Option<Option<[u8; 32]>> {
+/// A 32-byte string or `null` field; `Err` for any other value.
+fn optional_digest(value: Value) -> Result<Option<[u8; 32]>, ()> {
     if value.is_null() {
-        Some(None)
+        Ok(None)
     } else {
         value
             .into_bytes()
             .ok()
             .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
             .map(Some)
+            .ok_or(())
     }
 }
 
@@ -574,10 +582,11 @@ impl GatewayModeBindingV1 {
     }
 }
 
-/// Bind the opened store of `host` to the compiled profile `id` (ADR-134
-/// §4 predicates 1 to 5 and §8), attaching the binding's epoch to the host's
-/// one adapter instance before its first write. This is the only way to
-/// obtain a [`GatewayModeBindingV1`].
+/// Bind the opened store of `host` to the compiled profile `id`.
+///
+/// This runs ADR-134 §4 predicates 1 to 5 and §8 and attaches the binding's
+/// epoch to the host's one adapter instance before its first write. It is
+/// the only way to obtain a [`GatewayModeBindingV1`].
 ///
 /// An empty store is bound at epoch 1; a store bound to the same profile is
 /// attached; a store bound to the revision this profile names as its previous
@@ -759,9 +768,11 @@ impl GatewayModeStoreLockV1 {
     }
 }
 
-/// `migrate-mode <sqlite-path> --from <id> --to <id>`: under the exclusive
-/// lock, advance the store's binding from `from` to `to` (epoch + 1 and a
-/// history entry of kind migrate). Returns the operator audit line.
+/// Run `migrate-mode <sqlite-path> --from <id> --to <id>`.
+///
+/// Under the exclusive lock, advance the store's binding from `from` to `to`
+/// (epoch + 1 and a history entry of kind migrate). Returns the operator
+/// audit line.
 ///
 /// # Errors
 /// Returns a lock, profile or store refusal; nothing changes on failure.
