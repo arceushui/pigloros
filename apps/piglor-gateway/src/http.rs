@@ -591,14 +591,18 @@ async fn post_ledger_prediction(
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let retry_after = retry_after_seconds(&self);
-        let mut response = ProblemV1::from(self).into_response();
-        if let Some(seconds) = retry_after {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
-        }
-        response
+        with_retry_after(ProblemV1::from(self).into_response(), retry_after)
     }
+}
+
+/// Add `Retry-After` to a response when the failure states one.
+fn with_retry_after(mut response: Response, retry_after: Option<u64>) -> Response {
+    if let Some(seconds) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    response
 }
 
 /// The `Retry-After` seconds of a failure that states when a retry may succeed.
@@ -698,8 +702,9 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
             (Code::ConsentInvalid, StatusCode::BAD_REQUEST, false)
         }
         GatewayError::Consent(_) => (Code::ConsentInvalid, StatusCode::FORBIDDEN, false),
-        GatewayError::LedgerWriteDisabled => (Code::Unauthorized, StatusCode::FORBIDDEN, false),
-        GatewayError::AuthorizationDenied(recorded) => denial_problem(recorded.denial()),
+        GatewayError::LedgerWriteDisabled | GatewayError::AuthorizationDenied(_) => {
+            refusal_problem(error)
+        }
         GatewayError::ActionAuthorizationUnavailable | GatewayError::AuthorizationUnavailable => {
             (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
         }
@@ -723,6 +728,15 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
             true,
         ),
         other => bound_problem(other),
+    }
+}
+
+/// The problem of a refused write or a recorded authority denial.
+const fn refusal_problem(error: &GatewayError) -> ProblemShape {
+    if let GatewayError::AuthorizationDenied(recorded) = error {
+        denial_problem(recorded.denial())
+    } else {
+        (ProblemCodeV1::Unauthorized, StatusCode::FORBIDDEN, false)
     }
 }
 
