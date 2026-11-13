@@ -271,7 +271,7 @@ fn row_and_generation_counts_are_bounded_at_their_exact_limits() -> TestResult {
         Selection::from_canonical_cbor(&encode(&selection_value(rows))?).err(),
         Some(Error::BoundsExceeded)
     );
-    let floors = [floors()[1]; 257];
+    let floors = vec![floors()[1]; 257];
     assert_eq!(
         Selection::new(input(&floors)).err(),
         Some(Error::BoundsExceeded)
