@@ -214,7 +214,7 @@ impl ScratchStore {
             path: std::env::temp_dir().join(format!(
                 "pos-gateway-conformance-{}-{unique}-{}.sqlite",
                 std::process::id(),
-                Ulid::new()
+                Ulid::generate()
             )),
         }
     }
