@@ -686,7 +686,7 @@ mod tests {
         )?)
     }
 
-    /// A SQLite store provisioned with one Local Principal and served by the
+    /// A `SQLite` store provisioned with one Local Principal and served by the
     /// production composition.
     struct Served {
         _directory: tempfile::TempDir,
@@ -1280,7 +1280,9 @@ mod tests {
                 &served.gateway,
                 None,
                 move |gateway| async move {
-                    drop(started.send(()));
+                    match started.send(()) {
+                        Ok(()) | Err(()) => {}
+                    }
                     drop(release_rx.await);
                     gateway.create_timeline("admitted").await
                 },
@@ -1298,7 +1300,9 @@ mod tests {
             tokio::spawn(async move { authorization.replace_authority(revoked).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!replacement.is_finished());
-        drop(release.send(()));
+        match release.send(()) {
+            Ok(()) | Err(()) => {}
+        }
         replacement.await??;
         let (status, problem) = create(&served.app, Some(actor()?)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);

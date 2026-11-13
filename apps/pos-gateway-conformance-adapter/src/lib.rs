@@ -27,7 +27,7 @@
 //!    failure when every exchange matched, else `subcase-mismatch`.
 //!
 //! The `authorized` composition is the production serve composition (#1361): a fixture Local
-//! Principal document is provisioned into a fresh SQLite store and the Gateway is composed over
+//! Principal document is provisioned into a fresh `SQLite` store and the Gateway is composed over
 //! it by `local_gateway`, which requires that Principal for every protected operation. No
 //! production authority is sourced from the fixture document (ADR-108). Results are
 //! Local-relaxation engineering evidence, not hosted conformance.

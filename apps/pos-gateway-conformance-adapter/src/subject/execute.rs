@@ -149,7 +149,7 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// it has one.
 ///
 /// `open` is the unprotected in-process harness Gateway. `authorized` is the production serve
-/// composition (#1361): a fixture Local Principal document is provisioned into a fresh SQLite
+/// composition (#1361): a fixture Local Principal document is provisioned into a fresh `SQLite`
 /// store with the production `provision_local_principal`, and the Gateway is composed over that
 /// store by `local_gateway`, which requires the recorded Principal for every protected
 /// operation.
@@ -173,7 +173,7 @@ fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)
     }
 }
 
-/// A fresh SQLite store holding the fixture Local Principal of the `authorized` composition:
+/// A fresh `SQLite` store holding the fixture Local Principal of the `authorized` composition:
 /// it may create Timelines and read their Events as the fixture actor, and holds no action or
 /// signal grant. Only its document is fixture data.
 fn provisioned_store() -> Option<ScratchStore> {
@@ -200,7 +200,7 @@ fn provisioned_store() -> Option<ScratchStore> {
         .map(|_| store)
 }
 
-/// One sub-case's SQLite file in the temporary directory, removed with its journal files when
+/// One sub-case's `SQLite` file in the temporary directory, removed with its journal files when
 /// the sub-case ends.
 struct ScratchStore {
     path: PathBuf,
