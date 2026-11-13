@@ -284,7 +284,7 @@ fn change_in_transaction(
 fn finish_binding_transaction<T>(conn: &Connection, step: BindingStep<T>) -> BindingStep<T> {
     let commit = step.as_ref().is_ok_and(Result::is_ok);
     conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })
-        .and_then(|()| step)
+        .and(step)
 }
 
 /// Run one binding change as a `BEGIN IMMEDIATE` transaction under
