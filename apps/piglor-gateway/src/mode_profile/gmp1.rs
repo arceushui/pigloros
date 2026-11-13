@@ -6,18 +6,18 @@
 use ciborium::Value;
 
 /// The record magic, distinct from EPF1's `EPF1`.
-pub(crate) const GMP1_MAGIC: &str = "GMP1";
+pub(super) const GMP1_MAGIC: &str = "GMP1";
 /// The one record version.
-pub(crate) const GMP1_VERSION: u8 = 1;
+pub(super) const GMP1_VERSION: u8 = 1;
 /// The one platform value: Linux.
-pub(crate) const GMP1_PLATFORM_LINUX: u8 = 1;
+pub(super) const GMP1_PLATFORM_LINUX: u8 = 1;
 /// The Local profile identifier.
-pub(crate) const LOCAL_MODE_PROFILE_ID: &str = "gateway-mode-local-v1";
+pub(super) const LOCAL_MODE_PROFILE_ID: &str = "gateway-mode-local-v1";
 /// The Air-Gapped profile identifier.
-pub(crate) const AIR_GAPPED_MODE_PROFILE_ID: &str = "gateway-mode-air-gapped-v1";
+pub(super) const AIR_GAPPED_MODE_PROFILE_ID: &str = "gateway-mode-air-gapped-v1";
 /// Startup predicates both modes require: linux, listeners-within-ingress,
 /// network-features-granted, no-network-ledger-source, store-mode-binding.
-pub(crate) const STARTUP_PREDICATES: [u8; 5] = [1, 2, 3, 4, 5];
+pub(super) const STARTUP_PREDICATES: [u8; 5] = [1, 2, 3, 4, 5];
 
 /// The reviewed meaning of one identifier: fields 2 and 4 to 9. Changing it
 /// needs an ADR-134 amendment.
@@ -52,16 +52,16 @@ const REVIEWED_MEANINGS: [ReviewedMeaningV1; 2] = [
 /// The fields of one GMP1 record other than its constant magic, version and
 /// platform.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Gmp1RecordV1 {
-    pub(crate) mode_profile_id: String,
-    pub(crate) semantic_version: String,
-    pub(crate) mode: u8,
-    pub(crate) network_allowed: bool,
-    pub(crate) ingress: Vec<u8>,
-    pub(crate) startup_predicates: Vec<u8>,
-    pub(crate) revocation_freshness: u8,
-    pub(crate) registration_profile_id: Option<String>,
-    pub(crate) previous_mode_profile_digest: Option<[u8; 32]>,
+pub(super) struct Gmp1RecordV1 {
+    pub(super) mode_profile_id: String,
+    pub(super) semantic_version: String,
+    pub(super) mode: u8,
+    pub(super) network_allowed: bool,
+    pub(super) ingress: Vec<u8>,
+    pub(super) startup_predicates: Vec<u8>,
+    pub(super) revocation_freshness: u8,
+    pub(super) registration_profile_id: Option<String>,
+    pub(super) previous_mode_profile_digest: Option<[u8; 32]>,
 }
 
 impl Gmp1RecordV1 {
@@ -70,7 +70,7 @@ impl Gmp1RecordV1 {
     ///
     /// # Errors
     /// Returns a description of the first broken rule.
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         REVIEWED_MEANINGS
             .iter()
             .find(|meaning| meaning.id == self.mode_profile_id)
@@ -100,7 +100,7 @@ impl Gmp1RecordV1 {
     /// shortest-form integers. Serializing a float-free, map-free value into
     /// memory cannot fail, and every consumer compares the bytes it relies
     /// on, so a partial write could never be accepted.
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let value = Value::Array(vec![
             Value::Text(GMP1_MAGIC.to_owned()),
             Value::Integer(GMP1_VERSION.into()),

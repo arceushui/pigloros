@@ -676,7 +676,7 @@ fn mark_mode_binding_stale(mut response: Response, stale: bool) -> Response {
 
 /// Fire `signal` when a response carries the stale-binding marker, so the
 /// serve loop answers that `503` and then stops and exits nonzero.
-pub(crate) fn stop_on_stale_mode_binding(
+pub(super) fn stop_on_stale_mode_binding(
     router: Router,
     signal: std::sync::Arc<crate::mode_profile::GatewayModeStaleSignalV1>,
 ) -> Router {
