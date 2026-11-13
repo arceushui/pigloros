@@ -161,6 +161,10 @@ pub enum OwnTracksCommandError {
     /// Owner-key material failed a fail-closed safety check.
     #[error(transparent)]
     OwnerKey(#[from] OwnTracksMaterialError),
+    /// The store's execution-mode binding refuses this offline writer
+    /// (ADR-134 §8).
+    #[error(transparent)]
+    ModeBinding(#[from] crate::mode_profile::GatewayModeBindingErrorV1),
 }
 
 #[derive(Deserialize)]
@@ -260,7 +264,7 @@ pub fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
             let policy_text = std::fs::read_to_string(policy_path)
                 .map_err(|_| OwnTracksCommandError::PolicyConfigurationUnavailable)?;
             let policy = parse_consent_policy(&policy_text)?;
-            let mut store = enrollment_store(sqlite_path)?;
+            let (_lock, mut store) = bound_enrollment_store(sqlite_path, false)?;
             if store
                 .owntracks_enrollment_status()
                 .map_err(|_| OwnTracksCommandError::EnrollmentTransitionUnavailable)?
@@ -304,7 +308,7 @@ pub fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
             ))
         }
         [command, sqlite_path, owner_key_path] if command == "rotate" => {
-            let mut store = enrollment_store(sqlite_path)?;
+            let (_lock, mut store) = bound_enrollment_store(sqlite_path, false)?;
             let status = store
                 .owntracks_enrollment_status()
                 .map_err(|_| OwnTracksCommandError::EnrollmentStateUnavailable)?;
@@ -322,7 +326,8 @@ pub fn execute(arguments: &[String]) -> Result<String, OwnTracksCommandError> {
             Ok(credential.terminal_display())
         }
         [command, sqlite_path] if command == "revoke" => {
-            let mut store = enrollment_store(sqlite_path)?;
+            // Revocation only reduces capability, so Air-Gapped allows it.
+            let (_lock, mut store) = bound_enrollment_store(sqlite_path, true)?;
             store
                 .revoke_owntracks_enrollment()
                 .map_err(|_| OwnTracksCommandError::EnrollmentTransitionUnavailable)?;
@@ -350,6 +355,35 @@ fn enrollment_store(
 ) -> Result<Box<dyn OwnTracksEnrollmentStore>, OwnTracksCommandError> {
     open_owntracks_enrollment_store(sqlite_path)
         .map_err(|_| OwnTracksCommandError::EnrollmentStateUnavailable)
+}
+
+/// Open the store of an offline `OwnTracks` writer (ADR-134 §8): under the
+/// store's shared mode lock, attached to its execution-mode binding. An
+/// unbound store is refused, and so is an Air-Gapped one unless
+/// `air_gapped_allowed`. The lock lives as long as the returned guard.
+fn bound_enrollment_store(
+    sqlite_path: &str,
+    air_gapped_allowed: bool,
+) -> Result<
+    (
+        crate::mode_profile::GatewayModeStoreLockV1,
+        pos_store::sqlite::SqliteStore,
+    ),
+    OwnTracksCommandError,
+> {
+    let lock = crate::mode_profile::GatewayModeStoreLockV1::shared(sqlite_path)?;
+    let mut store = pos_store::sqlite::SqliteStore::open(sqlite_path)
+        .map_err(|_| OwnTracksCommandError::EnrollmentStateUnavailable)?;
+    crate::mode_profile::attach_offline_writer_v1(&mut store)
+        .and_then(|mode| {
+            if air_gapped_allowed {
+                Ok(())
+            } else {
+                crate::mode_profile::refuse_air_gapped(mode)
+            }
+        })
+        .map(|()| (lock, store))
+        .map_err(OwnTracksCommandError::from)
 }
 
 const fn status_label(status: OwnTracksEnrollmentStatusV1) -> &'static str {
@@ -791,6 +825,11 @@ mod tests {
         let policy = directory.join("consent.toml");
         let timeline = {
             let mut store = SqliteStore::open(database.to_str().test_ok()?).test_ok()?;
+            crate::mode_profile::bind_test_store(
+                &mut store,
+                crate::mode_profile::GatewayModeProfileIdV1::Local,
+            )
+            .test_ok()?;
             store
                 .create_timeline("OwnTracks pair fixture")
                 .test_ok()?
@@ -832,6 +871,71 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-134 §8: `pair`, `rotate` and `revoke` are offline writers. They
+    /// refuse an unbound store and a store `migrate-mode` holds, and an
+    /// Air-Gapped store refuses `pair` and `rotate` but allows `revoke`.
+    #[test]
+    fn offline_owntracks_writers_follow_the_store_mode_binding(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temporary_path("mode-binding");
+        std::fs::create_dir(&directory).test_ok()?;
+        let database = directory
+            .join("owntracks.db")
+            .to_str()
+            .test_ok()?
+            .to_owned();
+        let owner_key = directory.join("owner.key").to_str().test_ok()?.to_owned();
+        let unbound = super::execute(&["revoke".to_owned(), database.clone()]).test_err()?;
+        assert!(unbound.to_string().contains("not bound"), "{unbound}");
+
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(&database).test_ok()?,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        )
+        .test_ok()?;
+        let refused = super::execute(&["rotate".to_owned(), database.clone(), owner_key.clone()])
+            .test_err()?;
+        assert!(
+            refused.to_string().contains("execution mode refuses"),
+            "{refused}"
+        );
+        let policy = directory.join("consent.toml");
+        std::fs::write(&policy, "schema_version = 1\nconsent_identity = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nconsent_revision = 1\npolicy_version = 1\nbinding_revision = 1\nwithdrawn = false\npurpose = \"local_pairing\"\nprecision = \"exact\"\nsource_time_bucket = \"minute\"\nvisibility = \"paired_devices_only\"\n").test_ok()?;
+        let refused = super::execute(&[
+            "pair".to_owned(),
+            database.clone(),
+            owner_key.clone(),
+            "--consent-policy".to_owned(),
+            policy.display().to_string(),
+            TimelineId::new().to_string(),
+            EntityId::new().to_string(),
+        ])
+        .test_err()?;
+        assert!(
+            refused.to_string().contains("execution mode refuses"),
+            "{refused}"
+        );
+        assert!(!std::path::Path::new(&owner_key).exists());
+        let migrating =
+            crate::mode_profile::GatewayModeStoreLockV1::exclusive(&database).test_ok()?;
+        let locked = super::execute(&["revoke".to_owned(), database.clone()]).test_err()?;
+        assert!(locked.to_string().contains("lock"), "{locked}");
+        drop(migrating);
+        assert!(
+            super::execute(&["revoke".to_owned(), database.clone()]).is_err_and(|error| error
+                .to_string()
+                == "OwnTracks enrollment transition is unavailable")
+        );
+        let unopenable =
+            super::execute(&["revoke".to_owned(), directory.display().to_string()]).test_err()?;
+        assert_eq!(
+            unopenable.to_string(),
+            "OwnTracks enrollment state is unavailable"
+        );
+        std::fs::remove_dir_all(directory).test_ok()?;
+        Ok(())
+    }
+
     #[test]
     fn rotate_and_revoke_use_only_the_enrollment_capability(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -843,6 +947,11 @@ mod tests {
         let owner_key = owner_key.to_str().test_ok()?.to_owned();
 
         let mut store = SqliteStore::open(&database).test_ok()?;
+        crate::mode_profile::bind_test_store(
+            &mut store,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        )
+        .test_ok()?;
         let timeline = store.create_timeline("OwnTracks fixture").test_ok()?;
         let entity = EntityId::new();
         store
@@ -1171,6 +1280,10 @@ mod coverage_entrypoints {
         test_ok(std::fs::write(&policy, policy_text()));
         let mut store = test_ok(pos_store::sqlite::SqliteStore::open(
             &database.display().to_string(),
+        ));
+        test_ok(crate::mode_profile::bind_test_store(
+            &mut store,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
         ));
         let timeline = test_ok(pos_core::EventStore::create_timeline(
             &mut store,

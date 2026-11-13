@@ -539,7 +539,8 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
         }
         ErasureHostErrorV1::AuthorizationDenied
         | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
+        | ErasureHostErrorV1::AdapterFailure
+        | ErasureHostErrorV1::ModeBindingStale => {
             CoreError::Storage("erasure host rejected experiment operation".to_owned())
         }
     }
@@ -1196,6 +1197,7 @@ mod host_store_tests {
             ErasureHostErrorV1::AuthorizationDenied,
             ErasureHostErrorV1::Conflict,
             ErasureHostErrorV1::AdapterFailure,
+            ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(matches!(host_error(error), CoreError::Storage(_)));
         }

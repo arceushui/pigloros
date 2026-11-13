@@ -40,6 +40,7 @@ pub mod fork_ancestry;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod fork_event_provenance;
+pub mod gateway_mode_binding;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -601,6 +602,12 @@ pub use fork_event_provenance::{
     MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
     MAX_FORK_EVENT_REGISTRAR_BYTES_V1, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1,
     MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+};
+pub use gateway_mode_binding::{
+    commit_epoch_for_append_v1, GatewayModeBindPermitV1, GatewayModeBindingErrorV1,
+    GatewayModeBindingHistoryEntryV1, GatewayModeBindingHostV1, GatewayModeBindingKindV1,
+    GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeMigrationPermitV1,
+    GatewayModeProfileRefV1, GatewayModeRotationPermitV1, MAX_GATEWAY_MODE_PROFILE_ID_BYTES,
 };
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};

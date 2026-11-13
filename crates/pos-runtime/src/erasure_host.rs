@@ -172,6 +172,7 @@ impl ErasureVerifiedInventoryQueryV1 for SingleUseVerifiedInventoryQueryV1 {
 
 trait ErasureHostStore:
     crate::ScheduledAdmissionStoreV1
+    + pos_core::GatewayModeBindingPortV1
     + ErasureInventoryPersistencePortV1
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
@@ -193,6 +194,7 @@ trait ErasureHostStore:
 impl<T> ErasureHostStore for T
 where
     T: crate::ScheduledAdmissionStoreV1
+        + pos_core::GatewayModeBindingPortV1
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1
@@ -1490,6 +1492,16 @@ impl ErasureExecutionHostV1 {
     /// Fork-admission session of this host's adapter through it. The port
     /// cannot read or change Timelines, Events, or erasure state.
     pub fn fork_admission_bootstrap(&mut self) -> &mut dyn ForkAdmissionAuthorityBootstrapPortV1 {
+        self.store.host_store()
+    }
+
+    /// Borrow the owned store's ADR-134 Gateway mode-binding port.
+    ///
+    /// The Gateway composition root binds or attaches this host's one adapter
+    /// instance through it before the adapter's first write, so every append
+    /// the host makes carries the process epoch. The port cannot read or
+    /// change Timelines, Events, or erasure state.
+    pub fn gateway_mode_binding(&mut self) -> &mut dyn pos_core::GatewayModeBindingPortV1 {
         self.store.host_store()
     }
 
@@ -4700,6 +4712,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
+        CoreError::ModeBindingStale => ErasureHostErrorV1::ModeBindingStale,
         _ => ErasureHostErrorV1::AdapterFailure,
     }
 }
@@ -6316,6 +6329,63 @@ mod tests {
                 self.inner
                     .recover_fork_admission(operation, successor_inventory)
             }
+        }
+    }
+
+    impl pos_core::GatewayModeBindingPortV1 for FaultStoreV1 {
+        fn bind_empty_store_mode(
+            &mut self,
+            permit: pos_core::GatewayModeBindPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::bind_empty_store_mode(&mut self.inner, permit)
+        }
+
+        fn attach_mode_binding(
+            &mut self,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::attach_mode_binding(&mut self.inner)
+        }
+
+        fn rotate_mode(
+            &mut self,
+            permit: pos_core::GatewayModeRotationPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::rotate_mode(&mut self.inner, permit)
+        }
+
+        fn migrate_mode(
+            &mut self,
+            permit: pos_core::GatewayModeMigrationPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::migrate_mode(&mut self.inner, permit)
+        }
+
+        fn load_mode_binding(
+            &self,
+        ) -> Result<Option<pos_core::GatewayModeBindingRecordV1>, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::load_mode_binding(&self.inner)
+        }
+
+        fn load_mode_binding_history(
+            &self,
+        ) -> Result<
+            Vec<pos_core::GatewayModeBindingHistoryEntryV1>,
+            pos_core::GatewayModeBindingErrorV1,
+        > {
+            pos_core::GatewayModeBindingPortV1::load_mode_binding_history(&self.inner)
+        }
+
+        fn load_commit_epoch(
+            &self,
+            timeline: TimelineId,
+            local_seq: Seq,
+        ) -> Result<Option<std::num::NonZeroU64>, pos_core::GatewayModeBindingErrorV1> {
+            pos_core::GatewayModeBindingPortV1::load_commit_epoch(&self.inner, timeline, local_seq)
         }
     }
 

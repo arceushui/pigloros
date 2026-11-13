@@ -18,10 +18,10 @@ use std::{
 
 use piglor_ledger::LedgerView;
 use pos_core::ForkAdmissionHostRecordV1;
-use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{
     sqlite::SqliteStore, ForkAdmissionAuthoritySessionV1, ForkEventAuthorityErrorV1,
-    ForkEventPermitIssuerV1, StoreConfig,
+    ForkEventPermitIssuerV1,
 };
 
 use crate::{
@@ -34,25 +34,50 @@ use crate::{
         open_fork_admission_session, reconcile_startup, LocalForkAdmissionCoordinatorV1,
     },
     local_fork_listener::bind_pathname_listener,
+    mode_profile::{attach_offline_writer_v1, GatewayModeBindingV1, GatewayModeStoreLockV1},
     router_for_addr,
     startup::{
-        announce_listening, open_recovered_erasure_host, stop_after_bind_failure,
-        GatewayHostStoreV1,
+        announce_listening, announce_mode_binding, bound_router, shutdown_or_stale,
+        stale_binding_exit, stop_after_bind_failure,
     },
     AppState, Gateway, LedgerWriteMode, OwnTracksOwnerKey,
 };
 
 type ServeError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The private paths of one local Fork-admission deployment.
-#[derive(Clone, Copy, Debug)]
-pub struct LocalForkAdmissionPathsV1<'a> {
-    /// The one `SQLite` database the HTTP Gateway and the listener share.
-    pub sqlite_path: &'a str,
+/// The managed credentials of one local Fork-admission deployment (FACR1,
+/// FAHK1 and the FCP1 classifier profile), decoded before the database opens.
+pub struct LocalForkAdmissionCredentialsV1 {
+    credentials: LocalForkAuthenticationCredentialsV1,
+    profile: ForkClassifierProfileV1,
+}
+
+/// Load and validate the managed credentials in the validated systemd
+/// credential directory (ADR-107 r6 startup step 1).
+///
+/// # Errors
+/// Returns an error when a credential is missing, unprotected or invalid.
+pub fn load_local_fork_admission_credentials(
+    credential_directory: &Path,
+) -> io::Result<LocalForkAdmissionCredentialsV1> {
+    managed_credentials(credential_directory).map(|(credentials, profile)| {
+        LocalForkAdmissionCredentialsV1 {
+            credentials,
+            profile,
+        }
+    })
+}
+
+/// One local Fork-admission deployment ready to serve: the recovered erasure
+/// host of its store, already bound to its execution mode, the decoded
+/// managed credentials, and the ADR-109 pathname socket.
+pub struct LocalForkAdmissionStartV1<'a> {
+    /// The one recovered host the HTTP Gateway and the listener share.
+    pub host: ErasureExecutionHostV1,
+    /// The decoded managed credentials.
+    pub credentials: LocalForkAdmissionCredentialsV1,
     /// The ADR-109 pathname socket.
     pub socket_path: &'a Path,
-    /// The validated systemd credential directory.
-    pub credential_directory: &'a Path,
 }
 
 /// Running local Fork-admission listener owned by the Gateway process.
@@ -139,82 +164,86 @@ impl Drop for LocalForkAdmissionListenerV1 {
 /// # Errors
 /// Returns an error when the credentials are unavailable or invalid, or when
 /// the store cannot be opened or provisioned.
+///
+/// An offline writer (ADR-134 §8): it holds the store's shared mode lock and
+/// attaches the store's execution-mode binding before it writes, so an
+/// unbound store and a store `migrate-mode` holds are refused.
 pub fn provision_local_fork_admission_authority(
     sqlite_path: &str,
     credential_directory: &Path,
 ) -> io::Result<()> {
     let credentials = credentials(credential_directory)?;
-    provision_with_credentials(sqlite_path, &credentials)
+    let lock = GatewayModeStoreLockV1::shared(sqlite_path).map_err(io::Error::other)?;
+    let provisioned = SqliteStore::open(sqlite_path)
+        .map_err(io::Error::other)
+        .and_then(|mut store| {
+            attach_offline_writer_v1(&mut store)
+                .map_err(io::Error::other)
+                .and_then(|_| provision_with_credentials(&mut store, &credentials))
+        });
+    drop(lock);
+    provisioned
 }
 
 fn provision_with_credentials(
-    sqlite_path: &str,
+    store: &mut SqliteStore,
     credentials: &LocalForkAuthenticationCredentialsV1,
 ) -> io::Result<()> {
-    let mut store = SqliteStore::open(sqlite_path).map_err(io::Error::other)?;
     credentials
-        .provision_authority(&mut store)
+        .provision_authority(store)
         .map(|_| ())
         .map_err(io::Error::other)
 }
 
 /// Serve the HTTP Gateway and the local Fork-admission listener over the one
-/// erasure host of `paths.sqlite_path` (ADR-109 revision 9, Decision 1).
+/// erasure host of the deployment's store (ADR-109 revision 9, Decision 1).
 ///
 /// Startup fails closed in this order, and no listener binds before its
-/// last step: the three managed credentials (FACR1, FAHK1, and the FCP1
-/// classifier profile) are validated and decoded before the database opens;
-/// the host recovers a verified inventory with `composition`; the read-only
-/// FCP1 preflight and then the FAO1 open proof run on the host's own adapter;
-/// the journal is reconciled there; the host and the Fork-admission slot,
-/// which alone holds the session's permit issuer and the profile, move into
-/// one `StoreExecutor`; then TCP and, last, the Unix pathname socket bind
-/// (ADR-109 revision 12). Shutdown stops TCP, then the
-/// listener, then drains the executor. The binary passes the closed
-/// composition; no flag, environment variable, or credential selects another.
+/// last step: the caller decodes the three managed credentials (FACR1, FAHK1,
+/// and the FCP1 classifier profile) with
+/// [`load_local_fork_admission_credentials`] before the database opens, then
+/// recovers the host with the closed composition and binds it to its
+/// execution mode ([`crate::mode_profile::bind_gateway_mode_v1`], ADR-134
+/// §4); this function runs the read-only FCP1 preflight and then the FAO1
+/// open proof on the host's own adapter, reconciles the journal there, moves
+/// the host and the Fork-admission slot, which alone holds the session's
+/// permit issuer and the profile, into one `StoreExecutor`, and binds TCP
+/// and, last, the Unix pathname socket (ADR-109 revision 12). Fork admission
+/// therefore never runs unbound. Shutdown stops TCP, then the listener, then
+/// drains the executor; a stale-binding refusal stops it the same way and
+/// the call then fails.
 ///
 /// # Errors
-/// Returns the first startup, serve, listener, or executor shutdown error.
+/// Returns the first startup, serve, listener, executor shutdown or stale
+/// binding error.
 pub async fn serve_local_fork_admission(
     addr: SocketAddr,
-    paths: LocalForkAdmissionPathsV1<'_>,
+    start: LocalForkAdmissionStartV1<'_>,
+    mode: &GatewayModeBindingV1,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: &ErasureCoordinatorCompositionV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     ledger: (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
-    let managed = managed_credentials(paths.credential_directory)?;
-    let started =
-        open_with_credentials(paths.sqlite_path, managed, owntracks_owner_key, composition)?;
-    serve_started(addr, started, paths.socket_path, shutdown, ledger).await
+    let started = open_with_credentials(
+        start.host,
+        (start.credentials.credentials, start.credentials.profile),
+        owntracks_owner_key,
+    )?;
+    serve_started(addr, started, start.socket_path, mode, shutdown, ledger).await
 }
 
-/// Startup steps 2 to 5: open the one host with `composition`, preflight the
-/// FCP1 profile and open the ADR-106 session on its adapter, reconcile the
-/// journal there, and move the host with its Fork-admission slot into the
-/// Gateway's `StoreExecutor`.
+/// Startup steps 2a to 5 on the recovered host: preflight the FCP1 profile
+/// and open the ADR-106 session on its adapter, reconcile the journal there,
+/// and move the host with its Fork-admission slot into the Gateway's
+/// `StoreExecutor`.
 fn open_with_credentials(
-    sqlite_path: &str,
+    mut host: ErasureExecutionHostV1,
     (credentials, profile): (
         LocalForkAuthenticationCredentialsV1,
         ForkClassifierProfileV1,
     ),
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: &ErasureCoordinatorCompositionV1,
 ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
-    // Startup step 2: the one read-write adapter and erasure host of the store.
-    let store = if owntracks_owner_key.is_some() {
-        GatewayHostStoreV1::OwnTracks
-    } else {
-        GatewayHostStoreV1::Standard
-    };
-    let mut host = open_recovered_erasure_host(
-        StoreConfig::Sqlite {
-            path: sqlite_path.to_owned(),
-        },
-        store,
-        composition,
-    )?;
     let (session, issuer, record) = open_profiled_session(&mut host, &credentials, &profile)?;
     let tuples = host.reconcile_fork_delivery_journal(&session);
     reconcile_startup(
@@ -300,16 +329,20 @@ async fn serve_started(
     addr: SocketAddr,
     (gateway, coordinator): (Gateway, LocalForkAdmissionCoordinatorV1),
     socket_path: &Path,
+    mode: &GatewayModeBindingV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
-    let app = router_for_addr(
-        addr,
-        AppState {
-            gateway: gateway.clone(),
-            ledger_view,
-            ledger_write,
-        },
+    let app = bound_router(
+        router_for_addr(
+            addr,
+            AppState {
+                gateway: gateway.clone(),
+                ledger_view,
+                ledger_write,
+            },
+        ),
+        mode,
     );
     let tcp = match tokio::net::TcpListener::bind(addr).await {
         Ok(tcp) => tcp,
@@ -320,13 +353,17 @@ async fn serve_started(
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
     announce_listening(addr);
-    let serve_result = axum::serve(tcp, app).with_graceful_shutdown(shutdown).await;
+    announce_mode_binding(mode);
+    let serve_result = axum::serve(tcp, app)
+        .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
+        .await;
     let stop_result = listener.stop().await;
     let shutdown_result = gateway.shutdown().await.map_err(ServeError::from);
     serve_result
         .and(stop_result)
         .map_err(ServeError::from)
         .and(shutdown_result)
+        .and_then(|()| stale_binding_exit(mode).map_err(ServeError::from))
 }
 
 /// Bind the Unix pathname socket last and spawn the listener thread.
@@ -380,6 +417,69 @@ fn managed_credentials(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::mode_profile::{
+        bind_gateway_mode_v1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
+    };
+    use crate::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
+    use pos_runtime::ErasureCoordinatorCompositionV1;
+    use pos_store::StoreConfig;
+
+    /// Open the recovered host of `path` and run startup steps 2a to 5.
+    fn open_at(
+        path: &str,
+        managed: (
+            LocalForkAuthenticationCredentialsV1,
+            ForkClassifierProfileV1,
+        ),
+        owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+        composition: &ErasureCoordinatorCompositionV1,
+    ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
+        let store = if owntracks_owner_key.is_some() {
+            GatewayHostStoreV1::OwnTracks
+        } else {
+            GatewayHostStoreV1::Standard
+        };
+        open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: path.to_owned(),
+            },
+            store,
+            composition,
+        )
+        .and_then(|host| open_with_credentials(host, managed, owntracks_owner_key))
+    }
+
+    /// The loopback Fork-admission composition of the managed deployment.
+    fn fork_composition() -> GatewayServeCompositionV1 {
+        GatewayServeCompositionV1 {
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            owntracks_ingress: false,
+            fork_admission_socket: true,
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// The first `serve` of an empty store binds it to the Local mode.
+    fn bind_world(world: &World) -> TestResult {
+        let mut host = open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        bind_gateway_mode_v1(
+            GatewayModeProfileIdV1::Local,
+            &fork_composition(),
+            &mut host,
+        )?;
+        Ok(())
+    }
+
+    fn test_mode() -> GatewayModeBindingV1 {
+        crate::mode_profile::test_binding(GatewayModeProfileIdV1::Local, [])
+    }
     use crate::{
         executor::{ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, StoreExecutor},
         local_fork_authentication::{
@@ -702,8 +802,8 @@ mod tests {
                 ],
             )?,
         )?;
+        provision_with_credentials(&mut store, &current_peer_credentials()?)?;
         drop(store);
-        provision_with_credentials(world.path()?, &current_peer_credentials()?)?;
         Ok((world, parents))
     }
 
@@ -712,7 +812,7 @@ mod tests {
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
         let (gateway, coordinator) =
-            open_with_credentials(world.path()?, current_peer_managed()?, None, composition)?;
+            open_at(world.path()?, current_peer_managed()?, None, composition)?;
         let listener = start_listener(coordinator, &world.socket)?;
         Ok((gateway, listener))
     }
@@ -1641,7 +1741,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_executor_answers_busy_without_journal_rows() -> TestResult {
         let (world, parents) = provisioned_world(&["a7 parent"])?;
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1758,9 +1858,7 @@ mod tests {
         authorize_request(&world, &test_composition(&authority)?)?;
         let authority_before = authority_rows(&world)?;
         let graph_before = graph_rows(&world)?;
-        assert!(
-            open_with_credentials(world.path()?, current_peer_managed()?, None, &closed).is_err()
-        );
+        assert!(open_at(world.path()?, current_peer_managed()?, None, &closed).is_err());
         assert_eq!(authority_rows(&world)?, authority_before);
         assert_eq!(graph_rows(&world)?, graph_before);
 
@@ -1769,10 +1867,10 @@ mod tests {
             .path()
             .to_str()
             .ok_or("runtime path is not UTF-8")?;
-        assert!(open_with_credentials(unopenable, current_peer_managed()?, None, &closed).is_err());
+        assert!(open_at(unopenable, current_peer_managed()?, None, &closed).is_err());
 
         let unprovisioned = unprovisioned_world()?;
-        assert!(open_with_credentials(
+        assert!(open_at(
             unprovisioned.path()?,
             current_peer_managed()?,
             None,
@@ -1796,9 +1894,7 @@ mod tests {
             params![[51_u8; 32].as_slice(), [52_u8; 32].as_slice()],
         )?;
         drop(connection);
-        assert!(
-            open_with_credentials(corrupt.path()?, current_peer_managed()?, None, &closed).is_err()
-        );
+        assert!(open_at(corrupt.path()?, current_peer_managed()?, None, &closed).is_err());
         assert_eq!(delivery_state(&corrupt, 52)?, Some(0));
         for failed in [&world, &unprovisioned, &corrupt] {
             assert!(!failed.socket.exists());
@@ -1813,6 +1909,24 @@ mod tests {
     // -----------------------------------------------------------------
     // Credential, lifecycle, and framing boundaries.
     // -----------------------------------------------------------------
+
+    /// ADR-134 §8: provisioning is an offline writer. It refuses an unbound
+    /// store and a store `migrate-mode` holds, and never binds.
+    #[test]
+    fn provisioning_is_an_offline_writer_of_a_bound_store() -> TestResult {
+        let world = unprovisioned_world()?;
+        let credentials = protected_credential_directory(world.runtime.path())?;
+        protected_credentials(&credentials, [7; 32], [8; 32])?;
+        assert!(provision_local_fork_admission_authority(world.path()?, &credentials).is_err());
+        assert!(authority_rows(&world)?.is_empty());
+        bind_world(&world)?;
+        let migrating = GatewayModeStoreLockV1::exclusive(world.path()?)?;
+        assert!(provision_local_fork_admission_authority(world.path()?, &credentials).is_err());
+        drop(migrating);
+        provision_local_fork_admission_authority(world.path()?, &credentials)?;
+        assert!(!authority_rows(&world)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn provision_rejects_missing_protected_credentials() -> TestResult {
@@ -1863,26 +1977,40 @@ mod tests {
         Ok(())
     }
 
-    fn paths<'a>(
-        world: &'a World,
-        credentials: &'a Path,
-    ) -> io::Result<LocalForkAdmissionPathsV1<'a>> {
-        Ok(LocalForkAdmissionPathsV1 {
-            sqlite_path: world.path()?,
-            socket_path: &world.socket,
-            credential_directory: credentials,
-        })
-    }
-
+    /// Main's managed serve sequence: decode the credentials before the
+    /// database opens, recover the host, bind its execution mode, serve.
     async fn serve_for_test(
-        paths: LocalForkAdmissionPathsV1<'_>,
+        world: &World,
+        credentials: &Path,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServeError> {
-        let addr = "127.0.0.1:0".parse()?;
-        let composition = ErasureCoordinatorCompositionV1::closed();
+        let admission = load_local_fork_admission_credentials(credentials)?;
+        let mut host = open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let mode = bind_gateway_mode_v1(
+            GatewayModeProfileIdV1::Local,
+            &fork_composition(),
+            &mut host,
+        )?;
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        serve_local_fork_admission(addr, paths, None, &composition, shutdown, ledger).await?;
-        Ok(())
+        serve_local_fork_admission(
+            "127.0.0.1:0".parse()?,
+            LocalForkAdmissionStartV1 {
+                host,
+                credentials: admission,
+                socket_path: &world.socket,
+            },
+            &mode,
+            None,
+            shutdown,
+            ledger,
+        )
+        .await
     }
 
     /// Step 1 and step 3: missing credentials fail before the database is
@@ -1892,16 +2020,14 @@ mod tests {
     ) -> TestResult {
         let world = unprovisioned_world()?;
         let missing = world.runtime.path().join("missing-credentials");
-        assert!(serve_for_test(paths(&world, &missing)?, async {})
-            .await
-            .is_err());
+        assert!(serve_for_test(&world, &missing, async {}).await.is_err());
         assert!(!world.database.exists());
         assert!(!world.socket.exists());
 
         let credentials = protected_credential_directory(world.runtime.path())?;
         let profile = profile_bytes(&[7])?;
         managed_credentials(&credentials, ([7; 32], [8; 32]), &profile)?;
-        assert!(serve_for_test(paths(&world, &credentials)?, async {})
+        assert!(serve_for_test(&world, &credentials, async {})
             .await
             .is_err());
         assert!(!world.socket.exists());
@@ -1914,7 +2040,7 @@ mod tests {
         install_profile(&credentials, &profile)?;
         for (adapter, host) in [([9; 32], [8; 32]), ([7; 32], [9; 32])] {
             protected_credentials(&credentials, adapter, host)?;
-            assert!(serve_for_test(paths(&world, &credentials)?, async {})
+            assert!(serve_for_test(&world, &credentials, async {})
                 .await
                 .is_err());
             assert!(!world.socket.exists());
@@ -1930,10 +2056,11 @@ mod tests {
         let world = unprovisioned_world()?;
         let credentials = protected_credential_directory(world.runtime.path())?;
         protected_credentials(&credentials, [7; 32], [8; 32])?;
+        bind_world(&world)?;
         provision_local_fork_admission_authority(world.path()?, &credentials)?;
         install_profile(&credentials, &profile_bytes(&[7])?)?;
         let socket = world.socket.clone();
-        serve_for_test(paths(&world, &credentials)?, async move {
+        serve_for_test(&world, &credentials, async move {
             assert!(socket.exists());
         })
         .await?;
@@ -1947,7 +2074,7 @@ mod tests {
     async fn bind_failures_stop_what_was_started() -> TestResult {
         let (world, _) = provisioned_world(&[])?;
         let occupied = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let started = open_with_credentials(
+        let started = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1959,6 +2086,7 @@ mod tests {
             occupied.local_addr()?,
             started,
             &world.socket,
+            &test_mode(),
             async {},
             ledger
         )
@@ -1969,7 +2097,7 @@ mod tests {
         assert!(!world.socket.exists());
 
         fs::set_permissions(world.runtime.path(), fs::Permissions::from_mode(0o777))?;
-        let started = open_with_credentials(
+        let started = open_at(
             world.path()?,
             current_peer_managed()?,
             None,
@@ -1981,6 +2109,7 @@ mod tests {
             "127.0.0.1:0".parse()?,
             started,
             &world.socket,
+            &test_mode(),
             async {},
             ledger
         )
@@ -1998,7 +2127,7 @@ mod tests {
         let owner_key_path = world.runtime.path().join("owner.key");
         crate::owntracks::create_or_load_owner_key(&owner_key_path)?;
         let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             current_peer_managed()?,
             Some(&owner_key),
@@ -2126,7 +2255,7 @@ mod tests {
         world: &World,
         descriptors: &[u8],
     ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
-        let (gateway, coordinator) = open_with_credentials(
+        let (gateway, coordinator) = open_at(
             world.path()?,
             (current_peer_credentials()?, profile_from(descriptors)?),
             None,
@@ -2171,7 +2300,7 @@ mod tests {
         stop(&world, gateway, listener).await?;
 
         let authority_before = authority_rows(&world)?;
-        assert!(open_with_credentials(
+        assert!(open_at(
             world.path()?,
             (current_peer_credentials()?, profile_from(&[9])?),
             None,
@@ -2269,7 +2398,7 @@ mod tests {
             fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700))?;
             write(credentials.as_path())?;
             assert!(
-                serve_for_test(paths(&world, &credentials)?, async {})
+                serve_for_test(&world, &credentials, async {})
                     .await
                     .is_err(),
                 "{name} must fail closed"

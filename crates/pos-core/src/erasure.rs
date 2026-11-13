@@ -337,6 +337,9 @@ pub enum ErasureHostErrorV1 {
     Conflict,
     /// The owned persistence adapter failed without exposing payload details.
     AdapterFailure,
+    /// The owned adapter's attached Gateway mode-binding epoch is stale
+    /// (ADR-134 §8); the write committed nothing.
+    ModeBindingStale,
 }
 
 impl ErasureHostErrorV1 {
@@ -350,6 +353,7 @@ impl ErasureHostErrorV1 {
             Self::AuthorizationDenied => 3,
             Self::Conflict => 4,
             Self::AdapterFailure => 5,
+            Self::ModeBindingStale => 6,
         }
     }
 }

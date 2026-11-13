@@ -419,6 +419,12 @@ fn retained_receipt_rebuilds_the_original_receipt_without_the_basis() {
         timeline(1),
         &events,
     ));
+    assert_eq!(original.mode_binding_epoch(), None);
+    let epoch = std::num::NonZeroU64::new(3);
+    let bound = original.clone().with_mode_binding_epoch(epoch);
+    assert_eq!(bound.mode_binding_epoch(), epoch);
+    assert_ne!(bound, original);
+    assert_eq!(bound.with_mode_binding_epoch(None), original);
 
     assert_eq!(
         PipelineCommitReceiptV1::try_from_retained_events(

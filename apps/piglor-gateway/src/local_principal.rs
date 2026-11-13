@@ -253,12 +253,24 @@ pub fn provision_local_principal_from_credentials(
             .and_then(|text| LocalPrincipalProvisionV1::from_toml(text).map_err(io::Error::other))
     })
     .and_then(|provision| {
-        pos_store::sqlite::SqliteStore::open(sqlite_path)
+        // An offline writer (ADR-134 §8): under the shared mode lock, attach
+        // the store's binding before writing; it never binds.
+        crate::mode_profile::GatewayModeStoreLockV1::shared(sqlite_path)
             .map_err(io::Error::other)
-            .and_then(|mut store| {
-                provision_local_principal(&mut store, &provision)
-                    .map(|_| ())
+            .and_then(|lock| {
+                let provisioned = pos_store::sqlite::SqliteStore::open(sqlite_path)
                     .map_err(io::Error::other)
+                    .and_then(|mut store| {
+                        crate::mode_profile::attach_offline_writer_v1(&mut store)
+                            .map_err(io::Error::other)
+                            .and_then(|_| {
+                                provision_local_principal(&mut store, &provision)
+                                    .map(|_| ())
+                                    .map_err(io::Error::other)
+                            })
+                    });
+                drop(lock);
+                provisioned
             })
     })
 }
@@ -1613,6 +1625,17 @@ mod tests {
         install(b"principal_id = ")?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
         install(document(&actor, "\"timeline.create\"").as_bytes())?;
+        // ADR-134 §8: an offline writer refuses an unbound store and a store
+        // `migrate-mode` holds; the first `serve` binds it.
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(path)?,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        )?;
+        let migrating = crate::mode_profile::GatewayModeStoreLockV1::exclusive(path)?;
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        drop(migrating);
+        assert!(load_local_principal(&SqliteStore::open(path)?)?.is_none());
         assert!(provision_local_principal_from_credentials(
             directory
                 .path()
