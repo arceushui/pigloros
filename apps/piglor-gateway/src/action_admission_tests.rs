@@ -1796,14 +1796,20 @@ async fn a_window_flush_refused_by_a_saturated_store_succeeds_on_its_retry() -> 
         .block_worker_for_test()
         .map_err(|error| format!("{error:?}"))?;
     assert!(fixture.gateway.store.saturate_for_test() > 0);
-    let ((), released) = tokio::join!(
-        crate::flush_expired_denial_window(&store, &authorization, std::time::Instant::now()),
-        async {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            release.send(()).is_ok()
-        }
+    let flush =
+        crate::flush_expired_denial_window(&store, &authorization, std::time::Instant::now());
+    tokio::pin!(flush);
+    // The flush cannot finish while the worker is blocked: its first attempt
+    // is refused and it waits out the retry delay. A flush that skipped the
+    // retry, or retried at once, would finish here and fail this assertion.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut flush)
+            .await
+            .is_err()
     );
-    assert!(released);
+    assert!(fixture.authorization.denial_markers_pending());
+    assert!(release.send(()).is_ok());
+    flush.await;
 
     // Only the retry could have recorded the count.
     assert!(!fixture.authorization.denial_markers_pending());
