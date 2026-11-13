@@ -300,6 +300,16 @@
           },
           "default": {
             "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }

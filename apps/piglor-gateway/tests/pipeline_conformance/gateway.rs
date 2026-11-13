@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use piglor_gateway::{
     Gateway, GatewayAuthenticationAdapter, GatewayAuthenticationError,
-    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationRequest, GatewayError,
+    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationRequest,
+    GatewayDenialEvidenceError, GatewayDenialEvidencePort, GatewayDenialRecordV1, GatewayError,
     HumanActionRequest, LocalAuthenticationAdapter,
 };
 use pos_core::{
@@ -124,7 +125,18 @@ fn authorization(
         pinned.view.clone(),
         pinned.registry.clone(),
         revocation_state_current,
+        Arc::new(AcceptedEvidence),
     )
+}
+
+/// Denial evidence the precedence capture does not inspect: it accepts every
+/// record, so each rung answers its typed denial.
+struct AcceptedEvidence;
+
+impl GatewayDenialEvidencePort for AcceptedEvidence {
+    fn persist(&self, _record: &GatewayDenialRecordV1) -> Result<(), GatewayDenialEvidenceError> {
+        Ok(())
+    }
 }
 
 fn decide(authorization: &GatewayAuthorization, actor: EntityId) -> String {

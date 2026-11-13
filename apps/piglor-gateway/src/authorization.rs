@@ -8,12 +8,14 @@
 //! The public seam implements the accepted [ADR-059 composition](https://redmine.piglor.com/projects/pigloros/wiki/ADR-059_Participant_Knowledge_Observation_and_Structured_Causal_Trace)
 //! tracked by Redmine #180; the wiki page remains canonical.
 
+use crate::denial_evidence::{GatewayDenialEvidencePort, GatewayDenialRecordV1};
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
-    Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorizationOutcomeV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1,
+    EntityId, EventId, Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId,
+    WallTime,
 };
 use std::{
     collections::VecDeque,
@@ -118,6 +120,30 @@ impl GatewayAuthenticationAdapter for AirGappedAuthenticationAdapter {
     }
 }
 
+/// The closed public family of one denied authority decision.
+///
+/// Each family is one problem `code` of the Gateway v1 contract; the mapping
+/// from the AUD1 outcome is fixed by [`GatewayAuthorization::authorize`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum GatewayAuthorityDenial {
+    /// The authentication evidence is outside its validity window, or the
+    /// host cannot resolve it to a Principal its authority trusts.
+    #[error("authentication not accepted")]
+    Unauthenticated,
+    /// No trusted grant or capability covers the operation.
+    #[error("authorization denied")]
+    Unauthorized,
+    /// The grant or consent was revoked at the evaluation fence, or expired.
+    #[error("authority revoked")]
+    Revoked,
+    /// The consent the operation requires is absent or does not bind it.
+    #[error("consent invalid")]
+    ConsentInvalid,
+    /// The host cannot vouch that its revocation state is current.
+    #[error("revocation state unavailable")]
+    RevocationStateStale,
+}
+
 /// Stable Gateway authorization failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum GatewayAuthorizationError {
@@ -127,8 +153,14 @@ pub enum GatewayAuthorizationError {
     RequestUnavailable,
     #[error("authorization state unavailable")]
     AuthorityUnavailable,
+    /// A complete decision denied the operation and its durable evidence is
+    /// recorded.
     #[error("authorization denied")]
-    AuthorizationDenied,
+    Denied(GatewayAuthorityDenial),
+    /// A decision denied the operation but its evidence could not be made
+    /// durable, so the denial is not answered.
+    #[error("authorization evidence unavailable")]
+    EvidenceUnavailable,
 }
 
 /// Exact Timeline target bound into one protected Gateway operation.
@@ -421,17 +453,20 @@ pub struct GatewayAuthorization {
     revocation_state_current: bool,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
+    evidence: Arc<dyn GatewayDenialEvidencePort>,
 }
 
 impl GatewayAuthorization {
-    /// Bind one authentication adapter to a trusted, pinned authority snapshot.
+    /// Bind one authentication adapter to a trusted, pinned authority
+    /// snapshot and the durable evidence seam every denial is recorded in.
     #[must_use]
     pub fn new(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
         authority: AuthorityViewV1,
         registry: AuthorityRegistrySnapshotV1,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
     ) -> Self {
-        Self::new_with_revocation_state(adapter, authority, registry, true)
+        Self::new_with_revocation_state(adapter, authority, registry, true, evidence)
     }
 
     /// Bind one adapter to host-pinned authority state with an explicit
@@ -439,13 +474,14 @@ impl GatewayAuthorization {
     ///
     /// Local hosts normally pass `true`. An Air-Gapped host must pass `false`
     /// until its pinned revocation snapshot is current; authorization then
-    /// fails closed with [`GatewayAuthorizationError::AuthorizationDenied`].
+    /// fails closed with [`GatewayAuthorityDenial::RevocationStateStale`].
     #[must_use]
     pub fn new_with_revocation_state(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
         authority: AuthorityViewV1,
         registry: AuthorityRegistrySnapshotV1,
         revocation_state_current: bool,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
     ) -> Self {
         Self {
             adapter,
@@ -455,18 +491,14 @@ impl GatewayAuthorization {
             revocation_state_current,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
+            evidence,
         }
     }
 
-    /// Evaluate a request and return its complete structured decision.
-    ///
-    /// A denied decision remains available to callers that need a typed audit
-    /// outcome.  Use [`Self::authorize`] for a stable fail-closed result.
-    ///
-    /// # Errors
-    /// Returns a stable authentication, authority-state, or request-validation
-    /// error when the host cannot establish a complete decision.
-    pub fn evaluate(
+    /// Evaluate a request and return its complete structured decision,
+    /// allowed or denied, without recording evidence. Only
+    /// [`Self::authorize`] answers a caller.
+    fn evaluate(
         &self,
         mut request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
@@ -500,20 +532,76 @@ impl GatewayAuthorization {
 
     /// Evaluate and require an active authorization decision.
     ///
+    /// A denied decision is durably recorded through the evidence seam before
+    /// its typed [`GatewayAuthorizationError::Denied`] is returned. The AUD1
+    /// outcome maps to one [`GatewayAuthorityDenial`]: `RevokedAtFence` and a
+    /// grant or consent `Expired` to `Revoked`, an `Expired` outside the
+    /// authentication window or an unresolved Principal to `Unauthenticated`,
+    /// `ConsentMissing` to `ConsentInvalid`, `RevocationStateStale` to itself,
+    /// and `ParentInvalid` or any other fail-closed answer to `Unauthorized`.
+    ///
     /// # Errors
-    /// Returns a stable authorization-denied error or one of the host
-    /// authentication, authority-state, or request-validation errors.
+    /// Returns the typed denial, [`GatewayAuthorizationError::EvidenceUnavailable`]
+    /// when the denial cannot be recorded, or one of the host authentication,
+    /// authority-state, or request-validation errors.
     pub fn authorize(
         &self,
         request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
         self.evaluate(request).and_then(|decision| {
-            if decision.is_allowed() {
-                Ok(decision)
-            } else {
-                Err(GatewayAuthorizationError::AuthorizationDenied)
-            }
+            public_denial(&decision)
+                .map(|denial| {
+                    self.record_denial(
+                        &decision,
+                        decision.decision.outcome(),
+                        decision.decision.error(),
+                        denial,
+                    )
+                })
+                .map_or(Ok(decision), Err)
         })
+    }
+
+    /// Record a denial the store reported at its commit fence for an
+    /// operation this host had authorized, and return its typed error.
+    ///
+    /// The store composes the persisted authority chain, so it can find a
+    /// revocation or expiry another host persisted after this host's own
+    /// decision. Authentication evidence was accepted by that decision, so an
+    /// expiry here is the grant's.
+    pub(crate) fn deny_at_commit_fence(
+        &self,
+        decision: &GatewayAuthorizationDecision,
+        outcome: AuthorizationOutcomeV1,
+        error: Option<AuthorityErrorV1>,
+    ) -> GatewayAuthorizationError {
+        self.record_denial(
+            decision,
+            outcome,
+            error,
+            denial_of(outcome, error, false).unwrap_or(GatewayAuthorityDenial::Unauthorized),
+        )
+    }
+
+    /// Persist one denial record, then return the typed denial; a record that
+    /// cannot be made durable fails closed without answering the denial.
+    fn record_denial(
+        &self,
+        decision: &GatewayAuthorizationDecision,
+        outcome: AuthorizationOutcomeV1,
+        error: Option<AuthorityErrorV1>,
+        denial: GatewayAuthorityDenial,
+    ) -> GatewayAuthorizationError {
+        self.evidence
+            .persist(&GatewayDenialRecordV1::new(
+                decision.request_digest(),
+                decision.operation_binding(),
+                outcome,
+                error,
+            ))
+            .map_or(GatewayAuthorizationError::EvidenceUnavailable, |()| {
+                GatewayAuthorizationError::Denied(denial)
+            })
     }
 
     /// Replace the pinned authority snapshot at a host-controlled fence.
@@ -625,6 +713,55 @@ impl GatewayAuthorization {
             self.registry.registry_digest(),
             self.revocation_state_current,
         )
+    }
+}
+
+/// The public denial of one evaluated decision, or `None` when it is active.
+fn public_denial(decision: &GatewayAuthorizationDecision) -> Option<GatewayAuthorityDenial> {
+    let at_time = decision.request.at_time;
+    let authenticated = &decision.authenticated;
+    denial_of(
+        decision.decision.outcome(),
+        decision.decision.error(),
+        at_time < authenticated.issued_at() || at_time >= authenticated.expires_at(),
+    )
+}
+
+/// The closed mapping from an AUD1 outcome and safe-error code to its public
+/// denial (owner decisions D3 and D9 on #302).
+///
+/// The evaluator checks the authentication window before consent and
+/// capability, so an `Expired` outcome while the evidence is outside its
+/// window is the evidence's expiry (`Unauthenticated`); any other `Expired`
+/// is a grant or consent expiry and reads as `Revoked`. A broken delegation
+/// parent (`ParentInvalid`) confers no capability, and every other
+/// fail-closed indeterminate answer is `Unauthorized`, except an unresolved
+/// Principal, which no trusted authority recognizes (`Unauthenticated`).
+const fn denial_of(
+    outcome: AuthorizationOutcomeV1,
+    error: Option<AuthorityErrorV1>,
+    authentication_lapsed: bool,
+) -> Option<GatewayAuthorityDenial> {
+    match outcome {
+        AuthorizationOutcomeV1::Active => None,
+        // A lapsed window yields `Expired` unless the evidence is not trusted
+        // at all, which yields an unresolved Principal first.
+        AuthorizationOutcomeV1::Expired | AuthorizationOutcomeV1::IndeterminateFailClosed
+            if authentication_lapsed
+                || matches!(error, Some(AuthorityErrorV1::PrincipalUnresolved)) =>
+        {
+            Some(GatewayAuthorityDenial::Unauthenticated)
+        }
+        AuthorizationOutcomeV1::RevokedAtFence | AuthorizationOutcomeV1::Expired => {
+            Some(GatewayAuthorityDenial::Revoked)
+        }
+        AuthorizationOutcomeV1::ConsentMissing => Some(GatewayAuthorityDenial::ConsentInvalid),
+        AuthorizationOutcomeV1::RevocationStateStale => {
+            Some(GatewayAuthorityDenial::RevocationStateStale)
+        }
+        AuthorizationOutcomeV1::ParentInvalid | AuthorizationOutcomeV1::IndeterminateFailClosed => {
+            Some(GatewayAuthorityDenial::Unauthorized)
+        }
     }
 }
 
@@ -816,7 +953,18 @@ fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
 
 #[cfg(test)]
 pub(crate) fn test_authorization_for(actor: EntityId) -> GatewayAuthorization {
-    tests::fixture_authorization_with_actor(actor)
+    test_authorization_with_evidence(
+        actor,
+        Arc::new(crate::denial_evidence::VolatileDenialEvidence::default()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_authorization_with_evidence(
+    actor: EntityId,
+    evidence: Arc<dyn GatewayDenialEvidencePort>,
+) -> GatewayAuthorization {
+    tests::fixture_authorization_with_actor(actor, evidence)
 }
 
 #[cfg(test)]
@@ -825,8 +973,19 @@ pub(crate) fn test_action_only_authorization_for(actor: EntityId) -> GatewayAuth
 }
 
 #[cfg(test)]
-pub(crate) fn test_expired_authorization_for(actor: EntityId) -> GatewayAuthorization {
-    tests::fixture_expired_authorization_with_actor(actor)
+pub(crate) fn test_expired_authorization_for(
+    actor: EntityId,
+    evidence: Arc<dyn GatewayDenialEvidencePort>,
+) -> GatewayAuthorization {
+    tests::fixture_expired_authorization_with_actor(actor, evidence)
+}
+
+#[cfg(test)]
+pub(crate) fn test_expired_grant_authorization_for(
+    actor: EntityId,
+    evidence: Arc<dyn GatewayDenialEvidencePort>,
+) -> GatewayAuthorization {
+    tests::fixture_expired_grant_authorization_with_actor(actor, evidence)
 }
 
 #[cfg(test)]
@@ -848,6 +1007,7 @@ pub(crate) fn test_revoked_authority_for(actor: EntityId) -> AuthorityViewV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::denial_evidence::VolatileDenialEvidence;
     use pos_core::{
         AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthorityGranteeV1,
         AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, CapabilityGrantDraftV1,
@@ -899,6 +1059,7 @@ mod tests {
 
     struct Fixture {
         authorization: GatewayAuthorization,
+        evidence: Arc<VolatileDenialEvidence>,
         authenticated: AuthenticatedPrincipalResultV1,
         actor: EntityId,
         target_timeline: TimelineId,
@@ -919,27 +1080,62 @@ mod tests {
         )
     }
 
-    fn fixture_with_scope(
+    fn fixture_authenticated(expires_at: WallTime) -> AuthenticatedPrincipalResultV1 {
+        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+            principal: PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok(),
+            adapter_id: "fixture".to_owned(),
+            assurance: AssuranceLevelV1::try_new(1).test_ok(),
+            issued_at: WallTime::from_micros(1),
+            expires_at,
+            binding_digest: hash(2),
+        })
+        .test_ok()
+    }
+
+    /// One root grant of the fixture Principal for `actor` on the actor's
+    /// own authority Timeline, so every fixture for one actor agrees on it.
+    fn fixture_grant(
+        actor: EntityId,
+        scope: CapabilityScopeV1,
+        grant_id: u8,
+        issuance: u64,
+        valid_until: u64,
+    ) -> CapabilityGrantV1 {
+        let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok();
+        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id: hash(grant_id),
+            grantor: principal.clone(),
+            grantee: AuthorityGranteeV1::Principal(principal),
+            trust_domain: "gateway.test".to_owned(),
+            scope,
+            valid_from_position: Seq::from_u64(issuance),
+            valid_until_position: Seq::from_u64(valid_until),
+            parent_grant_id: None,
+            delegation_depth: 0,
+            max_delegation_depth: 0,
+            permitted_delegate_classes: Vec::new(),
+            consent_references: Vec::new(),
+            policy_revision: hash(4),
+            issuance_timeline: authority_timeline(actor),
+            issuance_seq: Seq::from_u64(issuance),
+            revocation_epoch: 0,
+            revocation_fence: None,
+            authority_registry_digest: hash(3),
+        })
+        .test_ok()
+    }
+
+    fn authority_timeline(actor: EntityId) -> TimelineId {
+        TimelineId::from_ulid(actor.inner())
+    }
+
+    fn fixture_scope(
         actor: EntityId,
         resources: Vec<String>,
         actions: Vec<String>,
         purposes: Vec<String>,
-    ) -> Fixture {
-        let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok();
-        let authenticated =
-            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                principal: principal.clone(),
-                adapter_id: "fixture".to_owned(),
-                assurance: AssuranceLevelV1::try_new(1).test_ok(),
-                issued_at: WallTime::from_micros(1),
-                expires_at: WallTime::from_micros(u64::MAX),
-                binding_digest: hash(2),
-            })
-            .test_ok();
-        let authority_timeline = TimelineId::new();
-        let registry_digest = hash(3);
-        let policy_revision = hash(4);
-        let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+    ) -> CapabilityScopeV1 {
+        CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
             resources,
             actions,
             purposes,
@@ -953,36 +1149,39 @@ mod tests {
             budget: 1,
             environment_constraints: Vec::new(),
         })
-        .test_ok();
-        let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id: hash(5),
-            grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal),
-            trust_domain: "gateway.test".to_owned(),
-            scope,
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(50),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: Vec::new(),
-            consent_references: Vec::new(),
-            policy_revision,
-            issuance_timeline: authority_timeline,
-            issuance_seq: Seq::from_u64(1),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: registry_digest,
-        })
-        .test_ok();
-        let registry = AuthorityRegistrySnapshotV1::try_new(
-            registry_digest,
+        .test_ok()
+    }
+
+    fn fixture_registry(
+        authenticated: &AuthenticatedPrincipalResultV1,
+        mut bindings: Vec<Hash>,
+    ) -> AuthorityRegistrySnapshotV1 {
+        bindings.sort_unstable();
+        AuthorityRegistrySnapshotV1::try_new(
+            hash(3),
             vec![authenticated.registry_binding_digest()],
-            vec![grant.binding_digest().test_ok()],
+            bindings,
             Vec::new(),
         )
-        .test_ok();
-        let host = AuthorityPersistenceHostV1::new(&registry);
+        .test_ok()
+    }
+
+    fn fixture_with_scope(
+        actor: EntityId,
+        resources: Vec<String>,
+        actions: Vec<String>,
+        purposes: Vec<String>,
+    ) -> Fixture {
+        let authenticated = fixture_authenticated(WallTime::from_micros(u64::MAX));
+        let grant = fixture_grant(
+            actor,
+            fixture_scope(actor, resources, actions, purposes),
+            5,
+            1,
+            50,
+        );
+        let issued = fixture_registry(&authenticated, vec![grant.binding_digest().test_ok()]);
+        let host = AuthorityPersistenceHostV1::new(&issued);
         let mut state = AuthorityPersistenceStateV1::new();
         state
             .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
@@ -990,11 +1189,11 @@ mod tests {
         let authority = state.view(grant.grant_id()).test_ok();
         let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
             grant_id: grant.grant_id(),
-            authority_timeline,
+            authority_timeline: authority_timeline(actor),
             fence_position: Seq::from_u64(2),
             revocation_epoch: 1,
-            policy_revision,
-            authority_registry_digest: registry_digest,
+            policy_revision: hash(4),
+            authority_registry_digest: hash(3),
         })
         .test_ok();
         state
@@ -1004,23 +1203,62 @@ mod tests {
             )
             .test_ok();
         let revoked_authority = state.view(grant.grant_id()).test_ok();
+        // The registry also attests the grant as resolved after its
+        // revocation, so the evaluator reaches the revocation fence instead
+        // of distrusting the resolved record.
+        let registry = fixture_registry(
+            &authenticated,
+            vec![
+                grant.binding_digest().test_ok(),
+                revoked_authority.authority().chain().grants()[0]
+                    .binding_digest()
+                    .test_ok(),
+            ],
+        );
+        let evidence = Arc::new(VolatileDenialEvidence::default());
         let authorization = GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(authenticated.clone())),
             authority.clone(),
             registry,
+            evidence.clone(),
         );
         Fixture {
             authorization,
+            evidence,
             authenticated,
             actor,
-            target_timeline: authority_timeline,
+            target_timeline: authority_timeline(actor),
             authority,
             revoked_authority,
         }
     }
 
-    pub(super) fn fixture_authorization_with_actor(actor: EntityId) -> GatewayAuthorization {
-        fixture_with_actor(actor).authorization
+    /// Rebind a fixture's authority to another adapter and evidence seam.
+    fn rebound(
+        fixture: &Fixture,
+        adapter: Arc<dyn GatewayAuthenticationAdapter>,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
+    ) -> GatewayAuthorization {
+        GatewayAuthorization::new(
+            adapter,
+            fixture.authority.clone(),
+            fixture.authorization.registry.clone(),
+            evidence,
+        )
+    }
+
+    pub(super) fn fixture_authorization_with_actor(
+        actor: EntityId,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
+    ) -> GatewayAuthorization {
+        let fixture = fixture_with_actor(actor);
+        rebound(
+            &fixture,
+            Arc::new(LocalAuthenticationAdapter::new(
+                fixture.authenticated.clone(),
+            )),
+            evidence,
+        )
     }
 
     pub(super) fn fixture_action_only_authorization_with_actor(
@@ -1037,38 +1275,66 @@ mod tests {
 
     pub(super) fn fixture_expired_authorization_with_actor(
         actor: EntityId,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
     ) -> GatewayAuthorization {
         let fixture = fixture_with_actor(actor);
-        let authenticated =
-            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                principal: fixture.authenticated.principal().clone(),
-                adapter_id: fixture.authenticated.adapter_id().to_owned(),
-                assurance: fixture.authenticated.assurance(),
-                issued_at: WallTime::from_micros(1),
-                expires_at: WallTime::from_micros(2),
-                binding_digest: fixture.authenticated.binding_digest(),
-            })
-            .test_ok();
-        let grant_binding = fixture
-            .authority
-            .authority()
-            .chain()
-            .grants()
-            .iter()
-            .map(CapabilityGrantV1::binding_digest)
-            .collect::<Result<Vec<_>, _>>()
-            .test_ok();
-        let registry = AuthorityRegistrySnapshotV1::try_new(
-            fixture.authorization.registry.registry_digest(),
-            vec![authenticated.registry_binding_digest()],
-            grant_binding,
-            Vec::new(),
-        )
-        .test_ok();
+        let authenticated = fixture_authenticated(WallTime::from_micros(2));
+        let registry = fixture_registry(
+            &authenticated,
+            fixture
+                .authority
+                .authority()
+                .chain()
+                .grants()
+                .iter()
+                .map(CapabilityGrantV1::binding_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .test_ok(),
+        );
         GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(authenticated)),
             fixture.authority,
             registry,
+            evidence,
+        )
+    }
+
+    /// A grant valid for positions 1..2 whose authority Timeline a later
+    /// sibling grant advanced to position 2, so the grant has expired.
+    pub(super) fn fixture_expired_grant_authorization_with_actor(
+        actor: EntityId,
+        evidence: Arc<dyn GatewayDenialEvidencePort>,
+    ) -> GatewayAuthorization {
+        let authenticated = fixture_authenticated(WallTime::from_micros(u64::MAX));
+        let scope = || {
+            fixture_scope(
+                actor,
+                vec!["timeline.events".to_owned(), "world.action.v1".to_owned()],
+                vec!["read".to_owned(), "world.action.v1.submit".to_owned()],
+                vec!["action".to_owned(), "read".to_owned()],
+            )
+        };
+        let expiring = fixture_grant(actor, scope(), 5, 1, 2);
+        let sibling = fixture_grant(actor, scope(), 6, 2, 50);
+        let registry = fixture_registry(
+            &authenticated,
+            vec![
+                expiring.binding_digest().test_ok(),
+                sibling.binding_digest().test_ok(),
+            ],
+        );
+        let host = AuthorityPersistenceHostV1::new(&registry);
+        let mut state = AuthorityPersistenceStateV1::new();
+        for grant in [&expiring, &sibling] {
+            state
+                .issue_grant(host.authorize_grant(grant).test_ok(), grant.clone())
+                .test_ok();
+        }
+        GatewayAuthorization::new(
+            Arc::new(LocalAuthenticationAdapter::new(authenticated)),
+            state.view(expiring.grant_id()).test_ok(),
+            registry,
+            evidence,
         )
     }
 
@@ -1076,10 +1342,10 @@ mod tests {
         actor: EntityId,
     ) -> GatewayAuthorization {
         let fixture = fixture_with_actor(actor);
-        GatewayAuthorization::new(
+        rebound(
+            &fixture,
             Arc::new(RejectingAdapter),
-            fixture.authority,
-            fixture.authorization.registry,
+            fixture.evidence.clone(),
         )
     }
 
@@ -1087,13 +1353,13 @@ mod tests {
         actor: EntityId,
     ) -> GatewayAuthorization {
         let fixture = fixture_with_actor(actor);
-        GatewayAuthorization::new(
+        rebound(
+            &fixture,
             Arc::new(RejectAfterFirstAdapter {
-                evidence: fixture.authenticated,
+                evidence: fixture.authenticated.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            fixture.authority,
-            fixture.authorization.registry,
+            fixture.evidence.clone(),
         )
     }
 
@@ -1158,10 +1424,10 @@ mod tests {
     #[test]
     fn adapter_failure_is_stable_and_does_not_reveal_evidence() {
         let fixture = fixture();
-        let authorization = GatewayAuthorization::new(
+        let authorization = rebound(
+            &fixture,
             Arc::new(RejectingAdapter),
-            fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.evidence.clone(),
         );
         assert_eq!(
             authorization.evaluate(action(&fixture)),
@@ -1183,19 +1449,19 @@ mod tests {
     #[test]
     fn local_and_air_gapped_adapters_have_identical_authority_semantics() {
         let fixture = fixture();
-        let local = GatewayAuthorization::new(
+        let local = rebound(
+            &fixture,
             Arc::new(LocalAuthenticationAdapter::new(
                 fixture.authenticated.clone(),
             )),
-            fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.evidence.clone(),
         );
-        let air_gapped = GatewayAuthorization::new(
+        let air_gapped = rebound(
+            &fixture,
             Arc::new(AirGappedAuthenticationAdapter::new(
                 fixture.authenticated.clone(),
             )),
-            fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.evidence.clone(),
         );
         let local_decision = local.authorize(action(&fixture)).test_ok();
         let air_decision = air_gapped.authorize(action(&fixture)).test_ok();
@@ -1351,23 +1617,56 @@ mod tests {
         );
     }
 
+    /// Authorize `request` and return its typed error and the one durable
+    /// record it left, after checking the record binds the exact evaluation.
+    fn denied(
+        authorization: &GatewayAuthorization,
+        evidence: &VolatileDenialEvidence,
+        request: GatewayAuthorizationRequest,
+    ) -> (GatewayAuthorizationError, GatewayDenialRecordV1) {
+        let before = evidence.records().len();
+        let evaluated = authorization.evaluate(request.clone()).test_ok();
+        let error = authorization.authorize(request).err().test_some();
+        let records = evidence.records();
+        assert_eq!(records.len(), before + 1);
+        let record = records[before];
+        assert_eq!(record.request_digest(), evaluated.request_digest());
+        assert_eq!(record.operation_binding(), evaluated.operation_binding());
+        assert_eq!(record.outcome(), evaluated.decision().outcome());
+        assert_eq!(record.error(), evaluated.decision().error());
+        (error, record)
+    }
+
+    trait TestSome<T> {
+        fn test_some(self) -> T;
+    }
+
+    impl<T> TestSome<T> for Option<T> {
+        fn test_some(self) -> T {
+            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected a value")))
+        }
+    }
+
     #[test]
     fn denied_decision_does_not_enumerate_principal_or_entity() {
         let fixture = fixture();
         let mut request = action(&fixture);
         request.actor_entity_id = EntityId::new();
-        let decision = fixture.authorization.evaluate(request).test_ok();
+        let decision = fixture.authorization.evaluate(request.clone()).test_ok();
         assert!(!decision.is_allowed());
+        let (error, record) = denied(&fixture.authorization, &fixture.evidence, request);
         assert_eq!(
-            decision.decision().error(),
-            Some(AuthorityErrorV1::CapabilityMissing)
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::Unauthorized)
         );
-        assert!(!GatewayAuthorizationError::AuthorizationDenied
-            .to_string()
-            .contains(&decision.principal().trust_domain().to_owned()));
-        assert!(!GatewayAuthorizationError::AuthorizationDenied
-            .to_string()
-            .contains(&decision.actor_entity_id().to_string()));
+        assert_eq!(record.error(), Some(AuthorityErrorV1::CapabilityMissing));
+        for text in [
+            error.to_string(),
+            GatewayAuthorityDenial::Unauthorized.to_string(),
+        ] {
+            assert!(!text.contains(decision.principal().trust_domain()));
+            assert!(!text.contains(&decision.actor_entity_id().to_string()));
+        }
     }
 
     #[test]
@@ -1377,12 +1676,12 @@ mod tests {
         request.subject_id = Some(fixture.actor);
         request.consent_timeline = Some(fixture.target_timeline);
         request.consent_at_position = Some(Seq::from_u64(1));
-        let decision = fixture.authorization.evaluate(request).test_ok();
-        assert!(!decision.is_allowed());
+        let (error, record) = denied(&fixture.authorization, &fixture.evidence, request);
         assert_eq!(
-            decision.decision().error(),
-            Some(AuthorityErrorV1::ConsentMissing)
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::ConsentInvalid)
         );
+        assert_eq!(record.error(), Some(AuthorityErrorV1::ConsentMissing));
     }
 
     #[test]
@@ -1390,27 +1689,183 @@ mod tests {
         let fixture = fixture();
         let request = action(&fixture);
         let stale = GatewayAuthorization::new_with_revocation_state(
-            Arc::new(LocalAuthenticationAdapter::new(fixture.authenticated)),
-            fixture.authority,
-            fixture.authorization.registry,
+            Arc::new(LocalAuthenticationAdapter::new(
+                fixture.authenticated.clone(),
+            )),
+            fixture.authority.clone(),
+            fixture.authorization.registry.clone(),
             false,
+            fixture.evidence.clone(),
         );
-        let decision = stale.evaluate(request).test_ok();
-        assert!(!decision.is_allowed());
+        let (error, record) = denied(&stale, &fixture.evidence, request);
         assert_eq!(
-            decision.decision().error(),
-            Some(AuthorityErrorV1::RevocationStateStale)
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::RevocationStateStale)
+        );
+        assert_eq!(
+            record.outcome(),
+            AuthorizationOutcomeV1::RevocationStateStale
         );
     }
 
     #[test]
-    fn invalid_expiry_is_denied_by_authority_not_adapter() {
+    fn expired_authentication_evidence_is_unauthenticated() {
         let fixture = fixture();
         let mut request = action(&fixture);
         request.at_time = WallTime::from_micros(u64::MAX);
-        let decision = fixture.authorization.evaluate(request).test_ok();
-        assert!(!decision.is_allowed());
-        assert_eq!(decision.decision().error(), None);
+        let (error, record) = denied(&fixture.authorization, &fixture.evidence, request);
+        assert_eq!(
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::Unauthenticated)
+        );
+        assert_eq!(record.outcome(), AuthorizationOutcomeV1::Expired);
+        assert_eq!(record.error(), None);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_or_expired_grant_is_revoked() {
+        let fixture = fixture();
+        fixture
+            .authorization
+            .replace_authority(fixture.revoked_authority.clone())
+            .await
+            .test_ok();
+        let (error, record) = denied(&fixture.authorization, &fixture.evidence, action(&fixture));
+        assert_eq!(
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::Revoked)
+        );
+        assert_eq!(record.outcome(), AuthorizationOutcomeV1::RevokedAtFence);
+        assert_eq!(record.error(), Some(AuthorityErrorV1::RevokedAtFence));
+
+        let evidence = Arc::new(VolatileDenialEvidence::default());
+        let expired =
+            fixture_expired_grant_authorization_with_actor(fixture.actor, evidence.clone());
+        let (error, record) = denied(&expired, &evidence, action(&fixture));
+        assert_eq!(
+            error,
+            GatewayAuthorizationError::Denied(GatewayAuthorityDenial::Revoked)
+        );
+        assert_eq!(record.outcome(), AuthorizationOutcomeV1::Expired);
+        assert_eq!(record.error(), None);
+    }
+
+    struct UnavailableEvidence;
+
+    impl GatewayDenialEvidencePort for UnavailableEvidence {
+        fn persist(
+            &self,
+            _record: &GatewayDenialRecordV1,
+        ) -> Result<(), crate::denial_evidence::GatewayDenialEvidenceError> {
+            Err(crate::denial_evidence::GatewayDenialEvidenceError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn a_denial_without_durable_evidence_is_not_answered() {
+        let fixture = fixture();
+        let authorization = rebound(
+            &fixture,
+            Arc::new(LocalAuthenticationAdapter::new(
+                fixture.authenticated.clone(),
+            )),
+            Arc::new(UnavailableEvidence),
+        );
+        let mut request = action(&fixture);
+        assert!(authorization.authorize(request.clone()).is_ok());
+        request.actor_entity_id = EntityId::new();
+        assert_eq!(
+            authorization.authorize(request).err(),
+            Some(GatewayAuthorizationError::EvidenceUnavailable)
+        );
+    }
+
+    #[test]
+    fn every_authority_outcome_has_one_public_denial() {
+        use super::GatewayAuthorityDenial as Denial;
+        use pos_core::AuthorizationOutcomeV1 as Outcome;
+        let cases = [
+            (Outcome::Active, None, false, None),
+            (Outcome::Active, None, true, None),
+            (
+                Outcome::RevokedAtFence,
+                Some(AuthorityErrorV1::RevokedAtFence),
+                false,
+                Some(Denial::Revoked),
+            ),
+            (Outcome::Expired, None, false, Some(Denial::Revoked)),
+            (Outcome::Expired, None, true, Some(Denial::Unauthenticated)),
+            (
+                Outcome::ConsentMissing,
+                Some(AuthorityErrorV1::ConsentMissing),
+                false,
+                Some(Denial::ConsentInvalid),
+            ),
+            (
+                Outcome::RevocationStateStale,
+                Some(AuthorityErrorV1::RevocationStateStale),
+                false,
+                Some(Denial::RevocationStateStale),
+            ),
+            (
+                Outcome::ParentInvalid,
+                Some(AuthorityErrorV1::DelegationInvalid),
+                false,
+                Some(Denial::Unauthorized),
+            ),
+            (
+                Outcome::IndeterminateFailClosed,
+                Some(AuthorityErrorV1::PrincipalUnresolved),
+                false,
+                Some(Denial::Unauthenticated),
+            ),
+            (
+                Outcome::IndeterminateFailClosed,
+                Some(AuthorityErrorV1::CapabilityMissing),
+                false,
+                Some(Denial::Unauthorized),
+            ),
+            (
+                Outcome::IndeterminateFailClosed,
+                Some(AuthorityErrorV1::PolicyIndeterminate),
+                false,
+                Some(Denial::Unauthorized),
+            ),
+            (
+                Outcome::IndeterminateFailClosed,
+                None,
+                false,
+                Some(Denial::Unauthorized),
+            ),
+        ];
+        for (outcome, error, lapsed, expected) in cases {
+            assert_eq!(denial_of(outcome, error, lapsed), expected, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_commit_fence_denial_is_recorded_against_the_authorized_operation() {
+        let fixture = fixture();
+        let decision = fixture.authorization.authorize(action(&fixture)).test_ok();
+        for (outcome, error) in [
+            (
+                AuthorizationOutcomeV1::RevokedAtFence,
+                Some(AuthorityErrorV1::RevokedAtFence),
+            ),
+            (AuthorizationOutcomeV1::Expired, None),
+        ] {
+            assert_eq!(
+                fixture
+                    .authorization
+                    .deny_at_commit_fence(&decision, outcome, error),
+                GatewayAuthorizationError::Denied(GatewayAuthorityDenial::Revoked)
+            );
+        }
+        let records = fixture.evidence.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].request_digest(), decision.request_digest());
+        assert_eq!(records[0].operation_binding(), decision.operation_binding());
+        assert_eq!(records[1].outcome(), AuthorizationOutcomeV1::Expired);
     }
 
     #[tokio::test]

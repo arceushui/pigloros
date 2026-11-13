@@ -16,12 +16,13 @@ use pos_core::{
     ids::TimelineId,
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
-    ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PreparedOwnTracksIngressV1, ProposedAction,
-    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AuthorityErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit, ConsentGrantedV1,
+    ConsentRevocationReservation, ConsentRevokedV1, CoreError, ErasureHostErrorV1,
+    ErasureProtectedOperationV1, ErasureReferenceV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1, ForkAuthenticationPolicyV1,
+    ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -3114,7 +3115,13 @@ fn execute_host_action_admission(
                                 .with_scheduled_admission(|ports| admission.admit(ports))
                                 .map_err(host_action_error)
                                 .and_then(|admitted| {
-                                    admitted.map_err(ActionCommandError::Admission)
+                                    admitted.map_err(|error| {
+                                        commit_fence_refusal(
+                                            context.authorization,
+                                            &decision,
+                                            error,
+                                        )
+                                    })
                                 })
                                 .and_then(|admitted| {
                                     committed_action(sender, context.timeline, &admitted)
@@ -3260,6 +3267,57 @@ fn retain_admitted_action_release(
         if !action.duplicate() {
             publish_action_notice(context.bus, context.timeline, action.event());
         }
+    }
+}
+
+/// Type a store refusal at the commit fence. A revocation or expiry the
+/// store composed from the persisted authority chain is an authority denial
+/// of the decision just rechecked: its durable evidence is recorded before
+/// the typed denial is returned. Every other refusal keeps its own error.
+fn commit_fence_refusal(
+    authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
+    error: HumanActionAdmissionErrorV1,
+) -> ActionCommandError {
+    match error {
+        HumanActionAdmissionErrorV1::NotAdmitted(outcome) => commit_fence_authority(&outcome)
+            .map_or_else(
+                || ActionCommandError::Admission(HumanActionAdmissionErrorV1::NotAdmitted(outcome)),
+                |(authority, safe_error)| {
+                    ActionCommandError::Authorization(
+                        authorization.deny_at_commit_fence(decision, authority, safe_error),
+                    )
+                },
+            ),
+        other => ActionCommandError::Admission(other),
+    }
+}
+
+/// The AUD1 outcome and safe-error code of a store outcome that denies the
+/// operation's authority; `None` for every other outcome. The match has no
+/// wildcard, so a new `PipelineOutcomeV1` variant fails to compile until it
+/// is classified here.
+pub(crate) const fn commit_fence_authority(
+    outcome: &PipelineOutcomeV1,
+) -> Option<(AuthorizationOutcomeV1, Option<AuthorityErrorV1>)> {
+    match outcome {
+        PipelineOutcomeV1::AuthorityRevoked => Some((
+            AuthorizationOutcomeV1::RevokedAtFence,
+            Some(AuthorityErrorV1::RevokedAtFence),
+        )),
+        PipelineOutcomeV1::AuthorityExpired => Some((AuthorizationOutcomeV1::Expired, None)),
+        PipelineOutcomeV1::PolicyIndeterminate
+        | PipelineOutcomeV1::Rejected
+        | PipelineOutcomeV1::InvalidObservation
+        | PipelineOutcomeV1::ResourceExhausted
+        | PipelineOutcomeV1::InvalidPluginResult
+        | PipelineOutcomeV1::InvalidProviderResult
+        | PipelineOutcomeV1::DomainConflict
+        | PipelineOutcomeV1::AdmissionConflict
+        | PipelineOutcomeV1::Committed(_)
+        | PipelineOutcomeV1::RecoveredDuplicate(_)
+        | PipelineOutcomeV1::InvalidDependencyDeclaration
+        | PipelineOutcomeV1::DependencySetExhausted => None,
     }
 }
 

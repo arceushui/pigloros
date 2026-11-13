@@ -11,6 +11,7 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod action_admission_tests;
 pub mod authorization;
+pub mod denial_evidence;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
@@ -34,9 +35,15 @@ pub mod startup;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
-    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationAudit,
-    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    GatewayAuthorizationTarget, LocalAuthenticationAdapter,
+    GatewayAuthenticationRequest, GatewayAuthorityDenial, GatewayAuthorization,
+    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
+    GatewayAuthorizationRequest, GatewayAuthorizationTarget, LocalAuthenticationAdapter,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use denial_evidence::VolatileDenialEvidence;
+pub use denial_evidence::{
+    FileDenialEvidenceLog, GatewayDenialEvidenceError, GatewayDenialEvidencePort,
+    GatewayDenialRecordV1,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
@@ -1621,12 +1628,18 @@ pub enum GatewayError {
     /// limit is permanent, so retrying the same request cannot help.
     #[error("timeline dependency set is exhausted")]
     DependencySetExhausted,
-    /// The provider-neutral host authorization decision denied the operation.
-    #[error("authorization denied")]
-    AuthorizationDenied,
+    /// The provider-neutral host authority denied the operation; the
+    /// denial's family selects its public problem and its durable evidence
+    /// was recorded before this error was returned.
+    #[error("{0}")]
+    AuthorizationDenied(GatewayAuthorityDenial),
     /// The provider-neutral host authorization boundary is unavailable.
     #[error("authorization unavailable")]
     AuthorizationUnavailable,
+    /// A denial's durable evidence could not be recorded, so the Gateway
+    /// fails closed without answering the denial.
+    #[error("authorization evidence unavailable")]
+    AuthorizationEvidenceUnavailable,
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1856,7 +1869,9 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
 /// The stable Gateway error of one family; the match has no wildcard.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
     match family {
-        NotAdmitted::AuthorityDenied => GatewayError::AuthorizationDenied,
+        NotAdmitted::AuthorityDenied => {
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+        }
         NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
         NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
         NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
@@ -2963,9 +2978,12 @@ impl Gateway {
     /// the same read with [`Self::read_events_page_authorized_after`].
     ///
     /// # Errors
-    /// Returns [`GatewayError::AuthorizationUnavailable`] or
-    /// [`GatewayError::AuthorizationDenied`] before delegating to the bounded
-    /// Timeline read errors.
+    /// Returns [`GatewayError::AuthorizationUnavailable`],
+    /// [`GatewayError::AuthorizationDenied`] or
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] before delegating to
+    /// the bounded Timeline read errors. The authority decision precedes the
+    /// lookup, so a caller without a read grant receives the same denial for
+    /// an unknown Timeline as for an existing one.
     pub async fn read_events_page_authorized(
         &self,
         timeline_id: &str,
@@ -3028,7 +3046,9 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         if !request.targets_read(target_timeline, from_seq, limit) {
-            return Err(GatewayError::AuthorizationDenied);
+            return Err(GatewayError::AuthorizationDenied(
+                GatewayAuthorityDenial::Unauthorized,
+            ));
         }
         // The public request is an input envelope, not authority to choose the
         // operation being authorized. Rebuild the complete read semantics from
@@ -3460,7 +3480,10 @@ const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayErr
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
-        GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
+        GatewayAuthorizationError::Denied(denial) => GatewayError::AuthorizationDenied(denial),
+        GatewayAuthorizationError::EvidenceUnavailable => {
+            GatewayError::AuthorizationEvidenceUnavailable
+        }
     }
 }
 
@@ -4254,7 +4277,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(revoked, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            revoked,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked)
+        ));
 
         let denied = gateway
             .submit_json_action(
@@ -4266,7 +4292,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -4589,7 +4618,9 @@ mod tests {
                     "boundary-denied-actor",
                 )
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationDenied(
+                GatewayAuthorityDenial::Unauthorized
+            ))
         ));
         assert!(matches!(
             gateway
@@ -4735,7 +4766,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+        ));
         let invalid_timeline = gateway
             .read_events_page_authorized(
                 "not-a-timeline",
@@ -4764,7 +4798,7 @@ mod tests {
                 .test_err();
             assert!(matches!(
                 mismatched_range,
-                GatewayError::AuthorizationDenied
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
             ));
         }
 
@@ -4830,7 +4864,9 @@ mod tests {
             gateway
                 .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationDenied(
+                GatewayAuthorityDenial::Unauthorized
+            ))
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4891,7 +4927,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             substituted_operation,
-            GatewayError::AuthorizationDenied
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4903,7 +4939,10 @@ mod tests {
         let gateway = Gateway::new_with_world_bodies_and_authorization(
             open_store(StoreConfig::Memory).test_ok(),
             [],
-            crate::authorization::test_expired_authorization_for(actor),
+            crate::authorization::test_expired_authorization_for(
+                actor,
+                Arc::new(crate::denial_evidence::VolatileDenialEvidence::default()),
+            ),
         );
         let timeline = gateway.create_timeline("expired-read").await.test_ok();
         let request =
@@ -4912,7 +4951,10 @@ mod tests {
             .read_events_page_authorized(&timeline.id().to_string(), 0, 1, request)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -7473,7 +7515,10 @@ mod tests {
             .submit_proposed_action(&timeline_id, legacy)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+        ));
         let valid = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
@@ -7549,7 +7594,10 @@ mod tests {
             .submit_proposed_action(&tl.id().to_string(), bad_cap)
             .await
             .test_err();
-        assert!(matches!(err, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            err,
+            GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized)
+        ));
 
         // Approver rejection
         let invalid = ProposedAction::new(

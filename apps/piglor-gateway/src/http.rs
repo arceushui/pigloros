@@ -6,8 +6,8 @@ use crate::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
         ProblemCodeV1, ProblemV1,
     },
-    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
-    GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
+    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayAuthorityDenial,
+    GatewayError, GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
@@ -679,9 +679,8 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
             (Code::ConsentInvalid, StatusCode::BAD_REQUEST, false)
         }
         GatewayError::Consent(_) => (Code::ConsentInvalid, StatusCode::FORBIDDEN, false),
-        GatewayError::LedgerWriteDisabled | GatewayError::AuthorizationDenied => {
-            (Code::Unauthorized, StatusCode::FORBIDDEN, false)
-        }
+        GatewayError::LedgerWriteDisabled => (Code::Unauthorized, StatusCode::FORBIDDEN, false),
+        GatewayError::AuthorizationDenied(denial) => denial_problem(*denial),
         GatewayError::ActionAuthorizationUnavailable | GatewayError::AuthorizationUnavailable => {
             (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
         }
@@ -697,13 +696,33 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
         | GatewayError::StoreExecutorUnhealthy
         | GatewayError::LedgerUnavailable
         | GatewayError::OwnTracksOwnerKeyUnavailable
-        | GatewayError::ActionAdmissionUnavailable => UNAVAILABLE,
+        | GatewayError::ActionAdmissionUnavailable
+        | GatewayError::AuthorizationEvidenceUnavailable => UNAVAILABLE,
         GatewayError::EventReadTimeExceeded { .. } => (
             Code::TemporarilyUnavailable,
             StatusCode::GATEWAY_TIMEOUT,
             true,
         ),
         other => bound_problem(other),
+    }
+}
+
+/// The public problem of one denied authority decision (#1359): expired
+/// authentication evidence is `unauthenticated`, a revoked or expired grant
+/// or consent is `revoked`, and a host that cannot vouch for its revocation
+/// state is temporarily unavailable rather than a denial of the caller.
+const fn denial_problem(denial: GatewayAuthorityDenial) -> ProblemShape {
+    use ProblemCodeV1 as Code;
+    match denial {
+        GatewayAuthorityDenial::Unauthenticated => {
+            (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
+        }
+        GatewayAuthorityDenial::Unauthorized => (Code::Unauthorized, StatusCode::FORBIDDEN, false),
+        GatewayAuthorityDenial::Revoked => (Code::Revoked, StatusCode::FORBIDDEN, false),
+        GatewayAuthorityDenial::ConsentInvalid => {
+            (Code::ConsentInvalid, StatusCode::FORBIDDEN, false)
+        }
+        GatewayAuthorityDenial::RevocationStateStale => UNAVAILABLE,
     }
 }
 
@@ -1699,7 +1718,7 @@ osf_link = \"https://osf.io/example\"\n";
 
     /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn problem_cases() -> [(GatewayError, &'static str, bool); 19] {
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 24] {
         [
             (
                 GatewayError::DependencySetExhausted,
@@ -1754,7 +1773,36 @@ osf_link = \"https://osf.io/example\"\n";
                 "unauthenticated",
                 false,
             ),
-            (GatewayError::AuthorizationDenied, "unauthorized", false),
+            (
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthorized),
+                "unauthorized",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated),
+                "unauthenticated",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked),
+                "revoked",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::ConsentInvalid),
+                "consent-invalid",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(GatewayAuthorityDenial::RevocationStateStale),
+                "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::AuthorizationEvidenceUnavailable,
+                "temporarily-unavailable",
+                true,
+            ),
             (
                 GatewayError::ConsentGrantSequenceMismatch,
                 "consent-invalid",
@@ -2321,6 +2369,56 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    /// The raw status and body bytes of one authorized Events read.
+    async fn read_as(app: Router, timeline: &str, actor: EntityId) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/timelines/{timeline}/events?limit=1"))
+            .header("x-piglor-actor-entity", actor.to_string())
+            .body(Body::empty())
+            .test_ok();
+        let response = app.oneshot(request).await.test_ok();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .test_ok();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn unknown_and_unauthorized_timelines_answer_identically_without_a_read_grant() {
+        let actor = test_action_actor();
+        let app = router(AppState {
+            gateway: Gateway::new_with_world_bodies_and_authorization(
+                open_store(StoreConfig::Memory).test_ok(),
+                [],
+                crate::authorization::test_action_only_authorization_for(actor),
+            ),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        let (_status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "non-enumerating-read"})),
+        )
+        .await;
+        let existing = created["id"].as_str().test_ok().to_owned();
+
+        let (existing_status, existing_body) = read_as(app.clone(), &existing, actor).await;
+        let (unknown_status, unknown_body) =
+            read_as(app, &TimelineId::new().to_string(), actor).await;
+
+        assert_eq!(existing_status, StatusCode::FORBIDDEN);
+        assert_eq!(unknown_status, existing_status);
+        assert_eq!(unknown_body, existing_body);
+        let problem: serde_json::Value = serde_json::from_slice(&existing_body).test_ok();
+        assert_eq!(problem["code"], "unauthorized");
+        assert!(!String::from_utf8_lossy(&existing_body).contains(&existing));
+    }
+
     #[tokio::test]
     async fn authority_bound_read_requires_actor_header_and_uses_stable_errors() {
         let actor = test_action_actor();
@@ -2571,8 +2669,14 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::DependencySetExhausted.into_response();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        let r = GatewayError::AuthorizationDenied.into_response();
+        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Revoked).into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::Unauthenticated)
+            .into_response();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = GatewayError::AuthorizationDenied(GatewayAuthorityDenial::RevocationStateStale)
+            .into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
             "world.unknown".into(),
         ))
