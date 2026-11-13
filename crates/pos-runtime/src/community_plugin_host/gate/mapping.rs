@@ -216,6 +216,7 @@ pub const fn host_error_for_registry_v1(
         | PluginTrustPolicyRegistryErrorV1::NoActiveRelease
         | PluginTrustPolicyRegistryErrorV1::RollbackTargetActive
         | PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch
+        | PluginTrustPolicyRegistryErrorV1::ContentProofMismatch
         | PluginTrustPolicyRegistryErrorV1::ActivationEventRejected
         | PluginTrustPolicyRegistryErrorV1::NestedTransaction
         | PluginTrustPolicyRegistryErrorV1::WalRequired

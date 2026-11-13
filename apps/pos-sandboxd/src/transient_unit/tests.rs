@@ -688,6 +688,38 @@ fn service_limits_require_the_complete_ordered_elm1_and_exact_systemd_values() {
 }
 
 #[test]
+fn cpu_shares_systemd_would_raise_are_refused_at_compile_time() {
+    let source = complete_effective_limits();
+    for (per_million, accepted) in [
+        (1, false),
+        (999, false),
+        (1_000, true),
+        (1_001, false),
+        (3_000, false),
+        (5_000, true),
+        (8_000, true),
+        (9_999, false),
+        (10_000, true),
+        (10_001, true),
+        (1_000_000, true),
+        (u64::MAX - 1, true),
+    ] {
+        let mut limits = source.clone();
+        limits[3].value = per_million;
+        let compiled = SystemdServiceLimits::from_effective_limits(&limits);
+        if accepted {
+            assert!(compiled.is_ok(), "{per_million}");
+        } else {
+            assert_eq!(
+                compiled,
+                Err(SystemdServiceLimitsError::UnenforceableLimit(3)),
+                "{per_million}"
+            );
+        }
+    }
+}
+
+#[test]
 fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Box<dyn Error>> {
     let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
     let request = request(LaunchMode::AirGapped)?;

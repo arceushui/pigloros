@@ -10,8 +10,9 @@
 //! 3. authorize the projection with the caller's verified trust evidence, which
 //!    resolves the publisher key (a signature alone is not trust admission);
 //! 4. verify the PMF1 release signature under the resolved key;
-//! 5. sample the sealed trusted wall source;
-//! 6. only then call the registry's `admit` with the evidence's own Tick and
+//! 5. validate the same closure's content with the fixed basic package rule;
+//! 6. sample the sealed trusted wall source;
+//! 7. only then call the registry's `admit` with the evidence's own Tick and
 //!    the verified signature as the release proof (ADR-103 revision 7), which
 //!    the registry requires to bind its own authorization of the release.
 //!
@@ -20,7 +21,7 @@
 //! order is enforced by type as well. It may not call `rollback`, `provision`, or
 //! `advance_policy`.
 //!
-//! Steps 1 to 5 are one private function, `verify_release_v1`, that the production rollback
+//! Steps 1 to 6 are one private function, `verify_release_v1`, that the production rollback
 //! entry (`rollback_plugin_release_v1`, ADR-103 revision 7) shares, so the two orders cannot
 //! drift.
 //!
@@ -28,11 +29,7 @@
 //! its caller, and it builds no activation Event: the trusted composition
 //! supplies the already validated [`ActivationEventInputV1`].
 //!
-//! Content validation of the release artifacts (WIT archive paths, provenance,
-//! SBOM, licence text, schema documents) is deferred to follow-up #574. The
-//! installer verifies only descriptor digests and bytes, through the OCI
-//! closure and the PMF1 decoder, and says so in its receipt through
-//! [`ContentValidationV1::NotPerformed`].
+//! The registry also requires the content proof bound to the same closure.
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::trusted_clock::PluginTrustWallSourceV1;
@@ -42,7 +39,11 @@ use pos_crypto::plugin_manifest::{
     VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
-    PluginTrustErrorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+    PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
+    VerifiedPluginTrustEvidenceV1,
+};
+use pos_plugin_content::{
+    validate_plugin_bundle_content_v1, PluginBundleContentErrorV1, ValidatedPluginBundleContentV1,
 };
 use pos_plugin_release::{
     BundleAddressV1, ContentValidationV1, ReleaseSourceErrorV1, ReleaseSourceV1,
@@ -90,6 +91,9 @@ pub enum PluginReleaseInstallErrorV1 {
     /// The PMF1 signature failed verification under the authorized key.
     #[error(transparent)]
     Signature(#[from] PluginReleaseSignatureErrorV1),
+    /// A required bundle artifact failed the basic package checks.
+    #[error(transparent)]
+    Content(#[from] PluginBundleContentErrorV1),
     /// The registry refused the admission, or the trusted time was unavailable.
     #[error(transparent)]
     Registry(#[from] PluginTrustPolicyRegistryErrorV1),
@@ -118,7 +122,7 @@ pub struct PluginInstallRequestV1<'a> {
 /// It is constructed only by [`install_plugin_release_v1()`]. The admission
 /// receipt claims trust-policy admission and the signature fact claims
 /// mathematical validity, in that order of verification; neither is a claim
-/// about artifact content.
+/// about artifact content; the separate content fact reports the basic checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledPluginReleaseV1 {
     admission: AdmittedPluginReleaseReceiptV1,
@@ -145,10 +149,10 @@ impl InstalledPluginReleaseV1 {
         self.signature
     }
 
-    /// Content validation was not performed (follow-up #574).
+    /// The installed closure passed the fixed basic package checks.
     #[must_use]
     pub const fn content_validation(&self) -> ContentValidationV1 {
-        ContentValidationV1::NotPerformed
+        ContentValidationV1::BasicPackageV1
     }
 }
 
@@ -159,9 +163,8 @@ impl InstalledPluginReleaseV1 {
 /// that closure and `request.evidence`. The UTC second comes from `wall`, the
 /// sealed trusted wall source, and the Tick is the evidence's own, so the
 /// registry's coordinate-equality check binds both to the evidence. The
-/// signature is verified before the wall source is sampled and before any
-/// registry call, so a release whose signature is invalid never reaches the
-/// registry and consumes no clock sample.
+/// signature and content are checked before the wall source is sampled and
+/// before any registry call.
 ///
 /// Installing the same release again with the same evidence and activation
 /// identity returns the registry's original receipt as an idempotent replay.
@@ -170,8 +173,8 @@ impl InstalledPluginReleaseV1 {
 /// Returns `Source` when the closure cannot be read, `Manifest` when its PMF1
 /// is not a canonical V1 manifest, `Authorization` when the evidence does not
 /// authorize the release, `Signature` when field 26 does not verify under the
-/// authorized key, and `Registry` for a trusted-time failure or the registry's
-/// own typed refusal of the admission.
+/// authorized key, `Content` when a required content check fails, and
+/// `Registry` for a trusted-time failure or the registry's own typed refusal.
 pub fn install_plugin_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
@@ -186,7 +189,7 @@ pub fn install_plugin_release_v1(
         request.tps1_bytes,
         request.evidence,
         &verified.projection,
-        &verified.signature,
+        (&verified.signature, &verified.content),
         verified.point,
         request.activation,
     )?;
@@ -206,15 +209,17 @@ struct VerifiedReleaseV1 {
     execution: PluginExecutionProjectionV1,
     /// The PMF1 signature verified under the key the evidence resolved.
     signature: VerifiedPluginReleaseSignatureV1,
+    /// The basic package proof bound to the same closure.
+    content: ValidatedPluginBundleContentV1,
     /// The sampled trusted UTC second and the evidence's own Tick.
     point: TrustEvaluationPointV1,
 }
 
 /// The read-project-authorize-verify-sample prefix shared by installation and rollback (ADR-103
 /// revision 7): read the verified closure at `address`, project it, authorize the projection
-/// with `evidence`, verify the PMF1 signature under the resolved key, then sample `wall` once.
+/// with `evidence`, verify the signature and content, then sample `wall` once.
 ///
-/// Nothing here touches a registry, and `wall` is sampled only after the signature verified.
+/// Nothing here touches a registry, and `wall` is sampled only after both checks pass.
 /// `E` is the caller's closed error type, so each entry keeps its own typed variants.
 fn verify_release_v1<E>(
     source: &impl ReleaseSourceV1,
@@ -227,20 +232,41 @@ where
         + From<PluginManifestErrorV1>
         + From<PluginTrustErrorV1>
         + From<PluginReleaseSignatureErrorV1>
+        + From<PluginBundleContentErrorV1>
         + From<PluginTrustPolicyRegistryErrorV1>,
 {
     let bundle = source.read_verified(address)?;
     let (projection, execution) = project(&bundle)?;
     let authorization = evidence.authorize_release(&projection)?;
-    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let (signature, content) = verify_release_artifacts::<E>(&bundle, &authorization)?;
     let trusted_utc = TrustedUtcSecondV1::from_source(wall)?;
     let (_, tick) = evidence.evaluation_coordinates();
     Ok(VerifiedReleaseV1 {
         projection,
         execution,
         signature,
+        content,
         point: TrustEvaluationPointV1::new(trusted_utc, tick),
     })
+}
+
+/// Verify both facts against the same authorized release, in signature-first order.
+fn verify_release_artifacts<E>(
+    bundle: &VerifiedReleaseBundleV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> Result<
+    (
+        VerifiedPluginReleaseSignatureV1,
+        ValidatedPluginBundleContentV1,
+    ),
+    E,
+>
+where
+    E: From<PluginReleaseSignatureErrorV1> + From<PluginBundleContentErrorV1>,
+{
+    let signature = verify_plugin_release_signature_v1(bundle, authorization)?;
+    let content = validate_plugin_bundle_content_v1(bundle)?;
+    Ok((signature, content))
 }
 
 /// The trust projection and the execution projection of one closure.

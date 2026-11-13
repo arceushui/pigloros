@@ -152,6 +152,32 @@ pub enum AtomicCommitFailureV1 {
     Operational,
 }
 
+/// The closed reason a required basic package check refused the closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleContentReasonV1 {
+    /// A fixed input or traversal bound was exceeded.
+    BoundsExceeded,
+    /// An artifact format is unsupported.
+    UnsupportedFormat,
+    /// An artifact is malformed.
+    Malformed,
+    /// An internal identity or reference differs.
+    ReferenceMismatch,
+}
+
+impl BundleContentReasonV1 {
+    /// The closed outcome basis name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BoundsExceeded => "BoundsExceeded",
+            Self::UnsupportedFormat => "UnsupportedFormat",
+            Self::Malformed => "Malformed",
+            Self::ReferenceMismatch => "ReferenceMismatch",
+        }
+    }
+}
+
 /// The closed community Plugin host error (ADR-061 corrective amendment).
 ///
 /// Each variant carries only a closed class, a safe index or a trap class:
@@ -162,6 +188,12 @@ pub enum CommunityPluginHostErrorV1 {
     /// The release manifest failed PMF1 V1 validation.
     #[error("invalid community Plugin manifest")]
     InvalidManifest,
+    /// A required basic package content check refused the release.
+    #[error("invalid community Plugin bundle content")]
+    InvalidBundleContent {
+        /// The closed content failure reason.
+        reason: BundleContentReasonV1,
+    },
     /// The release is not authorized by the admitted trust evidence.
     #[error("community Plugin artifact trust denied")]
     ArtifactTrustDenied {
@@ -248,65 +280,49 @@ impl CommunityPluginHostErrorV1 {
     /// The exact closed ADR-061 error name.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::InvalidManifest => "InvalidManifest",
-            Self::ArtifactTrustDenied { .. } => "ArtifactTrustDenied",
-            Self::ArtifactRevoked { .. } => "ArtifactRevoked",
-            Self::IncompatibleAbi => "IncompatibleAbi",
-            Self::MissingFeature { .. } => "MissingFeature",
-            Self::CapabilityDenied { .. } => "CapabilityDenied",
-            Self::InvalidInvocation => "InvalidInvocation",
-            Self::InvalidGuestOutput => "InvalidGuestOutput",
-            Self::UnsupportedSchema => "UnsupportedSchema",
-            Self::StateMigrationFailed => "StateMigrationFailed",
-            Self::GuestDeclaredFailure => "GuestDeclaredFailure",
-            Self::ComponentTrap { .. } => "ComponentTrap",
-            Self::WorkerCrashed => "WorkerCrashed",
-            Self::FuelExhausted => "FuelExhausted",
-            Self::MemoryLimitExceeded => "MemoryLimitExceeded",
-            Self::HostCallLimitExceeded => "HostCallLimitExceeded",
-            Self::OutputLimitExceeded => "OutputLimitExceeded",
-            Self::DeterministicDeadlineExceeded => "DeterministicDeadlineExceeded",
-            Self::OperationalWatchdogStop => "OperationalWatchdogStop",
-            Self::AtomicCommitFailed { .. } => "AtomicCommitFailed",
-        }
+        self.description().0
     }
 
-    /// The basis name of a trust denial or a revocation, if this error has
-    /// one (ADR-061 revision 7 decision 3).
+    /// The basis name of a trust, revocation, or content refusal, if present.
     ///
     /// Every other error has none. [`Self::name()`] is unchanged: the basis is
     /// reported next to the name, never in place of it.
     #[must_use]
     pub const fn basis_name(self) -> Option<&'static str> {
+        self.description().1
+    }
+
+    /// The closed outcome name and its optional basis, kept in one mapping.
+    const fn description(self) -> (&'static str, Option<&'static str>) {
         match self {
-            Self::ArtifactTrustDenied { basis } => Some(basis.name()),
-            Self::ArtifactRevoked { basis } => Some(basis.name()),
-            Self::InvalidManifest
-            | Self::IncompatibleAbi
-            | Self::MissingFeature { .. }
-            | Self::CapabilityDenied { .. }
-            | Self::InvalidInvocation
-            | Self::InvalidGuestOutput
-            | Self::UnsupportedSchema
-            | Self::StateMigrationFailed
-            | Self::GuestDeclaredFailure
-            | Self::ComponentTrap { .. }
-            | Self::WorkerCrashed
-            | Self::FuelExhausted
-            | Self::MemoryLimitExceeded
-            | Self::HostCallLimitExceeded
-            | Self::OutputLimitExceeded
-            | Self::DeterministicDeadlineExceeded
-            | Self::OperationalWatchdogStop
-            | Self::AtomicCommitFailed { .. } => None,
+            Self::InvalidManifest => ("InvalidManifest", None),
+            Self::InvalidBundleContent { reason } => ("InvalidBundleContent", Some(reason.name())),
+            Self::ArtifactTrustDenied { basis } => ("ArtifactTrustDenied", Some(basis.name())),
+            Self::ArtifactRevoked { basis } => ("ArtifactRevoked", Some(basis.name())),
+            Self::IncompatibleAbi => ("IncompatibleAbi", None),
+            Self::MissingFeature { .. } => ("MissingFeature", None),
+            Self::CapabilityDenied { .. } => ("CapabilityDenied", None),
+            Self::InvalidInvocation => ("InvalidInvocation", None),
+            Self::InvalidGuestOutput => ("InvalidGuestOutput", None),
+            Self::UnsupportedSchema => ("UnsupportedSchema", None),
+            Self::StateMigrationFailed => ("StateMigrationFailed", None),
+            Self::GuestDeclaredFailure => ("GuestDeclaredFailure", None),
+            Self::ComponentTrap { .. } => ("ComponentTrap", None),
+            Self::WorkerCrashed => ("WorkerCrashed", None),
+            Self::FuelExhausted => ("FuelExhausted", None),
+            Self::MemoryLimitExceeded => ("MemoryLimitExceeded", None),
+            Self::HostCallLimitExceeded => ("HostCallLimitExceeded", None),
+            Self::OutputLimitExceeded => ("OutputLimitExceeded", None),
+            Self::DeterministicDeadlineExceeded => ("DeterministicDeadlineExceeded", None),
+            Self::OperationalWatchdogStop => ("OperationalWatchdogStop", None),
+            Self::AtomicCommitFailed { .. } => ("AtomicCommitFailed", None),
         }
     }
 
     /// The ADR-061 classification of this error.
     ///
     /// - Pre-execution rejections are host refusals before any guest code
-    ///   runs (revision 7 decision 5): exactly `InvalidManifest`,
+    ///   runs (revision 7 decision 5 and R12): `InvalidManifest`, `InvalidBundleContent`,
     ///   `ArtifactTrustDenied`, `ArtifactRevoked`, `IncompatibleAbi`,
     ///   `MissingFeature`, `CapabilityDenied` and `InvalidInvocation`.
     /// - The guest-output and deterministic-limit rows of the failure table
@@ -325,6 +341,7 @@ impl CommunityPluginHostErrorV1 {
     pub const fn class(self) -> HostFailureClassV1 {
         match self {
             Self::InvalidManifest
+            | Self::InvalidBundleContent { .. }
             | Self::ArtifactTrustDenied { .. }
             | Self::ArtifactRevoked { .. }
             | Self::IncompatibleAbi

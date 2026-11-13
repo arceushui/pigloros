@@ -12,12 +12,17 @@
 use pos_conformance::{PluginFloorKindV1, PluginTrustBridgeErrorV1};
 use pos_core::store::{EventStore as _, SeqRange};
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
-use pos_crypto::plugin_manifest::PluginReleaseSignatureErrorV1;
+use pos_crypto::plugin_manifest::{
+    verify_plugin_release_signature_v1, PluginReleaseSignatureErrorV1,
+};
 use pos_crypto::plugin_trust::{PluginTrustErrorV1, ValidatedPluginManifestProjectionV1};
+use pos_plugin_content::{
+    validate_plugin_bundle_content_v1, PluginBundleContentArtifactV1, PluginBundleContentErrorV1,
+};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, SCOPE, TICK, UTC},
-    release::{make_draft, pmf1_digest, PrivateRoot, Shape, COMPONENT_BYTES},
-    world::{key_bytes, wall, World},
+    release::{make_draft, pmf1_digest, FixtureContent, PrivateRoot, Shape, COMPONENT_BYTES},
+    world::{activation, key_bytes, trusted_utc, wall, World},
     BoxResult,
 };
 use pos_plugin_publisher::{
@@ -27,7 +32,7 @@ use pos_plugin_publisher::{
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1,
-    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
+    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustEvaluationPointV1,
 };
 
 type TestResult = BoxResult<()>;
@@ -96,6 +101,50 @@ const fn registry_error(error: PluginTrustPolicyRegistryErrorV1) -> PluginReleas
 // ---------------------------------------------------------------------------
 // Positive rollback and replay
 // ---------------------------------------------------------------------------
+
+#[test]
+fn signed_malformed_rollback_target_refuses_before_time_or_registry() -> TestResult {
+    let (mut world, _, _) = two_installed()?;
+    let shape = Shape::first();
+    let mut content = FixtureContent::new(shape.component);
+    content.corrupt_provenance();
+    let release = world.publish_with_content(shape, &content)?;
+    let material = world.material()?;
+    let expected = PluginReleaseRollbackErrorV1::Content(PluginBundleContentErrorV1::Malformed {
+        artifact: PluginBundleContentArtifactV1::Provenance,
+    });
+    assert_refused_before_registry(&mut world, release.address(), &material, &expected)
+}
+
+#[test]
+fn rollback_refuses_a_content_proof_from_the_other_release() -> TestResult {
+    let (mut world, first, second) = two_installed()?;
+    let bundle = world.store.read_verified(first.address())?;
+    let other = world.store.read_verified(second.address())?;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let original_content = validate_plugin_bundle_content_v1(&bundle)?;
+    let content = validate_plugin_bundle_content_v1(&other)?;
+    let material = world.material()?;
+    let authorization = material.evidence.authorize_release(&projection)?;
+    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let before = world.snapshot(&[original_content.pmf1_digest()])?;
+    let utc = trusted_utc(material.utc)?;
+    let result = world.registry.rollback(
+        &world.anchor,
+        &material.tps1,
+        &material.evidence,
+        &projection,
+        (&signature, &content),
+        TrustEvaluationPointV1::new(utc, TICK),
+        activation(world.timeline, 3),
+    );
+    assert_eq!(
+        result.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
+    );
+    assert_eq!(world.snapshot(&[original_content.pmf1_digest()])?, before);
+    Ok(())
+}
 
 #[test]
 fn rolls_back_to_the_earlier_release_through_the_production_entry() -> TestResult {
@@ -309,7 +358,10 @@ fn a_target_with_a_tampered_signature_is_refused_before_the_registry() -> TestRe
         &mut world.keys,
         &world.publisher,
         1,
-        &make_draft(Shape::first())?,
+        &make_draft(
+            Shape::first(),
+            &FixtureContent::new(Shape::first().component),
+        )?,
     )?
     .signature();
     let mut flipped = valid;
@@ -348,7 +400,10 @@ fn an_address_holding_nothing_is_refused_before_the_registry() -> TestResult {
         &mut world.keys,
         &world.publisher,
         1,
-        &make_draft(only_elsewhere)?,
+        &make_draft(
+            only_elsewhere,
+            &FixtureContent::new(only_elsewhere.component),
+        )?,
         &other_store,
     )?;
     let material = world.material()?;

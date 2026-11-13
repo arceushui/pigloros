@@ -15,13 +15,13 @@
 //! verification ever admits or installs a release.
 //!
 //! The signed installer (#573) reads one verified release, authorizes it with
-//! trust evidence, verifies its PMF1 signature, and only then asks the Plugin
-//! trust policy registry to admit it. It does not validate artifact content
-//! (follow-up #574) and builds no activation Event (the caller supplies it).
+//! trust evidence, verifies its PMF1 signature and checks its artifact content,
+//! then asks the Plugin trust policy registry to admit it. The caller supplies
+//! the activation Event.
 //!
 //! The production rollback entry (ADR-103 revision 7) re-activates an already
 //! admitted release in the installer's own order: it reads, projects,
-//! authorizes, and signature-verifies the target through the installer's
+//! authorizes, signature-verifies and content-checks the target through the installer's
 //! private prefix before it asks the registry to roll back to it.
 //!
 //! The `test-support` feature compiles the shared signed-release test world used by the

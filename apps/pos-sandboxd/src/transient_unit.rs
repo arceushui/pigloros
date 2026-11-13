@@ -42,7 +42,8 @@ pub enum SystemdServiceLimitsError {
     /// ELM1 must contain exactly one record for every ID 0 through 16 in order.
     #[error("effective limits are not the complete ordered ELM1 set")]
     InvalidEffectiveLimits,
-    /// The specified exact capacity would be rejected or interpreted as infinity.
+    /// The specified exact capacity would be rejected, interpreted as
+    /// infinity, or stored by systemd as a looser kernel value.
     #[error("ELM1 limit ID {0} cannot be enforced exactly by systemd")]
     UnenforceableLimit(u8),
     /// The watchdog milliseconds cannot be represented as systemd microseconds.
@@ -59,6 +60,27 @@ const fn is_unenforceable(id: usize, value: u64) -> bool {
         || (value == 0 && matches!(id, 0 | 2 | 3 | 4))
 }
 
+/// ELM1 limit 3 (`CpuQuotaPerMillion`), sent as systemd `CPUQuotaPerSecUSec`.
+const CPU_QUOTA_LIMIT_ID: usize = 3;
+
+/// Whether systemd v260 would write a larger `cpu.max` quota than `per_million`.
+///
+/// systemd keeps the 100 ms period for shares of at least 1% and otherwise
+/// stretches it to `1 s / share`, at most 1 s. It then writes the share of
+/// that period, rounded down, but never less than the kernel's 1 ms minimum.
+/// Below 0.1% the minimum always applies. Between 0.1% and 1% the stored
+/// quota stays exact only when the share divides 10^9 microseconds; any
+/// other share would be raised to 1 ms and enforced more loosely.
+const fn is_below_systemd_cpu_minimum(per_million: u64) -> bool {
+    // 10_000 itself divides 10^9, so the band ends at 9_999 inclusive.
+    per_million < 1_000 || (per_million <= 9_999 && !1_000_000_000_u64.is_multiple_of(per_million))
+}
+
+/// Whether systemd cannot store `value` for ELM1 limit `id` exactly.
+const fn is_unrepresentable(id: usize, value: u64) -> bool {
+    is_unenforceable(id, value) || (id == CPU_QUOTA_LIMIT_ID && is_below_systemd_cpu_minimum(value))
+}
+
 impl SystemdServiceLimits {
     /// Compile exact systemd values from one complete, already authorized ELM1.
     ///
@@ -67,7 +89,8 @@ impl SystemdServiceLimits {
     ///
     /// # Errors
     /// Rejects missing, duplicate, unordered, or unknown IDs, values that
-    /// systemd rejects or treats as infinity, and watchdog conversion overflow.
+    /// systemd rejects or treats as infinity, CPU shares whose stored quota
+    /// systemd would raise, and watchdog conversion overflow.
     pub fn from_effective_limits(
         limits: &[SandboxLimit],
     ) -> Result<Self, SystemdServiceLimitsError> {
@@ -82,7 +105,7 @@ impl SystemdServiceLimits {
         let mut requested = [0; 7];
         let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
         for (id, limit) in limits.iter().enumerate() {
-            if is_unenforceable(id, limit.value) {
+            if is_unrepresentable(id, limit.value) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
                     limit.limit_id,
                 ));
@@ -118,6 +141,11 @@ impl SystemdServiceLimits {
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
         self.requested[property.index()]
+    }
+
+    /// The requested ELM1 `WorkBytes` ceiling for the `/work` tmpfs.
+    pub(crate) const fn work_bytes(&self) -> u64 {
+        self.work_bytes
     }
 
     /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
