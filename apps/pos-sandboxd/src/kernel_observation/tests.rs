@@ -402,10 +402,10 @@ fn sharing_any_single_namespace_type_with_the_provider_is_refused() -> TestResul
     let own = *ProviderNamespaces::observe()?.namespaces();
     let foreign = NamespaceSet::for_test_shifted(&own);
     assert!(own.isolated_from(&foreign));
-    for shared in 0..NAMESPACES.len() {
+    for (shared, name) in NAMESPACES.iter().enumerate() {
         let mut provider = foreign;
         provider.0[shared] = own.0[shared];
-        assert!(!own.isolated_from(&provider), "{}", NAMESPACES[shared]);
+        assert!(!own.isolated_from(&provider), "{name}");
         let (_directory, cgroup) = cgroup_listing(own_pid())?;
         assert_eq!(
             observe_unit(
@@ -415,8 +415,7 @@ fn sharing_any_single_namespace_type_with_the_provider_is_refused() -> TestResul
             )
             .err(),
             Some(KernelObservationError::SharedNamespace),
-            "{}",
-            NAMESPACES[shared]
+            "{name}"
         );
     }
     Ok(())

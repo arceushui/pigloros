@@ -1744,7 +1744,7 @@ mod cases {
                 unit.clone(),
                 "/org/freedesktop/systemd1/unit/attempt",
             )?;
-            let observed = crate::ObservedUnit::new(crate::KernelObservation::fixture([7; 16]));
+            let observed = crate::ObservedUnit::new(&crate::KernelObservation::fixture([7; 16]));
             let release = ReleaseOutcome::new(Some([3; 32]), Some(observed), None);
             let mut progress = AttemptProgress::Failed {
                 error: ExecuteError::HostTimeout,

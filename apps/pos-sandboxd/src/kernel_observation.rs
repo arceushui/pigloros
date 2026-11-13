@@ -459,9 +459,9 @@ pub struct ObservedUnit {
 impl ObservedUnit {
     /// An observation that holds no `/work` handle.
     #[cfg(test)]
-    pub(crate) const fn new(observation: KernelObservation) -> Self {
+    pub(crate) const fn new(observation: &KernelObservation) -> Self {
         Self {
-            observation,
+            observation: *observation,
             work: None,
         }
     }

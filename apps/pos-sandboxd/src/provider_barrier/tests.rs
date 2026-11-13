@@ -218,11 +218,11 @@ impl ObservedReadback for TestObserved {
             (Observing::Unavailable, _) | (Observing::VanishesOnRecheck, 1..) => {
                 Err(ObservedReadbackUnavailable(KernelObservationError::Exited))
             }
-            (Observing::Changes, 1..) => Ok(ObservedUnit::new(self.second)),
+            (Observing::Changes, 1..) => Ok(ObservedUnit::new(&self.second)),
             (Observing::ReadsUnit, _) => unit()
-                .map(|_| ObservedUnit::new(self.first))
+                .map(|_| ObservedUnit::new(&self.first))
                 .map_err(ObservedReadbackUnavailable),
-            _ => Ok(ObservedUnit::new(self.first)),
+            _ => Ok(ObservedUnit::new(&self.first)),
         }
     }
 
