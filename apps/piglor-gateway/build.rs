@@ -10,20 +10,8 @@ use std::{env, error::Error, fmt::Write as _, fs, path::PathBuf};
 
 /// The crate's own GMP1 codec and declaration compiler, shared with the
 /// crate's tests.
-pub mod src {
-    #[path = "mode_profile/declaration.rs"]
-    mod declaration;
-    #[path = "mode_profile/gmp1.rs"]
-    mod gmp1;
-
-    /// Compile the reviewed declaration into canonical GMP1 records.
-    ///
-    /// # Errors
-    /// Returns a description of the first rejected rule.
-    pub fn compile(json: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        declaration::compile_declaration_v1(json)
-    }
-}
+#[path = "src/mode_profile/compiler.rs"]
+pub mod compiler;
 
 const DECLARATION: &str = "../../contracts/gateway/v1/execution-mode-profiles.json";
 
@@ -33,8 +21,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed={}", declaration_path.display());
     println!("cargo:rerun-if-changed=src/mode_profile/declaration.rs");
     println!("cargo:rerun-if-changed=src/mode_profile/gmp1.rs");
+    println!("cargo:rerun-if-changed=src/mode_profile/compiler.rs");
     let json = fs::read_to_string(&declaration_path)?;
-    let compiled = src::compile(&json)?;
+    let compiled = compiler::compile(&json)?;
     let mut source = String::new();
     for (mode_profile_id, bytes) in &compiled {
         let name = mode_profile_id.replace('-', "_").to_uppercase();
