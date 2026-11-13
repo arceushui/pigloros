@@ -933,7 +933,8 @@ impl GatewayAuthorization {
     /// view through that source, exactly as a store refresh does, so a
     /// revocation learned here is answered `revoked`. The replacement is the
     /// host's own in-process decision and is installed as given; a later
-    /// store refresh never rolls it back (see [`Self::is_behind`]).
+    /// store refresh never rolls it back, because a refresh installs only a
+    /// record ahead of the pinned chain.
     ///
     /// # Errors
     /// Returns [`GatewayAuthorizationError::AuthorityUnavailable`] when the
