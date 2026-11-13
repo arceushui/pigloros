@@ -57,7 +57,7 @@ jobs:
       - name: Quiesce background servicing before native fixtures (diagnostic)
         shell: pwsh
         run: |
-          foreach ($name in 'wuauserv', 'UsoSvc', 'BITS', 'DoSvc', 'DiagTrack', 'SysMain', 'WSearch', 'TrustedInstaller', 'InstallService') {
+          foreach ($name in 'StorSvc', 'wuauserv', 'UsoSvc', 'BITS', 'DoSvc', 'DiagTrack', 'SysMain', 'WSearch', 'TrustedInstaller', 'InstallService') {
             try {
               $service = Get-Service -Name $name -ErrorAction Stop
               $before = $service.Status
