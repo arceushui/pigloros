@@ -84,10 +84,10 @@ pub fn bound_router(router: Router, mode: &GatewayModeBindingV1) -> Router {
 
 /// The graceful-shutdown future of a bound Gateway: the operator's
 /// `shutdown`, or a write that found the binding stale.
-pub fn shutdown_or_stale(
-    shutdown: impl Future<Output = ()> + Send + 'static,
+pub fn shutdown_or_stale<S: Future<Output = ()> + Send + 'static>(
+    shutdown: S,
     mode: &GatewayModeBindingV1,
-) -> impl Future<Output = ()> + Send + 'static {
+) -> impl Future<Output = ()> + Send + 'static + use<S> {
     let signal = mode.stale_signal();
     async move {
         tokio::select! {
