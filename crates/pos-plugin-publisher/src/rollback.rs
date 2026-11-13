@@ -11,12 +11,13 @@
 //! 3. authorize the projection with the caller's verified trust evidence, which
 //!    resolves the publisher key;
 //! 4. verify the PMF1 release signature under the resolved key;
-//! 5. sample the sealed trusted wall source;
-//! 6. only then call the registry's `rollback` with the evidence's own Tick and
+//! 5. validate the same closure's content with the fixed basic package rule;
+//! 6. sample the sealed trusted wall source;
+//! 7. only then call the registry's `rollback` with the evidence's own Tick and
 //!    the verified signature as the release proof, which the registry requires
 //!    to bind its own authorization of the target.
 //!
-//! Steps 1 to 5 are the installer's own private prefix, so the two orders
+//! Steps 1 to 6 are the installer's own private prefix, so the two orders
 //! cannot drift; this file is therefore a child module of `install`, included
 //! by `#[path]`, while keeping its own file for the guard's allow-list.
 //! ADR-103 revision 7 names this module the sole non-test caller of the
@@ -37,6 +38,7 @@ use pos_crypto::plugin_manifest::{
     PluginManifestErrorV1, PluginReleaseSignatureErrorV1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{PluginTrustErrorV1, VerifiedPluginTrustEvidenceV1};
+use pos_plugin_content::PluginBundleContentErrorV1;
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, PluginRollbackReceiptV1, PluginTrustPolicyRegistryErrorV1,
@@ -68,6 +70,9 @@ pub enum PluginReleaseRollbackErrorV1 {
     /// The target's PMF1 signature failed verification under the authorized key.
     #[error(transparent)]
     Signature(#[from] PluginReleaseSignatureErrorV1),
+    /// A required bundle artifact failed the basic package checks.
+    #[error(transparent)]
+    Content(#[from] PluginBundleContentErrorV1),
     /// The registry refused the rollback, or the trusted time was unavailable.
     #[error(transparent)]
     Registry(#[from] PluginTrustPolicyRegistryErrorV1),
@@ -140,7 +145,7 @@ impl RolledBackPluginReleaseV1 {
 /// Returns `Source` when the closure cannot be read, `Manifest` when its PMF1
 /// is not a canonical V1 manifest, `Authorization` when the evidence does not
 /// authorize the target, `Signature` when field 26 does not verify under the
-/// authorized key, and `Registry` for a trusted-time failure or the registry's
+/// authorized key, `Content` when a required content check fails, and `Registry` for a trusted-time failure or the registry's
 /// own typed refusal of the rollback (for example `UnknownRollbackTarget`,
 /// `NoActiveRelease`, or `RollbackTargetActive`).
 pub fn rollback_plugin_release_v1(
@@ -157,7 +162,7 @@ pub fn rollback_plugin_release_v1(
         request.tps1_bytes,
         request.evidence,
         &verified.projection,
-        &verified.signature,
+        (&verified.signature, &verified.content),
         verified.point,
         request.activation,
     )?;

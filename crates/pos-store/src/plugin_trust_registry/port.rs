@@ -5,6 +5,7 @@ use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::ValidatedPluginBundleContentV1;
 
 use super::error::PluginTrustPolicyRegistryErrorV1;
 use super::types::{
@@ -48,7 +49,9 @@ impl TrustEvaluationPointV1 {
 /// the release digest and the public key of the registry's own authorization
 /// of the projection, else `ReleaseProofMismatch`. The registry checks that
 /// binding only; it does not re-verify the signature and retains nothing from
-/// the proof. Their UTC second and Tick are one [`TrustEvaluationPointV1`].
+/// the proof. They also require the basic content proof, whose complete-PMF1
+/// and release digests must match that authorization, else `ContentProofMismatch`.
+/// Their UTC second and Tick are one [`TrustEvaluationPointV1`].
 ///
 /// Writes take `&mut self` and commit all of their state or none; reads take
 /// `&self`, and so does the read-only `evaluate_current_release`. A write validates the
@@ -69,8 +72,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Admit and activate one release, or return the identical earlier decision.
     ///
-    /// `release_proof` must bind the authorized release and key; `point` is the
-    /// trusted UTC second and the Tick of the transaction.
+    /// `proofs` contains the signature bound to the authorized release and key,
+    /// followed by the content proof bound to the same release; `point` supplies trusted time and Tick.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -80,7 +83,10 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        proofs: (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1>;
@@ -100,8 +106,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Re-activate a previously admitted release of the active Plugin ID.
     ///
-    /// `release_proof` must bind the authorized target and key; `point` is the
-    /// trusted UTC second and the Tick of the transaction.
+    /// `proofs` contains the signature bound to the authorized target and key,
+    /// followed by the content proof bound to the same target; `point` supplies trusted time and Tick.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -111,7 +117,10 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        proofs: (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<PluginRollbackReceiptV1, PluginTrustPolicyRegistryErrorV1>;

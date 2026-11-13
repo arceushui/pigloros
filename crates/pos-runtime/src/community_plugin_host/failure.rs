@@ -34,6 +34,7 @@ pub const fn quarantine_for(error: CommunityPluginHostErrorV1) -> Option<PluginA
         Error::ArtifactRevoked { .. } => Some(PluginAvailabilityV1::Revoked),
         Error::WorkerCrashed => Some(PluginAvailabilityV1::Unavailable),
         Error::InvalidManifest
+        | Error::InvalidBundleContent { .. }
         | Error::ArtifactTrustDenied { .. }
         | Error::IncompatibleAbi
         | Error::MissingFeature { .. }
