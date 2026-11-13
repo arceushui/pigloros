@@ -38,7 +38,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) {
         let loopback = loopback.clone();
         let foreground = Arc::clone(&foreground);
         workers.push(thread::spawn(move || {
-            pass(run_worker(&path, root, loopback, &foreground, worker))
+            run_worker(&path, root, loopback, &foreground, worker)
         }));
     }
     // Every creating STA retires its accepted owners before its join completes.
@@ -64,7 +64,7 @@ fn run_worker(
     mut loopback: SharedLoopback,
     foreground: &Foreground,
     worker: usize,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> usize {
     pass(crate::create_private_directory(&root));
     let runtime = Arc::new(pass(crate::verify_fixed_runtime(runtime_path, &root)));
     let factory = Rc::new(pass(crate::Native::owner_factory()));
@@ -81,7 +81,6 @@ fn run_worker(
         )
         .map_err(pos_owner_bridge::SurfaceError::error),
     );
-    let mut outcome = Ok(RUNS_PER_WORKER);
     for iteration in 0..RUNS_PER_WORKER {
         let number = pass(u64::try_from(worker * RUNS_PER_WORKER + iteration + 1));
         let mut bytes = [0; 16];
@@ -95,13 +94,12 @@ fn run_worker(
             CeremonyId::from_bytes(bytes),
             number,
         );
-        if let Err(error) = attempt {
-            outcome = Err(format!(
-                "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {error}",
-                started.elapsed()
-            ).into());
-            break;
-        }
+        assert!(
+            attempt.is_ok(),
+            "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {:?}",
+            started.elapsed(),
+            attempt.as_ref().err()
+        );
     }
     // run_ceremony also retires failed and panicking cases before returning.
     worker_stage(worker, "dropping-surface");
@@ -117,7 +115,7 @@ fn run_worker(
     worker_stage(worker, "timer-stopped");
     drop(factory);
     worker_stage(worker, "apartment-released");
-    outcome
+    RUNS_PER_WORKER
 }
 
 // Constant-memory observations of existing driver and STA pump calls.
@@ -233,10 +231,13 @@ fn run_ceremony(
                         surface.controller_lost();
                     }
                 }
+                assert!(
+                    !step_done(&step),
+                    "readiness driver finished without a result"
+                );
                 match step {
                     Step::Finished(result) => return Ok(result),
-                    Step::Done => return Err("readiness driver finished without a result".into()),
-                    Step::Pending => {
+                    Step::Pending | Step::Done => {
                         let pump_started = timing.band(receipt.is_some()).enter_pump();
                         let pumped = pump(surface);
                         timing.band(receipt.is_some()).return_pump(pump_started);
@@ -266,9 +267,7 @@ fn run_ceremony(
         store,
         driver,
         result,
-        |surface, driver, loopback| {
-            trace.update("quarantine", surface, driver, loopback);
-        },
+        |surface, driver, loopback| trace.update("quarantine", surface, driver, loopback),
     );
     surface.report_readiness_timing();
     let resource = crate::Native::readiness_resource_snapshot();
@@ -336,6 +335,10 @@ pub(super) fn env<'a>(
         loopback,
         store,
     }
+}
+
+pub(super) const fn step_done(step: &Step) -> bool {
+    matches!(step, Step::Done)
 }
 
 pub(super) fn cancel_driver(
@@ -511,6 +514,10 @@ mod tests {
             });
             assert!(result.is_ok(), "store creation: {result:?}");
             drop(factory);
+            assert!(Rc::try_unwrap(scripted).is_ok_and(|mut pump| {
+                crate::StaPump::next(&pump).is_ok_and(|pulse| pulse == crate::NativePulse::Timer)
+                    && crate::StaPump::stop(&mut pump).is_ok()
+            }));
             assert!(root.remove().is_ok());
         });
         assert!(result.is_ok(), "fixture root: {result:?}");
