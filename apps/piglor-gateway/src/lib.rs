@@ -2720,6 +2720,7 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        self.wait_for_admitted_operations().await;
         self.flush_denial_markers_before_shutdown().await;
         self.store.shutdown().await.map_err(Into::into)
     }
@@ -3354,6 +3355,14 @@ impl Gateway {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
             Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
             Err(error) => error.into(),
+        }
+    }
+
+    /// Wait for every operation admitted under the authority fence (a
+    /// detached mutation task included) to complete before the store stops.
+    async fn wait_for_admitted_operations(&self) {
+        if let Some(authorization) = &self.authorization {
+            authorization.wait_for_admitted_operations().await;
         }
     }
 

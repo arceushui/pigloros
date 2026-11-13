@@ -931,7 +931,9 @@ impl GatewayAuthorization {
     /// racing a final authorization check and append. An authorizer with a
     /// [`GatewayAuthoritySourceV1`] rebuilds the attesting registry with the
     /// view through that source, exactly as a store refresh does, so a
-    /// revocation learned here is answered `revoked`.
+    /// revocation learned here is answered `revoked`. The replacement is the
+    /// host's own in-process decision and is installed as given; a later
+    /// store refresh never rolls it back (see [`Self::is_behind`]).
     ///
     /// # Errors
     /// Returns [`GatewayAuthorizationError::AuthorityUnavailable`] when the
@@ -974,13 +976,38 @@ impl GatewayAuthorization {
     /// Recompose the pinned view and registry from the store's `persisted`
     /// chain under the commit-fence write guard, so no decision or admitted
     /// operation interleaves.
+    ///
+    /// The comparison is repeated under the guard: a refresh that raced a
+    /// newer one never installs its older record over the newer pin.
     pub(crate) async fn refresh(
         &self,
         persisted: &PersistedAuthorityV1,
     ) -> Result<(), GatewayAuthorizationError> {
         let _guard = self.commit_lock.write().await;
+        if !self.is_behind(persisted) {
+            return Ok(());
+        }
         self.recomposed(persisted)
             .and_then(|pinned| self.install(pinned))
+    }
+
+    /// Decide `request` as a host that cannot vouch for its revocation
+    /// state: a store whose authority record could not be read or
+    /// recomposed. A covered request is denied `RevocationStateStale`
+    /// (`503`, retryable; D3 on #302), never answered as unauthenticated.
+    pub(crate) fn authorize_with_stale_state(
+        &self,
+        request: GatewayAuthorizationRequest,
+    ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
+        let mut stale = self.clone();
+        stale.revocation_state_current = false;
+        stale.authorize(request)
+    }
+
+    /// Wait until every operation admitted under the commit fence has
+    /// released it.
+    pub(crate) async fn wait_for_admitted_operations(&self) {
+        drop(self.commit_lock.write().await);
     }
 
     /// The source's view and registry for `persisted`, under this host's

@@ -140,7 +140,11 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
     ///
     /// A request cancelled after the decision does not release the fence
     /// early: the mutation either commits before a later revocation lands
-    /// or is never started.
+    /// or is never started. Such tasks are bounded by the requests in flight
+    /// and by the store command deadline: a hung mutation holds the read
+    /// fence (delaying revocations) until its store command expires.
+    /// [`Gateway::shutdown`] first waits for every admitted operation to
+    /// release the fence, so no mutation task outlives a clean shutdown.
     ///
     /// # Errors
     /// Returns the failures of [`Self::authorize`], before `operation` is
@@ -172,20 +176,23 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
 /// the host brought its pinned authority current with its store.
 pub(crate) struct AuthorityFence {
     _guard: OwnedRwLockReadGuard<()>,
-    stale: Option<GatewayAuthorizationError>,
+    stale: bool,
 }
 
 impl AuthorityFence {
-    /// Decide `request`, or fail closed when the store's authority could not
-    /// be read or recomposed.
+    /// Decide `request`; when the store's authority could not be read or
+    /// recomposed, decide it as a host whose revocation state is stale, so
+    /// a covered request is answered `503` and retryable.
     pub(crate) fn authorize(
         &self,
         authorization: &GatewayAuthorization,
         request: GatewayAuthorizationRequest,
     ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
-        self.stale
-            .clone()
-            .map_or_else(|| authorization.authorize(request), Err)
+        if self.stale {
+            authorization.authorize_with_stale_state(request)
+        } else {
+            authorization.authorize(request)
+        }
     }
 }
 
@@ -268,7 +275,7 @@ impl Gateway {
         &self,
         authorization: &Arc<GatewayAuthorization>,
     ) -> AuthorityFence {
-        let stale = self.bring_current(authorization).await.err();
+        let stale = self.bring_current(authorization).await.is_err();
         AuthorityFence {
             _guard: authorization.commit_fence().await,
             stale,

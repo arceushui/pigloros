@@ -269,8 +269,9 @@ pub fn provision_local_principal_from_credentials(
 /// Reading never writes the store.
 ///
 /// # Errors
-/// Returns [`LocalPrincipalErrorV1::Corrupt`] when the authority records
-/// cannot be read, or hold a Local Principal record this host cannot
+/// Returns [`LocalPrincipalErrorV1::Unavailable`] when the store cannot be
+/// read, and [`LocalPrincipalErrorV1::Corrupt`] when its authority records
+/// are invalid or hold a Local Principal record this host cannot
 /// recompose exactly. Only a store that records no Local Principal grant (a
 /// store resolves no chain for an absent leaf, and it validates every
 /// recorded grant's chain on write) is unprovisioned.
@@ -283,6 +284,7 @@ where
     match store.load_authority(local_principal_grant_id()) {
         // The store resolves no chain for an absent leaf grant.
         Err(AuthorityPersistenceErrorV1::Conflict) => Ok(None),
+        Err(AuthorityPersistenceErrorV1::Unavailable) => Err(LocalPrincipalErrorV1::Unavailable),
         Err(_) => Err(LocalPrincipalErrorV1::Corrupt),
         Ok(persisted) => compose(&persisted)
             .map(Some)
@@ -567,6 +569,7 @@ mod tests {
         startup::{open_recovered_erasure_host, GatewayHostStoreV1},
         AppState, GatewayError, LedgerWriteMode,
     };
+    use axum::response::IntoResponse;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -898,6 +901,9 @@ mod tests {
         assert_eq!(scope.actions(), ["create", "read"]);
         assert_eq!(scope.purposes(), ["operation", "read"]);
         assert_eq!(scope.actor_entity_ids(), [actor()?]);
+        // No participant is ever granted, so a signal acting as another
+        // entity than its header actor can never be covered (M4).
+        assert!(scope.participant_ids().is_empty());
         assert_eq!(built.grant.grant_id(), local_principal_grant_id());
         // The registry digest commits to the whole document: every field,
         // even at equal set sizes.
@@ -1047,6 +1053,10 @@ mod tests {
         assert_eq!(
             load_local_principal(&FailingStore(AuthorityPersistenceErrorV1::InvalidRecord)).err(),
             Some(LocalPrincipalErrorV1::Corrupt)
+        );
+        assert_eq!(
+            load_local_principal(&FailingStore(AuthorityPersistenceErrorV1::Unavailable)).err(),
+            Some(LocalPrincipalErrorV1::Unavailable)
         );
         Ok(())
     }
@@ -1321,17 +1331,27 @@ mod tests {
             std::iter::empty(),
             loaded(&served_provision()?)?,
         );
+        // An unreadable authority store is stale revocation state: `503`
+        // and retryable, never `401` (D3); here its denial evidence cannot
+        // be recorded either.
+        let refused = gateway
+            .authorize_operation(
+                GatewayOperationV1::CREATE_TIMELINE,
+                Some(actor()?),
+                None,
+                None,
+            )
+            .await
+            .err()
+            .ok_or("an unreadable store admits nothing")?;
         assert!(matches!(
-            gateway
-                .authorize_operation(
-                    GatewayOperationV1::CREATE_TIMELINE,
-                    Some(actor()?),
-                    None,
-                    None
-                )
-                .await,
-            Err(GatewayError::AuthorizationUnavailable)
+            refused,
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
+        assert_eq!(
+            refused.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         gateway.shutdown().await?;
         drop(gateway);
         Ok(())
@@ -1350,6 +1370,57 @@ mod tests {
         record_revocation(&path, &provision)?;
         let revoked = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
         assert!(authorization.is_behind(&revoked));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_older_record_never_rolls_a_newer_pin_back() -> TestResult {
+        let provision = served_provision()?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
+        let authorization =
+            load_local_principal(&SqliteStore::open(&path)?)?.ok_or("provisioned")?;
+        let older = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        record_revocation(&path, &provision)?;
+        let newer = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        authorization.refresh(&newer).await?;
+        assert!(!authorization.is_behind(&newer));
+        // A refresh that read the store before the revocation lands later.
+        authorization.refresh(&older).await?;
+        assert!(!authorization.is_behind(&newer));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_an_admitted_mutation() -> TestResult {
+        let served = served_store(&served_provision()?)?;
+        let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let gateway = served.gateway.clone();
+        let request = tokio::spawn(async move {
+            OperationAuthority::<CreateTimelineOperation>::for_test(Some(actor()?))
+                .run(&gateway, None, move |gateway| async move {
+                    match started.send(()) {
+                        Ok(()) | Err(()) => {}
+                    }
+                    drop(release_rx.await);
+                    gateway.create_timeline("before-shutdown").await
+                })
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
+        });
+        started_rx.await?;
+        let stopping = served.gateway.clone();
+        let shutdown = tokio::spawn(async move { stopping.shutdown().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!shutdown.is_finished());
+        match release.send(()) {
+            Ok(()) | Err(()) => {}
+        }
+        request.await??;
+        shutdown.await??;
+        drop(served);
         Ok(())
     }
 
@@ -1387,6 +1458,56 @@ mod tests {
             .ok_or("a conflicting record never serves")?;
         assert!(error.to_string().contains("restore the store"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_protected_route_refuses_an_unprovisioned_host_before_its_body() -> TestResult {
+        let (gateway, app) = served(None)?;
+        let timeline = TimelineId::new().to_string();
+        for (method, route) in crate::http::PROTECTED_ROUTES {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(route.replace("{timeline_id}", &timeline))
+                        .header("content-type", "application/json")
+                        .header(ACTOR_ENTITY_HEADER, actor()?.to_string())
+                        .body(Body::from("{"))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+        }
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(())
+    }
+
+    #[test]
+    fn the_protected_route_table_is_every_loopback_route() {
+        let source = include_str!("http.rs");
+        let body = source
+            .split("fn loopback_routes() -> Router<AppState> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        let mut served = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".route(\""))
+            .filter_map(|rest| {
+                let route = rest.split('"').next()?;
+                let method = if rest.contains(", get(") {
+                    "GET"
+                } else {
+                    "POST"
+                };
+                Some((method, route))
+            })
+            .collect::<Vec<_>>();
+        served.sort_unstable();
+        let mut table = crate::http::PROTECTED_ROUTES.to_vec();
+        table.sort_unstable();
+        assert_eq!(served, table);
     }
 
     #[test]
