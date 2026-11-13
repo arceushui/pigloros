@@ -193,6 +193,27 @@ fn domain_with(
     Ok(MemoryCommunityDomainV1::new(store, INCARNATION)?)
 }
 
+/// Install the metadata authority from explicit composition inputs.
+fn installed(
+    principal: AuthenticatedPrincipalResultV1,
+    registry: AuthorityRegistrySnapshotV1,
+    audience: &str,
+    samples: &[u64],
+) -> CommunityMetadataAuthorityV1 {
+    CommunityMetadataAuthorityV1::new(
+        CommunityMetadataAuthorityInputV1 {
+            registry,
+            principal,
+            actor_entity_id: actor(),
+            principal_role: AuthorityRoleV1::Actor,
+            audience: audience.to_owned(),
+            consent_policy_revision: CONSENT_REVISION,
+            capability_policy_revision: POLICY_REVISION,
+        },
+        ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
+    )
+}
+
 struct World {
     domain: MemoryCommunityDomainV1,
     policy: CommunityMetadataPolicyV1,
@@ -237,28 +258,7 @@ impl World {
 
     /// The installed authority, with trusted wall samples at 500 micros.
     fn authority_with(&self, audience: &str, samples: &[u64]) -> CommunityMetadataAuthorityV1 {
-        self.installed(self.owner.clone(), self.registry.clone(), audience, samples)
-    }
-
-    fn installed(
-        &self,
-        principal: AuthenticatedPrincipalResultV1,
-        registry: AuthorityRegistrySnapshotV1,
-        audience: &str,
-        samples: &[u64],
-    ) -> CommunityMetadataAuthorityV1 {
-        CommunityMetadataAuthorityV1::new(
-            CommunityMetadataAuthorityInputV1 {
-                registry,
-                principal,
-                actor_entity_id: actor(),
-                principal_role: AuthorityRoleV1::Actor,
-                audience: audience.to_owned(),
-                consent_policy_revision: CONSENT_REVISION,
-                capability_policy_revision: POLICY_REVISION,
-            },
-            ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
-        )
+        installed(self.owner.clone(), self.registry.clone(), audience, samples)
     }
 
     fn authority(&self) -> CommunityMetadataAuthorityV1 {
@@ -1180,7 +1180,7 @@ fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
         (foreign_adapter, world.registry.clone()),
         (world.owner.clone(), foreign_registry),
     ] {
-        let mut authority = world.installed(principal, registry, AUDIENCE, &[500]);
+        let mut authority = installed(principal, registry, AUDIENCE, &[500]);
         assert_eq!(
             world.open_as(request()?, &mut authority),
             Err(Error::EvidenceUnavailable)
