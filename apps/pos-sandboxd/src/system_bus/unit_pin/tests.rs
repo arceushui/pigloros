@@ -31,6 +31,10 @@ struct Bus {
     /// Successive `ActiveState` reads; the last one repeats.
     states: VecDeque<String>,
     activated_us: u64,
+    invocation: [u8; 16],
+    result: &'static str,
+    /// `ExecMainCode` and `ExecMainStatus`.
+    main_exit: (i32, i32),
 }
 
 type Shared = Arc<Mutex<Bus>>;
@@ -43,7 +47,7 @@ struct Manager(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl Manager {
-    async fn ref_unit(&self, name: String) -> fdo::Result<()> {
+    fn ref_unit(&self, name: String) -> fdo::Result<()> {
         let mut bus = self.0.lock().map_err(failed)?;
         bus.calls.push(format!("ref {name}"));
         if bus.refuse_ref {
@@ -53,7 +57,7 @@ impl Manager {
         }
     }
 
-    async fn unref_unit(&self, name: String) -> fdo::Result<()> {
+    fn unref_unit(&self, name: String) -> fdo::Result<()> {
         let mut bus = self.0.lock().map_err(failed)?;
         bus.calls.push(format!("unref {name}"));
         if bus.refuse_unref {
@@ -80,8 +84,8 @@ impl Unit {
     }
 
     #[zbus(property, name = "InvocationID")]
-    fn invocation_id(&self) -> Vec<u8> {
-        INVOCATION.to_vec()
+    fn invocation_id(&self) -> fdo::Result<Vec<u8>> {
+        Ok(self.0.lock().map_err(failed)?.invocation.to_vec())
     }
 
     #[zbus(property, name = "ActiveEnterTimestampMonotonic")]
@@ -90,23 +94,24 @@ impl Unit {
     }
 }
 
-struct Service;
+/// The unit's service: it exited with the bus's recorded main exit.
+struct Service(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
 impl Service {
     #[zbus(property, name = "Result")]
-    fn result(&self) -> String {
-        "success".to_owned()
+    fn result(&self) -> fdo::Result<String> {
+        Ok(self.0.lock().map_err(failed)?.result.to_owned())
     }
 
     #[zbus(property, name = "ExecMainCode")]
-    fn exec_main_code(&self) -> i32 {
-        1
+    fn exec_main_code(&self) -> fdo::Result<i32> {
+        Ok(self.0.lock().map_err(failed)?.main_exit.0)
     }
 
     #[zbus(property, name = "ExecMainStatus")]
-    fn exec_main_status(&self) -> i32 {
-        0
+    fn exec_main_status(&self) -> fdo::Result<i32> {
+        Ok(self.0.lock().map_err(failed)?.main_exit.1)
     }
 }
 
@@ -155,13 +160,16 @@ impl Fixture {
         let bus = Arc::new(Mutex::new(Bus {
             states: states.iter().map(|state| (*state).to_owned()).collect(),
             activated_us: ACTIVATED_US,
+            invocation: INVOCATION,
+            result: "success",
+            main_exit: (1, 0),
             ..Bus::default()
         }));
         let (server, client) = peer_connections(|server| {
             server
                 .serve_at("/org/freedesktop/systemd1", Manager(Arc::clone(&bus)))
                 .serve_at(UNIT_PATH, Unit(Arc::clone(&bus)))
-                .serve_at(UNIT_PATH, Service)
+                .serve_at(UNIT_PATH, Service(Arc::clone(&bus)))
         })
         .await?;
         let started = SystemdVerifiedStart {
@@ -386,16 +394,10 @@ async fn an_exited_unit_is_measured_read_and_then_unpinned() -> TestResult {
             settle_by,
         )
         .await;
-    let snapshot = terminal
-        .terminal()
-        .as_ref()
-        .map_err(|error| error.to_string())?;
+    let snapshot = terminal.terminal().as_ref().map_err(ToString::to_string)?;
     assert_eq!(snapshot.counter(AttemptLimitEventCounter::MemoryOomKill), 0);
     assert!(matches!(terminal.work_after(), Some(Ok(_))));
-    let service = terminal
-        .service()
-        .as_ref()
-        .map_err(|error| error.to_string())?;
+    let service = terminal.service().as_ref().map_err(ToString::to_string)?;
     assert_eq!(service.result(), SystemdServiceResult::Success);
     assert!(terminal.unpinned().is_ok());
     assert_eq!(fixture.calls()?, [named("unref", fixture.unit())]);

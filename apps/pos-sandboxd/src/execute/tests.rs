@@ -1857,7 +1857,7 @@ mod release_evidence {
             Some(monotonic_now_ns() + u64::try_from(hour).unwrap_or_default());
         scenario.air_gapped().await??;
         let left = release_deadline(&scenario)?.saturating_duration_since(Instant::now());
-        assert!(left > Duration::from_secs(3_600));
+        assert!(left > Duration::from_hours(1));
         Ok(())
     }
 

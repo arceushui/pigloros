@@ -38,8 +38,9 @@ fn context(cgroup: &File, work: bool) -> TestResult<ObservationContext<'_>> {
     ))
 }
 
-fn this_unit() -> Result<(u32, [u8; 16]), KernelObservationError> {
-    Ok((own_pid(), INVOCATION))
+/// The manager's view of this process as the unit's main process.
+fn this_unit() -> impl Fn() -> Result<(u32, [u8; 16]), KernelObservationError> {
+    || Ok((own_pid(), INVOCATION))
 }
 
 /// A child that exits at once; reap it with `wait`.
@@ -67,7 +68,7 @@ fn exited(pidfd: &OwnedFd) -> TestResult {
 fn this_process_is_observed_through_its_anchored_procdir() -> TestResult {
     let (_directory, cgroup) = cgroup_listing(own_pid())?;
     let provider = foreign_provider()?;
-    let observed = observe_unit(&this_unit, &context(&cgroup, false)?, &provider)?;
+    let observed = observe_unit(&this_unit(), &context(&cgroup, false)?, &provider)?;
     let observation = observed.observation();
     let own = ProviderNamespaces::observe()?;
     assert_eq!(observation.main_pid(), own_pid());
@@ -86,7 +87,7 @@ fn this_process_is_observed_through_its_anchored_procdir() -> TestResult {
     assert_eq!(observation.cgroup().device().major(), major(metadata.dev()));
     assert_eq!(observation.cgroup().device().minor(), minor(metadata.dev()));
     // Two observations of an unchanged process are equal: the recheck's rule.
-    let again = observe_unit(&this_unit, &context(&cgroup, false)?, &provider)?;
+    let again = observe_unit(&this_unit(), &context(&cgroup, false)?, &provider)?;
     assert_eq!(again.observation(), observation);
     Ok(())
 }
@@ -102,7 +103,7 @@ fn a_requested_work_mount_is_observed_and_held_for_after_exit() -> TestResult {
     };
     let observed = observe_unit_in(
         paths,
-        &this_unit,
+        &this_unit(),
         &context(&cgroup, true)?,
         &foreign_provider()?,
     )?;
@@ -139,7 +140,7 @@ fn a_work_path_that_is_no_tmpfs_root_is_refused() -> TestResult {
     assert!(matches!(
         observe_unit_in(
             paths,
-            &this_unit,
+            &this_unit(),
             &context(&cgroup, true)?,
             &foreign_provider()?
         ),
@@ -208,7 +209,7 @@ fn a_process_directory_off_procfs_is_never_trusted() -> TestResult {
     assert!(matches!(
         observe_unit_in(
             paths,
-            &this_unit,
+            &this_unit(),
             &context(&cgroup, false)?,
             &foreign_provider()?
         ),
@@ -257,7 +258,7 @@ fn a_main_pid_outside_the_bound_cgroup_is_refused() -> TestResult {
         Err(KernelObservationError::CgroupProcs)
     );
     assert_eq!(
-        observe_unit(&this_unit, &context(&other, false)?, &foreign_provider()?).err(),
+        observe_unit(&this_unit(), &context(&other, false)?, &foreign_provider()?).err(),
         Some(KernelObservationError::NotInCgroup)
     );
     Ok(())
@@ -268,7 +269,7 @@ fn a_unit_in_the_providers_namespaces_is_refused() -> TestResult {
     let (_directory, cgroup) = cgroup_listing(own_pid())?;
     let provider = ProviderNamespaces::observe()?;
     assert_eq!(
-        observe_unit(&this_unit, &context(&cgroup, false)?, &provider).err(),
+        observe_unit(&this_unit(), &context(&cgroup, false)?, &provider).err(),
         Some(KernelObservationError::SharedNamespace)
     );
     Ok(())
@@ -299,7 +300,7 @@ fn the_manager_identity_must_be_readable_and_unchanged() -> TestResult {
         if reads.get() > 1 {
             Err(KernelObservationError::Identity)
         } else {
-            this_unit()
+            Ok((own_pid(), INVOCATION))
         }
     };
     assert_eq!(
@@ -329,7 +330,7 @@ fn device_numbers_are_kept_within_the_kernel_bounds() -> TestResult {
         false,
     );
     assert_eq!(
-        observe_unit(&this_unit, &context, &foreign_provider()?).err(),
+        observe_unit(&this_unit(), &context, &foreign_provider()?).err(),
         Some(KernelObservationError::Device)
     );
     Ok(())
