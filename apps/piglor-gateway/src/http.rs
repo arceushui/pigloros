@@ -1046,12 +1046,18 @@ mod tests {
         });
         let timeline = TimelineId::new().to_string();
         for (method, route) in PROTECTED_ROUTES {
+            // Each request is one its handler would refuse first with `400`:
+            // a malformed body, or for the read a page limit of zero.
+            let query = if method == "GET" { "?limit=0" } else { "" };
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method(method)
-                        .uri(route.replace("{timeline_id}", &timeline))
+                        .uri(format!(
+                            "{}{query}",
+                            route.replace("{timeline_id}", &timeline)
+                        ))
                         .header("content-type", "application/json")
                         .header(
                             crate::operation::ACTOR_ENTITY_HEADER,
@@ -1076,12 +1082,20 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .unwrap_or_default();
-        let mut served = body
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix(".route(\""))
+        // Whitespace is removed first, so a `.route(` call split across
+        // lines is still found. Only routes registered in
+        // `loopback_routes` itself are seen; a route added through another
+        // helper would escape this check.
+        let compact = body
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let mut served = compact
+            .split(".route(\"")
+            .skip(1)
             .filter_map(|rest| {
                 let route = rest.split('"').next()?;
-                let method = if rest.contains(", get(") {
+                let method = if rest.contains(",get(") {
                     "GET"
                 } else {
                     "POST"

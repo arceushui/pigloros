@@ -1420,6 +1420,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_abandons_a_hung_mutation_at_its_deadline() -> TestResult {
+        let served = served_store(&served_provision()?)?;
+        let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let gateway = served.gateway.clone();
+        let hung = tokio::spawn(async move {
+            OperationAuthority::<CreateTimelineOperation>::for_test(Some(actor()?))
+                .run(&gateway, None, move |_gateway| async move {
+                    match started.send(()) {
+                        Ok(()) | Err(()) => {}
+                    }
+                    std::future::pending::<Result<(), GatewayError>>().await
+                })
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })
+        });
+        started_rx.await?;
+        tokio::time::timeout(
+            crate::executor::SHUTDOWN_DEADLINE + Duration::from_secs(10),
+            served.gateway.shutdown(),
+        )
+        .await??;
+        hung.abort();
+        drop(served);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_an_admitted_mutation() -> TestResult {
         let served = served_store(&served_provision()?)?;
         let (release, release_rx) = tokio::sync::oneshot::channel::<()>();

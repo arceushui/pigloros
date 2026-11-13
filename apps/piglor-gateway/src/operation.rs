@@ -143,8 +143,10 @@ impl<O: OperationSpecV1> OperationAuthority<O> {
     /// or is never started. Such tasks are bounded by the requests in flight
     /// and by the store command deadline: a hung mutation holds the read
     /// fence (delaying revocations) until its store command expires.
-    /// [`Gateway::shutdown`] first waits for every admitted operation to
-    /// release the fence, so no mutation task outlives a clean shutdown.
+    /// [`Gateway::shutdown`] first waits, up to its shutdown deadline, for
+    /// every admitted operation to release the fence; an operation still
+    /// running then is reported and abandoned, and its store command fails
+    /// once the store has shut down.
     ///
     /// # Errors
     /// Returns the failures of [`Self::authorize`], before `operation` is

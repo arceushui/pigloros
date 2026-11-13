@@ -3360,9 +3360,22 @@ impl Gateway {
 
     /// Wait for every operation admitted under the authority fence (a
     /// detached mutation task included) to complete before the store stops.
+    ///
+    /// The wait is bounded by the shutdown deadline: an operation still
+    /// running then (a hung Ledger write, for example) is reported and
+    /// abandoned, and the store shuts down under it.
     async fn wait_for_admitted_operations(&self) {
-        if let Some(authorization) = &self.authorization {
-            authorization.wait_for_admitted_operations().await;
+        let Some(authorization) = &self.authorization else {
+            return;
+        };
+        if tokio::time::timeout(
+            executor::SHUTDOWN_DEADLINE,
+            authorization.wait_for_admitted_operations(),
+        )
+        .await
+        .is_err()
+        {
+            report_unfinished_operations();
         }
     }
 
@@ -3665,6 +3678,16 @@ impl Gateway {
             authorization_required: false,
         }
     }
+}
+
+/// Report admitted operations still running at the shutdown deadline.
+fn report_unfinished_operations() {
+    use std::io::Write as _;
+    drop(writeln!(
+        std::io::stderr().lock(),
+        "piglor-gateway shutdown: admitted operations still running at the shutdown deadline \
+         were abandoned"
+    ));
 }
 
 /// Whole seconds until a retry may succeed: a partial second rounds up, and
