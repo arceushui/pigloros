@@ -11,16 +11,20 @@ mod envelope;
 mod error;
 mod failure;
 mod generation_admission;
+mod graph_root;
 mod guest_claim;
 mod guest_error;
 mod host_error;
 mod initialization;
+mod input_group;
+mod input_reference;
 mod invocation;
 mod key_intent;
 mod member;
 mod member_progress;
 mod metadata_envelope;
 mod metadata_scope;
+mod native_node;
 mod owner_binding;
 mod prepared;
 mod profile;
@@ -34,6 +38,7 @@ mod revision;
 mod seal;
 mod selected_head;
 mod selection;
+mod source_closure;
 mod state;
 mod step;
 mod terminal;
@@ -59,6 +64,10 @@ pub use failure::{
 pub use generation_admission::{
     CommunityGenerationAdmissionInputV1, CommunityGenerationAdmissionV1,
 };
+pub use graph_root::{
+    CommunityGraphCountsV1, CommunityGraphRootInputV1, CommunityGraphRootV1,
+    MAX_COMMUNITY_GRAPH_ROOT_BYTES_V1,
+};
 pub use guest_claim::{
     CommunityClaimArtifactV1, CommunityGuestClaimContextV1, CommunityGuestClaimKindV1,
     CommunityGuestClaimReferenceV1, CommunityGuestClaimReferencesV1, CommunityGuestClaimV1,
@@ -76,6 +85,11 @@ pub use initialization::{
     CommunityInitializationProducerInputV1, CommunityInitializationProducerV1,
     CommunityInitializationRequestInputV1, CommunityInitializationRequestV1,
     CommunityInitializationSourceV1,
+};
+pub use input_group::{CommunityInputGroupInputV1, CommunityInputGroupV1};
+pub use input_reference::{
+    CommunityLocatorProducerV1, CommunityMetadataLocatorV1, CommunityNativeNodeReferenceV1,
+    CommunityNativeNodeReferencesV1, CommunityTypedInputRefV1, CommunityTypedInputRefsV1,
 };
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
@@ -95,6 +109,11 @@ pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchema
 pub use metadata_scope::{
     CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityScopeMemberV1,
     CommunityScopeMembersIterV1, CommunityScopeMembersV1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
+};
+pub use native_node::{
+    CommunityContentReferenceV1, CommunityInputIndexV1, CommunityNativeNodeInputV1,
+    CommunityNativeNodeKindV1, CommunityNativeNodeV1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
+    MAX_COMMUNITY_EXPANDED_INPUTS_V1,
 };
 pub use owner_binding::{
     CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
@@ -143,6 +162,7 @@ pub use selection::{
     CommunityTimelineFloorV1, CommunityTimelineFloorsV1, MAX_COMMUNITY_CLOSED_GENERATIONS_V1,
     MAX_COMMUNITY_SELECTION_TIMELINES_V1,
 };
+pub use source_closure::{CommunitySourceClosureInputV1, CommunitySourceClosureV1};
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
 pub use step::{CommunityInvocationStepInputV1, CommunityInvocationStepV1};
 pub use terminal::{
