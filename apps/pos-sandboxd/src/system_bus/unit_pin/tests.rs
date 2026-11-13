@@ -47,7 +47,7 @@ struct Manager(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl Manager {
-    fn ref_unit(&self, name: String) -> fdo::Result<()> {
+    fn ref_unit(&self, name: &str) -> fdo::Result<()> {
         let mut bus = self.0.lock().map_err(failed)?;
         bus.calls.push(format!("ref {name}"));
         if bus.refuse_ref {
@@ -57,7 +57,7 @@ impl Manager {
         }
     }
 
-    fn unref_unit(&self, name: String) -> fdo::Result<()> {
+    fn unref_unit(&self, name: &str) -> fdo::Result<()> {
         let mut bus = self.0.lock().map_err(failed)?;
         bus.calls.push(format!("unref {name}"));
         if bus.refuse_unref {

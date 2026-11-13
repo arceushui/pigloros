@@ -1285,8 +1285,12 @@ mod kernel_observation {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_production_readback_observes_the_launcher_through_procfs() -> TestResult {
+        // No `/work` is requested: this test process has none to observe.
+        let mut limits = crate::test_fixtures::execution_limits(GENEROUS_MS);
+        limits[9].value = 0;
         let attempt =
-            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
+                .with_limits(limits);
         let own = crate::ProviderNamespaces::observe()?;
         let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
             own.namespaces(),

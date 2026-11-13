@@ -24,7 +24,9 @@ use rustix::fs::{
     PROC_SUPER_MAGIC,
 };
 use rustix::io::Errno;
-use rustix::process::{pidfd_open, Pid, PidfdFlags};
+use rustix::process::pidfd_open;
+use rustix::process::Pid;
+use rustix::process::PidfdFlags;
 
 use crate::{EffectiveLimitError, ObservedReadback, ObservedReadbackUnavailable, WorkCapacity};
 

@@ -101,6 +101,8 @@ enum ObservedControl {
         whom: String,
         signal: i32,
     },
+    Ref(String),
+    Unref(String),
 }
 
 struct RecordingManager {
@@ -178,8 +180,29 @@ impl Default for ManagerBehavior {
     }
 }
 
+impl RecordingManager {
+    fn record(&self, call: ObservedControl) -> fdo::Result<()> {
+        self.behavior
+            .control_calls
+            .lock()
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?
+            .push(call);
+        Ok(())
+    }
+}
+
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
+    #[zbus(name = "RefUnit")]
+    fn ref_unit(&self, name: String) -> fdo::Result<()> {
+        self.record(ObservedControl::Ref(name))
+    }
+
+    #[zbus(name = "UnrefUnit")]
+    fn unref_unit(&self, name: String) -> fdo::Result<()> {
+        self.record(ObservedControl::Unref(name))
+    }
+
     #[zbus(name = "Subscribe")]
     fn subscribe(&self) -> fdo::Result<()> {
         if matches!(self.behavior.subscription, SubscriptionBehavior::Reject) {
@@ -1306,6 +1329,15 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
         error,
         SystemdTransientUnitTransportError::CgroupKernel(_)
     ));
+    // The unit was referenced before the bind, and released when it failed.
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[
+            ObservedControl::Ref(name.as_str().to_owned()),
+            ObservedControl::Unref(name.as_str().to_owned()),
+        ]
+    );
+    calls.lock().map_err(|error| error.to_string())?.clear();
     UnitHost::stop(&transport, name.clone()).await?;
     UnitHost::kill(&transport, name.clone()).await?;
     // The handle an execution falls back on when it is dropped kills, then stops.
