@@ -141,22 +141,54 @@ const CGROUP_SOURCES: [(&str, &[u8]); 8] = [
     ("cpu.max", b"50000 100000\n"),
 ];
 
+/// The attempt's unit; the fake manager serves it at [`UNIT_PATH`].
+fn unit_name() -> TestResult<TransientServiceUnitName> {
+    Ok(TransientServiceUnitName::from_attempt_id([0x40; 16])?)
+}
+
+/// A temporary cgroup directory holding every source, and its path.
+fn cgroup_directory() -> TestResult<(tempfile::TempDir, std::path::PathBuf)> {
+    let root = tempfile::tempdir()?;
+    let directory = root.path().join("attempt");
+    fs::create_dir(&directory)?;
+    std::iter::once(("cgroup.events", b"populated 0\n".as_slice()))
+        .chain(CGROUP_SOURCES)
+        .try_for_each(|(name, bytes)| fs::write(directory.join(name), bytes))?;
+    Ok((root, directory))
+}
+
+/// The attempt cgroup bound beneath `root`.
+fn bound(root: &tempfile::TempDir) -> TestResult<BoundAttemptCgroup> {
+    let path = OwnedObjectPath::try_from(UNIT_PATH)?;
+    let root = CgroupRoot::for_test(fs::File::open(root.path())?);
+    Ok(BoundAttemptCgroup::open(
+        root,
+        unit_name()?,
+        path,
+        "/attempt".to_owned(),
+    )?)
+}
+
+/// The verified start of the attempt's unit.
+fn verified_start() -> TestResult<SystemdVerifiedStart> {
+    let job = OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/7")?;
+    Ok(SystemdVerifiedStart {
+        unit_name: unit_name()?,
+        job: SystemdStartJob(job),
+        unit_path: OwnedObjectPath::try_from(UNIT_PATH)?,
+        requested_readback: Vec::new(),
+        manager_readback: SystemdManagerReadback::new(
+            SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+            "",
+        ),
+        requested: Vec::new(),
+    })
+}
+
 impl Fixture {
     async fn new(states: &[&str]) -> TestResult<Self> {
-        let root = tempfile::tempdir()?;
-        let directory = root.path().join("attempt");
-        fs::create_dir(&directory)?;
-        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
-        for (name, bytes) in CGROUP_SOURCES {
-            fs::write(directory.join(name), bytes)?;
-        }
-        let unit_name = TransientServiceUnitName::from_attempt_id([0x40; 16])?;
-        let cgroup = BoundAttemptCgroup::open(
-            CgroupRoot::for_test(fs::File::open(root.path())?),
-            unit_name.clone(),
-            OwnedObjectPath::try_from(UNIT_PATH)?,
-            "/attempt".to_owned(),
-        )?;
+        let (root, directory) = cgroup_directory()?;
+        let cgroup = bound(&root)?;
         let bus = Arc::new(Mutex::new(Bus {
             states: states.iter().map(|state| (*state).to_owned()).collect(),
             activated_us: ACTIVATED_US,
@@ -172,24 +204,11 @@ impl Fixture {
                 .serve_at(UNIT_PATH, Service(Arc::clone(&bus)))
         })
         .await?;
-        let started = SystemdVerifiedStart {
-            unit_name,
-            job: SystemdStartJob(OwnedObjectPath::try_from(
-                "/org/freedesktop/systemd1/job/7",
-            )?),
-            unit_path: OwnedObjectPath::try_from(UNIT_PATH)?,
-            requested_readback: Vec::new(),
-            manager_readback: SystemdManagerReadback::new(
-                SystemdManagerReadbackOnlyProperty::RootImagePolicy,
-                "",
-            ),
-            requested: Vec::new(),
-        };
         Ok(Self {
             bus,
             _server: server,
             transport: SystemdTransientUnitTransport { connection: client },
-            started,
+            started: verified_start()?,
             cgroup,
             directory,
             _root: root,
