@@ -1160,7 +1160,10 @@ impl GatewayAuthorization {
     /// An Air-Gapped binding makes revocation state current by construction,
     /// because Air-Gapped reads authority only from its one bound store: an
     /// authorizer that is not recomposed from that store (it has no
-    /// [`GatewayAuthoritySourceV1`]) is refused.
+    /// [`GatewayAuthoritySourceV1`]) is refused. This "store-backed" rule is
+    /// enforced by composition, not by type: the check is that a source is
+    /// attached, and the serve composition attaches only the bound store's
+    /// Local Principal source.
     ///
     /// # Errors
     /// Returns [`crate::mode_profile::GatewayModeErrorV1::RefusedInMode`] for

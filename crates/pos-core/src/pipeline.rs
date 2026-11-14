@@ -765,7 +765,7 @@ pub enum PipelineOutcomeKindV1 {
 
 impl PipelineOutcomeKindV1 {
     /// The number of outcome kinds, the length of a per-outcome table.
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
 }
 
 impl PipelineOutcomeV1 {

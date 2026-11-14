@@ -233,8 +233,9 @@ impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
 }
 
 /// The name of each outcome kind, indexed by
-/// [`pos_core::PipelineOutcomeKindV1`]; its length is the kind count, so a
-/// new outcome must add its name here.
+/// [`pos_core::PipelineOutcomeKindV1`]. Its length is the kind count; the
+/// oracle test `every_outcome_kind_routes_through_the_name_table` fails to
+/// compile until a new outcome is named here.
 const OUTCOME_NAMES: [&str; pos_core::PipelineOutcomeKindV1::COUNT] = [
     "Rejected",
     "InvalidObservation",
@@ -255,8 +256,19 @@ const OUTCOME_NAMES: [&str; pos_core::PipelineOutcomeKindV1::COUNT] = [
 
 /// Name only the outcome discriminant so a rendered error never carries
 /// receipt data such as Event identities or digests.
-const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
-    OUTCOME_NAMES[outcome.kind() as usize]
+fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+    kind_name(outcome.kind())
+}
+
+const _: () = assert!(OUTCOME_NAMES.len() == pos_core::PipelineOutcomeKindV1::COUNT);
+
+/// The name of one outcome kind; a kind past the table is `Unclassified`,
+/// never a success name.
+fn kind_name(kind: pos_core::PipelineOutcomeKindV1) -> &'static str {
+    OUTCOME_NAMES
+        .get(kind as usize)
+        .copied()
+        .unwrap_or("Unclassified")
 }
 
 #[cfg(test)]
@@ -353,6 +365,56 @@ mod tests {
         };
         assert!(e.to_string().contains("Live"));
         assert!(e.to_string().contains("Replay"));
+    }
+
+    /// The exhaustive oracle of the name table: a new outcome kind fails to
+    /// compile here until it is named.
+    const fn oracle_name(kind: pos_core::PipelineOutcomeKindV1) -> &'static str {
+        use pos_core::PipelineOutcomeKindV1 as Kind;
+        match kind {
+            Kind::Rejected => "Rejected",
+            Kind::InvalidObservation => "InvalidObservation",
+            Kind::AuthorityRevoked => "AuthorityRevoked",
+            Kind::AuthorityExpired => "AuthorityExpired",
+            Kind::PolicyIndeterminate => "PolicyIndeterminate",
+            Kind::ResourceExhausted => "ResourceExhausted",
+            Kind::InvalidPluginResult => "InvalidPluginResult",
+            Kind::InvalidProviderResult => "InvalidProviderResult",
+            Kind::DomainConflict => "DomainConflict",
+            Kind::AdmissionConflict => "AdmissionConflict",
+            Kind::Committed => "Committed",
+            Kind::RecoveredDuplicate => "RecoveredDuplicate",
+            Kind::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
+            Kind::DependencySetExhausted => "DependencySetExhausted",
+            Kind::ModeBindingStale => "ModeBindingStale",
+        }
+    }
+
+    #[test]
+    fn every_outcome_kind_routes_through_the_name_table() {
+        use pos_core::PipelineOutcomeKindV1 as Kind;
+        let kinds = [
+            Kind::Rejected,
+            Kind::InvalidObservation,
+            Kind::AuthorityRevoked,
+            Kind::AuthorityExpired,
+            Kind::PolicyIndeterminate,
+            Kind::ResourceExhausted,
+            Kind::InvalidPluginResult,
+            Kind::InvalidProviderResult,
+            Kind::DomainConflict,
+            Kind::AdmissionConflict,
+            Kind::Committed,
+            Kind::RecoveredDuplicate,
+            Kind::InvalidDependencyDeclaration,
+            Kind::DependencySetExhausted,
+            Kind::ModeBindingStale,
+        ];
+        assert_eq!(kinds.len(), Kind::COUNT);
+        for (index, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(kind as usize, index);
+            assert_eq!(kind_name(kind), oracle_name(kind));
+        }
     }
 
     #[test]

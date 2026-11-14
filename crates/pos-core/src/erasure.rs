@@ -343,6 +343,10 @@ pub enum ErasureHostErrorV1 {
 }
 
 impl ErasureHostErrorV1 {
+    /// The number of host errors, the length of a table indexed by the
+    /// error's explicit, append-only discriminant: the last variant's plus one.
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
+
     /// Return the stable public error code: the variant's explicit
     /// discriminant.
     #[must_use]

@@ -834,6 +834,20 @@ fn every_alias_of_one_store_names_one_lock() -> TestResult {
         GatewayModeStoreLockV1::shared("..").err(),
         Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
+    let dangling = directory.path().join("dangling.db");
+    std::os::unix::fs::symlink(directory.path().join("missing.db"), &dangling)?;
+    assert_eq!(
+        GatewayModeStoreLockV1::shared(dangling.to_str().ok_or("path is not UTF-8")?).err(),
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
+    );
+    assert!(!directory
+        .path()
+        .join("dangling.db.gateway-mode.lock")
+        .exists());
+    assert!(!directory
+        .path()
+        .join("missing.db.gateway-mode.lock")
+        .exists());
     Ok(())
 }
 
@@ -868,4 +882,28 @@ fn migration_never_creates_a_missing_store() -> TestResult {
         ))
     );
     Ok(())
+}
+
+/// Review L-A on #1021: only a store bound to another mode, or unbound, makes
+/// the handle stale; an unreadable binding is an unavailable store.
+#[test]
+fn only_another_binding_makes_a_host_check_stale() {
+    for stale in [
+        GatewayModeErrorV1::ModeMismatch,
+        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unbound),
+    ] {
+        assert!(matches!(
+            super::binding_check_error(stale),
+            crate::GatewayError::Store(pos_core::CoreError::ModeBindingStale)
+        ));
+    }
+    for unavailable in [
+        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unavailable),
+        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::InvalidRecord),
+    ] {
+        assert!(matches!(
+            super::binding_check_error(unavailable),
+            crate::GatewayError::Store(pos_core::CoreError::Storage(_))
+        ));
+    }
 }

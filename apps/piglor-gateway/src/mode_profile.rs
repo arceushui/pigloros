@@ -592,7 +592,7 @@ impl GatewayModeBindingV1 {
         authorization: crate::GatewayAuthorization,
     ) -> Result<crate::GatewayAuthorization, crate::GatewayError> {
         self.verify_host(host)
-            .map_err(|_| crate::GatewayError::Store(pos_core::CoreError::ModeBindingStale))
+            .map_err(binding_check_error)
             .and_then(|()| {
                 authorization
                     .with_mode_binding(self)
@@ -651,6 +651,21 @@ pub fn bind_gateway_mode_v1(
             bind_store(host.gateway_mode_binding(), &profile)
                 .map(|_| GatewayModeBindingV1::new(profile, composition))
         })
+}
+
+/// The Gateway error of a failed host binding check: a store bound to
+/// another mode, or unbound, makes this handle stale (the process stops); a
+/// binding that cannot be read is an unavailable store, not a stale one.
+fn binding_check_error(error: GatewayModeErrorV1) -> crate::GatewayError {
+    match error {
+        GatewayModeErrorV1::ModeMismatch
+        | GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unbound) => {
+            crate::GatewayError::Store(pos_core::CoreError::ModeBindingStale)
+        }
+        _ => crate::GatewayError::Store(pos_core::CoreError::Storage(
+            "gateway execution-mode binding is unavailable".to_owned(),
+        )),
+    }
 }
 
 /// What predicate 5 does with the store's current binding.
@@ -838,17 +853,21 @@ impl GatewayModeStoreLockV1 {
 /// The lock file of the store at `sqlite_path`:
 /// `<canonical store path>.gateway-mode.lock`. The store path is resolved
 /// through every symlink (its parent directory when the file does not exist
-/// yet), so every alias of one store names the same lock. A directory is no
-/// store and has no lock.
+/// yet), so every alias of one store names the same lock. A directory and a
+/// dangling symlink are no store and have no lock.
 fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
     let path = Path::new(".").join(sqlite_path);
     path.canonicalize()
         .ok()
         .or_else(|| {
-            path.parent()
-                .and_then(|parent| parent.canonicalize().ok())
-                .zip(path.file_name())
-                .map(|(directory, name)| directory.join(name))
+            // Only an absent store resolves through its parent: a dangling
+            // symlink names no store and has no lock.
+            path.symlink_metadata().err().and_then(|_| {
+                path.parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .zip(path.file_name())
+                    .map(|(directory, name)| directory.join(name))
+            })
         })
         .filter(|store| !store.is_dir())
         .and_then(|store| {

@@ -60,7 +60,10 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
   and `rotate`. Only Gateway processes write a bound store; other hosts, such as `pos-experiment`,
   are refused.
 - **A stale process stops.** A write by a process whose binding a migration replaced commits
-  nothing, answers `503` `temporarily-unavailable`, and the process exits nonzero.
+  nothing, answers `503` `temporarily-unavailable`, and the process exits nonzero. A read that
+  finds the store changed underneath it answers the same way, so a stale process can also stop
+  on a `GET`. A Fork-admission listener request answers FARL1 code 8 and stops the process the
+  same way.
 
 ## Local Principal
 

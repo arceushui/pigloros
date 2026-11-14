@@ -1976,7 +1976,7 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
 
 /// The Gateway error family of a not-admitted store outcome, numbered so
 /// [`NOT_ADMITTED_ERRORS`] is indexed by it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NotAdmitted {
     PolicyUnavailable = 0,
     LimitReached = 1,
@@ -1987,9 +1987,15 @@ enum NotAdmitted {
     Rejected = 6,
 }
 
+impl NotAdmitted {
+    /// The number of families: the last variant's discriminant plus one.
+    const COUNT: usize = Self::Rejected as usize + 1;
+}
+
 /// The family of every outcome kind, indexed by
-/// [`pos_core::PipelineOutcomeKindV1`]; its length is the kind count, so a
-/// new outcome fails to compile until it is routed here.
+/// [`pos_core::PipelineOutcomeKindV1`]. Its length is the kind count; the
+/// oracle test `every_outcome_kind_routes_through_the_family_table` fails to
+/// compile until a new outcome is routed here.
 ///
 /// The executor turns a store revocation or expiry into a pending denial
 /// that is answered only once recorded; one that arrives here unrecorded is
@@ -2012,9 +2018,20 @@ const NOT_ADMITTED_FAMILIES: [NotAdmitted; pos_core::PipelineOutcomeKindV1::COUN
     NotAdmitted::ModeBindingStale,  // ModeBindingStale
 ];
 
+const _: () = assert!(NOT_ADMITTED_FAMILIES.len() == pos_core::PipelineOutcomeKindV1::COUNT);
+
 /// Classify every outcome by its kind.
-const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
-    NOT_ADMITTED_FAMILIES[outcome.kind() as usize]
+fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
+    family_of_kind(outcome.kind())
+}
+
+/// The family of one outcome kind; a kind past the table fails closed as a
+/// host fault.
+fn family_of_kind(kind: pos_core::PipelineOutcomeKindV1) -> NotAdmitted {
+    NOT_ADMITTED_FAMILIES
+        .get(kind as usize)
+        .copied()
+        .unwrap_or(NotAdmitted::HostFault)
 }
 
 /// A store outcome names no protected record: an unavailable policy reuses the
@@ -2025,8 +2042,10 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
     not_admitted_error(not_admitted_family(outcome), maximum)
 }
 
-/// The stable Gateway error of each family, indexed by [`NotAdmitted`].
-const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; 7] = [
+/// The stable Gateway error of each family, indexed by [`NotAdmitted`]. The
+/// oracle test `every_family_routes_through_the_error_table` fails to compile
+/// until a new family is routed here.
+const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; NotAdmitted::COUNT] = [
     |_| GatewayError::AuthorizationUnavailable,
     |maximum| GatewayError::EventLimitReached { maximum },
     |_| GatewayError::ActionAdmissionUnavailable,
@@ -2040,9 +2059,20 @@ const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; 7] = [
     },
 ];
 
-/// The stable Gateway error of one family.
+const _: () = assert!(NOT_ADMITTED_ERRORS.len() == NotAdmitted::COUNT);
+
+/// The admission-unavailable answer of a family past the table.
+const fn admission_unavailable(_maximum: u64) -> GatewayError {
+    GatewayError::ActionAdmissionUnavailable
+}
+
+/// The stable Gateway error of one family; a family past the table fails
+/// closed as admission-unavailable.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
-    NOT_ADMITTED_ERRORS[family as usize](maximum)
+    NOT_ADMITTED_ERRORS
+        .get(family as usize)
+        .copied()
+        .unwrap_or(admission_unavailable)(maximum)
 }
 
 impl From<ActionSubmissionError> for GatewayError {
@@ -4372,6 +4402,97 @@ mod tests {
                 Err(GatewayError::ActionRegistry(_))
             ));
         }
+    }
+
+    /// The exhaustive oracle of the family table: a new outcome kind fails to
+    /// compile here until it is routed.
+    const fn oracle_family(kind: pos_core::PipelineOutcomeKindV1) -> NotAdmitted {
+        match kind {
+            pos_core::PipelineOutcomeKindV1::Rejected
+            | pos_core::PipelineOutcomeKindV1::InvalidPluginResult
+            | pos_core::PipelineOutcomeKindV1::InvalidProviderResult
+            | pos_core::PipelineOutcomeKindV1::Committed
+            | pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => NotAdmitted::Rejected,
+            pos_core::PipelineOutcomeKindV1::InvalidObservation
+            | pos_core::PipelineOutcomeKindV1::DomainConflict
+            | pos_core::PipelineOutcomeKindV1::AdmissionConflict => NotAdmitted::Stale,
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked
+            | pos_core::PipelineOutcomeKindV1::AuthorityExpired
+            | pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                NotAdmitted::HostFault
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => NotAdmitted::LimitReached,
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => NotAdmitted::SetExhausted,
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => NotAdmitted::ModeBindingStale,
+        }
+    }
+
+    #[test]
+    fn every_outcome_kind_routes_through_the_family_table() {
+        let kinds = [
+            pos_core::PipelineOutcomeKindV1::Rejected,
+            pos_core::PipelineOutcomeKindV1::InvalidObservation,
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked,
+            pos_core::PipelineOutcomeKindV1::AuthorityExpired,
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate,
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted,
+            pos_core::PipelineOutcomeKindV1::InvalidPluginResult,
+            pos_core::PipelineOutcomeKindV1::InvalidProviderResult,
+            pos_core::PipelineOutcomeKindV1::DomainConflict,
+            pos_core::PipelineOutcomeKindV1::AdmissionConflict,
+            pos_core::PipelineOutcomeKindV1::Committed,
+            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate,
+            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration,
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted,
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale,
+        ];
+        assert_eq!(kinds.len(), pos_core::PipelineOutcomeKindV1::COUNT);
+        for (index, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(kind as usize, index);
+            assert_eq!(family_of_kind(kind), oracle_family(kind), "{kind:?}");
+        }
+    }
+
+    /// The exhaustive oracle of the error table: a new family fails to
+    /// compile here until it is routed.
+    fn oracle_error(family: NotAdmitted, maximum: u64) -> GatewayError {
+        match family {
+            NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
+            NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
+            NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
+            NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
+            NotAdmitted::Stale => GatewayError::ActionObservationStale,
+            NotAdmitted::ModeBindingStale => GatewayError::Store(CoreError::ModeBindingStale),
+            NotAdmitted::Rejected => GatewayError::ActionRejected(
+                ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
+            ),
+        }
+    }
+
+    #[test]
+    fn every_family_routes_through_the_error_table() {
+        let families = [
+            NotAdmitted::PolicyUnavailable,
+            NotAdmitted::LimitReached,
+            NotAdmitted::HostFault,
+            NotAdmitted::SetExhausted,
+            NotAdmitted::Stale,
+            NotAdmitted::ModeBindingStale,
+            NotAdmitted::Rejected,
+        ];
+        assert_eq!(families.len(), NotAdmitted::COUNT);
+        for (index, family) in families.into_iter().enumerate() {
+            assert_eq!(family as usize, index);
+            assert_eq!(
+                format!("{:?}", not_admitted_error(family, 9)),
+                format!("{:?}", oracle_error(family, 9))
+            );
+        }
+        assert!(matches!(
+            admission_unavailable(9),
+            GatewayError::ActionAdmissionUnavailable
+        ));
     }
 
     /// ADR-134 rev 5 M4 and D10: the handle must name the binding the host's

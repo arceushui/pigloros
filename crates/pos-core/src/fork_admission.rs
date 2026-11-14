@@ -85,7 +85,7 @@ pub enum ForkAdmissionErrorV1 {
 impl ForkAdmissionErrorV1 {
     /// The number of Fork-admission errors, the length of a table indexed by
     /// the error's explicit, append-only discriminant.
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
 }
 
 /// The Fork-admission error of a failed store mode check: a stale mode

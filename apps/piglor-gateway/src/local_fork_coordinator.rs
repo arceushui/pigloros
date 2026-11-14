@@ -612,8 +612,9 @@ const fn authentication_code(error: LocalForkAuthenticationErrorV1) -> LocalFork
 }
 
 /// The FARL1 code of each Fork-admission error, indexed by the error's
-/// explicit discriminant; its length is the error count, so a new error
-/// fails to compile until it is routed here.
+/// explicit discriminant. Its length is the error count; the oracle test
+/// `every_fork_admission_error_routes_through_the_code_table` fails to
+/// compile until a new error is routed here.
 const AUTHORITY_CODES: [LocalForkAdmissionCodeV1; ForkAdmissionErrorV1::COUNT] = [
     LocalForkAdmissionCodeV1::InvalidRequest,  // InvalidRequest
     LocalForkAdmissionCodeV1::Unauthenticated, // Unauthenticated
@@ -635,8 +636,15 @@ const AUTHORITY_CODES: [LocalForkAdmissionCodeV1; ForkAdmissionErrorV1::COUNT] =
     LocalForkAdmissionCodeV1::ModeBindingStale, // ModeBindingStale
 ];
 
-const fn authority_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
-    AUTHORITY_CODES[error as usize]
+const _: () = assert!(AUTHORITY_CODES.len() == ForkAdmissionErrorV1::COUNT);
+
+/// The FARL1 code of `error`; an error past the table fails closed as
+/// `AuthorityUnavailable`.
+fn authority_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
+    AUTHORITY_CODES
+        .get(error as usize)
+        .copied()
+        .unwrap_or(LocalForkAdmissionCodeV1::AuthorityUnavailable)
 }
 
 #[cfg(test)]
@@ -1639,6 +1647,64 @@ mod tests {
             Some(0)
         );
         Ok(())
+    }
+
+    /// The exhaustive oracle: a new Fork-admission error fails to compile
+    /// here until it is routed, and every error agrees with the table.
+    const fn oracle_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1 {
+        match error {
+            ForkAdmissionErrorV1::InvalidRequest => LocalForkAdmissionCodeV1::InvalidRequest,
+            ForkAdmissionErrorV1::Unauthenticated => LocalForkAdmissionCodeV1::Unauthenticated,
+            ForkAdmissionErrorV1::PrincipalOwnerConflict | ForkAdmissionErrorV1::Conflict => {
+                LocalForkAdmissionCodeV1::Conflict
+            }
+            ForkAdmissionErrorV1::StaleFoldBoundary => LocalForkAdmissionCodeV1::StaleFoldBoundary,
+            ForkAdmissionErrorV1::ParentChanged => LocalForkAdmissionCodeV1::ParentChanged,
+            ForkAdmissionErrorV1::CorruptAuthority
+            | ForkAdmissionErrorV1::HostAuthorityMismatch
+            | ForkAdmissionErrorV1::AuthorityClockUnavailable
+            | ForkAdmissionErrorV1::ClockRollback
+            | ForkAdmissionErrorV1::AuthorityUninitialized
+            | ForkAdmissionErrorV1::AuthorityAlreadyInitialized
+            | ForkAdmissionErrorV1::EntropyUnavailable
+            | ForkAdmissionErrorV1::ParentErasureContained
+            | ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
+                LocalForkAdmissionCodeV1::AuthorityUnavailable
+            }
+            ForkAdmissionErrorV1::StorageIndeterminate | ForkAdmissionErrorV1::OperationMissing => {
+                LocalForkAdmissionCodeV1::Indeterminate
+            }
+            ForkAdmissionErrorV1::ModeBindingStale => LocalForkAdmissionCodeV1::ModeBindingStale,
+        }
+    }
+
+    #[test]
+    fn every_fork_admission_error_routes_through_the_code_table() {
+        let errors = [
+            ForkAdmissionErrorV1::InvalidRequest,
+            ForkAdmissionErrorV1::Unauthenticated,
+            ForkAdmissionErrorV1::PrincipalOwnerConflict,
+            ForkAdmissionErrorV1::StaleFoldBoundary,
+            ForkAdmissionErrorV1::ParentChanged,
+            ForkAdmissionErrorV1::Conflict,
+            ForkAdmissionErrorV1::CorruptAuthority,
+            ForkAdmissionErrorV1::StorageIndeterminate,
+            ForkAdmissionErrorV1::HostAuthorityMismatch,
+            ForkAdmissionErrorV1::AuthorityClockUnavailable,
+            ForkAdmissionErrorV1::ClockRollback,
+            ForkAdmissionErrorV1::OperationMissing,
+            ForkAdmissionErrorV1::AuthorityUninitialized,
+            ForkAdmissionErrorV1::AuthorityAlreadyInitialized,
+            ForkAdmissionErrorV1::EntropyUnavailable,
+            ForkAdmissionErrorV1::ParentErasureContained,
+            ForkAdmissionErrorV1::ErasureContainmentUnavailable,
+            ForkAdmissionErrorV1::ModeBindingStale,
+        ];
+        assert_eq!(errors.len(), ForkAdmissionErrorV1::COUNT);
+        for (index, error) in errors.into_iter().enumerate() {
+            assert_eq!(error as usize, index);
+            assert_eq!(authority_code(error), oracle_code(error), "{error:?}");
+        }
     }
 
     #[test]

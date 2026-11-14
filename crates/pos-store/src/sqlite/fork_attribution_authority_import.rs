@@ -207,8 +207,15 @@ pub(super) fn imported_binding_gate(
 }
 
 /// Map a local Principal-binding read failure.
+///
+/// `ModeBindingStale` is named explicitly so it can never read as corrupt
+/// authority. The binding read runs no mode check, so it cannot return it
+/// today; a stale writer committed nothing, so it would be indeterminate.
 const fn admission_failure(error: ForkAdmissionErrorV1) -> ImportError {
-    if matches!(error, ForkAdmissionErrorV1::StorageIndeterminate) {
+    if matches!(
+        error,
+        ForkAdmissionErrorV1::StorageIndeterminate | ForkAdmissionErrorV1::ModeBindingStale
+    ) {
         ImportError::StorageIndeterminate
     } else {
         ImportError::CorruptAuthority
@@ -1180,6 +1187,10 @@ mod tests {
             INDETERMINATE
         );
         assert_eq!(admission_failure(Admission::CorruptAuthority), CORRUPT);
+        assert_eq!(
+            admission_failure(Admission::ModeBindingStale),
+            INDETERMINATE
+        );
         assert_eq!(
             imported_owner_failure(INDETERMINATE),
             Admission::StorageIndeterminate

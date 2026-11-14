@@ -153,6 +153,42 @@ mod lifecycle_coverage_tests {
         assert_eq!(final_state, LifecycleState::Closed);
     }
 
+    /// The exhaustive oracle of the host error table: a new host error fails
+    /// to compile here until it is routed.
+    fn oracle_core(error: ErasureHostErrorV1) -> CoreError {
+        match error {
+            ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+                CoreError::ErasureContainmentUnavailable
+            }
+            ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AuthorizationDenied
+            | ErasureHostErrorV1::Conflict
+            | ErasureHostErrorV1::AdapterFailure => host_command_rejected(),
+            ErasureHostErrorV1::ModeBindingStale => CoreError::ModeBindingStale,
+        }
+    }
+
+    #[test]
+    fn every_host_error_routes_through_the_core_table() {
+        let errors = [
+            ErasureHostErrorV1::RecoveryUnavailable,
+            ErasureHostErrorV1::AccessFrozen,
+            ErasureHostErrorV1::StaleGeneration,
+            ErasureHostErrorV1::AuthorizationDenied,
+            ErasureHostErrorV1::Conflict,
+            ErasureHostErrorV1::AdapterFailure,
+            ErasureHostErrorV1::ModeBindingStale,
+        ];
+        assert_eq!(errors.len(), ErasureHostErrorV1::COUNT);
+        for (index, error) in errors.into_iter().enumerate() {
+            assert_eq!(error as usize, index);
+            assert_eq!(
+                format!("{:?}", host_error_to_core(error)),
+                format!("{:?}", oracle_core(error))
+            );
+        }
+    }
+
     #[test]
     fn test_gate_binding_and_host_error_mapping_cover_every_variant(
     ) -> Result<(), ErasureHostErrorV1> {
@@ -742,19 +778,32 @@ impl ExecutorStore {
 }
 
 /// The store error of each erasure host error, indexed by its stable code
-/// (`ErasureHostErrorV1::code`).
-const HOST_ERROR_TO_CORE: [fn() -> CoreError; 7] = [
-    || CoreError::ErasureContainmentUnavailable,
+/// (`ErasureHostErrorV1::code`). The oracle test
+/// `every_host_error_routes_through_the_core_table` fails to compile until a
+/// new host error is routed here.
+const HOST_ERROR_TO_CORE: [fn() -> CoreError; ErasureHostErrorV1::COUNT] = [
+    host_containment_unavailable,
     || CoreError::ErasureAccessFrozen,
-    || CoreError::ErasureContainmentUnavailable,
+    host_containment_unavailable,
     host_command_rejected,
     host_command_rejected,
     host_command_rejected,
     || CoreError::ModeBindingStale,
 ];
 
+const _: () = assert!(HOST_ERROR_TO_CORE.len() == ErasureHostErrorV1::COUNT);
+
+/// The store error of `error`; a host error past the table fails closed as
+/// unavailable containment.
 fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
-    HOST_ERROR_TO_CORE[error as usize]()
+    HOST_ERROR_TO_CORE
+        .get(error as usize)
+        .copied()
+        .unwrap_or(host_containment_unavailable)()
+}
+
+const fn host_containment_unavailable() -> CoreError {
+    CoreError::ErasureContainmentUnavailable
 }
 
 fn host_command_rejected() -> CoreError {

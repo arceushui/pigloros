@@ -49,6 +49,12 @@ pub enum ForkEventAuthorityErrorV1 {
     ModeBindingStale = 6,
 }
 
+impl ForkEventAuthorityErrorV1 {
+    /// The number of authority errors, the length of a table indexed by the
+    /// error's explicit, append-only discriminant: the last variant's plus one.
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
+}
+
 /// The authority error of a failed classified-append write step: a stale
 /// mode binding committed nothing and keeps its own error; any other step
 /// failure leaves the outcome indeterminate.
@@ -104,8 +110,11 @@ impl From<CounterfactualStoreErrorV1> for ClassifiedCounterfactualErrorV1 {
 /// cannot follow a host-internal source and a fresh operation, so they can
 /// only mean corrupt authority; an indeterminate step inside the
 /// counterfactual transaction is a known rollback, and a stale mode binding
-/// keeps its own error.
-const CLASSIFIED_AUTHORITY_ERRORS: [ClassifiedCounterfactualErrorV1; 7] = [
+/// keeps its own error. The oracle test
+/// `every_authority_error_routes_through_the_classified_table` fails to
+/// compile until a new error is routed here.
+const CLASSIFIED_AUTHORITY_ERRORS: [ClassifiedCounterfactualErrorV1;
+    ForkEventAuthorityErrorV1::COUNT] = [
     ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest),
     ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated),
     ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
@@ -115,9 +124,17 @@ const CLASSIFIED_AUTHORITY_ERRORS: [ClassifiedCounterfactualErrorV1; 7] = [
     ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::ModeBindingStale),
 ];
 
+const _: () = assert!(CLASSIFIED_AUTHORITY_ERRORS.len() == ForkEventAuthorityErrorV1::COUNT);
+
+/// An authority error past the table fails closed as corrupt authority.
 impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
     fn from(error: ForkEventAuthorityErrorV1) -> Self {
-        CLASSIFIED_AUTHORITY_ERRORS[error as usize]
+        CLASSIFIED_AUTHORITY_ERRORS
+            .get(error as usize)
+            .copied()
+            .unwrap_or(ClassifiedCounterfactualErrorV1::Provenance(
+                ClassifiedProvenanceErrorV1::CorruptAuthority,
+            ))
     }
 }
 
@@ -5156,6 +5173,46 @@ mod classified_counterfactual_tests {
         ClassifiedCounterfactualErrorV1 as Classified, ClassifiedProvenanceErrorV1 as Provenance,
         ForkEventAuthorityErrorV1 as Authority,
     };
+
+    /// The exhaustive oracle of the classified table: a new authority error
+    /// fails to compile here until it is routed.
+    const fn oracle_classified(error: Authority) -> Classified {
+        match error {
+            Authority::InvalidRequest => Classified::Provenance(Provenance::InvalidRequest),
+            Authority::Unauthenticated => Classified::Provenance(Provenance::Unauthenticated),
+            Authority::ClassifierRejected | Authority::Conflict | Authority::CorruptAuthority => {
+                Classified::Provenance(Provenance::CorruptAuthority)
+            }
+            Authority::StorageIndeterminate => {
+                Classified::Store(CounterfactualStoreErrorV1::StorageFailure)
+            }
+            Authority::ModeBindingStale => {
+                Classified::Store(CounterfactualStoreErrorV1::ModeBindingStale)
+            }
+        }
+    }
+
+    #[test]
+    fn every_authority_error_routes_through_the_classified_table() {
+        let errors = [
+            Authority::InvalidRequest,
+            Authority::Unauthenticated,
+            Authority::ClassifierRejected,
+            Authority::Conflict,
+            Authority::CorruptAuthority,
+            Authority::StorageIndeterminate,
+            Authority::ModeBindingStale,
+        ];
+        assert_eq!(errors.len(), Authority::COUNT);
+        for (index, error) in errors.into_iter().enumerate() {
+            assert_eq!(error as usize, index);
+            assert_eq!(
+                Classified::from(error),
+                oracle_classified(error),
+                "{error:?}"
+            );
+        }
+    }
 
     #[test]
     fn every_authority_error_maps_onto_one_closed_classified_error() {
