@@ -231,9 +231,18 @@ fn open_with_credentials(
         credentials.policy().clone(),
         profile.into_sources(),
     );
-    let (gateway, submitter) =
-        Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
-            .map_err(io::Error::other)?;
+    // D1 on #302: the Local Principal the store records protects every
+    // HTTP route of this Gateway; an unprovisioned store answers them `401`.
+    let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host)
+        .and_then(|authorization| {
+            Gateway::new_with_fork_admission_erasure_host(
+                host,
+                owntracks_owner_key,
+                slot,
+                authorization,
+            )
+            .map_err(io::Error::other)
+        })?;
     let coordinator = LocalForkAdmissionCoordinatorV1::new(
         credentials,
         record,
@@ -682,6 +691,17 @@ mod tests {
             .iter()
             .map(|name| store.create_timeline(name).map(|timeline| timeline.id()))
             .collect::<Result<Vec<_>, _>>()?;
+        crate::local_principal::provision_local_principal(
+            &mut store,
+            &crate::local_principal::LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([7; 16], "local")?,
+                [fork_test_actor()],
+                [
+                    crate::GatewayOperationV1::APPEND_SIGNAL,
+                    crate::GatewayOperationV1::READ_EVENTS,
+                ],
+            )?,
+        )?;
         drop(store);
         provision_with_credentials(world.path()?, &current_peer_credentials()?)?;
         Ok((world, parents))
@@ -768,9 +788,18 @@ mod tests {
         Ok(status)
     }
 
+    /// The entity the Local Principal of every provisioned world acts as.
+    fn fork_test_actor() -> pos_core::EntityId {
+        pos_core::EntityId::from_ulid(ulid::Ulid::from_parts(1_361, 7))
+    }
+
     async fn read_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
         let request = Request::builder()
             .uri(format!("/v1/timelines/{timeline}/events"))
+            .header(
+                crate::operation::ACTOR_ENTITY_HEADER,
+                fork_test_actor().to_string(),
+            )
             .body(Body::empty())?;
         let status = http(gateway, request).await?;
         Ok(status)
@@ -778,7 +807,7 @@ mod tests {
 
     async fn append_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
         let body = serde_json::json!({
-            "entity_id": pos_core::EntityId::new().to_string(),
+            "entity_id": fork_test_actor().to_string(),
             "dimension": "trust",
             "value": 0.4,
         });
@@ -786,6 +815,10 @@ mod tests {
             .method("POST")
             .uri(format!("/v1/timelines/{timeline}/signals"))
             .header("content-type", "application/json")
+            .header(
+                crate::operation::ACTOR_ENTITY_HEADER,
+                fork_test_actor().to_string(),
+            )
             .body(Body::from(body.to_string()))?;
         let status = http(gateway, request).await?;
         Ok(status)
@@ -795,9 +828,20 @@ mod tests {
         gateway: &Gateway,
         timeline: TimelineId,
     ) -> TestResult<Option<ErasureReferenceV1>> {
-        let timeline = timeline.to_string();
         let page = gateway
-            .read_events_page_at_generation(&timeline, 0, 1, None)
+            .read_events_page_authorized_at_generation(
+                &timeline.to_string(),
+                0,
+                1,
+                crate::GatewayAuthorizationRequest::read(
+                    fork_test_actor(),
+                    timeline,
+                    0,
+                    1,
+                    pos_core::WallTime::now(),
+                ),
+                None,
+            )
             .await?;
         Ok(page.inventory_generation)
     }

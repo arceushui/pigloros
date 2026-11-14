@@ -2,33 +2,31 @@
 //! per sub-case, its exchanges sent as raw HTTP requests through the public `router` and
 //! `spectator_router` of that Gateway, with no socket.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
+use piglor_gateway::local_principal::{
+    local_gateway, provision_local_principal, LocalPrincipalProvisionV1,
+};
+use piglor_gateway::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 use piglor_gateway::{
-    gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
-    GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter,
+    router, spectator_router, AppState, Gateway, GatewayOperationV1, LedgerWriteMode,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
-};
+use pos_core::{EntityId, ErasureRecoveryLimitsV1, PrincipalRefV1};
 use pos_reference::evaluator::ResourceUsage;
-use pos_runtime::ErasureExecutionHostV1;
-use pos_store::StoreConfig;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_store::{sqlite::SqliteStore, StoreConfig};
 use serde_json::{json, Map, Value};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
 use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
-use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
+use super::ACTOR_ENTITY_ID;
 use crate::observation_v1;
 
 /// The header an exchange with `actor` sends.
@@ -126,11 +124,11 @@ fn run_subcase(
         events: 0,
     };
     // The Gateway schedules its maintenance on the runtime it is built in.
-    let gateway = {
+    let composed = {
         let _context = runtime.enter();
         compose(subcase.composition)
     };
-    gateway.map_or(unavailable, |gateway| {
+    composed.map_or(unavailable, |(gateway, _store)| {
         runtime.block_on(exchange_all(gateway, subcase, capabilities, independent))
     })
 }
@@ -147,116 +145,93 @@ fn host() -> Option<ErasureExecutionHostV1> {
     .ok()
 }
 
-/// The Gateway of a composition (requirements section 3).
-fn compose(composition: CompositionV2) -> Option<Gateway> {
+/// The Gateway of a composition (requirements section 3), with the store file it serves when
+/// it has one.
+///
+/// `open` is the unprotected in-process harness Gateway. `authorized` is the production serve
+/// composition (#1361): a fixture Local Principal document is provisioned into a fresh `SQLite`
+/// store with the production `provision_local_principal`, and the Gateway is composed over that
+/// store by `local_gateway`, which requires the recorded Principal for every protected
+/// operation.
+fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
     match composition {
-        CompositionV2::Open => host().and_then(|host| Gateway::new_with_erasure_host(host).ok()),
-        CompositionV2::Authorized => fixture_authorization()
-            .zip(entity(BODY_ENTITY_ID))
-            .zip(host())
-            .and_then(|((authorization, body), host)| {
-                gateway_with_erasure_host_and_authorization(host, [body], authorization).ok()
-            }),
+        CompositionV2::Open => host()
+            .and_then(|host| Gateway::unprotected_for_harness(host).ok())
+            .map(|gateway| (gateway, None)),
+        CompositionV2::Authorized => provisioned_store().and_then(|store| {
+            open_recovered_erasure_host(
+                StoreConfig::Sqlite {
+                    path: store.path_text(),
+                },
+                GatewayHostStoreV1::Standard,
+                &ErasureCoordinatorCompositionV1::closed(),
+            )
+            .and_then(|host| local_gateway(host, None))
+            .ok()
+            .map(|gateway| (gateway, Some(store)))
+        }),
     }
 }
 
-/// The fixture-only authority of the `authorized` composition: one Principal whose single
-/// grant lets the fixture actor read Timeline Events and grants no action. It is never a
-/// source of production authority (ADR-108).
-fn fixture_authorization() -> Option<GatewayAuthorization> {
+/// A fresh `SQLite` store holding the fixture Local Principal of the `authorized` composition:
+/// it may create Timelines and read their Events as the fixture actor, and holds no action or
+/// signal grant. Only its document is fixture data.
+fn provisioned_store() -> Option<ScratchStore> {
+    let store = ScratchStore::new();
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
-        .and_then(|(principal, actor)| authenticated(&principal).zip(read_grant(principal, actor)))
-        .and_then(|(authenticated, grant)| pinned_authorization(authenticated, &grant))
-}
-
-fn authenticated(principal: &PrincipalRefV1) -> Option<AuthenticatedPrincipalResultV1> {
-    AssuranceLevelV1::try_new(1).ok().and_then(|assurance| {
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: principal.clone(),
-            adapter_id: "fixture".to_owned(),
-            assurance,
-            issued_at: WallTime::from_micros(1),
-            expires_at: WallTime::from_micros(u64::MAX),
-            binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .ok()
-    })
-}
-
-fn read_grant(principal: PrincipalRefV1, actor: EntityId) -> Option<CapabilityGrantV1> {
-    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec!["timeline.events".to_owned()],
-        actions: vec!["read".to_owned()],
-        purposes: vec!["read".to_owned()],
-        audiences: vec!["gateway".to_owned()],
-        actor_entity_ids: vec![actor],
-        subject_ids: Vec::new(),
-        participant_ids: Vec::new(),
-        plugin_id: None,
-        principal_roles: vec![AuthorityRoleV1::Actor],
-        max_uses: 1,
-        budget: 1,
-        environment_constraints: Vec::new(),
-    })
-    .ok()
-    .and_then(|scope| {
-        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-            grant_id: Hash::from_bytes([5; 32]),
-            grantor: principal.clone(),
-            grantee: AuthorityGranteeV1::Principal(principal),
-            trust_domain: "gateway.fixture".to_owned(),
-            scope,
-            valid_from_position: Seq::from_u64(1),
-            valid_until_position: Seq::from_u64(50),
-            parent_grant_id: None,
-            delegation_depth: 0,
-            max_delegation_depth: 0,
-            permitted_delegate_classes: Vec::new(),
-            consent_references: Vec::new(),
-            policy_revision: Hash::from_bytes([4; 32]),
-            issuance_timeline: TimelineId::from_ulid(Ulid(1)),
-            issuance_seq: Seq::from_u64(1),
-            revocation_epoch: 0,
-            revocation_fence: None,
-            authority_registry_digest: Hash::from_bytes([3; 32]),
-        })
-        .ok()
-    })
-}
-
-fn pinned_authorization(
-    authenticated: AuthenticatedPrincipalResultV1,
-    grant: &CapabilityGrantV1,
-) -> Option<GatewayAuthorization> {
-    grant
-        .binding_digest()
-        .ok()
-        .and_then(|binding| {
-            AuthorityRegistrySnapshotV1::try_new(
-                Hash::from_bytes([3; 32]),
-                vec![authenticated.registry_binding_digest()],
-                vec![binding],
-                Vec::new(),
+        .and_then(|(principal, actor)| {
+            LocalPrincipalProvisionV1::try_new(
+                &principal,
+                [actor],
+                [
+                    GatewayOperationV1::CREATE_TIMELINE,
+                    GatewayOperationV1::READ_EVENTS,
+                ],
             )
             .ok()
         })
-        .and_then(|registry| {
-            let host = AuthorityPersistenceHostV1::new(&registry);
-            let mut state = AuthorityPersistenceStateV1::new();
-            host.authorize_grant(grant)
+        .and_then(|provision| {
+            SqliteStore::open(&store.path_text())
                 .ok()
-                .and_then(|permit| state.issue_grant(permit, grant.clone()).ok())
-                .and_then(|_| state.view(grant.grant_id()).ok())
-                .map(|view| {
-                    GatewayAuthorization::new(
-                        Arc::new(LocalAuthenticationAdapter::new(authenticated)),
-                        view,
-                        registry,
-                    )
-                })
+                .and_then(|mut opened| provision_local_principal(&mut opened, &provision).ok())
         })
+        .map(|_| store)
+}
+
+/// One sub-case's `SQLite` file in the temporary directory, removed with its journal files when
+/// the sub-case ends.
+struct ScratchStore {
+    path: PathBuf,
+}
+
+impl ScratchStore {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "pos-gateway-conformance-{}-{unique}-{}.sqlite",
+                std::process::id(),
+                Ulid::generate()
+            )),
+        }
+    }
+
+    fn path_text(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for ScratchStore {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.path.clone().into_os_string();
+            path.push(suffix);
+            drop(std::fs::remove_file(path));
+        }
+    }
 }
 
 /// The header that carries the idempotency key of every request.
@@ -383,4 +358,25 @@ async fn exchange_all(
     run.matched &= !present;
     run.record = Value::Object(record);
     run
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchStore;
+
+    #[test]
+    fn a_scratch_store_removes_its_files() -> Result<(), Box<dyn std::error::Error>> {
+        let store = ScratchStore::new();
+        let path = store.path.clone();
+        assert_eq!(std::path::Path::new(&store.path_text()), path.as_path());
+        assert!(path.starts_with(std::env::temp_dir()));
+        std::fs::write(&path, b"store")?;
+        let mut journal = path.clone().into_os_string();
+        journal.push("-wal");
+        std::fs::write(&journal, b"journal")?;
+        drop(store);
+        assert!(!path.exists());
+        assert!(!std::path::Path::new(&journal).exists());
+        Ok(())
+    }
 }

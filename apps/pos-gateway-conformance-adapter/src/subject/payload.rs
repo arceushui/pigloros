@@ -38,7 +38,7 @@ pub(super) struct SubCaseV2 {
 pub(super) enum CompositionV2 {
     /// No host authorizer.
     Open,
-    /// The fixture-only action registry and fixture authority.
+    /// The production serve composition with a fixture Local Principal document.
     Authorized,
 }
 

@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "01becae1c92115edca8ad7296304a235e8dee535124324bc607f89ff87c079b4",
+  "input_blake3_digest": "93cf52d45b6a26eaae4003918367610b680bf46d2b54ae1720af16aff44dfde3",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",
