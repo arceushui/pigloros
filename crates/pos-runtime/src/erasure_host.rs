@@ -2444,9 +2444,9 @@ impl ErasureExecutionHostV1 {
                 return Err(UnaffectedTopologyTransitionError::UncertainPersistence);
             }
             Err(error) => {
-                return Err(UnaffectedTopologyTransitionError::Host(map_store_error(
-                    &error,
-                )));
+                return Err(UnaffectedTopologyTransitionError::Host(
+                    ErasureHostErrorV1::from(&error),
+                ));
             }
         };
         if transition.timeline.meta != candidate_timeline.meta {
@@ -4708,15 +4708,6 @@ const fn map_world_replay_verification_error(
     }
 }
 
-const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
-    match error {
-        CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
-        CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
-        CoreError::ModeBindingStale => ErasureHostErrorV1::ModeBindingStale,
-        _ => ErasureHostErrorV1::AdapterFailure,
-    }
-}
-
 trait ProtectedEffectSender {
     fn host(&mut self) -> &mut ErasureExecutionHostV1;
     fn generation(&self) -> ErasureReferenceV1;
@@ -4820,7 +4811,7 @@ trait MapStoreErrorV1<T> {
 
 impl<T> MapStoreErrorV1<T> for Result<T, CoreError> {
     fn map_store_error(self) -> Result<T, ErasureHostErrorV1> {
-        self.map_err(|error| map_store_error(&error))
+        self.map_err(|error| ErasureHostErrorV1::from(&error))
     }
 }
 
@@ -6335,11 +6326,11 @@ mod tests {
     #[test]
     fn a_stale_mode_binding_keeps_its_own_host_error() {
         assert_eq!(
-            map_store_error(&CoreError::ModeBindingStale),
+            ErasureHostErrorV1::from(&CoreError::ModeBindingStale),
             ErasureHostErrorV1::ModeBindingStale
         );
         assert_eq!(
-            map_store_error(&CoreError::Storage(String::new())),
+            ErasureHostErrorV1::from(&CoreError::Storage(String::new())),
             ErasureHostErrorV1::AdapterFailure
         );
     }
@@ -9520,15 +9511,15 @@ mod tests {
     #[test]
     fn host_error_mapping_is_payload_free() {
         assert_eq!(
-            map_store_error(&CoreError::ErasureAccessFrozen),
+            ErasureHostErrorV1::from(&CoreError::ErasureAccessFrozen),
             ErasureHostErrorV1::AccessFrozen
         );
         assert_eq!(
-            map_store_error(&CoreError::ErasureContainmentUnavailable),
+            ErasureHostErrorV1::from(&CoreError::ErasureContainmentUnavailable),
             ErasureHostErrorV1::RecoveryUnavailable
         );
         assert_eq!(
-            map_store_error(&CoreError::IdGenerationOverflow),
+            ErasureHostErrorV1::from(&CoreError::IdGenerationOverflow),
             ErasureHostErrorV1::AdapterFailure
         );
         assert_eq!(

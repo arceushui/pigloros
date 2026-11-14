@@ -1796,6 +1796,26 @@ fn erasure_host_errors_have_stable_payload_free_codes() {
         ErasureHostErrorV1::Conflict.to_string(),
         "erasure host error 4"
     );
+    for (store, host) in [
+        (
+            crate::CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AccessFrozen,
+        ),
+        (
+            crate::CoreError::ErasureContainmentUnavailable,
+            ErasureHostErrorV1::RecoveryUnavailable,
+        ),
+        (
+            crate::CoreError::ModeBindingStale,
+            ErasureHostErrorV1::ModeBindingStale,
+        ),
+        (
+            crate::CoreError::Storage(String::from("payload")),
+            ErasureHostErrorV1::AdapterFailure,
+        ),
+    ] {
+        assert_eq!(ErasureHostErrorV1::from(&store), host);
+    }
 }
 
 #[test]

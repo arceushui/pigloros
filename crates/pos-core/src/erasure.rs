@@ -360,6 +360,20 @@ impl From<ErasureContainmentErrorV1> for ErasureHostErrorV1 {
     }
 }
 
+/// The payload-free host error of a store failure the host's owned adapter
+/// returned: containment and stale-binding refusals keep their own error,
+/// and every other store failure is an adapter failure.
+impl From<&crate::CoreError> for ErasureHostErrorV1 {
+    fn from(error: &crate::CoreError) -> Self {
+        match error {
+            crate::CoreError::ErasureAccessFrozen => Self::AccessFrozen,
+            crate::CoreError::ErasureContainmentUnavailable => Self::RecoveryUnavailable,
+            crate::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::AdapterFailure,
+        }
+    }
+}
+
 impl std::fmt::Display for ErasureHostErrorV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "erasure host error {}", self.code())
