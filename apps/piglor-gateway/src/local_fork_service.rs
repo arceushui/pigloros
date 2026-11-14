@@ -6,7 +6,6 @@ use std::{
     fs,
     future::Future,
     io,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -69,28 +68,27 @@ fn load_local_fork_admission_credentials(
 }
 
 /// One local Fork-admission deployment ready to serve: the recovered erasure
-/// host of its store, already bound to its execution mode, the decoded
-/// managed credentials, and the ADR-109 pathname socket.
-struct LocalForkAdmissionStartV1<'a> {
+/// host of its store, already bound to its execution mode, and the decoded
+/// managed credentials.
+struct LocalForkAdmissionStartV1 {
     host: ErasureExecutionHostV1,
     credentials: LocalForkAdmissionCredentialsV1,
-    socket_path: &'a Path,
 }
 
 /// One managed local Fork-admission deployment of `serve`.
+///
+/// Its TCP bind and its ADR-109 pathname socket are the composition's: the
+/// listeners bind only what the startup predicates verified.
 pub struct ManagedLocalForkAdmissionV1<'a> {
-    /// The TCP HTTP bind.
-    pub addr: SocketAddr,
     /// The one `SQLite` database the HTTP Gateway and the listener share.
     pub sqlite_path: &'a str,
     /// The validated systemd credential directory.
     pub credential_directory: &'a Path,
-    /// The ADR-109 pathname socket.
-    pub socket_path: &'a Path,
     /// The requested execution-mode profile.
     pub profile: GatewayModeProfileIdV1,
-    /// The composition the startup predicates already accepted.
-    pub composition: &'a GatewayServeCompositionV1,
+    /// The composition the startup predicates already accepted, with the
+    /// TCP bind and the Fork-admission socket.
+    pub composition: GatewayServeCompositionV1,
     /// The `OwnTracks` owner key, when the deployment composes ingress.
     pub owntracks_owner_key: Option<&'a OwnTracksOwnerKey>,
     /// The curated ledger source.
@@ -126,12 +124,7 @@ pub async fn serve_managed_local_fork_admission(
     let mode = bind_gateway_mode_v1(deployment.profile, deployment.composition, &mut host)?;
     let ledger = deployment.ledger.load(&piglor_ledger::today_utc())?;
     serve_local_fork_admission(
-        deployment.addr,
-        LocalForkAdmissionStartV1 {
-            host,
-            credentials,
-            socket_path: deployment.socket_path,
-        },
+        LocalForkAdmissionStartV1 { host, credentials },
         &mode,
         deployment.owntracks_owner_key,
         shutdown,
@@ -289,8 +282,7 @@ fn provision_with_credentials(
 /// Returns the first startup, serve, listener, executor shutdown or stale
 /// binding error.
 async fn serve_local_fork_admission(
-    addr: SocketAddr,
-    start: LocalForkAdmissionStartV1<'_>,
+    start: LocalForkAdmissionStartV1,
     mode: &GatewayModeBindingV1,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
     shutdown: impl Future<Output = ()> + Send + 'static,
@@ -300,8 +292,9 @@ async fn serve_local_fork_admission(
         start.host,
         (start.credentials.credentials, start.credentials.profile),
         owntracks_owner_key,
+        mode,
     )?;
-    serve_started(addr, started, start.socket_path, mode, shutdown, ledger).await
+    serve_started(started, mode, shutdown, ledger).await
 }
 
 /// Startup steps 2a to 5 on the recovered host: preflight the FCP1 profile
@@ -315,6 +308,7 @@ fn open_with_credentials(
         ForkClassifierProfileV1,
     ),
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+    mode: &GatewayModeBindingV1,
 ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
     let (session, issuer, record) = open_profiled_session(&mut host, &credentials, &profile)?;
     let tuples = host.reconcile_fork_delivery_journal(&session);
@@ -334,16 +328,16 @@ fn open_with_credentials(
     );
     // D1 on #302: the Local Principal the store records protects every
     // HTTP route of this Gateway; an unprovisioned store answers them `401`.
-    let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host)
+    let (gateway, submitter) = crate::local_principal::load_host_local_principal(&mut host, mode)
         .and_then(|authorization| {
-            Gateway::new_with_fork_admission_erasure_host(
-                host,
-                owntracks_owner_key,
-                slot,
-                authorization,
-            )
-            .map_err(io::Error::other)
-        })?;
+        Gateway::new_with_fork_admission_erasure_host(
+            host,
+            owntracks_owner_key,
+            slot,
+            authorization,
+        )
+        .map_err(io::Error::other)
+    })?;
     let coordinator = LocalForkAdmissionCoordinatorV1::new(
         credentials,
         record,
@@ -398,13 +392,12 @@ const fn preflight_error(error: ForkEventAuthorityErrorV1) -> LocalForkAuthentic
 /// in-flight request while the executor is still open, is asserted on the
 /// same two calls by the A8 test.
 async fn serve_started(
-    addr: SocketAddr,
     (gateway, coordinator): (Gateway, LocalForkAdmissionCoordinatorV1),
-    socket_path: &Path,
     mode: &GatewayModeBindingV1,
     shutdown: impl Future<Output = ()> + Send + 'static,
     (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
+    let addr = mode.tcp_addr();
     let app = bound_router(
         router_for_addr(
             addr,
@@ -420,7 +413,10 @@ async fn serve_started(
         Ok(tcp) => tcp,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
-    let listener = match start_listener(coordinator, socket_path) {
+    let socket_path = mode
+        .fork_admission_socket()
+        .ok_or_else(|| io::Error::other("the bound composition has no Fork-admission socket"));
+    let listener = match socket_path.and_then(|path| start_listener(coordinator, path)) {
         Ok(listener) => listener,
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
@@ -488,6 +484,7 @@ fn managed_credentials(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     /// Open the recovered host of `path` and run startup steps 2a to 5.
     fn open_at(
@@ -511,15 +508,16 @@ mod tests {
             store,
             composition,
         )
-        .and_then(|host| open_with_credentials(host, managed, owntracks_owner_key))
+        .and_then(|host| open_with_credentials(host, managed, owntracks_owner_key, &test_mode()))
     }
 
-    /// The loopback Fork-admission composition of the managed deployment.
-    fn fork_composition() -> GatewayServeCompositionV1 {
+    /// The loopback Fork-admission composition of the managed deployment
+    /// over `socket`.
+    fn fork_composition(socket: &Path) -> GatewayServeCompositionV1 {
         GatewayServeCompositionV1 {
             tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            owntracks_ingress: false,
-            fork_admission_socket: true,
+            owntracks_owner_key: None,
+            fork_admission_socket: Some(socket.to_path_buf()),
             ledger_source: None,
             network_grants: std::collections::BTreeSet::new(),
         }
@@ -536,7 +534,7 @@ mod tests {
         )?;
         bind_gateway_mode_v1(
             GatewayModeProfileIdV1::Local,
-            &fork_composition(),
+            fork_composition(&world.socket),
             &mut host,
         )?;
         Ok(())
@@ -852,6 +850,7 @@ mod tests {
     fn provisioned_world(parents: &[&str]) -> TestResult<(World, Vec<TimelineId>)> {
         let world = unprovisioned_world()?;
         let mut store = SqliteStore::open(world.path()?)?;
+        crate::mode_profile::bind_test_store(&mut store, GatewayModeProfileIdV1::Local)?;
         let parents = parents
             .iter()
             .map(|name| store.create_timeline(name).map(|timeline| timeline.id()))
@@ -2050,12 +2049,10 @@ mod tests {
     ) -> Result<(), ServeError> {
         serve_managed_local_fork_admission(
             ManagedLocalForkAdmissionV1 {
-                addr: "127.0.0.1:0".parse()?,
                 sqlite_path: world.path()?,
                 credential_directory: credentials,
-                socket_path: &world.socket,
                 profile: GatewayModeProfileIdV1::Local,
-                composition: &fork_composition(),
+                composition: fork_composition(&world.socket),
                 owntracks_owner_key: None,
                 ledger: LedgerConfig::new(None, false),
             },
@@ -2133,16 +2130,29 @@ mod tests {
         )?;
         let gateway = started.0.clone();
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        assert!(serve_started(
-            occupied.local_addr()?,
-            started,
-            &world.socket,
-            &test_mode(),
-            async {},
-            ledger
-        )
-        .await
-        .is_err());
+        let mut occupied_tcp = fork_composition(&world.socket);
+        occupied_tcp.tcp_addr = occupied.local_addr()?;
+        let mode =
+            crate::mode_profile::test_binding_of(GatewayModeProfileIdV1::Local, occupied_tcp);
+        assert!(serve_started(started, &mode, async {}, ledger)
+            .await
+            .is_err());
+        assert!(!gateway.is_ready());
+        drop(gateway);
+        assert!(!world.socket.exists());
+
+        // A binding without a Fork-admission socket never binds a listener.
+        let started = open_at(
+            world.path()?,
+            current_peer_managed()?,
+            None,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let gateway = started.0.clone();
+        let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
+        assert!(serve_started(started, &test_mode(), async {}, ledger)
+            .await
+            .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());
@@ -2156,16 +2166,13 @@ mod tests {
         )?;
         let gateway = started.0.clone();
         let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
-        assert!(serve_started(
-            "127.0.0.1:0".parse()?,
-            started,
-            &world.socket,
-            &test_mode(),
-            async {},
-            ledger
-        )
-        .await
-        .is_err());
+        let mode = crate::mode_profile::test_binding_of(
+            GatewayModeProfileIdV1::Local,
+            fork_composition(&world.socket),
+        );
+        assert!(serve_started(started, &mode, async {}, ledger)
+            .await
+            .is_err());
         assert!(!gateway.is_ready());
         drop(gateway);
         assert!(!world.socket.exists());

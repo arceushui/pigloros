@@ -250,20 +250,9 @@ const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
         Outcome::DomainConflict => "DomainConflict",
         Outcome::AdmissionConflict => "AdmissionConflict",
-        Outcome::InvalidDependencyDeclaration
-        | Outcome::DependencySetExhausted
-        | Outcome::ModeBindingStale => store_refusal_name(outcome),
-    }
-}
-
-/// The name of an outcome the store refused at its commit point: a
-/// dependency-declaration refusal or a stale execution-mode binding.
-const fn store_refusal_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
-    use pos_core::PipelineOutcomeV1 as Outcome;
-    match outcome {
         Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
         Outcome::DependencySetExhausted => "DependencySetExhausted",
-        _ => "ModeBindingStale",
+        Outcome::ModeBindingStale => "ModeBindingStale",
     }
 }
 

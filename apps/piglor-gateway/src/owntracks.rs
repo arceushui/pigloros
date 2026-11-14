@@ -164,7 +164,7 @@ pub enum OwnTracksCommandError {
     /// The store's execution-mode binding refuses this offline writer
     /// (ADR-134 §8).
     #[error(transparent)]
-    ModeBinding(#[from] crate::mode_profile::GatewayModeBindingErrorV1),
+    ModeBinding(#[from] crate::mode_profile::GatewayModeErrorV1),
 }
 
 #[derive(Deserialize)]

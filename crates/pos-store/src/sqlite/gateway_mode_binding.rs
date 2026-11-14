@@ -326,6 +326,16 @@ pub(super) fn commit_epoch_at(
     .map_err(|error| CoreError::Storage(error.to_string()))
 }
 
+/// The store's persisted binding epoch, or `None` for an unbound store.
+fn persisted_epoch(conn: &Connection) -> rusqlite::Result<Option<NonZeroU64>> {
+    conn.query_row(
+        "SELECT binding_epoch FROM gateway_mode_binding WHERE singleton = 1",
+        [],
+        |row| row.get::<_, SqlEpochV1>(0).map(|epoch| epoch.0),
+    )
+    .optional()
+}
+
 /// The append choke point: compare the writer's attached epoch with the
 /// persisted one and record the committed range under it, inside the
 /// transaction that inserts the Event rows.
@@ -343,31 +353,26 @@ pub(super) fn record_commit_epoch_in_transaction(
     first_local_seq: Seq,
     last_local_seq: Seq,
 ) -> Result<(), CoreError> {
-    conn.query_row(
-        "SELECT binding_epoch FROM gateway_mode_binding WHERE singleton = 1",
-        [],
-        |row| row.get::<_, SqlEpochV1>(0).map(|epoch| epoch.0),
-    )
-    .optional()
-    .map_err(|error| CoreError::Storage(error.to_string()))
-    .and_then(|persisted| commit_epoch_for_append_v1(persisted, attached))
-    .and_then(|epoch| {
-        epoch.map_or(Ok(()), |epoch| {
-            conn.execute(
-                "INSERT INTO gateway_mode_commit_epochs
+    persisted_epoch(conn)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+        .and_then(|persisted| commit_epoch_for_append_v1(persisted, attached))
+        .and_then(|epoch| {
+            epoch.map_or(Ok(()), |epoch| {
+                conn.execute(
+                    "INSERT INTO gateway_mode_commit_epochs
                  (timeline_id, first_local_seq, last_local_seq, binding_epoch)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    timeline.to_string(),
-                    sql_integer(first_local_seq.as_u64()),
-                    sql_integer(last_local_seq.as_u64()),
-                    sql_integer(epoch.get())
-                ],
-            )
-            .map(drop)
-            .map_err(|error| CoreError::Storage(error.to_string()))
+                    params![
+                        timeline.to_string(),
+                        sql_integer(first_local_seq.as_u64()),
+                        sql_integer(last_local_seq.as_u64()),
+                        sql_integer(epoch.get())
+                    ],
+                )
+                .map(drop)
+                .map_err(|error| CoreError::Storage(error.to_string()))
+            })
         })
-    })
 }
 
 impl SqliteStore {
@@ -383,6 +388,32 @@ impl SqliteStore {
     ) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
         record.inspect(|record| self.mode_binding_epoch = Some(record.binding_epoch()))
     }
+
+    /// The choke-point compare of a commit that writes no Event: an empty
+    /// `append_committed` or import still refuses a stale or unattached
+    /// writer on a bound store (ADR-134 §8).
+    pub(super) fn empty_commit_mode_check(&self) -> Result<(), CoreError> {
+        persisted_epoch(&self.conn)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .and_then(|persisted| commit_epoch_for_append_v1(persisted, self.mode_binding_epoch))
+            .map(drop)
+    }
+
+    /// Name a containment refusal of a writer whose attached epoch is not the
+    /// store's persisted epoch (ADR-134 §8).
+    ///
+    /// Another process that changed the store also moves its data version,
+    /// so the erasure check refuses a stale writer before the append choke
+    /// point; this keeps that refusal `ModeBindingStale`. When the epochs
+    /// agree, or the binding cannot be read, the original refusal stands.
+    pub(super) fn stale_binding_refusal(&self, refusal: CoreError) -> CoreError {
+        persisted_epoch(&self.conn)
+            .ok()
+            .and_then(|persisted| {
+                commit_epoch_for_append_v1(persisted, self.mode_binding_epoch).err()
+            })
+            .unwrap_or(refusal)
+    }
 }
 
 impl GatewayModeBindingPortV1 for SqliteStore {
@@ -396,9 +427,10 @@ impl GatewayModeBindingPortV1 for SqliteStore {
 
     fn attach_mode_binding(
         &mut self,
+        expected: &GatewayModeProfileRefV1,
     ) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
         let current = settle(read_binding(&self.conn))
-            .and_then(|current| current.ok_or(GatewayModeBindingErrorV1::Unbound));
+            .and_then(|current| crate::expected_mode_binding(current, expected));
         self.attach_record(current)
     }
 
@@ -564,6 +596,56 @@ mod tests {
             append(&mut store, timeline),
             Err(CoreError::Storage(_))
         ));
+        assert!(matches!(
+            store.append_committed(timeline, &[]),
+            Err(CoreError::Storage(_))
+        ));
         assert_eq!(event_count(&store, timeline), 0);
+        // An unreadable binding keeps the original containment refusal.
+        assert!(matches!(
+            store.stale_binding_refusal(CoreError::ErasureContainmentUnavailable),
+            CoreError::ErasureContainmentUnavailable
+        ));
+    }
+
+    #[test]
+    fn an_empty_commit_refuses_a_stale_or_unattached_writer() {
+        let (mut store, timeline) = bound_store();
+        for attached in [None, NonZeroU64::new(2)] {
+            store.mode_binding_epoch = attached;
+            assert!(matches!(
+                store.append_committed(timeline, &[]),
+                Err(CoreError::ModeBindingStale)
+            ));
+        }
+        store.mode_binding_epoch = NonZeroU64::new(1);
+        ok(store.append_committed(timeline, &[]));
+        assert_eq!(event_count(&store, timeline), 0);
+    }
+
+    #[test]
+    fn a_containment_refusal_names_a_stale_binding_only_when_stale() {
+        let (mut bound, _) = bound_store();
+        assert!(matches!(
+            bound.stale_binding_refusal(CoreError::ErasureContainmentUnavailable),
+            CoreError::ErasureContainmentUnavailable
+        ));
+        for attached in [None, NonZeroU64::new(2)] {
+            bound.mode_binding_epoch = attached;
+            assert!(matches!(
+                bound.stale_binding_refusal(CoreError::ErasureContainmentUnavailable),
+                CoreError::ModeBindingStale
+            ));
+        }
+        let mut unbound = store();
+        assert!(matches!(
+            unbound.stale_binding_refusal(CoreError::ErasureContainmentUnavailable),
+            CoreError::ErasureContainmentUnavailable
+        ));
+        unbound.mode_binding_epoch = NonZeroU64::new(1);
+        assert!(matches!(
+            unbound.stale_binding_refusal(CoreError::ErasureContainmentUnavailable),
+            CoreError::ModeBindingStale
+        ));
     }
 }

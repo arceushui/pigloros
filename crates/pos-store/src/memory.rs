@@ -6192,7 +6192,9 @@ impl EventStore for MemoryStore {
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                 .and_then(|()| {
                     if events.is_empty() {
-                        return Ok(());
+                        // An empty batch writes no Event, but a stale or
+                        // unattached writer is still refused (ADR-134 §8).
+                        return store.mode_binding.append_mode().commit_epoch().map(drop);
                     }
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
@@ -9684,6 +9686,96 @@ mod tests {
 
         assert!(store.admit(request).is_err());
         assert!(store.geographic_cell_dedup.contains_key(&fingerprint));
+    }
+
+    /// ADR-134 §8: a stale or unattached writer on a bound store admits no
+    /// geographic cell or `OwnTracks` location and records no evidence.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_stale_or_unattached_geographic_admission_commits_nothing() {
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        let mut store = new_store();
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32]).test_ok();
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .test_ok();
+        let cell_timeline = store.create_timeline("bound-geo-cell").test_ok().id();
+        let cell_entity = EntityId::new();
+        let draft = geo_cell_draft(
+            cell_timeline,
+            cell_entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
+            12,
+            "bound-geo-cell",
+            vec![cell_entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let cell = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .test_ok(),
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .test_ok();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                cell.fence().draft().consent_record_id().clone(),
+                cell.fence().draft().consent_revision(),
+            ))
+            .test_ok();
+        store
+            .set_geo_cell_admission_fence(cell_timeline, cell_entity, cell.fence().clone())
+            .test_ok();
+        let location_timeline = store.create_timeline("bound-owntracks").test_ok().id();
+        let location_entity = EntityId::new();
+        pair_geographic_enrollment(
+            &mut store,
+            location_timeline,
+            location_entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
+        let location = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            location_timeline,
+            location_entity,
+            CanonicalBytes::from_static(b"bound-owntracks-location"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 10),
+            ([4; 32], [5; 32]),
+        ));
+        for attached in [None, std::num::NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert!(matches!(
+                store.admit(cell.clone()),
+                Err(CoreError::ModeBindingStale)
+            ));
+            assert!(matches!(
+                store.admit_geo_location(location.clone()),
+                Err(CoreError::ModeBindingStale)
+            ));
+            assert!(store.state(cell_timeline).events.is_empty());
+            assert!(store.state(location_timeline).events.is_empty());
+            assert!(store.geographic_cell_dedup.is_empty());
+            assert!(store.geographic_admission_dedup.is_empty());
+            assert!(store.geographic_admission_snapshots.is_empty());
+            assert!(store.geographic_admission_links.is_empty());
+        }
+        store
+            .mode_binding
+            .attach_epoch_for_test(std::num::NonZeroU64::new(1));
+        assert!(store.admit(cell).test_ok().is_accepted());
+        store.admit_geo_location(location).test_ok();
+        assert_eq!(store.state(cell_timeline).events.len(), 1);
+        assert_eq!(store.state(location_timeline).events.len(), 1);
     }
 
     fn snapshot_id_snapshot(
@@ -17225,6 +17317,55 @@ mod admitted_fork_deletion {
         );
         assert_eq!(sizes(&store), before);
         assert!(store.geographic_timelines.contains(&fork));
+        Ok(())
+    }
+
+    /// ADR-134 §8: a stale or unattached writer on a bound store appends no
+    /// classified Event and changes no map.
+    #[test]
+    fn a_stale_or_unattached_classified_append_commits_nothing() -> Fallible<()> {
+        use std::num::NonZeroU64;
+
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
+
+        let mut store = open()?;
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32])
+            .map_err(|error| format!("{error:?}"))?;
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .map_err(|error| format!("{error:?}"))?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let permit = authority.host_permit(&store, fork)?;
+        let before = sizes(&store);
+        let events = store.state(fork).events.clone();
+        for attached in [None, NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            let appended = store.append_classified(
+                &authority.session,
+                &permit,
+                hash(0x71),
+                draft(30, TICK_KIND),
+            );
+            assert_eq!(
+                appended.map(drop),
+                Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+            );
+            assert_eq!(sizes(&store), before);
+            assert_eq!(store.state(fork).events, events);
+        }
+        store.mode_binding.attach_epoch_for_test(NonZeroU64::new(1));
+        store.append_classified(
+            &authority.session,
+            &permit,
+            hash(0x71),
+            draft(30, TICK_KIND),
+        )?;
+        assert_eq!(store.state(fork).events.len(), events.len() + 1);
         Ok(())
     }
 }

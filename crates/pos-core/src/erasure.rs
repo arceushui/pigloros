@@ -326,25 +326,25 @@ impl std::error::Error for ErasureContainmentErrorV1 {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureHostErrorV1 {
     /// Complete durable recovery has not been installed or was invalidated.
-    RecoveryUnavailable,
+    RecoveryUnavailable = 0,
     /// The requested Timeline/Fork intersects a frozen-or-later scope.
-    AccessFrozen,
+    AccessFrozen = 1,
     /// The caller's inventory generation or durable predecessor is stale.
-    StaleGeneration,
+    StaleGeneration = 2,
     /// An independently injected verifier denied the operation.
-    AuthorizationDenied,
+    AuthorizationDenied = 3,
     /// A stable operation identity conflicts with different bound content.
-    Conflict,
+    Conflict = 4,
     /// The owned persistence adapter failed without exposing payload details.
-    AdapterFailure,
+    AdapterFailure = 5,
     /// The owned adapter's attached Gateway mode-binding epoch is stale
     /// (ADR-134 §8); the write committed nothing.
-    ModeBindingStale,
+    ModeBindingStale = 6,
 }
 
 impl ErasureHostErrorV1 {
-    /// Return the stable public error code: the variant's declaration index,
-    /// so a new variant is only ever appended.
+    /// Return the stable public error code: the variant's explicit
+    /// discriminant.
     #[must_use]
     pub const fn code(self) -> u64 {
         self as u64

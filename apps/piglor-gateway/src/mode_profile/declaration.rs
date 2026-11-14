@@ -148,15 +148,16 @@ fn tag_list(values: &[String], table: &[(&str, u8)]) -> Result<Vec<u8>, String> 
 
 /// Decode 64 lower-case hexadecimal characters.
 fn digest(hex: &str) -> Result<[u8; 32], String> {
-    let canonical = hex.len() == 64
-        && hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    canonical
-        .then(|| {
-            std::array::from_fn(|index| {
-                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap_or_default()
-            })
+    hex.bytes()
+        .map(|byte| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        })
+        .collect::<Option<Vec<u8>>>()
+        .filter(|nibbles| nibbles.len() == 64)
+        .map(|nibbles| {
+            std::array::from_fn(|index| (nibbles[2 * index] << 4) | nibbles[2 * index + 1])
         })
         .ok_or_else(|| "previous digest is not 64 lower-case hex characters".to_owned())
 }

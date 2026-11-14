@@ -7,6 +7,7 @@ use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -43,8 +44,8 @@ fn compiled_bytes(id: GatewayModeProfileIdV1) -> &'static [u8] {
 fn composition(addr: IpAddr) -> GatewayServeCompositionV1 {
     GatewayServeCompositionV1 {
         tcp_addr: SocketAddr::new(addr, 8080),
-        owntracks_ingress: false,
-        fork_admission_socket: false,
+        owntracks_owner_key: None,
+        fork_admission_socket: None,
         ledger_source: None,
         network_grants: BTreeSet::new(),
     }
@@ -184,6 +185,10 @@ fn the_build_rejects_every_unreviewed_declaration() {
             "\"previous_mode_profile_digest\": null",
             "\"previous_mode_profile_digest\": \"ABCD\"",
         ),
+        declaration_with(
+            "\"previous_mode_profile_digest\": null",
+            "\"previous_mode_profile_digest\": \"abcd\"",
+        ),
         declaration_with("\"registration_profile_id\": null,\n", ""),
         declaration_with(
             "\"registration_profile_id\": null",
@@ -318,7 +323,7 @@ fn a_profile_decodes_only_under_its_own_identifier() {
             compiled_bytes(GatewayModeProfileIdV1::AirGapped)
         )
         .err(),
-        Some(GatewayModeBindingErrorV1::InvalidProfileRecord)
+        Some(GatewayModeErrorV1::InvalidProfileRecord)
     );
 }
 
@@ -346,7 +351,7 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
     }
     assert_eq!(
         "deterministic-local-v1".parse::<GatewayModeProfileIdV1>(),
-        Err(GatewayModeBindingErrorV1::UnknownProfile)
+        Err(GatewayModeErrorV1::UnknownProfile)
     );
     assert_eq!("owntracks".parse(), Ok(GatewayNetworkGrantV1::OwnTracks));
     assert_eq!(
@@ -355,7 +360,7 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
     );
     assert_eq!(
         "ledger".parse::<GatewayNetworkGrantV1>(),
-        Err(GatewayModeBindingErrorV1::UnknownNetworkGrant)
+        Err(GatewayModeErrorV1::UnknownNetworkGrant)
     );
     assert_eq!(GatewayNetworkGrantV1::OwnTracks.tag(), 0x01);
     assert_eq!(GatewayNetworkGrantV1::PublicReadOnly.tag(), 0x02);
@@ -363,15 +368,15 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
 
 #[test]
 fn startup_predicates_enforce_d6_in_both_modes() {
-    use GatewayModeBindingErrorV1 as E;
+    use GatewayModeErrorV1 as E;
     use GatewayModeProfileIdV1::{AirGapped, Local};
     use GatewayNetworkGrantV1::{OwnTracks, PublicReadOnly};
     let mut owntracks = loopback();
-    owntracks.owntracks_ingress = true;
+    owntracks.owntracks_owner_key = Some(PathBuf::from("/private/owner.key"));
     let mut owntracks_spectator = spectator();
-    owntracks_spectator.owntracks_ingress = true;
+    owntracks_spectator.owntracks_owner_key = Some(PathBuf::from("/private/owner.key"));
     let mut fork = loopback();
-    fork.fork_admission_socket = true;
+    fork.fork_admission_socket = Some(PathBuf::from("/run/pigloros/fork.sock"));
     let mut network_ledger = loopback();
     network_ledger.ledger_source = Some(OsString::from("https://ledger.example/"));
     let mut local_ledger = loopback();
@@ -427,10 +432,10 @@ fn a_fork_socket_outside_the_ingress_is_refused() {
     narrowed.record.ingress = vec![INGRESS_LOOPBACK_HTTP];
     let mut fork = loopback();
     assert_eq!(verify_predicates(&narrowed, &fork), Ok(()));
-    fork.fork_admission_socket = true;
+    fork.fork_admission_socket = Some(PathBuf::from("/run/pigloros/fork.sock"));
     assert_eq!(
         verify_predicates(&narrowed, &fork),
-        Err(GatewayModeBindingErrorV1::ListenerOutsideIngress)
+        Err(GatewayModeErrorV1::ListenerOutsideIngress)
     );
 }
 
@@ -452,7 +457,7 @@ fn predicate_five_decides_bind_attach_rotate_or_refusal() {
     );
     assert_eq!(
         decide(record(previous), &current, Some([3; 32])),
-        Err(GatewayModeBindingErrorV1::ModeMismatch)
+        Err(GatewayModeErrorV1::ModeMismatch)
     );
     assert_eq!(
         decide(
@@ -460,7 +465,7 @@ fn predicate_five_decides_bind_attach_rotate_or_refusal() {
             &current,
             Some([1; 32])
         ),
-        Err(GatewayModeBindingErrorV1::ModeMismatch)
+        Err(GatewayModeErrorV1::ModeMismatch)
     );
 }
 
@@ -496,11 +501,11 @@ fn a_one_hop_rotation_advances_the_epoch() -> TestResult {
 fn the_first_serve_binds_an_empty_store_and_a_restart_attaches() -> TestResult {
     let (_directory, path) = temporary_database()?;
     let mut first = sqlite_host(&path)?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut first)?;
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut first)?;
     assert_eq!(binding_epoch(&mut first)?, 1);
     drop(first);
     let mut restarted = sqlite_host(&path)?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut restarted)?;
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut restarted)?;
     let current = restarted
         .gateway_mode_binding()
         .load_mode_binding()?
@@ -510,13 +515,8 @@ fn the_first_serve_binds_an_empty_store_and_a_restart_attaches() -> TestResult {
     drop(restarted);
     let mut switched = sqlite_host(&path)?;
     assert_eq!(
-        bind_gateway_mode_v1(
-            GatewayModeProfileIdV1::AirGapped,
-            &loopback(),
-            &mut switched
-        )
-        .err(),
-        Some(GatewayModeBindingErrorV1::ModeMismatch)
+        bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut switched).err(),
+        Some(GatewayModeErrorV1::ModeMismatch)
     );
     Ok(())
 }
@@ -525,8 +525,8 @@ fn the_first_serve_binds_an_empty_store_and_a_restart_attaches() -> TestResult {
 fn binding_refuses_a_d6_violation_and_a_populated_unbound_store() -> TestResult {
     let mut host = memory_host()?;
     assert_eq!(
-        bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, &spectator(), &mut host).err(),
-        Some(GatewayModeBindingErrorV1::ListenerOutsideIngress)
+        bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, spectator(), &mut host).err(),
+        Some(GatewayModeErrorV1::ListenerOutsideIngress)
     );
     let timeline = host.command_sender()?.create_timeline("populated")?.id();
     host.command_sender()?.append(
@@ -538,8 +538,8 @@ fn binding_refuses_a_d6_violation_and_a_populated_unbound_store() -> TestResult 
         )],
     )?;
     assert_eq!(
-        bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut host).err(),
-        Some(GatewayModeBindingErrorV1::Store(
+        bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut host).err(),
+        Some(GatewayModeErrorV1::Store(
             pos_core::GatewayModeBindingErrorV1::PopulatedUnbound
         ))
     );
@@ -550,7 +550,7 @@ fn binding_refuses_a_d6_violation_and_a_populated_unbound_store() -> TestResult 
 fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     let (_directory, path) = temporary_database()?;
     let mut serving = sqlite_host(&path)?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut serving)?;
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, loopback(), &mut serving)?;
     let draft = || {
         pos_core::EventDraft::new(
             pos_core::EntityId::new(),
@@ -568,20 +568,17 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     )?;
     assert!(audit.contains("to gateway-mode-air-gapped-v1 (455883a4"));
     assert!(audit.ends_with("at binding epoch 2"));
-    // The append commits nothing: the store's erasure data-version check or
-    // its append choke point refuses the stale adapter instance (the exact
-    // `ModeBindingStale` of the choke point is asserted by pos-store).
+    // The append commits nothing, and the stale adapter instance is told why.
     let refused = serving
         .command_sender()
         .and_then(|mut sender| sender.append(timeline, &[draft()]));
-    assert!(refused.is_err());
+    assert_eq!(
+        refused.err(),
+        Some(pos_core::ErasureHostErrorV1::ModeBindingStale)
+    );
     drop(serving);
     let mut reopened = sqlite_host(&path)?;
-    bind_gateway_mode_v1(
-        GatewayModeProfileIdV1::AirGapped,
-        &loopback(),
-        &mut reopened,
-    )?;
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut reopened)?;
     assert_eq!(binding_epoch(&mut reopened)?, 2);
     assert_eq!(reopened.command_sender()?.logical_head(timeline)?, head);
     Ok(())
@@ -593,30 +590,30 @@ fn migration_refuses_unbound_mismatched_and_identical_modes() -> TestResult {
     let (directory, path) = temporary_database()?;
     assert_eq!(
         migrate_gateway_mode_v1(&path, Local, AirGapped).err(),
-        Some(GatewayModeBindingErrorV1::Store(
+        Some(GatewayModeErrorV1::Store(
             pos_core::GatewayModeBindingErrorV1::Unbound
         ))
     );
     let mut host = sqlite_host(&path)?;
-    bind_gateway_mode_v1(Local, &loopback(), &mut host)?;
+    bind_gateway_mode_v1(Local, loopback(), &mut host)?;
     drop(host);
     assert_eq!(
         migrate_gateway_mode_v1(&path, AirGapped, Local).err(),
-        Some(GatewayModeBindingErrorV1::Store(
+        Some(GatewayModeErrorV1::Store(
             pos_core::GatewayModeBindingErrorV1::Mismatch
         ))
     );
     assert_eq!(
         migrate_gateway_mode_v1(&path, Local, Local).err(),
-        Some(GatewayModeBindingErrorV1::Store(
+        Some(GatewayModeErrorV1::Store(
             pos_core::GatewayModeBindingErrorV1::Mismatch
         ))
     );
     let directory_path = directory.path().to_str().ok_or("path is not UTF-8")?;
     assert_eq!(
         migrate_gateway_mode_v1(directory_path, Local, AirGapped).err(),
-        Some(GatewayModeBindingErrorV1::Store(
-            pos_core::GatewayModeBindingErrorV1::Unavailable
+        Some(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unbound
         ))
     );
     Ok(())
@@ -629,7 +626,7 @@ fn the_store_lock_excludes_migration_while_the_store_is_in_use() -> TestResult {
     let writer = GatewayModeStoreLockV1::shared(&path)?;
     assert_eq!(
         GatewayModeStoreLockV1::exclusive(&path).err(),
-        Some(GatewayModeBindingErrorV1::StoreLockUnavailable)
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
     assert_eq!(
         migrate_gateway_mode_v1(
@@ -638,19 +635,19 @@ fn the_store_lock_excludes_migration_while_the_store_is_in_use() -> TestResult {
             GatewayModeProfileIdV1::AirGapped
         )
         .err(),
-        Some(GatewayModeBindingErrorV1::StoreLockUnavailable)
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
     drop((serving, writer));
     let migrating = GatewayModeStoreLockV1::exclusive(&path)?;
     assert_eq!(
         GatewayModeStoreLockV1::shared(&path).err(),
-        Some(GatewayModeBindingErrorV1::StoreLockUnavailable)
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
     drop(migrating);
     let missing = directory.path().join("missing").join("gateway.db");
     assert_eq!(
         GatewayModeStoreLockV1::shared(missing.to_str().ok_or("path is not UTF-8")?).err(),
-        Some(GatewayModeBindingErrorV1::StoreLockUnavailable)
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
     Ok(())
 }
@@ -661,7 +658,7 @@ fn offline_writers_attach_only_a_compiled_binding() -> TestResult {
     let mut unbound = SqliteStore::open(&path)?;
     assert_eq!(
         attach_offline_writer_v1(&mut unbound),
-        Err(GatewayModeBindingErrorV1::Store(
+        Err(GatewayModeErrorV1::Store(
             pos_core::GatewayModeBindingErrorV1::Unbound
         ))
     );
@@ -671,7 +668,7 @@ fn offline_writers_attach_only_a_compiled_binding() -> TestResult {
     )?;
     assert_eq!(
         attach_offline_writer_v1(&mut foreign),
-        Err(GatewayModeBindingErrorV1::ModeMismatch)
+        Err(GatewayModeErrorV1::ModeMismatch)
     );
     for id in GatewayModeProfileIdV1::ALL {
         let mut store = MemoryStore::new();
@@ -683,7 +680,7 @@ fn offline_writers_attach_only_a_compiled_binding() -> TestResult {
     assert_eq!(refuse_air_gapped(GatewayModeProfileIdV1::Local), Ok(()));
     assert_eq!(
         refuse_air_gapped(GatewayModeProfileIdV1::AirGapped),
-        Err(GatewayModeBindingErrorV1::RefusedInMode)
+        Err(GatewayModeErrorV1::RefusedInMode)
     );
     Ok(())
 }
@@ -724,7 +721,7 @@ async fn the_stale_signal_wakes_the_serve_loop_once_fired() {
 
 #[test]
 fn every_error_has_a_closed_message() {
-    use GatewayModeBindingErrorV1 as E;
+    use GatewayModeErrorV1 as E;
     for error in [
         E::UnknownProfile,
         E::UnknownNetworkGrant,
@@ -747,4 +744,130 @@ fn every_error_has_a_closed_message() {
         E::from(pos_core::GatewayModeBindingErrorV1::Unbound),
         E::Store(pos_core::GatewayModeBindingErrorV1::Unbound)
     );
+}
+
+#[test]
+fn the_handle_owns_the_verified_listeners_and_its_host() -> TestResult {
+    let mut composition = loopback();
+    composition.owntracks_owner_key = Some(PathBuf::from("/private/owner.key"));
+    composition.fork_admission_socket = Some(PathBuf::from("/run/pigloros/fork.sock"));
+    composition.network_grants = [GatewayNetworkGrantV1::OwnTracks].into_iter().collect();
+    let mut bound = memory_host()?;
+    let mode = bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, composition, &mut bound)?;
+    assert_eq!(
+        mode.tcp_addr(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+    );
+    assert_eq!(
+        mode.owntracks_owner_key(),
+        Some(std::path::Path::new("/private/owner.key"))
+    );
+    assert_eq!(
+        mode.fork_admission_socket(),
+        Some(std::path::Path::new("/run/pigloros/fork.sock"))
+    );
+    assert_eq!(mode.verify_host(&mut bound), Ok(()));
+    assert_eq!(
+        mode.verify_host(&mut memory_host()?),
+        Err(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unbound
+        ))
+    );
+    let mut other = memory_host()?;
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut other)?;
+    assert_eq!(
+        mode.verify_host(&mut other),
+        Err(GatewayModeErrorV1::ModeMismatch)
+    );
+    assert_eq!(GATEWAY_NETWORK_CAPABILITY_V1, "gateway.network.v1");
+    Ok(())
+}
+
+#[test]
+fn an_attach_after_the_binding_changed_is_another_mode() -> TestResult {
+    let mut store = MemoryStore::new();
+    let host = GatewayModeBindingHostV1::new();
+    store.bind_empty_store_mode(host.authorize_bind(reference("gateway-mode-local-v1", 1)))?;
+    store.rotate_mode(host.authorize_rotation(
+        reference("gateway-mode-local-v1", 1),
+        reference("gateway-mode-local-v1", 2),
+    )?)?;
+    assert_eq!(
+        apply_decision(
+            &mut store,
+            reference("gateway-mode-local-v1", 1),
+            BindingDecisionV1::Attach
+        ),
+        Err(GatewayModeErrorV1::ModeMismatch)
+    );
+    assert_eq!(
+        binding_change_error(pos_core::GatewayModeBindingErrorV1::Unavailable),
+        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn every_alias_of_one_store_names_one_lock() -> TestResult {
+    let (directory, path) = temporary_database()?;
+    let alias = directory.path().join("alias");
+    std::os::unix::fs::symlink(directory.path(), &alias)?;
+    let aliased = alias.join("gateway.db");
+    let held = GatewayModeStoreLockV1::shared(aliased.to_str().ok_or("path is not UTF-8")?)?;
+    assert_eq!(
+        GatewayModeStoreLockV1::exclusive(&path).err(),
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
+    );
+    drop(held);
+    std::fs::write(&path, b"")?;
+    let linked = directory.path().join("linked.db");
+    std::os::unix::fs::symlink(&path, &linked)?;
+    let held = GatewayModeStoreLockV1::shared(linked.to_str().ok_or("path is not UTF-8")?)?;
+    assert_eq!(
+        GatewayModeStoreLockV1::exclusive(&path).err(),
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
+    );
+    drop(held);
+    assert!(directory
+        .path()
+        .join("gateway.db.gateway-mode.lock")
+        .exists());
+    assert_eq!(
+        GatewayModeStoreLockV1::shared("..").err(),
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn migration_never_creates_a_missing_store() -> TestResult {
+    let (_directory, path) = temporary_database()?;
+    assert_eq!(
+        migrate_gateway_mode_v1(
+            &path,
+            GatewayModeProfileIdV1::Local,
+            GatewayModeProfileIdV1::AirGapped
+        )
+        .err(),
+        Some(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unbound
+        ))
+    );
+    assert!(!std::path::Path::new(&path).exists());
+    std::fs::write(
+        &path,
+        b"not an SQLite database, only a long enough header for SQLite to reject",
+    )?;
+    assert_eq!(
+        migrate_gateway_mode_v1(
+            &path,
+            GatewayModeProfileIdV1::Local,
+            GatewayModeProfileIdV1::AirGapped
+        )
+        .err(),
+        Some(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable
+        ))
+    );
+    Ok(())
 }

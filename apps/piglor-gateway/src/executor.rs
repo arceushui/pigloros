@@ -741,28 +741,24 @@ impl ExecutorStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`).
+const HOST_ERROR_TO_CORE: [fn() -> CoreError; 7] = [
+    || CoreError::ErasureContainmentUnavailable,
+    || CoreError::ErasureAccessFrozen,
+    || CoreError::ErasureContainmentUnavailable,
+    host_command_rejected,
+    host_command_rejected,
+    host_command_rejected,
+    || CoreError::ModeBindingStale,
+];
+
 fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable
-        | ErasureHostErrorV1::StaleGeneration
-        | ErasureHostErrorV1::ModeBindingStale => unavailable_host_error(error),
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host command rejected".to_owned())
-        }
-    }
+    HOST_ERROR_TO_CORE[error as usize]()
 }
 
-/// A host that cannot serve this command now: its containment is not
-/// recovered or current, or its Gateway mode binding is stale (ADR-134 §8).
-const fn unavailable_host_error(error: ErasureHostErrorV1) -> CoreError {
-    if matches!(error, ErasureHostErrorV1::ModeBindingStale) {
-        CoreError::ModeBindingStale
-    } else {
-        CoreError::ErasureContainmentUnavailable
-    }
+fn host_command_rejected() -> CoreError {
+    CoreError::Storage("erasure host command rejected".to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -210,20 +210,7 @@ fn ensure_registry_erasure_gate(
 }
 
 fn hosted_store_error(error: pos_core::ErasureHostErrorV1) -> ExperimentError {
-    let error = match error {
-        pos_core::ErasureHostErrorV1::AccessFrozen => pos_core::CoreError::ErasureAccessFrozen,
-        pos_core::ErasureHostErrorV1::RecoveryUnavailable
-        | pos_core::ErasureHostErrorV1::StaleGeneration => {
-            pos_core::CoreError::ErasureContainmentUnavailable
-        }
-        pos_core::ErasureHostErrorV1::AuthorizationDenied
-        | pos_core::ErasureHostErrorV1::Conflict
-        | pos_core::ErasureHostErrorV1::AdapterFailure
-        | pos_core::ErasureHostErrorV1::ModeBindingStale => {
-            pos_core::CoreError::Storage("erasure host rejected experiment startup".to_owned())
-        }
-    };
-    ExperimentError::Store(error)
+    ExperimentError::Store(host_error(error))
 }
 
 fn bind_fork_registry_erasure_gate(
