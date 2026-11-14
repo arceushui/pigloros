@@ -5,7 +5,9 @@
 use std::fs::{self, File, Permissions};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
-use pos_crypto::subject_nonce_ledger::{SubjectNonceLedgerRowV1, SubjectNonceLedgerV1};
+use pos_crypto::subject_nonce_ledger::{
+    SubjectNonceLedgerRowV1, SubjectNonceLedgerV1, SubjectStoreFileIdV1,
+};
 use pos_owner_bridge::encryptor_lock::linux::store_file_id;
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 use rustix::fs::{self as descriptor_fs, FileType, Mode, OFlags, CWD};
@@ -33,7 +35,10 @@ fn private_regular_descriptor_matches_independent_metadata_and_the_snl1_pair() -
         owner_id: "subject:00000000000000000000000000000001".to_owned(),
         epoch: 1,
         root_material_digest: [9; 32],
-        store_file_id: identity,
+        store_file_id: SubjectStoreFileIdV1::Linux {
+            device: identity[0],
+            inode: identity[1],
+        },
         data_next: 12,
         bootstrap_next: 3,
     };

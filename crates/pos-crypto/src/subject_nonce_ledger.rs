@@ -1,14 +1,14 @@
 //! The SNL1 nonce-ledger artifact selected by Accepted ADR-110 E16.
 //!
-//! This codec validates bytes and row ordering only. A decoded device/inode
-//! pair is untrusted metadata, not a canonical store binding or an encryption
+//! This codec validates bytes and row ordering only. A decoded file identity
+//! is untrusted metadata, not a canonical store binding or an encryption
 //! permit. The owner adapter must establish the registry/root/store identity,
 //! hold the lifetime lock, and durably commit each reservation before use.
 //! Missing or suspect ledger state must never be recreated for a registered
 //! identity. None of those operations or production activation occur here.
 //!
-//! The pure format is available on every target; store-file tag 1 describes
-//! Linux. Decoding it does not enable owner operations on another platform.
+//! The pure format is available on every target; decoding an identity does not
+//! enable owner operations or establish a store binding.
 
 use thiserror::Error;
 
@@ -24,6 +24,7 @@ pub const EXHAUSTED_SUBJECT_NONCE_COUNTER: u64 = MAX_SUBJECT_NONCE_COUNTER + 1;
 
 const MAGIC: [u8; 4] = *b"SNL1";
 const LINUX_STORE_FILE_TAG: u64 = 1;
+const WINDOWS_STORE_FILE_TAG: u64 = 2;
 
 /// A closed, payload-free SNL1 structural or counter-transition failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -34,7 +35,8 @@ pub enum SubjectNonceLedgerErrorV1 {
     /// The complete encoding, declared collection or owner text is too large.
     #[error("SNL1 bound exceeded")]
     BoundsExceeded,
-    /// An invalid subject owner, role, zero epoch or out-of-range next counter.
+    /// An invalid subject owner, role, zero epoch, out-of-range next counter,
+    /// or out-of-range Windows volume serial.
     #[error("invalid SNL1 row")]
     InvalidRow,
     /// Row identities repeat or are not strictly increasing in wire order.
@@ -43,7 +45,7 @@ pub enum SubjectNonceLedgerErrorV1 {
     /// The ledger version is not 1.
     #[error("unsupported SNL1 version")]
     UnsupportedVersion,
-    /// A store-file identity uses a tag other than the selected Linux tag 1.
+    /// A store-file identity uses an unknown platform tag.
     #[error("unsupported SNL1 store-file tag")]
     UnsupportedPlatform,
     /// No row exactly matches the expected identity, binding and counters.
@@ -64,11 +66,30 @@ impl StrictCborError for SubjectNonceLedgerErrorV1 {
     }
 }
 
-/// Untrusted row data for the role-0 subject-data identity in SNL1.
+/// Untrusted platform-tagged store-file identity in SNL1.
 ///
 /// Constructing this value establishes no authority. [`SubjectNonceLedgerV1`]
 /// validates its wire grammar; the owner adapter must independently verify
-/// the root digest and the descriptor-derived device/inode against its store.
+/// the root digest and the handle-derived identity against its store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubjectStoreFileIdV1 {
+    /// Linux device and inode observed from an open file.
+    Linux {
+        /// Filesystem device identifier.
+        device: u64,
+        /// File inode number.
+        inode: u64,
+    },
+    /// Windows volume serial and file index observed from an open file.
+    Windows {
+        /// Volume serial number.
+        volume_serial: u32,
+        /// File index on that volume.
+        file_index: u64,
+    },
+}
+
+/// Untrusted row data for the role-0 subject-data identity in SNL1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubjectNonceLedgerRowV1 {
     /// Exact `subject:` plus 32 lowercase hex digits of a non-nil subject.
@@ -77,8 +98,8 @@ pub struct SubjectNonceLedgerRowV1 {
     pub epoch: u64,
     /// Public material digest of the subject root, never the private root.
     pub root_material_digest: [u8; 32],
-    /// Untrusted Linux `[st_dev, st_ino]` metadata; encoding adds tag 1.
-    pub store_file_id: [u64; 2],
+    /// Untrusted, platform-tagged file identity.
+    pub store_file_id: SubjectStoreFileIdV1,
     /// Next data counter in `1..=2^32`, with `2^32` meaning exhausted.
     pub data_next: u64,
     /// Independent bootstrap counter with the same range and sentinel.
@@ -242,12 +263,28 @@ fn append_row(output: &mut Vec<u8>, row: &SubjectNonceLedgerRowV1, identity: &[u
     output.push(0x87);
     output.extend_from_slice(identity);
     subject_cbor::byte_string(output, &row.root_material_digest);
-    output.push(0x83);
-    subject_cbor::unsigned(output, LINUX_STORE_FILE_TAG);
-    subject_cbor::unsigned(output, row.store_file_id[0]);
-    subject_cbor::unsigned(output, row.store_file_id[1]);
+    append_store_file_id(output, row.store_file_id);
     subject_cbor::unsigned(output, row.data_next);
     subject_cbor::unsigned(output, row.bootstrap_next);
+}
+
+fn append_store_file_id(output: &mut Vec<u8>, store_file_id: SubjectStoreFileIdV1) {
+    output.push(0x83);
+    match store_file_id {
+        SubjectStoreFileIdV1::Linux { device, inode } => {
+            subject_cbor::unsigned(output, LINUX_STORE_FILE_TAG);
+            subject_cbor::unsigned(output, device);
+            subject_cbor::unsigned(output, inode);
+        }
+        SubjectStoreFileIdV1::Windows {
+            volume_serial,
+            file_index,
+        } => {
+            subject_cbor::unsigned(output, WINDOWS_STORE_FILE_TAG);
+            subject_cbor::unsigned(output, u64::from(volume_serial));
+            subject_cbor::unsigned(output, file_index);
+        }
+    }
 }
 
 fn read_row(
@@ -260,16 +297,31 @@ fn read_row(
     }
     let epoch = reader.unsigned()?;
     let root_material_digest = reader.bytes()?;
-    reader.fixed_array(3)?;
-    if reader.unsigned()? != LINUX_STORE_FILE_TAG {
-        return Err(SubjectNonceLedgerErrorV1::UnsupportedPlatform);
-    }
+    let store_file_id = read_store_file_id(reader)?;
     Ok(SubjectNonceLedgerRowV1 {
         owner_id,
         epoch,
         root_material_digest,
-        store_file_id: [reader.unsigned()?, reader.unsigned()?],
+        store_file_id,
         data_next: reader.unsigned()?,
         bootstrap_next: reader.unsigned()?,
     })
+}
+
+fn read_store_file_id(
+    reader: &mut Reader<'_, SubjectNonceLedgerErrorV1>,
+) -> Result<SubjectStoreFileIdV1, SubjectNonceLedgerErrorV1> {
+    reader.fixed_array(3)?;
+    match reader.unsigned()? {
+        LINUX_STORE_FILE_TAG => Ok(SubjectStoreFileIdV1::Linux {
+            device: reader.unsigned()?,
+            inode: reader.unsigned()?,
+        }),
+        WINDOWS_STORE_FILE_TAG => Ok(SubjectStoreFileIdV1::Windows {
+            volume_serial: u32::try_from(reader.unsigned()?)
+                .map_err(|_| SubjectNonceLedgerErrorV1::InvalidRow)?,
+            file_index: reader.unsigned()?,
+        }),
+        _ => Err(SubjectNonceLedgerErrorV1::UnsupportedPlatform),
+    }
 }
