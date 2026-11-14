@@ -569,7 +569,10 @@ impl TerminationEvidence {
     }
 }
 
-fn bindings(fields: &[Value; 27]) -> Result<([u8; 16], [u8; 32], [u8; 32], [u8; 32])> {
+/// `attempt-id`, `agr1-digest`, `elm1-digest` and `koe1-digest`.
+type Bindings = ([u8; 16], [u8; 32], [u8; 32], [u8; 32]);
+
+fn bindings(fields: &[Value; 27]) -> Result<Bindings> {
     Ok((
         id16(&fields[2])?,
         digest(&fields[3])?,

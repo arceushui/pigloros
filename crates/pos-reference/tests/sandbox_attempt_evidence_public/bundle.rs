@@ -408,7 +408,16 @@ fn rule_2_local_network_and_work_after_follow_mode_and_elm1() -> TestResult {
     Fixture::observed(at_progress(1)?)?
         .tme1(&[21], Value::Null)?
         .tme1(&[26], integer(2))?
-        .rejects("started with a unit and no work-after")
+        .rejects("started with a unit and no work-after")?;
+    let unbound = edit(&at_progress(1)?, |fields| {
+        for index in [9, 10, 11, 21] {
+            fields[index] = Value::Null;
+        }
+        set(fields, &[24, 1], Value::Null)?;
+        fields[26] = integer(2);
+        Ok(())
+    })?;
+    Fixture::observed(unbound)?.accepts().map(|_| ())
 }
 
 #[test]

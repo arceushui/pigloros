@@ -216,7 +216,7 @@ fn open<T, const N: usize>(
     Ok((decoded, digest))
 }
 
-fn consistent(holds: bool) -> Result<()> {
+const fn consistent(holds: bool) -> Result<()> {
     if holds {
         Ok(())
     } else {
