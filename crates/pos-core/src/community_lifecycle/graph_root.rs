@@ -18,6 +18,10 @@ use zeroize::Zeroizing;
 /// Maximum canonical CGR1 encoding.
 pub const MAX_COMMUNITY_GRAPH_ROOT_BYTES_V1: usize = 65_536;
 
+/// Most roots that can fit the byte bound: a native reference is at least
+/// 1 + 17 + 1 + 1 + 34 = 54 bytes, and 65,536 / 54 is 1213.
+const MAX_GRAPH_ROOTS: usize = 1213;
+
 /// Profile 1 graph maxima from `graph_policy_bytes`: registrations, edges,
 /// keys, depth, registration bytes and artifact bytes.
 const GRAPH_MAXIMA: [u64; 6] = [4096, 8192, 4096, 4096, 67_108_864, 268_435_456];
@@ -52,16 +56,25 @@ impl CommunityGraphCountsV1 {
         ]
     }
 
-    fn validate(self) -> Result<()> {
+    /// Every count is within its profile-1 maximum. Each distinct root is
+    /// its own registration and depth counts the root as one, so a nonempty
+    /// root set needs at least one registration per root and a depth from 1
+    /// up to the number of registrations.
+    fn validate(self, roots: usize) -> Result<()> {
         if self
             .values()
             .iter()
             .zip(GRAPH_MAXIMA)
-            .all(|(value, maximum)| *value <= maximum)
+            .any(|(value, maximum)| *value > maximum)
         {
-            Ok(())
-        } else {
             Err(Error::BoundsExceeded)
+        } else if self.registrations < roots as u64
+            || self.maximum_depth == 0
+            || self.maximum_depth > self.registrations
+        {
+            Err(Error::InvalidBinding)
+        } else {
+            Ok(())
         }
     }
 
@@ -126,7 +139,7 @@ impl<'a> CommunityGraphRootV1<'a> {
                 {
                     Err(Error::InvalidBinding)
                 } else {
-                    input.roots.validate(1, usize::MAX)
+                    input.roots.validate(1, MAX_GRAPH_ROOTS)
                 }
             })
             .and_then(|()| {
@@ -140,7 +153,7 @@ impl<'a> CommunityGraphRootV1<'a> {
                     })
                 })
             })
-            .and_then(|()| input.graph_counts.validate())
+            .and_then(|()| input.graph_counts.validate(input.roots.len()))
             .and_then(|()| validate_horizon(input.evidence_not_after_micros))
             .map(|()| Self(input))
             .and_then(|root| {
@@ -202,23 +215,22 @@ fn read_root<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityGraphRootInputV
     fixed_bytes(cursor).and_then(|store_incarnation| {
         read_coordinates(cursor).and_then(|(timeline, generation)| {
             read_hashes(cursor).and_then(|[profile_digest, selected_head_digest]| {
-                CommunityNativeNodeReferencesV1::read(cursor, MAX_COMMUNITY_GRAPH_ROOT_BYTES_V1)
-                    .and_then(|roots| {
-                        CommunityGraphCountsV1::read(cursor).and_then(|graph_counts| {
-                            read_head(cursor, 0).map(|evidence_not_after_micros| {
-                                CommunityGraphRootInputV1 {
-                                    store_incarnation,
-                                    timeline,
-                                    generation,
-                                    profile_digest,
-                                    selected_head_digest,
-                                    roots,
-                                    graph_counts,
-                                    evidence_not_after_micros,
-                                }
-                            })
+                CommunityNativeNodeReferencesV1::read(cursor, MAX_GRAPH_ROOTS).and_then(|roots| {
+                    CommunityGraphCountsV1::read(cursor).and_then(|graph_counts| {
+                        read_head(cursor, 0).map(|evidence_not_after_micros| {
+                            CommunityGraphRootInputV1 {
+                                store_incarnation,
+                                timeline,
+                                generation,
+                                profile_digest,
+                                selected_head_digest,
+                                roots,
+                                graph_counts,
+                                evidence_not_after_micros,
+                            }
                         })
                     })
+                })
             })
         })
     })

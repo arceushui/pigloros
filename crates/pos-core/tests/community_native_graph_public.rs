@@ -449,10 +449,62 @@ fn direct_index_holds_one_to_256_ordered_references() {
     assert!(TypedRefs::from_references(&refs[..1]) != TypedRefs::from_references(&refs[..2]));
     assert!(TypedRefs::from_references(&refs[..1]) != TypedRefs::from_references(&refs[1..2]));
     let ordered = [
+        TypedRef::Native(native(5, 0, 2)),
+        TypedRef::Native(native(5, 1, 1)),
+    ];
+    assert_eq!(check(&ordered), Ok(()));
+}
+
+fn closure_of(inputs: &[TypedRef<'_>]) -> Result<(), Error> {
+    Closure::new(ClosureInput {
+        timeline: timeline(1),
+        generation: GENERATION,
+        inputs: TypedRefs::from_references(inputs),
+        source_scope_union_digest: hash(24),
+    })
+    .map(drop)
+}
+
+#[test]
+fn one_native_coordinate_under_two_digests_is_a_conflicting_alias() {
+    let alias = [
         TypedRef::Native(native(5, 0, 1)),
         TypedRef::Native(native(5, 0, 2)),
     ];
-    assert_eq!(check(&ordered), Ok(()));
+    assert_eq!(closure_of(&alias), Err(Error::InvalidBinding));
+    let other = [
+        TypedRef::Native(native(5, 0, 1)),
+        TypedRef::Native(NativeRef {
+            store_incarnation: [8; 16],
+            ..native(5, 0, 1)
+        }),
+    ];
+    assert_eq!(closure_of(&other), Ok(()));
+    let separated = [
+        TypedRef::Native(native(5, 0, 1)),
+        TypedRef::Native(native(5, 1, 2)),
+        refs()[1],
+    ];
+    assert_eq!(closure_of(&separated), Ok(()));
+    let roots = [native(1, 0, 50), native(1, 0, 51)];
+    assert_eq!(
+        error_of(Root::new(root_input(
+            NativeRefs::from_references(&roots),
+            counts()
+        ))),
+        Some(Error::InvalidBinding)
+    );
+    let groups = [native(1, 0, 50), native(1, 0, 51)];
+    let grouped = Node::new(node_input(
+        Kind::HostProgress,
+        Class::EndogenousRecomputed,
+        content(*b"CMS1"),
+        Index::Grouped {
+            groups: NativeRefs::from_references(&groups),
+            total_leaf_count: 300,
+        },
+    ));
+    assert_eq!(error_of(grouped), Some(Error::InvalidBinding));
 }
 
 #[test]
@@ -1162,15 +1214,15 @@ fn graph_root_counts_are_bounded_by_the_profile_maxima() {
     let roots = [native(1, 0, 50)];
     let refs = NativeRefs::from_references(&roots);
     assert_eq!(Root::new(root_input(refs, counts())).map(drop), Ok(()));
-    let zero = Counts {
-        registrations: 0,
+    let minimal = Counts {
+        registrations: 1,
         edges: 0,
         keys: 0,
-        maximum_depth: 0,
+        maximum_depth: 1,
         registration_bytes: 0,
         artifact_bytes: 0,
     };
-    assert_eq!(Root::new(root_input(refs, zero)).map(drop), Ok(()));
+    assert_eq!(Root::new(root_input(refs, minimal)).map(drop), Ok(()));
     let over = [
         Counts {
             registrations: 4097,
@@ -1299,6 +1351,191 @@ fn graph_root_rejects_invalid_roots_and_identities() -> TestResult {
     assert_eq!(
         error_of(Root::from_canonical_cbor(&vec![0; 65_537])),
         Some(Error::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn graph_root_counts_must_cover_every_root_and_a_real_depth() {
+    let roots = [native(1, 0, 50), native(1, 1, 51), native(2, 0, 52)];
+    let refs = NativeRefs::from_references(&roots);
+    let with = |registrations: u64, maximum_depth: u64| {
+        Root::new(root_input(
+            refs,
+            Counts {
+                registrations,
+                maximum_depth,
+                ..counts()
+            },
+        ))
+        .map(drop)
+    };
+    assert_eq!(with(3, 1), Ok(()));
+    assert_eq!(with(3, 3), Ok(()));
+    assert_eq!(with(2, 1), Err(Error::InvalidBinding));
+    assert_eq!(with(3, 0), Err(Error::InvalidBinding));
+    assert_eq!(with(3, 4), Err(Error::InvalidBinding));
+    assert_eq!(with(0, 0), Err(Error::InvalidBinding));
+}
+
+#[test]
+fn graph_root_count_is_capped_before_any_root_is_read() -> TestResult {
+    // 1213 is the most 54-byte roots the 65,536-byte bound can hold.
+    let many: Vec<NativeRef> = (1..=1214).map(|producer| native(producer, 0, 50)).collect();
+    for count in [1213, 1214] {
+        assert_eq!(
+            error_of(Root::new(root_input(
+                NativeRefs::from_references(&many[..count]),
+                counts()
+            ))),
+            Some(Error::BoundsExceeded)
+        );
+    }
+    let mut over = Root::new(root_input(
+        NativeRefs::from_references(&many[..1]),
+        counts(),
+    ))?
+    .to_canonical_cbor()
+    .to_vec();
+    // Patch the one-root array head (0x81 after the two 32-byte digests)
+    // to claim 1214 roots: the count is refused before any root is read.
+    let head = 7 + 3 * 17 + 2 * 34;
+    assert_eq!(over[head], 0x81);
+    over.splice(head..=head, [0x99, 0x04, 0xbe]);
+    assert_eq!(
+        error_of(Root::from_canonical_cbor(&over)),
+        Some(Error::BoundsExceeded)
+    );
+    Ok(())
+}
+
+fn widest_factual_refs<'a>(owner: &'a str, count: u64) -> Vec<TypedRef<'a>> {
+    (0..count)
+        .map(|index| TypedRef::Factual {
+            timeline: timeline(4),
+            node: FactualNode {
+                tick: u64::MAX - count + index + 1,
+                scheduler_position: u32::MAX,
+                owner_id: owner,
+                output_ordinal: u32::MAX,
+                schema_id: u32::MAX,
+                artifact_digest: hash(10),
+            },
+            record_digest: hash(12),
+        })
+        .collect()
+}
+
+#[test]
+fn worst_case_records_fit_their_encoded_bounds() -> TestResult {
+    let owner = "o".repeat(128);
+    let leaves = widest_factual_refs(&owner, 256);
+    let group = Group::new(GroupInput {
+        timeline: timeline(1),
+        generation: GENERATION,
+        consumer_content: content(*b"CSR1"),
+        leaves: TypedRefs::from_references(&leaves),
+    })?;
+    let bytes = group.to_canonical_cbor();
+    assert!(bytes.len() <= 65_536);
+    assert_eq!(Group::from_canonical_cbor(&bytes).map(drop), Ok(()));
+
+    let node = Node::new(revision_input(Index::Direct(TypedRefs::from_references(
+        &leaves,
+    ))))?;
+    let bytes = node.to_canonical_cbor();
+    assert!(bytes.len() <= 1_048_576);
+    assert_eq!(Node::from_canonical_cbor(&bytes).map(drop), Ok(()));
+
+    let inputs = widest_factual_refs(&owner, 4096);
+    let closure = Closure::new(ClosureInput {
+        timeline: timeline(1),
+        generation: GENERATION,
+        inputs: TypedRefs::from_references(&inputs),
+        source_scope_union_digest: hash(24),
+    })?;
+    let bytes = closure.to_canonical_cbor();
+    assert!(bytes.len() <= 1_048_576);
+    assert_eq!(Closure::from_canonical_cbor(&bytes).map(drop), Ok(()));
+    Ok(())
+}
+
+/// Non-canonical variants of one valid record: a non-preferred version,
+/// an indefinite-length outer array and a wrong outer array length.
+fn noncanonical(valid: &[u8]) -> [Vec<u8>; 3] {
+    let mut wide_version = valid.to_vec();
+    wide_version.splice(6..7, [0x18, 0x01]);
+    let mut indefinite = valid.to_vec();
+    indefinite[0] = 0x9f;
+    let mut short = valid.to_vec();
+    short[0] -= 1;
+    [wide_version, indefinite, short]
+}
+
+#[test]
+fn every_decoder_refuses_noncanonical_framing() -> TestResult {
+    let refs = refs();
+    let node = Node::new(revision_input(Index::Direct(TypedRefs::from_references(
+        &refs,
+    ))))?
+    .to_canonical_cbor()
+    .to_vec();
+    let group = Group::new(GroupInput {
+        timeline: timeline(1),
+        generation: GENERATION,
+        consumer_content: content(*b"CSR1"),
+        leaves: TypedRefs::from_references(&refs),
+    })?
+    .to_canonical_cbor()
+    .to_vec();
+    let closure = Closure::new(ClosureInput {
+        timeline: timeline(1),
+        generation: GENERATION,
+        inputs: TypedRefs::from_references(&refs),
+        source_scope_union_digest: hash(24),
+    })?
+    .to_canonical_cbor()
+    .to_vec();
+    let roots = [native(1, 0, 50)];
+    let root = Root::new(root_input(NativeRefs::from_references(&roots), counts()))?
+        .to_canonical_cbor()
+        .to_vec();
+    for (index, bytes) in noncanonical(&node).iter().enumerate() {
+        assert_eq!(
+            error_of(Node::from_canonical_cbor(bytes)),
+            Some(Error::InvalidEncoding),
+            "{index}"
+        );
+    }
+    for bytes in &noncanonical(&group) {
+        assert_eq!(
+            error_of(Group::from_canonical_cbor(bytes)),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    for bytes in &noncanonical(&closure) {
+        assert_eq!(
+            error_of(Closure::from_canonical_cbor(bytes)),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    for bytes in &noncanonical(&root) {
+        assert_eq!(
+            error_of(Root::from_canonical_cbor(bytes)),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    // A non-preferred inner integer: producer 300 widened from 0x19 to 0x1a.
+    let producer = [0x19, 0x01, 0x2c];
+    let at = node
+        .windows(3)
+        .position(|window| window == producer)
+        .ok_or("producer ordinal not found")?;
+    let mut wide = node;
+    wide.splice(at..at + 3, [0x1a, 0x00, 0x00, 0x01, 0x2c]);
+    assert_eq!(
+        error_of(Node::from_canonical_cbor(&wide)),
+        Some(Error::InvalidEncoding)
     );
     Ok(())
 }

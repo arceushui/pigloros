@@ -48,6 +48,15 @@ impl CommunityNativeNodeReferenceV1 {
         }
     }
 
+    /// The native coordinate, without the node digest.
+    const fn coordinate(self) -> ([u8; 16], u64, u32) {
+        (
+            self.store_incarnation,
+            self.producer_ordinal,
+            self.node_ordinal,
+        )
+    }
+
     /// Whether this reference strictly precedes the native coordinate.
     pub(super) const fn precedes(self, producer_ordinal: u64, node_ordinal: u32) -> bool {
         self.producer_ordinal < producer_ordinal
@@ -125,7 +134,8 @@ impl<'a> CommunityNativeNodeReferencesV1<'a> {
         })
     }
 
-    /// Check the count, every reference and strict ascending order.
+    /// Check the count, every reference and strictly ascending native
+    /// coordinates: one coordinate under two digests is a conflicting alias.
     pub(super) fn validate(self, minimum: usize, maximum: usize) -> Result<()> {
         if self.len() < minimum || self.len() > maximum {
             return Err(Error::BoundsExceeded);
@@ -134,7 +144,9 @@ impl<'a> CommunityNativeNodeReferencesV1<'a> {
         self.iter().try_for_each(|row| {
             row.and_then(|reference| {
                 reference.validate().and_then(|()| {
-                    if previous.is_some_and(|prior| prior >= reference) {
+                    if previous.is_some_and(|prior: CommunityNativeNodeReferenceV1| {
+                        prior.coordinate() >= reference.coordinate()
+                    }) {
                         Err(Error::InvalidBinding)
                     } else {
                         previous = Some(reference);
@@ -492,17 +504,26 @@ impl<'a> CommunityTypedInputRefsV1<'a> {
         })
     }
 
-    /// Check the count, every reference and strict canonical order.
+    /// Check the count, every reference and strict canonical order. Two
+    /// native references to one coordinate under different digests are a
+    /// conflicting alias; they sort adjacently, since only the digest differs.
     pub(super) fn validate(self, minimum: usize, maximum: usize) -> Result<()> {
         if self.len() < minimum || self.len() > maximum {
             return Err(Error::BoundsExceeded);
         }
         let mut previous: Option<Zeroizing<Vec<u8>>> = None;
+        let mut previous_native = None;
         // A named iterator is dropped before `previous`, in either edition.
         let mut rows = self.iter();
         rows.try_for_each(|row| {
             row.and_then(|reference| {
                 reference.validate().and_then(|()| {
+                    if let CommunityTypedInputRefV1::Native(native) = reference {
+                        if previous_native == Some(native.coordinate()) {
+                            return Err(Error::InvalidBinding);
+                        }
+                        previous_native = Some(native.coordinate());
+                    }
                     let mut encoded = Zeroizing::new(Vec::with_capacity(256));
                     reference.encode(&mut encoded);
                     // Byte 0 is the array head; ordering starts at the code.

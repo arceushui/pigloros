@@ -41,6 +41,9 @@ pub enum CommunityNativeNodeKindV1 {
     /// Kind 3, `pos.community.state-revision`, `EndogenousRecomputed`.
     StateRevision,
     /// Kind 4, `pos.community.event-output`, the admitted Event output class.
+    ///
+    /// The codec cannot know that class: the native owner (A3/A4) must check
+    /// it against the actual admitted output policy before committing.
     EventOutput,
     /// Kind 5, `pos.community.annotation`, `PresentationOnly`.
     Annotation,
@@ -51,6 +54,9 @@ pub enum CommunityNativeNodeKindV1 {
     /// Kind 8, `pos.community.host-progress`, `EndogenousRecomputed`.
     HostProgress,
     /// Kind 9, `pos.community.input-index`, the consumer's class.
+    ///
+    /// The codec cannot know that class: the native owner (A3/A4) must check
+    /// it equals the consuming node's class before committing.
     InputIndex,
 }
 
