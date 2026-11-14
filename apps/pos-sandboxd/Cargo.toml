@@ -14,7 +14,10 @@ futures-util = { version = "0.3", default-features = false }
 # `process` feature, which gates `fcntl::AtFlags`, is enabled.
 nix = { version = "=0.31.3", default-features = false, features = ["process"] }
 pos-reference = { path = "../../crates/pos-reference" }
+# `event` is for the pidfd liveness `poll` of the kernel observation
+# (ADR-069 R9 §4.4); it creates no process.
 rustix = { version = "1.1.4", default-features = false, features = [
+  "event",
   "fs",
   "mount",
   "net",

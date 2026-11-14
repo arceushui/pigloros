@@ -148,6 +148,7 @@ mod cases {
         type Cgroup = BoundAttemptCgroup;
         type Error = std::io::Error;
         type Killer = UnusedKiller;
+        type Evidence = ();
 
         fn killer(&self) -> UnusedKiller {
             UnusedKiller
@@ -163,6 +164,16 @@ mod cases {
 
         async fn bind_cgroup(&self, _started: &()) -> Result<BoundAttemptCgroup, Self::Error> {
             Err(std::io::Error::other("shutdown must not rebind a cgroup"))
+        }
+
+        async fn release_evidence(
+            &self,
+            _started: &(),
+            _cgroup: &BoundAttemptCgroup,
+        ) -> Result<(u64, ()), Self::Error> {
+            Err(std::io::Error::other(
+                "shutdown must not read release evidence",
+            ))
         }
 
         async fn stop(&self, unit: TransientServiceUnitName) -> Result<(), Self::Error> {
