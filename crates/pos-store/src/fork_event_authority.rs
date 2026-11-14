@@ -5192,26 +5192,38 @@ mod classified_counterfactual_tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_authority_error(variant: Authority) -> Option<Authority> {
+        match variant {
+            Authority::InvalidRequest => Some(Authority::Unauthenticated),
+            Authority::Unauthenticated => Some(Authority::ClassifierRejected),
+            Authority::ClassifierRejected => Some(Authority::Conflict),
+            Authority::Conflict => Some(Authority::CorruptAuthority),
+            Authority::CorruptAuthority => Some(Authority::StorageIndeterminate),
+            Authority::StorageIndeterminate => Some(Authority::ModeBindingStale),
+            Authority::ModeBindingStale => None,
+        }
+    }
+
     #[test]
     fn every_authority_error_routes_through_the_classified_table() {
-        let errors = [
-            Authority::InvalidRequest,
-            Authority::Unauthenticated,
-            Authority::ClassifierRejected,
-            Authority::Conflict,
-            Authority::CorruptAuthority,
-            Authority::StorageIndeterminate,
-            Authority::ModeBindingStale,
-        ];
-        assert_eq!(errors.len(), Authority::COUNT);
-        for (index, error) in errors.into_iter().enumerate() {
-            assert_eq!(error as usize, index);
+        let mut walked = 0;
+        let mut last = Authority::InvalidRequest;
+        let mut current = Some(Authority::InvalidRequest);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
             assert_eq!(
-                Classified::from(error),
-                oracle_classified(error),
-                "{error:?}"
+                Classified::from(variant),
+                oracle_classified(variant),
+                "{variant:?}"
             );
+            last = variant;
+            walked += 1;
+            current = next_authority_error(variant);
         }
+        assert_eq!(walked, Authority::COUNT);
+        assert_eq!(last as usize, Authority::COUNT - 1);
     }
 
     #[test]

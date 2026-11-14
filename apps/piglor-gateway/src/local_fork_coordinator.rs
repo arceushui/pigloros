@@ -1678,33 +1678,69 @@ mod tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_error(variant: ForkAdmissionErrorV1) -> Option<ForkAdmissionErrorV1> {
+        match variant {
+            ForkAdmissionErrorV1::InvalidRequest => Some(ForkAdmissionErrorV1::Unauthenticated),
+            ForkAdmissionErrorV1::Unauthenticated => {
+                Some(ForkAdmissionErrorV1::PrincipalOwnerConflict)
+            }
+            ForkAdmissionErrorV1::PrincipalOwnerConflict => {
+                Some(ForkAdmissionErrorV1::StaleFoldBoundary)
+            }
+            ForkAdmissionErrorV1::StaleFoldBoundary => Some(ForkAdmissionErrorV1::ParentChanged),
+            ForkAdmissionErrorV1::ParentChanged => Some(ForkAdmissionErrorV1::Conflict),
+            ForkAdmissionErrorV1::Conflict => Some(ForkAdmissionErrorV1::CorruptAuthority),
+            ForkAdmissionErrorV1::CorruptAuthority => {
+                Some(ForkAdmissionErrorV1::StorageIndeterminate)
+            }
+            ForkAdmissionErrorV1::StorageIndeterminate => {
+                Some(ForkAdmissionErrorV1::HostAuthorityMismatch)
+            }
+            ForkAdmissionErrorV1::HostAuthorityMismatch => {
+                Some(ForkAdmissionErrorV1::AuthorityClockUnavailable)
+            }
+            ForkAdmissionErrorV1::AuthorityClockUnavailable => {
+                Some(ForkAdmissionErrorV1::ClockRollback)
+            }
+            ForkAdmissionErrorV1::ClockRollback => Some(ForkAdmissionErrorV1::OperationMissing),
+            ForkAdmissionErrorV1::OperationMissing => {
+                Some(ForkAdmissionErrorV1::AuthorityUninitialized)
+            }
+            ForkAdmissionErrorV1::AuthorityUninitialized => {
+                Some(ForkAdmissionErrorV1::AuthorityAlreadyInitialized)
+            }
+            ForkAdmissionErrorV1::AuthorityAlreadyInitialized => {
+                Some(ForkAdmissionErrorV1::EntropyUnavailable)
+            }
+            ForkAdmissionErrorV1::EntropyUnavailable => {
+                Some(ForkAdmissionErrorV1::ParentErasureContained)
+            }
+            ForkAdmissionErrorV1::ParentErasureContained => {
+                Some(ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+            }
+            ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            }
+            ForkAdmissionErrorV1::ModeBindingStale => None,
+        }
+    }
+
     #[test]
     fn every_fork_admission_error_routes_through_the_code_table() {
-        let errors = [
-            ForkAdmissionErrorV1::InvalidRequest,
-            ForkAdmissionErrorV1::Unauthenticated,
-            ForkAdmissionErrorV1::PrincipalOwnerConflict,
-            ForkAdmissionErrorV1::StaleFoldBoundary,
-            ForkAdmissionErrorV1::ParentChanged,
-            ForkAdmissionErrorV1::Conflict,
-            ForkAdmissionErrorV1::CorruptAuthority,
-            ForkAdmissionErrorV1::StorageIndeterminate,
-            ForkAdmissionErrorV1::HostAuthorityMismatch,
-            ForkAdmissionErrorV1::AuthorityClockUnavailable,
-            ForkAdmissionErrorV1::ClockRollback,
-            ForkAdmissionErrorV1::OperationMissing,
-            ForkAdmissionErrorV1::AuthorityUninitialized,
-            ForkAdmissionErrorV1::AuthorityAlreadyInitialized,
-            ForkAdmissionErrorV1::EntropyUnavailable,
-            ForkAdmissionErrorV1::ParentErasureContained,
-            ForkAdmissionErrorV1::ErasureContainmentUnavailable,
-            ForkAdmissionErrorV1::ModeBindingStale,
-        ];
-        assert_eq!(errors.len(), ForkAdmissionErrorV1::COUNT);
-        for (index, error) in errors.into_iter().enumerate() {
-            assert_eq!(error as usize, index);
-            assert_eq!(authority_code(error), oracle_code(error), "{error:?}");
+        let mut walked = 0;
+        let mut last = ForkAdmissionErrorV1::InvalidRequest;
+        let mut current = Some(ForkAdmissionErrorV1::InvalidRequest);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(authority_code(variant), oracle_code(variant), "{variant:?}");
+            last = variant;
+            walked += 1;
+            current = next_error(variant);
         }
+        assert_eq!(walked, ForkAdmissionErrorV1::COUNT);
+        assert_eq!(last as usize, ForkAdmissionErrorV1::COUNT - 1);
     }
 
     #[test]

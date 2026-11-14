@@ -4428,30 +4428,76 @@ mod tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_kind(
+        variant: pos_core::PipelineOutcomeKindV1,
+    ) -> Option<pos_core::PipelineOutcomeKindV1> {
+        match variant {
+            pos_core::PipelineOutcomeKindV1::Rejected => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidObservation)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidObservation => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityRevoked)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityExpired)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityExpired => {
+                Some(pos_core::PipelineOutcomeKindV1::PolicyIndeterminate)
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => {
+                Some(pos_core::PipelineOutcomeKindV1::ResourceExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidPluginResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidPluginResult => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidProviderResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidProviderResult => {
+                Some(pos_core::PipelineOutcomeKindV1::DomainConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::DomainConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::AdmissionConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::AdmissionConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::Committed)
+            }
+            pos_core::PipelineOutcomeKindV1::Committed => {
+                Some(pos_core::PipelineOutcomeKindV1::RecoveredDuplicate)
+            }
+            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                Some(pos_core::PipelineOutcomeKindV1::DependencySetExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::ModeBindingStale)
+            }
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => None,
+        }
+    }
+
     #[test]
     fn every_outcome_kind_routes_through_the_family_table() {
-        let kinds = [
-            pos_core::PipelineOutcomeKindV1::Rejected,
-            pos_core::PipelineOutcomeKindV1::InvalidObservation,
-            pos_core::PipelineOutcomeKindV1::AuthorityRevoked,
-            pos_core::PipelineOutcomeKindV1::AuthorityExpired,
-            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate,
-            pos_core::PipelineOutcomeKindV1::ResourceExhausted,
-            pos_core::PipelineOutcomeKindV1::InvalidPluginResult,
-            pos_core::PipelineOutcomeKindV1::InvalidProviderResult,
-            pos_core::PipelineOutcomeKindV1::DomainConflict,
-            pos_core::PipelineOutcomeKindV1::AdmissionConflict,
-            pos_core::PipelineOutcomeKindV1::Committed,
-            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate,
-            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration,
-            pos_core::PipelineOutcomeKindV1::DependencySetExhausted,
-            pos_core::PipelineOutcomeKindV1::ModeBindingStale,
-        ];
-        assert_eq!(kinds.len(), pos_core::PipelineOutcomeKindV1::COUNT);
-        for (index, kind) in kinds.into_iter().enumerate() {
-            assert_eq!(kind as usize, index);
-            assert_eq!(family_of_kind(kind), oracle_family(kind), "{kind:?}");
+        let mut walked = 0;
+        let mut last = pos_core::PipelineOutcomeKindV1::Rejected;
+        let mut current = Some(pos_core::PipelineOutcomeKindV1::Rejected);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                family_of_kind(variant),
+                oracle_family(variant),
+                "{variant:?}"
+            );
+            last = variant;
+            walked += 1;
+            current = next_kind(variant);
         }
+        assert_eq!(walked, pos_core::PipelineOutcomeKindV1::COUNT);
+        assert_eq!(last as usize, pos_core::PipelineOutcomeKindV1::COUNT - 1);
     }
 
     /// The exhaustive oracle of the error table: a new family fails to
@@ -4470,25 +4516,37 @@ mod tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_family(variant: NotAdmitted) -> Option<NotAdmitted> {
+        match variant {
+            NotAdmitted::PolicyUnavailable => Some(NotAdmitted::LimitReached),
+            NotAdmitted::LimitReached => Some(NotAdmitted::HostFault),
+            NotAdmitted::HostFault => Some(NotAdmitted::SetExhausted),
+            NotAdmitted::SetExhausted => Some(NotAdmitted::Stale),
+            NotAdmitted::Stale => Some(NotAdmitted::ModeBindingStale),
+            NotAdmitted::ModeBindingStale => Some(NotAdmitted::Rejected),
+            NotAdmitted::Rejected => None,
+        }
+    }
+
     #[test]
     fn every_family_routes_through_the_error_table() {
-        let families = [
-            NotAdmitted::PolicyUnavailable,
-            NotAdmitted::LimitReached,
-            NotAdmitted::HostFault,
-            NotAdmitted::SetExhausted,
-            NotAdmitted::Stale,
-            NotAdmitted::ModeBindingStale,
-            NotAdmitted::Rejected,
-        ];
-        assert_eq!(families.len(), NotAdmitted::COUNT);
-        for (index, family) in families.into_iter().enumerate() {
-            assert_eq!(family as usize, index);
+        let mut walked = 0;
+        let mut last = NotAdmitted::PolicyUnavailable;
+        let mut current = Some(NotAdmitted::PolicyUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
             assert_eq!(
-                format!("{:?}", not_admitted_error(family, 9)),
-                format!("{:?}", oracle_error(family, 9))
+                format!("{:?}", not_admitted_error(variant, 9)),
+                format!("{:?}", oracle_error(variant, 9))
             );
+            last = variant;
+            walked += 1;
+            current = next_family(variant);
         }
+        assert_eq!(walked, NotAdmitted::COUNT);
+        assert_eq!(last as usize, NotAdmitted::COUNT - 1);
         assert!(matches!(
             admission_unavailable(9),
             GatewayError::ActionAdmissionUnavailable

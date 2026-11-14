@@ -1246,24 +1246,36 @@ mod host_store_tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_host_error(variant: ErasureHostErrorV1) -> Option<ErasureHostErrorV1> {
+        match variant {
+            ErasureHostErrorV1::RecoveryUnavailable => Some(ErasureHostErrorV1::AccessFrozen),
+            ErasureHostErrorV1::AccessFrozen => Some(ErasureHostErrorV1::StaleGeneration),
+            ErasureHostErrorV1::StaleGeneration => Some(ErasureHostErrorV1::AuthorizationDenied),
+            ErasureHostErrorV1::AuthorizationDenied => Some(ErasureHostErrorV1::Conflict),
+            ErasureHostErrorV1::Conflict => Some(ErasureHostErrorV1::AdapterFailure),
+            ErasureHostErrorV1::AdapterFailure => Some(ErasureHostErrorV1::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale => None,
+        }
+    }
+
     #[test]
     fn every_host_error_routes_through_the_experiment_table() {
-        let errors = [
-            ErasureHostErrorV1::RecoveryUnavailable,
-            ErasureHostErrorV1::AccessFrozen,
-            ErasureHostErrorV1::StaleGeneration,
-            ErasureHostErrorV1::AuthorizationDenied,
-            ErasureHostErrorV1::Conflict,
-            ErasureHostErrorV1::AdapterFailure,
-            ErasureHostErrorV1::ModeBindingStale,
-        ];
-        assert_eq!(errors.len(), ErasureHostErrorV1::COUNT);
-        for (index, error) in errors.into_iter().enumerate() {
-            assert_eq!(error as usize, index);
+        let mut walked = 0;
+        let mut last = ErasureHostErrorV1::RecoveryUnavailable;
+        let mut current = Some(ErasureHostErrorV1::RecoveryUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
             assert_eq!(
-                format!("{:?}", host_error(error)),
-                format!("{:?}", oracle_error(error))
+                format!("{:?}", host_error(variant)),
+                format!("{:?}", oracle_error(variant))
             );
+            last = variant;
+            walked += 1;
+            current = next_host_error(variant);
         }
+        assert_eq!(walked, ErasureHostErrorV1::COUNT);
+        assert_eq!(last as usize, ErasureHostErrorV1::COUNT - 1);
     }
 }

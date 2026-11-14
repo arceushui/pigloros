@@ -390,31 +390,72 @@ mod tests {
         }
     }
 
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_kind(
+        variant: pos_core::PipelineOutcomeKindV1,
+    ) -> Option<pos_core::PipelineOutcomeKindV1> {
+        match variant {
+            pos_core::PipelineOutcomeKindV1::Rejected => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidObservation)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidObservation => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityRevoked)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityExpired)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityExpired => {
+                Some(pos_core::PipelineOutcomeKindV1::PolicyIndeterminate)
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => {
+                Some(pos_core::PipelineOutcomeKindV1::ResourceExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidPluginResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidPluginResult => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidProviderResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidProviderResult => {
+                Some(pos_core::PipelineOutcomeKindV1::DomainConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::DomainConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::AdmissionConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::AdmissionConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::Committed)
+            }
+            pos_core::PipelineOutcomeKindV1::Committed => {
+                Some(pos_core::PipelineOutcomeKindV1::RecoveredDuplicate)
+            }
+            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                Some(pos_core::PipelineOutcomeKindV1::DependencySetExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::ModeBindingStale)
+            }
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => None,
+        }
+    }
+
     #[test]
     fn every_outcome_kind_routes_through_the_name_table() {
-        use pos_core::PipelineOutcomeKindV1 as Kind;
-        let kinds = [
-            Kind::Rejected,
-            Kind::InvalidObservation,
-            Kind::AuthorityRevoked,
-            Kind::AuthorityExpired,
-            Kind::PolicyIndeterminate,
-            Kind::ResourceExhausted,
-            Kind::InvalidPluginResult,
-            Kind::InvalidProviderResult,
-            Kind::DomainConflict,
-            Kind::AdmissionConflict,
-            Kind::Committed,
-            Kind::RecoveredDuplicate,
-            Kind::InvalidDependencyDeclaration,
-            Kind::DependencySetExhausted,
-            Kind::ModeBindingStale,
-        ];
-        assert_eq!(kinds.len(), Kind::COUNT);
-        for (index, kind) in kinds.into_iter().enumerate() {
-            assert_eq!(kind as usize, index);
-            assert_eq!(kind_name(kind), oracle_name(kind));
+        let mut walked = 0;
+        let mut last = pos_core::PipelineOutcomeKindV1::Rejected;
+        let mut current = Some(pos_core::PipelineOutcomeKindV1::Rejected);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(kind_name(variant), oracle_name(variant));
+            last = variant;
+            walked += 1;
+            current = next_kind(variant);
         }
+        assert_eq!(walked, pos_core::PipelineOutcomeKindV1::COUNT);
+        assert_eq!(last as usize, pos_core::PipelineOutcomeKindV1::COUNT - 1);
     }
 
     #[test]
