@@ -23,6 +23,7 @@ use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::ValidatedPluginBundleContentV1;
 
 use super::MemoryStore;
 use crate::plugin_trust_registry::logic::{
@@ -240,11 +241,19 @@ impl MemoryStore {
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         self.in_activation_fence(activation.timeline, |store| {
-            store.admit_fenced(input, projection, release_proof, activation, faults)
+            store.admit_fenced(
+                input,
+                projection,
+                release_proof,
+                content_proof,
+                activation,
+                faults,
+            )
         })
     }
 
@@ -253,6 +262,7 @@ impl MemoryStore {
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
@@ -263,6 +273,7 @@ impl MemoryStore {
             input,
             projection,
             release_proof,
+            content_proof,
             activation,
         )?;
         match plan {
@@ -293,11 +304,19 @@ impl MemoryStore {
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         self.in_activation_fence(activation.timeline, |store| {
-            store.rollback_fenced(input, target, release_proof, activation, faults)
+            store.rollback_fenced(
+                input,
+                target,
+                release_proof,
+                content_proof,
+                activation,
+                faults,
+            )
         })
     }
 
@@ -306,12 +325,20 @@ impl MemoryStore {
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let scope = input.anchor.scope();
         let utc = input.utc.as_i64();
-        let plan = plan_rollback(&self.plugin_trust, input, target, release_proof, activation)?;
+        let plan = plan_rollback(
+            &self.plugin_trust,
+            input,
+            target,
+            release_proof,
+            content_proof,
+            activation,
+        )?;
         match plan {
             RollbackPlanV1::Replay(facts) => self
                 .plugin_trust
@@ -355,7 +382,10 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
@@ -367,7 +397,14 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             tick,
         };
         let faults = MemoryFaultsV1::NONE;
-        self.admit_with_faults(&input, projection, release_proof, &activation, faults)
+        self.admit_with_faults(
+            &input,
+            projection,
+            release_proof,
+            content_proof,
+            &activation,
+            faults,
+        )
     }
 
     fn advance_policy(
@@ -398,7 +435,10 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
@@ -410,7 +450,14 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             tick,
         };
         let faults = MemoryFaultsV1::NONE;
-        self.rollback_with_faults(&input, target, release_proof, &activation, faults)
+        self.rollback_with_faults(
+            &input,
+            target,
+            release_proof,
+            content_proof,
+            &activation,
+            faults,
+        )
     }
 
     fn retained_release_decision(
@@ -522,6 +569,7 @@ mod tests {
                 &input,
                 &release_one().projection()?,
                 &release_one().release_proof()?,
+                &release_one().content_proof()?,
                 &activation(timeline, 1),
                 failing
             ),
@@ -539,7 +587,7 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &manifest.projection()?,
-                &manifest.release_proof()?,
+                (&manifest.release_proof()?, &manifest.content_proof()?),
                 TrustEvaluationPointV1::new(utc, genesis.tick),
                 activation(timeline, tag),
             )?;
@@ -551,6 +599,7 @@ mod tests {
                 &input,
                 &release_one().projection()?,
                 &release_one().release_proof()?,
+                &release_one().content_proof()?,
                 &activation(timeline, 3),
                 failing
             ),
@@ -561,7 +610,7 @@ mod tests {
         let active = store
             .active_release("scope", "plugin-a")?
             .ok_or("no pointer")?;
-        assert_eq!(active.pmf1_digest(), [0x03; 32]);
+        assert_eq!(active.pmf1_digest(), release_two().pmf1_digest()?);
         Ok(())
     }
 
@@ -582,12 +631,20 @@ mod tests {
         );
         let one = release_one().projection()?;
         let proof = release_one().release_proof()?;
+        let content = release_one().content_proof()?;
         assert_eq!(
-            store.admit_with_faults(&input, &one, &proof, &activation(timeline, 1), lost),
+            store.admit_with_faults(
+                &input,
+                &one,
+                &proof,
+                &content,
+                &activation(timeline, 1),
+                lost
+            ),
             Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
         );
         let committed = store
-            .retained_release_decision("scope", [0x01; 32])?
+            .retained_release_decision("scope", release_one().pmf1_digest()?)?
             .ok_or("the commit was lost")?;
         assert_eq!(store.read(timeline, SeqRange::all())?.len(), 1);
         let retry = store.admit(
@@ -595,7 +652,7 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            &proof,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 1),
         )?;
@@ -612,25 +669,35 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &release_two().projection()?,
-            &release_two().release_proof()?,
+            (
+                &release_two().release_proof()?,
+                &release_two().content_proof()?,
+            ),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 2),
         )?;
         assert_eq!(
-            store.rollback_with_faults(&input, &one, &proof, &activation(timeline, 3), lost),
+            store.rollback_with_faults(
+                &input,
+                &one,
+                &proof,
+                &content,
+                &activation(timeline, 3),
+                lost
+            ),
             Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
         );
         let active = store
             .active_release("scope", "plugin-a")?
             .ok_or("no pointer")?;
-        assert_eq!(active.pmf1_digest(), [0x01; 32]);
+        assert_eq!(active.pmf1_digest(), release_one().pmf1_digest()?);
         let events = store.read(timeline, SeqRange::all())?.len();
         let replay = store.rollback(
             &env.anchor,
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            &proof,
+            (&proof, &content),
             TrustEvaluationPointV1::new(utc, genesis.tick),
             activation(timeline, 3),
         )?;
@@ -692,7 +759,10 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    &release_one().release_proof()?,
+                    (
+                        &release_one().release_proof()?,
+                        &release_one().content_proof()?
+                    ),
                     TrustEvaluationPointV1::new(utc, genesis.tick),
                     activation(timeline, 1)
                 ),
@@ -704,7 +774,10 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    &release_one().release_proof()?,
+                    (
+                        &release_one().release_proof()?,
+                        &release_one().content_proof()?
+                    ),
                     TrustEvaluationPointV1::new(utc, genesis.tick),
                     activation(timeline, 1)
                 ),
@@ -731,7 +804,10 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                &release_one().release_proof()?,
+                (
+                    &release_one().release_proof()?,
+                    &release_one().content_proof()?
+                ),
                 TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),

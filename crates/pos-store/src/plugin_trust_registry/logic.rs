@@ -20,6 +20,7 @@ use pos_crypto::plugin_trust::{
     ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
     VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::ValidatedPluginBundleContentV1;
 
 use super::error::PluginTrustPolicyRegistryErrorV1;
 use super::types::{
@@ -364,18 +365,35 @@ fn check_release_proof(
 
 /// The release-dependent tail of `admit` and `rollback`, which takes the release proof.
 ///
-/// Order: `authorize_release` (`Trust`); the release proof binding (`ReleaseProofMismatch`);
+/// Order: `authorize_release` (`Trust`); signature and content proof bindings;
 /// the TPS1 artifact-denial check; the floor plan, which only has to succeed.
 fn check_proven_release(
     checked: &CheckedPolicyV1,
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
     release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
 ) -> RegistryResult<ResolvedPluginTrustAuthorizationV1> {
     let authorization = input.evidence.authorize_release(projection)?;
-    check_release_proof(release_proof, &authorization)?;
+    check_release_proofs(release_proof, content_proof, &authorization)?;
     check_authorized_release(checked, input, &authorization)?;
     Ok(authorization)
+}
+
+/// Bind both proofs to the exact release authorized by the registry.
+fn check_release_proofs(
+    release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> RegistryResult<()> {
+    check_release_proof(release_proof, authorization)?;
+    if (content_proof.pmf1_digest(), content_proof.release_digest())
+        == (authorization.pmf1_digest(), authorization.release_digest())
+    {
+        Ok(())
+    } else {
+        Err(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
+    }
 }
 
 /// The release-dependent prefix of `admit` and `rollback`.
@@ -386,9 +404,11 @@ fn check_release(
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
     release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
 ) -> RegistryResult<(CheckedPolicyV1, ResolvedPluginTrustAuthorizationV1)> {
     let checked = check_policy(tx, input)?;
-    let authorization = check_proven_release(&checked, input, projection, release_proof)?;
+    let authorization =
+        check_proven_release(&checked, input, projection, release_proof, content_proof)?;
     Ok((checked, authorization))
 }
 
@@ -578,9 +598,11 @@ pub(crate) fn plan_admit(
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
     release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
     activation: &ActivationEventInputV1,
 ) -> RegistryResult<AdmitPlanV1> {
-    let (checked, authorization) = check_release(tx, input, projection, release_proof)?;
+    let (checked, authorization) =
+        check_release(tx, input, projection, release_proof, content_proof)?;
     let scope = input.anchor.scope();
     if let Some(existing) = tx.decision(scope, authorization.pmf1_digest())? {
         return if same_decision_identity(&existing, &checked.tps1, input, activation) {
@@ -707,9 +729,10 @@ pub(crate) fn plan_rollback(
     input: &PolicyInputV1<'_>,
     target: &ValidatedPluginManifestProjectionV1,
     release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
     activation: &ActivationEventInputV1,
 ) -> RegistryResult<RollbackPlanV1> {
-    let (checked, authorization) = check_release(tx, input, target, release_proof)?;
+    let (checked, authorization) = check_release(tx, input, target, release_proof, content_proof)?;
     let scope = input.anchor.scope();
     let target_pmf1_digest = authorization.pmf1_digest();
     if tx.decision(scope, target_pmf1_digest)?.is_none() {
@@ -982,11 +1005,11 @@ mod tests {
         let active = ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
-            pmf1_digest: [0x01; 32],
-            release_digest: [0x11; 32],
+            pmf1_digest: release_one().pmf1_digest()?,
+            release_digest: release_one().release_digest()?,
             activation_event: identity(&activation(TimelineId::new(), 1)),
         };
-        // release_one: release 0x11, no previous; release_two: release 0x12, previous 0x11.
+        // release_one has no predecessor; release_two names its actual release digest.
         let one = authorize(&release_one())?;
         let two = authorize(&release_two())?;
         let unrelated = authorize(&ManifestSpec::new("plugin-a", 0x05, 0x15, Some(0x99)))?;
@@ -1032,20 +1055,27 @@ mod tests {
         let genesis = env.genesis()?;
         let tps1 = authenticated(&env, &genesis)?;
         let input = activation(TimelineId::new(), 1);
-        // release_one authorizes release digest 0x11 of "plugin-a".
+        // release_one authorizes its actual release digest for "plugin-a".
         let authorization = genesis
             .evidence
             .authorize_release(&release_one().projection()?)?;
+        let digest = |release| {
+            if release == 0x11 {
+                authorization.release_digest()
+            } else {
+                [release; 32]
+            }
+        };
         let active = |release: u8| ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
             pmf1_digest: [0x01; 32],
-            release_digest: [release; 32],
+            release_digest: digest(release),
             activation_event: identity(&input),
         };
         let decision = |plugin: &str, release: u8| RetainedReleaseDecisionV1 {
             plugin_id: plugin.to_owned(),
-            release_digest: [release; 32],
+            release_digest: digest(release),
             ..decision_of(&tps1, &genesis, &input)
         };
         assert!(decision_describes(
@@ -1141,6 +1171,9 @@ mod tests {
         let tps1 = authenticated(&env, &genesis)?;
         let input = activation(TimelineId::new(), 1);
         let policy = policy_input(&env, &genesis)?;
+        let projection = release_one().projection()?;
+        let first_pmf1 = release_one().pmf1_digest()?;
+        let first_release = release_one().release_digest()?;
         let retained = RetainedScopeV1 {
             anchor: env.anchor.clone(),
             policy: RetainedPolicyStateV1 {
@@ -1157,13 +1190,13 @@ mod tests {
         let active = ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
-            pmf1_digest: [0x01; 32],
-            release_digest: [0x11; 32],
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
             activation_event: identity(&input),
         };
         let decision = RetainedReleaseDecisionV1 {
-            pmf1_digest: [0x01; 32],
-            release_digest: [0x11; 32],
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
             ..decision_of(&tps1, &genesis, &input)
         };
         let tx = |fail: Read| FailingTx {
@@ -1172,7 +1205,6 @@ mod tests {
             decision: Some(decision.clone()),
             active: Some(active.clone()),
         };
-        let projection = release_one().projection()?;
         let failed = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
         for read in [Read::Scope, Read::Active, Read::Decision] {
             let plan = plan_evaluate(&tx(read), &policy, &projection);
@@ -1180,7 +1212,7 @@ mod tests {
         }
         // No evaluation read touches the ledger: the same transaction otherwise evaluates.
         let evaluation = plan_evaluate(&tx(Read::LatestRow), &policy, &projection)?;
-        assert_eq!(evaluation.pmf1_digest(), [0x01; 32]);
+        assert_eq!(evaluation.pmf1_digest(), first_pmf1);
         assert_eq!(evaluation.activation_event(), &active.activation_event);
         Ok(())
     }
@@ -1192,6 +1224,11 @@ mod tests {
         let tps1 = authenticated(&env, &genesis)?;
         let input = activation(TimelineId::new(), 1);
         let policy = policy_input(&env, &genesis)?;
+        let projection = release_one().projection()?;
+        let first_pmf1 = release_one().pmf1_digest()?;
+        let first_release = release_one().release_digest()?;
+        let next_pmf1 = release_two().pmf1_digest()?;
+        let next_release = release_two().release_digest()?;
         let retained = RetainedScopeV1 {
             anchor: env.anchor.clone(),
             policy: RetainedPolicyStateV1 {
@@ -1205,12 +1242,20 @@ mod tests {
                 highest_trusted_utc_second: None,
             },
         };
-        let decision = decision_of(&tps1, &genesis, &input);
+        let decision = RetainedReleaseDecisionV1 {
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
+            ..decision_of(&tps1, &genesis, &input)
+        };
         let active = |pmf1: u8| ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
-            pmf1_digest: [pmf1; 32],
-            release_digest: [0x11; 32],
+            pmf1_digest: if pmf1 == 0x01 { first_pmf1 } else { next_pmf1 },
+            release_digest: if pmf1 == 0x01 {
+                first_release
+            } else {
+                next_release
+            },
             activation_event: identity(&input),
         };
         let tx = |fail: Read, decided: bool, pointer: Option<u8>| FailingTx {
@@ -1220,8 +1265,17 @@ mod tests {
             active: pointer.map(active),
         };
         let failed = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
-        let projection = release_one().projection()?;
         let proof = release_one().release_proof()?;
+        let content = release_one().content_proof()?;
+
+        // A retained target without an active pointer cannot be created by the
+        // public admission API; exercise that corrupted state through the
+        // transaction seam with a genuinely bound content proof.
+        let no_active = tx(Read::LatestRow, true, None);
+        assert_eq!(
+            plan_rollback(&no_active, &policy, &projection, &proof, &content, &input).err(),
+            Some(PluginTrustPolicyRegistryErrorV1::NoActiveRelease)
+        );
 
         let empty = FailingTx {
             fail: Read::Scope,
@@ -1237,7 +1291,14 @@ mod tests {
             assert_eq!(plan_advance(&tx(read, false, None), &policy).err(), failed);
         }
         for read in [Read::Scope, Read::Decision, Read::Active, Read::NextRowSeq] {
-            let plan = plan_admit(&tx(read, false, None), &policy, &projection, &proof, &input);
+            let plan = plan_admit(
+                &tx(read, false, None),
+                &policy,
+                &projection,
+                &proof,
+                &content,
+                &input,
+            );
             assert_eq!(plan.err(), failed);
         }
         // Rollback reaches each read in turn: the target is retained, then the pointer names
@@ -1250,7 +1311,7 @@ mod tests {
             (Read::NextRowSeq, Some(0x03)),
         ] {
             let failing = tx(read, true, pointer);
-            let plan = plan_rollback(&failing, &policy, &projection, &proof, &input);
+            let plan = plan_rollback(&failing, &policy, &projection, &proof, &content, &input);
             assert_eq!(plan.err(), failed);
         }
         Ok(())

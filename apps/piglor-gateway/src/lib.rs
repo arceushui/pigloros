@@ -3,8 +3,9 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
-//! authorization is opt-in through [`GatewayAuthorization`].
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. The production serve
+//! composition ([`local_principal::local_gateway`]) requires host-bound Principal authorization
+//! ([`GatewayAuthorization`]) for every protected operation.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(test)]
@@ -27,18 +28,25 @@ pub mod local_fork_coordinator;
 pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
+pub mod local_principal;
+pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
+pub mod problem;
 pub mod startup;
 
 pub use authorization::{
-    AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
-    GatewayAuthenticationRequest, GatewayAuthorization, GatewayAuthorizationAudit,
-    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    GatewayAuthorizationTarget, LocalAuthenticationAdapter,
+    AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
+    GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
+    GatewayAuthorityDenial, GatewayAuthoritySourceV1, GatewayAuthorization,
+    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
+    GatewayAuthorizationRequest, GatewayAuthorizationTarget, GatewayOperationV1,
+    LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
+    MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
+pub use operation::{GatewayOperationPermitV1, OperationAuthority, OperationSpecV1};
 #[cfg(test)]
 use pos_core::store::{AppendIdentity, AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
@@ -737,6 +745,87 @@ mod coverage_tests {
         drop(gateway);
     }
 
+    /// A private 32-byte owner key in `directory`, which is created with
+    /// `mode` when it does not exist yet.
+    #[cfg(unix)]
+    fn private_owner_key(directory: &Path, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(directory).test_ok();
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).test_ok();
+        let key = directory.join("owner.key");
+        std::fs::write(&key, [7_u8; 32]).test_ok();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).test_ok();
+        key
+    }
+
+    /// Every ancestor of the owner key is checked: each is a real
+    /// directory, the key's own directory is never group- or
+    /// other-writable, and a writable directory above it must be sticky.
+    #[cfg(unix)]
+    #[test]
+    fn owntracks_owner_key_ancestors_must_be_private_real_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().test_ok();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).test_ok();
+        let root = root.path();
+
+        // A clean 0700 chain loads; the temporary directory above it may
+        // be the system's sticky world-writable one.
+        let clean = private_owner_key(&root.join("clean"), 0o700);
+        assert!(OwnTracksOwnerKey::load(&clean).is_ok());
+        // Mode bits outside group and other write never refuse a parent.
+        let read_only = private_owner_key(&root.join("read-only"), 0o755);
+        assert!(OwnTracksOwnerKey::load(&read_only).is_ok());
+
+        // A sticky world-writable directory above the key's parent is
+        // accepted.
+        std::fs::create_dir(root.join("shared")).test_ok();
+        let below_sticky = private_owner_key(&root.join("shared").join("private"), 0o700);
+        std::fs::set_permissions(root.join("shared"), std::fs::Permissions::from_mode(0o1777))
+            .test_ok();
+        assert!(OwnTracksOwnerKey::load(&below_sticky).is_ok());
+
+        // The key's own directory, group- or other-writable, is refused
+        // even when sticky.
+        for mode in [0o1770, 0o1707, 0o770, 0o707] {
+            let parent = root.join(format!("parent-{mode:o}"));
+            let key = private_owner_key(&parent, 0o700);
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A writable directory above the parent that is not sticky is
+        // refused.
+        for mode in [0o770, 0o707] {
+            let open = root.join(format!("open-{mode:o}"));
+            std::fs::create_dir(&open).test_ok();
+            let key = private_owner_key(&open.join("private"), 0o700);
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A symlinked ancestor is refused although the key it reaches is
+        // private and complete.
+        std::fs::create_dir(root.join("real")).test_ok();
+        private_owner_key(&root.join("real").join("private"), 0o700);
+        symlink(root.join("real"), root.join("link")).test_ok();
+        let through_link = root.join("link").join("private").join("owner.key");
+        assert!(std::fs::read(&through_link).is_ok());
+        assert!(OwnTracksOwnerKey::load(&through_link).is_err());
+
+        // A non-directory ancestor is refused by the ancestor check itself:
+        // the file is not group- or other-writable, so only its type
+        // refuses it (through `load` the path would also fail later).
+        std::fs::write(root.join("file"), [1_u8]).test_ok();
+        std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o644))
+            .test_ok();
+        let under_file = root.join("file").join("owner.key");
+        assert!(crate::validate_owner_key_ancestors(&under_file).is_err());
+        assert!(OwnTracksOwnerKey::load(&under_file).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn owntracks_owner_key_load_requires_an_existing_private_32_byte_file() {
@@ -1095,6 +1184,28 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
+    /// Whether protected operations need [`Self::authorization`] (always set
+    /// with it), so a composition without its authorizer fails closed.
+    authorization_required: bool,
+}
+
+/// Whether a composition protects its operations, and with which authorizer.
+enum GatewayProtection {
+    /// The in-process harness composition: nothing is protected.
+    Unprotected,
+    /// Every protected operation requires the authorizer; without one it
+    /// answers `401`.
+    Required(Option<Arc<GatewayAuthorization>>),
+}
+
+impl GatewayProtection {
+    /// The authorizer and whether protected operations require one.
+    fn into_parts(self) -> (Option<Arc<GatewayAuthorization>>, bool) {
+        match self {
+            Self::Unprotected => (None, false),
+            Self::Required(authorization) => (authorization, true),
+        }
+    }
 }
 
 /// Action kinds admitted by the Gateway World approver.
@@ -1254,9 +1365,8 @@ fn gateway_action_registry_builder(
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests and behind the
-// `test-support` feature, which no deployable graph enables, so they never
-// enter the release builder.
+// registration authority. They exist only in unit tests, so they never enter
+// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1264,7 +1374,7 @@ fn gateway_action_registry_builder(
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1276,19 +1386,17 @@ fn fixture_action_registry_builder(
     )
 }
 
-/// Build a nonproduction, action-capable Gateway around a verified erasure host.
+/// Build a unit-test, action-capable Gateway around a verified erasure host.
 ///
 /// The action registry is the fixture registration of the reviewed Gateway
-/// entry, and `authorization` is whatever the caller pins: this composition is
-/// fixture-only and is never a source of production authority (ADR-108). It
-/// exists only in unit tests and behind the `test-support` feature, for the
-/// gateway-client-conformance subject adapter (#1295).
+/// entry, and `authorization` is whatever the test pins: this composition is
+/// never a source of production authority (ADR-108). Production composes its
+/// authorizer only through [`Gateway::require_authorization`] (#1361).
 ///
 /// # Errors
 /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn gateway_with_erasure_host_and_authorization(
+#[cfg(test)]
+pub(crate) fn gateway_with_erasure_host_and_authorization(
     host: ErasureExecutionHostV1,
     bodies: impl IntoIterator<Item = EntityId>,
     authorization: GatewayAuthorization,
@@ -1309,7 +1417,7 @@ pub fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        Some(Arc::new(authorization)),
+        GatewayProtection::Required(Some(Arc::new(authorization))),
     )
 }
 
@@ -1620,12 +1728,27 @@ pub enum GatewayError {
     /// limit is permanent, so retrying the same request cannot help.
     #[error("timeline dependency set is exhausted")]
     DependencySetExhausted,
-    /// The provider-neutral host authorization decision denied the operation.
-    #[error("authorization denied")]
-    AuthorizationDenied,
+    /// The provider-neutral host authority denied the operation; the
+    /// denial's family selects its public problem. Only a
+    /// [`RecordedAuthorityDenial`], whose ADN1 record the store committed,
+    /// can carry it.
+    #[error("{0}")]
+    AuthorizationDenied(RecordedAuthorityDenial),
     /// The provider-neutral host authorization boundary is unavailable.
     #[error("authorization unavailable")]
     AuthorizationUnavailable,
+    /// A denial's durable evidence could not be recorded, so the Gateway
+    /// fails closed without answering the denial.
+    #[error("authorization evidence unavailable")]
+    AuthorizationEvidenceUnavailable,
+    /// This Principal, or the host, reached its denial-record bound for the
+    /// current window; the denial gets no record of its own (only the
+    /// window's suppression count) and is not answered as a denial.
+    #[error("authorization denial limit reached")]
+    DenialRecordLimitReached {
+        /// Whole seconds until the current window closes, at least 1.
+        retry_after_seconds: u64,
+    },
     /// Consent payload did not meet its closed V1 contract.
     #[error(transparent)]
     ConsentCodec(#[from] ConsentCodecError),
@@ -1677,60 +1800,73 @@ impl OwnTracksOwnerKey {
     }
 }
 
+/// Whether this platform has the owner-key file checks: they exist on Unix
+/// only, and every other platform refuses the owner key (fails closed).
 #[cfg(unix)]
-fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
-    }
-}
-
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> = Ok(());
 #[cfg(not(unix))]
-fn absolute_owner_key_path(_path: &Path) -> Result<PathBuf, GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> =
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+
+// One item per name with an internal `cfg` split: same-name `cfg` twins
+// would be paired by line in the cargo-crap baseline.
+fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
+    OWNER_KEY_PLATFORM.and_then(|()| {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
+        }
+    })
 }
 
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
-    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
-    for (distance, ancestor) in parent.ancestors().enumerate() {
-        let metadata = std::fs::symlink_metadata(ancestor)
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
-        let mode = metadata.mode();
-        let writable_by_group_or_other = mode & 0o022 != 0;
-        let sticky = mode & 0o1000 != 0;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || (writable_by_group_or_other && (distance == 0 || !sticky))
-        {
-            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        let parent = path
+            .parent()
+            .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        for (distance, ancestor) in parent.ancestors().enumerate() {
+            let metadata = std::fs::symlink_metadata(ancestor)
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+            let mode = metadata.mode();
+            let writable_by_group_or_other = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            // `symlink_metadata` never reports a symlink as a directory, so
+            // this also refuses every symlinked ancestor.
+            if !metadata.is_dir() || (writable_by_group_or_other && (distance == 0 || !sticky)) {
+                return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+            }
         }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    OWNER_KEY_PLATFORM
 }
 
-#[cfg(not(unix))]
-fn validate_owner_key_ancestors(_path: &Path) -> Result<(), GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
-}
-
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    metadata.mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-const fn owner_key_is_permissive(_metadata: &std::fs::Metadata) -> bool {
-    true
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode()
+    };
+    // Without Unix permission bits every key is treated as permissive.
+    #[cfg(not(unix))]
+    let mode = {
+        let _ = metadata;
+        0o777
+    };
+    mode & 0o077 != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1766,7 +1902,7 @@ impl From<executor::StoreExecutorError> for GatewayError {
 fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> GatewayError {
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
-        executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
+        executor::ActionCommandError::Authorization(error) => map_authorization_error(&error),
         executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
@@ -1814,7 +1950,6 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
 /// The Gateway error family of a not-admitted store outcome.
 #[derive(Clone, Copy)]
 enum NotAdmitted {
-    AuthorityDenied,
     PolicyUnavailable,
     LimitReached,
     HostFault,
@@ -1827,12 +1962,14 @@ enum NotAdmitted {
 /// `PipelineOutcomeV1` variant fails to compile until it is routed here.
 const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     match outcome {
-        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            NotAdmitted::AuthorityDenied
-        }
         PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
         PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
-        PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
+        // The executor turns a store revocation or expiry into a pending
+        // denial that is answered only once recorded; one that arrives here
+        // unrecorded is a host fault, never an answered denial.
+        PipelineOutcomeV1::AuthorityRevoked
+        | PipelineOutcomeV1::AuthorityExpired
+        | PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
         PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
@@ -1845,8 +1982,9 @@ const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     }
 }
 
-/// A store outcome names no protected record: authority failures reuse the
-/// authorization errors, the dependency faults are a host fault and a
+/// A store outcome names no protected record: an unavailable policy reuses the
+/// authorization error, an unrecorded authority denial and the dependency
+/// faults are a host fault and a
 /// permanent per-Timeline limit, and a stale cursor or domain state is one shape.
 fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
     not_admitted_error(not_admitted_family(outcome), maximum)
@@ -1855,7 +1993,6 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
 /// The stable Gateway error of one family; the match has no wildcard.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
     match family {
-        NotAdmitted::AuthorityDenied => GatewayError::AuthorizationDenied,
         NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
         NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
         NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
@@ -2054,9 +2191,10 @@ impl Gateway {
         owntracks_enabled: bool,
         action_registry: Result<Arc<PluginRegistry>, pos_runtime::RuntimeError>,
         consent_authority: ConsentAuthority,
-        authorization: Option<Arc<GatewayAuthorization>>,
+        protection: GatewayProtection,
     ) -> Result<Self, GatewayError> {
         let action_registry = action_registry.map_err(GatewayError::ActionRegistry)?;
+        let (authorization, authorization_required) = protection.into_parts();
         Ok(Self {
             store,
             bus,
@@ -2067,6 +2205,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization,
+            authorization_required,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2099,6 +2238,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2133,8 +2273,23 @@ impl Gateway {
                     Arc::new(registry)
                 }),
             consent_authority,
-            None,
+            GatewayProtection::Unprotected,
         )
+    }
+
+    /// Construct an unprotected Gateway for an in-process test harness.
+    ///
+    /// Every operation is served without a Principal decision. It exists for
+    /// the gateway-client-conformance `open` composition and the
+    /// non-interference harnesses only; no binary path composes it (a
+    /// structure test checks this), and production composes
+    /// [`local_principal::local_gateway`].
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot be bound.
+    #[doc(hidden)]
+    pub fn unprotected_for_harness(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(host, GatewayProtection::Unprotected)
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
@@ -2144,12 +2299,27 @@ impl Gateway {
     /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
     /// single-consumer command stream.
     ///
-    /// Protected actions remain unavailable until the host supplies an
-    /// installed policy through the authorized constructor.
+    /// Every protected operation requires `authorization`; without it (an
+    /// unprovisioned host) each answers `401`. Actions also need an
+    /// installed World action catalogue (#461).
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+    pub(crate) fn new_with_erasure_host(
+        host: ErasureExecutionHostV1,
+        authorization: Option<GatewayAuthorization>,
+    ) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(
+            host,
+            GatewayProtection::Required(authorization.map(Arc::new)),
+        )
+    }
+
+    /// The Gateway over `host` without a World action catalogue.
+    fn with_empty_registry(
+        host: ErasureExecutionHostV1,
+        protection: GatewayProtection,
+    ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
         let store = executor::StoreExecutor::new_with_erasure_host(
@@ -2166,7 +2336,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            protection,
         )
     }
 
@@ -2201,21 +2371,22 @@ impl Gateway {
                 gate,
             ),
             consent_authority,
-            Some(Arc::new(authorization)),
+            GatewayProtection::Required(Some(Arc::new(authorization))),
         )
     }
 
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
-    /// Protected Gateway actions remain unavailable; `OwnTracks` ingress is
-    /// independently authenticated by its owner key.
+    /// `OwnTracks` ingress is independently authenticated by its owner key;
+    /// every other protected operation requires `authorization`.
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_owntracks_erasure_host(
+    pub(crate) fn new_with_owntracks_erasure_host(
         host: ErasureExecutionHostV1,
         owner_key: &OwnTracksOwnerKey,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2234,7 +2405,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )
     }
 
@@ -2254,6 +2425,7 @@ impl Gateway {
         host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<&OwnTracksOwnerKey>,
         slot: executor::ForkAdmissionSlotV1,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<(Self, executor::ForkAdmissionSubmitterV1), GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2273,7 +2445,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )?;
         Ok((gateway, submitter))
     }
@@ -2306,6 +2478,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2315,6 +2488,10 @@ impl Gateway {
     /// The authorizer owns adapter evidence and the current authority snapshot;
     /// the Gateway never receives credentials or turns adapter output into
     /// policy.  Proposed actions and configured protected reads use this seam.
+    ///
+    /// Test-only: the store has no authority ports, so every denial fails
+    /// closed as unavailable evidence (503) and is never answered as a
+    /// denial. No production composition can build it.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
@@ -2352,6 +2529,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: Some(Arc::new(authorization)),
+            authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2387,6 +2565,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2423,6 +2602,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2460,6 +2640,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2491,6 +2672,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2612,10 +2794,18 @@ impl Gateway {
         self.store.erasure_status().await.map_err(Into::into)
     }
 
-    /// Return whether this Gateway has a provider-neutral host authorizer.
+    /// Return whether this Gateway protects its operations: it has a
+    /// provider-neutral host authorizer, or its composition requires one and
+    /// fails closed without it.
     #[must_use]
     pub const fn has_authorization(&self) -> bool {
-        self.authorization.is_some()
+        self.authorization_required
+    }
+
+    /// Whether this Gateway requires an authorizer it does not have (an
+    /// unprovisioned host), so every protected route answers `401`.
+    pub(crate) const fn is_unprovisioned(&self) -> bool {
+        self.authorization_required && self.authorization.is_none()
     }
 
     /// Drain queued store commands and join the dedicated worker.
@@ -2624,6 +2814,8 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        self.wait_for_admitted_operations().await;
+        self.flush_denial_markers_before_shutdown().await;
         self.store.shutdown().await.map_err(Into::into)
     }
 
@@ -2871,7 +3063,7 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
-        if self.authorization.is_some() {
+        if self.has_authorization() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
         self.read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
@@ -2962,9 +3154,12 @@ impl Gateway {
     /// the same read with [`Self::read_events_page_authorized_after`].
     ///
     /// # Errors
-    /// Returns [`GatewayError::AuthorizationUnavailable`] or
-    /// [`GatewayError::AuthorizationDenied`] before delegating to the bounded
-    /// Timeline read errors.
+    /// Returns [`GatewayError::AuthorizationUnavailable`],
+    /// [`GatewayError::AuthorizationDenied`] or
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] before delegating to
+    /// the bounded Timeline read errors. The authority decision precedes the
+    /// lookup, so a caller without a read grant receives the same denial for
+    /// an unknown Timeline as for an existing one.
     pub async fn read_events_page_authorized(
         &self,
         timeline_id: &str,
@@ -3026,8 +3221,10 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
+        // A request envelope bound to another read is malformed input, not
+        // an authority decision, so it is never answered as a denial.
         if !request.targets_read(target_timeline, from_seq, limit) {
-            return Err(GatewayError::AuthorizationDenied);
+            return Err(GatewayError::InvalidAuthorizationRequest);
         }
         // The public request is an input envelope, not authority to choose the
         // operation being authorized. Rebuild the complete read semantics from
@@ -3042,9 +3239,12 @@ impl Gateway {
             limit,
             WallTime::now(),
         );
-        let fence = authorization.commit_fence().await;
-        if let Err(error) = authorization.authorize(request) {
-            return Err(map_authorization_error(error));
+        let fence = self.current_fence(authorization).await;
+        if let Err(error) = fence.authorize(authorization, request) {
+            // The denial's evidence is written after the fence is released,
+            // so an authority replacement never waits behind it.
+            drop(fence);
+            return Err(self.authorization_failure(authorization, error).await);
         }
         let page = normalize_protected_read_error(
             match self
@@ -3149,43 +3349,165 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
-        let fence = authorization.commit_fence().await;
-        let decision = match authorization
-            .authorize(GatewayAuthorizationRequest::action(
+        let fence = self.current_fence(&authorization).await;
+        let maximum = self.limits.max_events_per_timeline;
+        let admitted = match fence.authorize(
+            &authorization,
+            GatewayAuthorizationRequest::action(
                 request.proposal.actor_entity_id,
                 timeline,
                 request.proposal.event_type.as_str(),
                 request.proposal.capability.as_str(),
                 WallTime::now(),
-            ))
-            .map_err(map_authorization_error)
-        {
-            Ok(decision) => decision,
-            Err(error) => return Err(error),
+            ),
+        ) {
+            Ok(decision) => {
+                self.store
+                    .admit_action(
+                        timeline,
+                        Arc::clone(&self.action_registry),
+                        request.proposal,
+                        executor::AuthorizedActionContext::new(
+                            Arc::clone(&authorization),
+                            decision,
+                            self.bus.clone(),
+                        ),
+                        executor::ActionAttemptRequest::new(
+                            request.idempotency_key,
+                            request.observed_through,
+                        ),
+                        maximum,
+                    )
+                    .await
+            }
+            Err(error) => Err(executor::ActionCommandError::Authorization(error)),
         };
-        let maximum = self.limits.max_events_per_timeline;
-        let admitted = self
-            .store
-            .admit_action(
-                timeline,
-                Arc::clone(&self.action_registry),
-                request.proposal,
-                executor::AuthorizedActionContext::new(
-                    Arc::clone(&authorization),
-                    decision,
-                    self.bus.clone(),
-                ),
-                executor::ActionAttemptRequest::new(
-                    request.idempotency_key,
-                    request.observed_through,
-                ),
-                maximum,
-            )
-            .await;
+        // A denial's evidence is written after the fence is released, so an
+        // authority replacement never waits behind it.
         drop(fence);
-        admitted
-            .map(|(action, _decision)| action)
-            .map_err(|error| action_command_error(error, maximum))
+        self.admission_outcome(&authorization, admitted, maximum)
+            .await
+    }
+
+    /// The answer to one admission attempt: the committed action, an
+    /// authorization failure answered through [`Self::authorization_failure`],
+    /// or the stable error of any other refusal.
+    async fn admission_outcome(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        admitted: Result<
+            (AdmittedAction, GatewayAuthorizationDecision),
+            executor::ActionCommandError,
+        >,
+        maximum: u64,
+    ) -> Result<AdmittedAction, GatewayError> {
+        match admitted {
+            Ok((action, _decision)) => Ok(action),
+            Err(executor::ActionCommandError::Authorization(error)) => {
+                Err(self.authorization_failure(authorization, error).await)
+            }
+            Err(error) => Err(action_command_error(error, maximum)),
+        }
+    }
+
+    /// Answer one failed authorization. A denied decision is answered only
+    /// after its ADN1 record is committed in the authority store by its own
+    /// store command, outside the commit fence; a Principal or host over its
+    /// denial-record bound is answered `resource-limit-exceeded` without a
+    /// store write; every other failure keeps its stable error.
+    async fn authorization_failure(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        error: GatewayAuthorizationError,
+    ) -> GatewayError {
+        match error {
+            GatewayAuthorizationError::Denied(pending) => {
+                self.recorded_denial(authorization, pending).await
+            }
+            other => map_authorization_error(&other),
+        }
+    }
+
+    /// Record one pending denial under the denial-record bound and answer it.
+    async fn recorded_denial(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        pending: PendingAuthorityDenial,
+    ) -> GatewayError {
+        let batch = match authorization.admit_denial_record(pending) {
+            Ok(batch) => batch,
+            Err(suppression) => {
+                self.schedule_denial_flush(authorization, suppression.flush_at);
+                return GatewayError::DenialRecordLimitReached {
+                    retry_after_seconds: whole_retry_seconds(suppression.retry_after),
+                };
+            }
+        };
+        match write_denial_evidence_detached(self.store.clone(), Arc::clone(authorization), batch)
+            .await
+        {
+            Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
+            Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
+            Err(error) => error.into(),
+        }
+    }
+
+    /// Wait for every operation admitted under the authority fence (a
+    /// detached mutation task included) to complete before the store stops.
+    ///
+    /// The wait is bounded by the shutdown deadline: an operation still
+    /// running then (a hung Ledger write, for example) is reported and
+    /// abandoned, and the store shuts down under it.
+    async fn wait_for_admitted_operations(&self) {
+        let Some(authorization) = &self.authorization else {
+            return;
+        };
+        if tokio::time::timeout(
+            executor::SHUTDOWN_DEADLINE,
+            authorization.wait_for_admitted_operations(),
+        )
+        .await
+        .is_err()
+        {
+            use std::io::Write as _;
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "piglor-gateway shutdown: admitted operations still running at the shutdown \
+                 deadline were abandoned"
+            ));
+        }
+    }
+
+    /// Record the unrecorded suppression counts once before the store stops;
+    /// a count the store cannot take stays pending.
+    async fn flush_denial_markers_before_shutdown(&self) {
+        if let Some(authorization) = &self.authorization {
+            let store = self.store.clone();
+            let authorization = Arc::clone(authorization);
+            drop(
+                tokio::spawn(async move { flush_denial_markers(&store, &authorization).await })
+                    .await,
+            );
+        }
+    }
+
+    /// Flush a saturated window's markers when it expires, so a flood
+    /// followed by silence still leaves its count. One timer is armed per
+    /// window, at its first suppression; it holds only a weak store handle
+    /// and the authorizer, never the Gateway, so a Gateway dropped without a
+    /// shutdown is not kept alive by it.
+    fn schedule_denial_flush(
+        &self,
+        authorization: &Arc<GatewayAuthorization>,
+        flush_at: Option<std::time::Instant>,
+    ) {
+        if let Some(deadline) = flush_at {
+            let store = self.store.downgrade();
+            let authorization = Arc::clone(authorization);
+            drop(tokio::spawn(async move {
+                flush_expired_denial_window(&store, &authorization, deadline).await;
+            }));
+        }
     }
 
     /// Submit a proposed action without an idempotency key or cursor.
@@ -3411,6 +3733,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3426,6 +3749,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3450,16 +3774,117 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 }
 
-const fn map_authorization_error(error: GatewayAuthorizationError) -> GatewayError {
+/// Whole seconds until a retry may succeed: a partial second rounds up, and
+/// a retry is never advertised sooner than one second.
+fn whole_retry_seconds(retry_after: std::time::Duration) -> u64 {
+    retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1)
+}
+
+/// Pause before the one retry of a failed window flush.
+const DENIAL_FLUSH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Write one batch of denial evidence and settle its markers: a marker whose
+/// record committed is acknowledged, every other handed-out count (store
+/// fault, full log, dropped or unknown command) returns to pending for a
+/// later marker. An unknown outcome may thus be counted twice, never zero
+/// times.
+async fn write_denial_evidence(
+    store: &executor::StoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<DenialEvidenceReceipt, executor::StoreExecutorError> {
+    let handed_out = batch.markers().to_vec();
+    let receipt = store
+        .record_denial_evidence(Arc::clone(authorization), batch)
+        .await;
+    authorization.settle_denial_markers(
+        &handed_out,
+        receipt
+            .as_ref()
+            .map_or(&[][..], DenialEvidenceReceipt::committed),
+    );
+    receipt
+}
+
+/// Run [`write_denial_evidence`] on its own task and await it. A caller
+/// dropped mid-await (a client disconnect) cannot interrupt the hand-out,
+/// store write and settlement, while an awaiting caller still answers the
+/// denial only after its record committed. A task that cannot finish is
+/// answered as unavailable evidence.
+async fn write_denial_evidence_detached(
+    store: executor::StoreExecutor,
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+) -> Result<Option<RecordedAuthorityDenial>, executor::StoreExecutorError> {
+    tokio::spawn(async move {
+        write_denial_evidence(&store, &authorization, batch)
+            .await
+            .map(|receipt| receipt.denial())
+    })
+    .await
+    .unwrap_or(Ok(None))
+}
+
+/// Record every pending suppression count as markers; nothing is written
+/// when no count is pending. Returns whether every marker this flush handed
+/// out committed, so counts suppressed meanwhile never cause a retry.
+async fn flush_denial_markers(
+    store: &executor::StoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+) -> bool {
+    let batch = authorization.take_denial_markers();
+    let handed_out = batch.markers().len();
+    batch.is_empty()
+        || write_denial_evidence(store, authorization, batch)
+            .await
+            .is_ok_and(|receipt| receipt.committed().len() == handed_out)
+}
+
+/// Flush through `store` while its executor is alive; an executor that is
+/// gone (its Gateway was dropped) leaves nothing to write to.
+async fn flush_denial_markers_if_live(
+    store: &executor::WeakStoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+) -> bool {
+    match store.upgrade() {
+        Some(store) => flush_denial_markers(&store, authorization).await,
+        None => true,
+    }
+}
+
+/// Wait for a saturated window to expire, then flush its counts, retrying
+/// once after [`DENIAL_FLUSH_RETRY_DELAY`] when a marker did not commit.
+/// Counts a store still refuses stay pending for the next window, flush or
+/// shutdown.
+async fn flush_expired_denial_window(
+    store: &executor::WeakStoreExecutor,
+    authorization: &Arc<GatewayAuthorization>,
+    deadline: std::time::Instant,
+) {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    if !flush_denial_markers_if_live(store, authorization).await {
+        tokio::time::sleep(DENIAL_FLUSH_RETRY_DELAY).await;
+        flush_denial_markers_if_live(store, authorization).await;
+    }
+}
+
+/// The stable error of an authorization failure that is not answered as a
+/// recorded denial: a denial that has not been recorded fails closed as
+/// unavailable evidence.
+const fn map_authorization_error(error: &GatewayAuthorizationError) -> GatewayError {
     match error {
         GatewayAuthorizationError::AuthenticationUnavailable
         | GatewayAuthorizationError::AuthorityUnavailable => GatewayError::AuthorizationUnavailable,
         GatewayAuthorizationError::RequestUnavailable => GatewayError::InvalidAuthorizationRequest,
-        GatewayAuthorizationError::AuthorizationDenied => GatewayError::AuthorizationDenied,
+        GatewayAuthorizationError::Denied(_) => GatewayError::AuthorizationEvidenceUnavailable,
     }
 }
 
@@ -3650,9 +4075,6 @@ pub struct ActionRequest {
     pub payload: serde_json::Value,
     /// Capability required to submit the action.
     pub capability: String,
-    /// Optional external ingress identity for retry-safe append.
-    #[serde(default)]
-    pub ingress_id: Option<String>,
 }
 
 fn default_action_type() -> String {
@@ -3845,7 +4267,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
 
         assert!(!gateway.has_authorization());
         let timeline = gateway.create_timeline("foundation").await.test_ok();
@@ -3895,7 +4317,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_erasure_host(host),
+            Gateway::unprotected_for_harness(host),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
 
@@ -3923,7 +4345,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
+            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32]), None),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
     }
@@ -4106,7 +4528,7 @@ mod tests {
                     "world.unowned".to_owned(),
                 )),
                 ConsentAuthority::new(),
-                None,
+                GatewayProtection::Unprotected,
             ),
             Err(GatewayError::ActionRegistry(
                 pos_runtime::RuntimeError::UnknownEventType(_)
@@ -4256,7 +4678,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(revoked, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            revoked,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Revoked
+        ));
 
         let denied = gateway
             .submit_json_action(
@@ -4268,7 +4693,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -4591,7 +5019,7 @@ mod tests {
                     "boundary-denied-actor",
                 )
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationDenied(denial)) if denial.denial() == GatewayAuthorityDenial::Unauthorized
         ));
         assert!(matches!(
             gateway
@@ -4737,7 +5165,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(denied, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            denied,
+            GatewayError::AuthorizationEvidenceUnavailable
+        ));
         let invalid_timeline = gateway
             .read_events_page_authorized(
                 "not-a-timeline",
@@ -4766,7 +5197,7 @@ mod tests {
                 .test_err();
             assert!(matches!(
                 mismatched_range,
-                GatewayError::AuthorizationDenied
+                GatewayError::InvalidAuthorizationRequest
             ));
         }
 
@@ -4832,7 +5263,7 @@ mod tests {
             gateway
                 .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
                 .await,
-            Err(GatewayError::AuthorizationDenied)
+            Err(GatewayError::AuthorizationEvidenceUnavailable)
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4845,7 +5276,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway
             .create_timeline("generationless-cursor")
             .await
@@ -4893,7 +5324,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             substituted_operation,
-            GatewayError::AuthorizationDenied
+            GatewayError::AuthorizationEvidenceUnavailable
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
@@ -4914,7 +5345,10 @@ mod tests {
             .read_events_page_authorized(&timeline.id().to_string(), 0, 1, request)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationEvidenceUnavailable
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
@@ -7043,6 +7477,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
@@ -7061,6 +7496,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_list.create_timeline("x").await,
@@ -7105,6 +7541,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             missing
@@ -7149,6 +7586,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = empty_append.create_timeline("e").await.test_ok();
         let err = empty_append
@@ -7174,6 +7612,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_get_timeline
             .append_action(
@@ -7198,6 +7637,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = fail_append.create_timeline("a").await.test_ok();
         let err = fail_append
@@ -7223,6 +7663,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7282,6 +7723,7 @@ mod tests {
                 pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 authorization: None,
+                authorization_required: false,
             };
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7475,7 +7917,10 @@ mod tests {
             .submit_proposed_action(&timeline_id, legacy)
             .await
             .test_err();
-        assert!(matches!(error, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            error,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
         let valid = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
@@ -7551,7 +7996,10 @@ mod tests {
             .submit_proposed_action(&tl.id().to_string(), bad_cap)
             .await
             .test_err();
-        assert!(matches!(err, GatewayError::AuthorizationDenied));
+        assert!(matches!(
+            err,
+            GatewayError::AuthorizationDenied(denial) if denial.denial() == GatewayAuthorityDenial::Unauthorized
+        ));
 
         // Approver rejection
         let invalid = ProposedAction::new(
@@ -7610,7 +8058,7 @@ mod coverage_entrypoints {
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
-        let gateway = Gateway::new_with_erasure_host(host)?;
+        let gateway = Gateway::unprotected_for_harness(host)?;
         assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);
         let timeline = gateway.create_timeline("host-owned-gateway").await?;
         let entity = EntityId::new();

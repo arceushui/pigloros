@@ -167,7 +167,8 @@ struct ConnectionIdentity {
 enum GrantState {
     Prepared,
     Writing,
-    Granted,
+    /// AGR1 was written completely; this is its self-digest.
+    Granted([u8; 32]),
 }
 
 /// Derived policy and atomic reservations, before any adapter input is admitted.
@@ -191,6 +192,7 @@ pub struct AdmittedProviderExecution {
     root_image: File,
     proof: Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
+    grant_digest: [u8; 32],
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,

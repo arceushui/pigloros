@@ -29,6 +29,20 @@ impl AttemptShutdownDeadlines {
         self.overall
     }
 
+    /// When the stop and its grace must have ended.
+    pub(crate) const fn grace(self) -> Instant {
+        self.grace
+    }
+
+    /// The same phases, each `by` later.
+    pub(crate) fn shifted(self, by: Duration) -> Self {
+        Self {
+            grace: self.grace + by,
+            unit_kill: self.unit_kill + by,
+            overall: self.overall + by,
+        }
+    }
+
     /// Bound stop plus grace, the unit SIGKILL call, and final observation.
     ///
     /// # Errors

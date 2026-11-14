@@ -1,0 +1,65 @@
+{
+  "name": "draft-ensemble-incomplete",
+  "operation_id": "getEnsemble",
+  "request": {
+    "path": {
+      "ensemble_id": "01JC0GATEWAYW90ENSEMB1E001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:ensemble",
+      "id": "01JC0GATEWAYW90ENSEMB1E001",
+      "generation": 2,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "host-derived"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "state": "incomplete",
+      "parent_cut": {
+        "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+        "seq": 3
+      },
+      "horizon_ticks": 120,
+      "forks": [
+        {
+          "ordinal": 0,
+          "label": "Ordinary alternative",
+          "condition": "ordinary",
+          "timeline_id": "01JC0GATEWAYW9F0RK00000001",
+          "fork_generation": 1,
+          "state": "complete",
+          "suffix_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+          "recomputed_through_tick": 123,
+          "failure_code": null
+        },
+        {
+          "ordinal": 1,
+          "label": "Adversarial trust shock",
+          "condition": "adversarial",
+          "timeline_id": "01JC0GATEWAYW9F0RK00000002",
+          "fork_generation": 1,
+          "state": "incomplete",
+          "suffix_digest": null,
+          "recomputed_through_tick": 57,
+          "failure_code": "counterfactual-incomplete"
+        }
+      ],
+      "replay_claim": "exact"
+    }
+  }
+}

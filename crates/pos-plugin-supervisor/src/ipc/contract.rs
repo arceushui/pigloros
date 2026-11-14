@@ -6,6 +6,8 @@
 //! `option` is `null` or its value. The decoder enforces each WIT count bound;
 //! semantic validation stays with the engine and the supervisor.
 
+use zeroize::{Zeroize, Zeroizing};
+
 use pos_runtime::community_plugin_host::{
     ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, OperationalLogRecord,
     PluginDescriptorV1, PluginErrorCodeV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
@@ -77,21 +79,35 @@ pub(super) fn read_invocation(reader: &mut EnvelopeReader<'_>) -> Decoded<Plugin
         tick: reader.unsigned()?,
         scheduler_position: read_u32(reader)?,
     };
+    let output_base_ordinal = read_u32(reader)?;
+    let principal_ref = read_artifact(reader)?;
+    let authorization_decision = read_artifact(reader)?;
+    let observation_snapshot = read_artifact(reader)?;
+    // Keep each private allocation owned on every later decoding failure.
+    // Transfer it into the completed invocation only after the last read.
+    let mut observation_bytes = Zeroizing::new(read_bytes(reader, MAX_OBSERVATION_BYTES_V1)?);
+    let prior_state_schema = reader.bytes()?;
+    let mut prior_state_bytes = Zeroizing::new(read_bytes(reader, MAX_STATE_BYTES_V1)?);
+    let execution_profile_digest = reader.bytes()?;
+    let trust_policy_snapshot_digest = reader.bytes()?;
+    let mut deterministic_budget_id = Zeroizing::new(read_text(reader, MAX_TEXT_BYTES)?);
+    let deterministic_random_domain = reader.bytes()?;
+    let provenance_root = reader.bytes()?;
     Ok(PluginInvocationV1 {
         invocation_id,
         timeline_position,
-        output_base_ordinal: read_u32(reader)?,
-        principal_ref: read_artifact(reader)?,
-        authorization_decision: read_artifact(reader)?,
-        observation_snapshot: read_artifact(reader)?,
-        observation_bytes: read_bytes(reader, MAX_OBSERVATION_BYTES_V1)?,
-        prior_state_schema: reader.bytes()?,
-        prior_state_bytes: read_bytes(reader, MAX_STATE_BYTES_V1)?,
-        execution_profile_digest: reader.bytes()?,
-        trust_policy_snapshot_digest: reader.bytes()?,
-        deterministic_budget_id: read_text(reader, MAX_TEXT_BYTES)?,
-        deterministic_random_domain: reader.bytes()?,
-        provenance_root: reader.bytes()?,
+        output_base_ordinal,
+        principal_ref,
+        authorization_decision,
+        observation_snapshot,
+        observation_bytes: std::mem::take(&mut *observation_bytes),
+        prior_state_schema,
+        prior_state_bytes: std::mem::take(&mut *prior_state_bytes),
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+        deterministic_budget_id: std::mem::take(&mut *deterministic_budget_id),
+        deterministic_random_domain,
+        provenance_root,
     })
 }
 
@@ -169,34 +185,63 @@ pub(super) fn write_output(writer: &mut Writer, output: &PluginOutputV1) {
 
 pub(super) fn read_output(reader: &mut EnvelopeReader<'_>) -> Decoded<PluginOutputV1> {
     reader.fixed_array(7)?;
+    let invocation_id = reader.bytes()?;
+    let mut event_drafts = read_private_list(reader, MAX_RECORDS, read_draft)?;
+    let next_state_schema = reader.bytes()?;
+    let mut next_state_bytes = Zeroizing::new(read_bytes(reader, MAX_STATE_BYTES_V1)?);
+    let mut trace_annotations = read_private_list(reader, MAX_RECORDS, read_annotation)?;
+    let mut consumed_dependencies = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
+    let output_digest = reader.bytes()?;
     Ok(PluginOutputV1 {
-        invocation_id: reader.bytes()?,
-        event_drafts: read_list(reader, MAX_RECORDS, read_draft)?,
-        next_state_schema: reader.bytes()?,
-        next_state_bytes: read_bytes(reader, MAX_STATE_BYTES_V1)?,
-        trace_annotations: read_list(reader, MAX_RECORDS, read_annotation)?,
-        consumed_dependencies: read_digests(reader, MAX_DIGESTS)?,
-        output_digest: reader.bytes()?,
+        invocation_id,
+        event_drafts: std::mem::take(&mut *event_drafts),
+        next_state_schema,
+        next_state_bytes: std::mem::take(&mut *next_state_bytes),
+        trace_annotations: std::mem::take(&mut *trace_annotations),
+        consumed_dependencies: std::mem::take(&mut *consumed_dependencies),
+        output_digest,
     })
+}
+
+/// Keep completed private items owned if a later item fails to decode.
+/// The callback reads this envelope's input, not every possible input lifetime.
+fn read_private_list<'input, T: Zeroize>(
+    reader: &mut EnvelopeReader<'input>,
+    max: usize,
+    mut item: impl FnMut(&mut EnvelopeReader<'input>) -> Decoded<T>,
+) -> Decoded<Zeroizing<Vec<T>>> {
+    let count = reader.array(max)?;
+    let mut items = Zeroizing::new(Vec::with_capacity(count));
+    (0..count)
+        .try_for_each(|_| item(reader).map(|value| items.push(value)))
+        .map(|()| items)
 }
 
 fn read_draft(reader: &mut EnvelopeReader<'_>) -> Decoded<EventDraftV1> {
     reader.fixed_array(5)?;
+    let event_schema_id = read_u32(reader)?;
+    let entity_id = reader.bytes()?;
+    let mut event_type = Zeroizing::new(read_text(reader, MAX_TEXT_BYTES)?);
+    let mut canonical_payload = Zeroizing::new(read_bytes(reader, MAX_EVENT_PAYLOAD_BYTES)?);
+    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
     Ok(EventDraftV1 {
-        event_schema_id: read_u32(reader)?,
-        entity_id: reader.bytes()?,
-        event_type: read_text(reader, MAX_TEXT_BYTES)?,
-        canonical_payload: read_bytes(reader, MAX_EVENT_PAYLOAD_BYTES)?,
-        dependency_digests: read_digests(reader, MAX_DIGESTS)?,
+        event_schema_id,
+        entity_id,
+        event_type: std::mem::take(&mut *event_type),
+        canonical_payload: std::mem::take(&mut *canonical_payload),
+        dependency_digests: std::mem::take(&mut *dependency_digests),
     })
 }
 
 fn read_annotation(reader: &mut EnvelopeReader<'_>) -> Decoded<TraceAnnotationV1> {
     reader.fixed_array(3)?;
+    let annotation_schema_id = read_u32(reader)?;
+    let mut canonical_bytes = Zeroizing::new(read_bytes(reader, MAX_TRACE_ANNOTATION_BYTES_V1)?);
+    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
     Ok(TraceAnnotationV1 {
-        annotation_schema_id: read_u32(reader)?,
-        canonical_bytes: read_bytes(reader, MAX_TRACE_ANNOTATION_BYTES_V1)?,
-        dependency_digests: read_digests(reader, MAX_DIGESTS)?,
+        annotation_schema_id,
+        canonical_bytes: std::mem::take(&mut *canonical_bytes),
+        dependency_digests: std::mem::take(&mut *dependency_digests),
     })
 }
 

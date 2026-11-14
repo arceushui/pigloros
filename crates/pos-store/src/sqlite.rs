@@ -1475,6 +1475,54 @@ type ForkEventSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
+/// Ordinary native entry shared by the store and trusted-clock adapter. Keep
+/// namespace refusal with the effect so callers cannot open before screening.
+/// This does not qualify protected ownership or make installation atomic.
+pub(crate) fn open_ordinary_filename(
+    filename: &str,
+    flags: OpenFlags,
+) -> Result<Connection, CoreError> {
+    #[cfg(target_os = "linux")]
+    crate::protected_sqlite_namespace::refuse_reserved_filename(filename)?;
+    Connection::open_with_flags(filename, flags)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+}
+
+/// Preserve adapter-specific errors for namespace refusal versus a failed
+/// filesystem/native operation, without an unchecked path callback.
+#[cfg(target_os = "linux")]
+pub(crate) enum DatabasePathError<E> {
+    NamespaceRefused,
+    Operation(E),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_database_path(
+    path: &std::path::Path,
+    flags: OpenFlags,
+) -> Result<Connection, DatabasePathError<rusqlite::Error>> {
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    Connection::open_with_flags(path, flags).map_err(DatabasePathError::Operation)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_private_database_file(
+    path: &std::path::Path,
+) -> Result<(), DatabasePathError<std::io::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+        .map_err(DatabasePathError::Operation)
+}
+
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
         &self,
@@ -2094,8 +2142,7 @@ impl SqliteStore {
         initialize_schema: bool,
         options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
-        let conn = Connection::open_with_flags(path, flags)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = open_ordinary_filename(path, flags)?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection =
@@ -2147,7 +2194,7 @@ impl SqliteStore {
         options: SqliteStoreOpenOptionsV1,
     ) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Connection::open_with_flags(
+            open_ordinary_filename(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
             )
@@ -2476,6 +2523,10 @@ impl SqliteStore {
                      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                      state_cbor BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS authority_denials (
+                     sequence INTEGER PRIMARY KEY,
+                     evidence BLOB NOT NULL CHECK (length(evidence) IN (14, 71))
+                 );
                  COMMIT;",
             )
             .map_err(Self::into_storage_error)
@@ -2535,24 +2586,50 @@ impl SqliteStore {
     }
 
     fn validate_authority_schema(&self) -> Result<(), CoreError> {
+        [
+            (
+                "authority_state",
+                &[
+                    "singleton integer primary key check (singleton = 1)",
+                    "schema_version integer not null check (schema_version = 1)",
+                    "state_cbor blob not null",
+                ][..],
+            ),
+            (
+                "authority_denials",
+                &[
+                    "sequence integer primary key",
+                    "evidence blob not null check (length(evidence) in (14, 71))",
+                ][..],
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(table, required)| self.validate_authority_table(table, required))
+    }
+
+    fn validate_authority_table(&self, table: &str, required: &[&str]) -> Result<(), CoreError> {
         let sql = self
             .conn
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authority_state'",
-                [],
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
                 |row| row.get::<_, String>(0),
             )
-            .map_err(Self::into_storage_error)?;
+            .optional()
+            .map_err(Self::into_storage_error)?
+            .ok_or_else(|| {
+                // A read-only open cannot create a table a newer schema added;
+                // one writable open of the same database must come first.
+                CoreError::Storage(format!(
+                    "SQLite {table} table is missing; open the store writable once to create it"
+                ))
+            })?;
         let normalized = normalize_schema_sql(&sql);
-        for required in [
-            "singleton integer primary key check (singleton = 1)",
-            "schema_version integer not null check (schema_version = 1)",
-            "state_cbor blob not null",
-        ] {
+        for required in required {
             if !normalized.contains(&normalize_schema_sql(required)) {
-                return Err(CoreError::Storage(
-                    "SQLite authority_state table has an incompatible schema".to_owned(),
-                ));
+                return Err(CoreError::Storage(format!(
+                    "SQLite {table} table has an incompatible schema"
+                )));
             }
         }
         Ok(())
@@ -14508,6 +14585,87 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
     }
+
+    /// One autocommit `INSERT` is its own committed transaction; inside an
+    /// outer transaction it would not commit before the host answers, so it
+    /// fails closed instead. Sequences are append-only, so the highest one
+    /// bounds the row count: at [`pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS`]
+    /// the insert writes nothing and the record fails closed.
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding())
+            || !self.conn.is_autocommit()
+        {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        sqlite_append_denial_evidence(
+            &self.conn,
+            permit.evidence(),
+            pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS,
+        )
+    }
+
+    fn load_authorization_denials(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.conn
+            .prepare_cached(
+                "SELECT sequence, evidence FROM authority_denials
+                 WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        params![
+                            i64::try_from(after).unwrap_or(i64::MAX),
+                            i64::try_from(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+                                .unwrap_or(i64::MAX)
+                        ],
+                        |row| {
+                            row.get::<_, i64>(0).and_then(|sequence| {
+                                row.get::<_, Vec<u8>>(1).map(|bytes| (sequence, bytes))
+                            })
+                        },
+                    )
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .or(Err(AuthorityPersistenceErrorV1::Unavailable))
+            .and_then(|rows| {
+                rows.iter()
+                    .map(|(sequence, bytes)| {
+                        pos_core::AuthorizationDenialEvidenceV1::decode(bytes).map(|evidence| {
+                            (u64::try_from(*sequence).unwrap_or_default(), evidence)
+                        })
+                    })
+                    .collect()
+            })
+    }
+}
+
+/// Append one denial-evidence record unless the log already holds
+/// `capacity` records; at the bound nothing is written and it fails closed.
+fn sqlite_append_denial_evidence(
+    conn: &Connection,
+    evidence: &pos_core::AuthorizationDenialEvidenceV1,
+    capacity: u64,
+) -> Result<(), AuthorityPersistenceErrorV1> {
+    conn.execute(
+        "INSERT INTO authority_denials (evidence)
+         SELECT ?1 WHERE COALESCE((SELECT MAX(sequence) FROM authority_denials), 0) < ?2",
+        params![
+            evidence.encode(),
+            i64::try_from(capacity).unwrap_or(i64::MAX)
+        ],
+    )
+    .ok()
+    .filter(|inserted| *inserted == 1)
+    .map(|_| ())
+    .ok_or(AuthorityPersistenceErrorV1::Unavailable)
 }
 
 /// Resolve each coordinator WKE1 against this transaction's key registry,
@@ -15075,6 +15233,7 @@ mod tests {
     mod protected_interval_cleanup;
 
     use super::*;
+
     use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
@@ -15091,6 +15250,31 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lower_read_only_writer_opener_independently_refuses_reserved_namespace(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The lower factory must refuse even if the namespace became reserved
+        // after the outer opener's check. This exercises that native edge
+        // directly without racing installation or claiming atomic activation.
+        let directory = tempfile::tempdir()?;
+        std::fs::create_dir(
+            directory
+                .path()
+                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+        )?;
+        let database = directory.path().join("main.db");
+        let path = database.to_str().ok_or("fixture path is not UTF-8")?;
+        assert!(SqliteStore::open_writer_reservation_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+            SqliteStoreOpenOptionsV1::default(),
+        )
+        .is_none());
+        assert!(!database.exists());
+        Ok(())
+    }
 
     // Measure the durable rewrite fixture outside the tests/ exporter filter.
     #[cfg_attr(coverage_nightly, coverage(on))]
@@ -16857,6 +17041,52 @@ mod tests {
         assert_eq!(
             write_fork_admission_wall_fence(&store.conn, u64::MAX),
             Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        );
+    }
+
+    #[test]
+    fn sqlite_denial_record_inside_an_outer_transaction_fails_closed() {
+        let mut store = tests::new_store();
+        let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            Hash::from_bytes([7; 32]),
+            vec![Hash::from_bytes([8; 32])],
+            Vec::new(),
+            Vec::new(),
+        )
+        .test_ok();
+        let host = pos_core::AuthorityPersistenceHostV1::new(&registry);
+        let evidence = pos_core::AuthorizationDenialEvidenceV1::Suppressed(
+            pos_core::AuthorizationDenialSuppressionV1::try_new(
+                pos_core::AuthorizationDenialScopeV1::Host,
+                3,
+            )
+            .test_ok(),
+        );
+        store
+            .bind_authority_persistence(host.persistence_binding())
+            .test_ok();
+        store.conn.execute_batch("BEGIN").test_ok();
+        assert_eq!(
+            store.record_authorization_denial(host.authorize_denial(evidence)),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        store.conn.execute_batch("ROLLBACK").test_ok();
+        store
+            .record_authorization_denial(host.authorize_denial(evidence))
+            .test_ok();
+        assert_eq!(
+            store.load_authorization_denials(0, 1).test_ok(),
+            vec![(1, evidence)]
+        );
+
+        // At the capacity the insert writes nothing and fails closed.
+        assert_eq!(
+            sqlite_append_denial_evidence(&store.conn, &evidence, 1),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(
+            store.load_authorization_denials(0, 8).test_ok(),
+            vec![(1, evidence)]
         );
     }
 
@@ -19724,7 +19954,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn bounded_read_rejects_aggregate_event_bytes_before_full_event_query() {
         let mut store = new_store();
         let timeline = store.create_timeline("aggregate-bytes").test_ok();
@@ -19770,6 +20000,16 @@ mod tests {
         assert!(matches!(time_error, CoreError::ReadTimeTooLarge { .. }));
 
         BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(|delay| delay.set(20));
+        // A successful read with no elapsed cap reaches the pause regardless of
+        // host scheduling; the deadline probes below keep their original caps.
+        let delayed_events = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes(4, 1, usize::MAX, 2, 10),
+            )
+            .test_ok();
+        assert_eq!(delayed_events, events);
         let time_error = store
             .read_bounded(
                 timeline.id(),

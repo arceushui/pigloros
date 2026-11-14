@@ -35,10 +35,19 @@ mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
 mod unit_absence;
 pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
+mod unit_result;
+pub use unit_result::{
+    SystemdMainExit, SystemdServiceResult, SystemdUnitOutcome, SystemdUnitResultError,
+    SystemdUnitResultObservation,
+};
+#[cfg(target_os = "linux")]
+mod unit_pin;
 #[cfg(target_os = "linux")]
 mod unit_teardown;
 #[cfg(target_os = "linux")]
 pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
+#[cfg(all(test, target_os = "linux"))]
+pub use unit_teardown::{TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop};
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,9 +221,18 @@ pub struct SystemdVerifiedStart {
     unit_path: OwnedObjectPath,
     requested_readback: Vec<SystemdTransientUnitReadback>,
     manager_readback: SystemdManagerReadback,
+    requested: Vec<crate::RequestedConfigurationProperty>,
 }
 
 impl SystemdVerifiedStart {
+    /// Return the requested properties as RQE1 records them, in request
+    /// order: RQE1 `requested`, whose readback is
+    /// [`Self::requested_readback`] and [`Self::manager_readback`].
+    #[must_use]
+    pub fn requested_configuration(&self) -> &[crate::RequestedConfigurationProperty] {
+        &self.requested
+    }
+
     /// Return the exact transient service-unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
@@ -243,6 +261,28 @@ impl SystemdVerifiedStart {
     #[must_use]
     pub const fn manager_readback(&self) -> &SystemdManagerReadback {
         &self.manager_readback
+    }
+
+    /// A start of `unit_name` loaded at `unit_path`, with nothing read back.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn for_test(
+        unit_name: TransientServiceUnitName,
+        unit_path: &str,
+    ) -> zbus::Result<Self> {
+        Ok(Self {
+            unit_name,
+            job: SystemdStartJob(OwnedObjectPath::try_from(
+                "/org/freedesktop/systemd1/job/1",
+            )?),
+            unit_path: OwnedObjectPath::try_from(unit_path)?,
+            requested_readback: Vec::new(),
+            manager_readback: SystemdManagerReadback::new(
+                SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+                "",
+            ),
+            requested: Vec::new(),
+        })
     }
 }
 
@@ -303,6 +343,10 @@ pub enum SystemdTransientUnitTransportError {
     /// The exact attempt unit could not be identified at cgroup binding time.
     #[error("systemd attempt-unit identity changed before cgroup binding")]
     CgroupUnitMismatch,
+    /// A unit without a cgroup is not inactive or failed, so its processes
+    /// cannot be proved absent.
+    #[error("a systemd attempt unit without a cgroup is not inactive or failed")]
+    CgrouplessUnitActive,
     /// The typed service `ControlGroup` property could not be read.
     #[error("failed to read the exact systemd attempt ControlGroup")]
     CgroupReadback(#[source] zbus::Error),
@@ -312,6 +356,19 @@ pub enum SystemdTransientUnitTransportError {
     /// The manager-bound cgroup could not be safely opened or observed.
     #[error(transparent)]
     CgroupKernel(#[from] AttemptCgroupError),
+    /// The bound cgroup's effective kernel limits could not be read.
+    #[error(transparent)]
+    EffectiveLimits(#[from] crate::EffectiveLimitError),
+    /// systemd rejected or failed the typed `RefUnit` call, so the unit's
+    /// result could be collected before it is read.
+    #[error("systemd rejected the attempt-unit reference")]
+    UnitRef(#[source] zbus::Error),
+    /// systemd rejected or failed the typed `UnrefUnit` call.
+    #[error("systemd rejected the release of the attempt-unit reference")]
+    UnitUnref(#[source] zbus::Error),
+    /// The unit's `ActiveEnterTimestampMonotonic` is zero or unrepresentable.
+    #[error("the systemd attempt unit has no activation time")]
+    ActivationUnset,
     /// The manager's `InvocationID` is not exactly 16 bytes.
     #[error("systemd returned a malformed InvocationID")]
     InvocationIdMalformed,
@@ -357,7 +414,7 @@ impl SystemdTransientUnitTransport {
         Self::from_connection(connection).await
     }
 
-    async fn from_connection(
+    pub(crate) async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {
         let subscription = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
@@ -458,18 +515,30 @@ impl SystemdTransientUnitTransport {
         verified: &SystemdVerifiedStart,
         root: CgroupRoot,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        self.bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
+            .await
+    }
+
+    /// Bind the cgroup of the unit `unit_name` loaded at `unit_path`, checking
+    /// the manager-to-cgroup mapping in both directions around the kernel open.
+    async fn bind_unit_cgroup(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        root: CgroupRoot,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let manager = ManagerProxy::new(&self.connection)
             .await
             .map_err(SystemdTransientUnitTransportError::Proxy)?;
         let current_unit = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit != verified.unit_path {
+        if current_unit != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let service = ServiceProxy::builder(&self.connection)
-            .path(verified.unit_path.clone())
+            .path(unit_path.clone())
             // The second ControlGroup read must reach systemd, not a proxy cache.
             .cache_properties(CacheProperties::No)
             .build()
@@ -483,15 +552,11 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(path.clone())
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse != verified.unit_path {
+        if reverse != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
-        let bound = BoundAttemptCgroup::open(
-            root,
-            verified.unit_name.clone(),
-            verified.unit_path.clone(),
-            path.clone(),
-        )?;
+        let bound =
+            BoundAttemptCgroup::open(root, unit_name.clone(), unit_path.clone(), path.clone())?;
         let reread = service
             .control_group()
             .await
@@ -503,14 +568,14 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(reread)
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse_again != verified.unit_path {
+        if reverse_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let current_unit_again = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit_again != verified.unit_path {
+        if current_unit_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         Ok(bound)
@@ -640,6 +705,7 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
     type Cgroup = BoundAttemptCgroup;
     type Error = SystemdTransientUnitTransportError;
     type Killer = Self;
+    type Evidence = crate::ReleaseResources;
 
     fn killer(&self) -> Self {
         self.clone()
@@ -659,7 +725,17 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
         started: &SystemdVerifiedStart,
     ) -> impl Future<Output = Result<BoundAttemptCgroup, SystemdTransientUnitTransportError>> + Send
     {
-        Self::bind_cgroup(self, started)
+        self.pinned(started.unit_name(), Self::bind_cgroup(self, started))
+    }
+
+    fn release_evidence(
+        &self,
+        started: &SystemdVerifiedStart,
+        cgroup: &BoundAttemptCgroup,
+    ) -> impl Future<
+        Output = Result<(u64, crate::ReleaseResources), SystemdTransientUnitTransportError>,
+    > + Send {
+        self.release_resources(started, cgroup)
     }
 
     async fn stop(
@@ -817,6 +893,7 @@ async fn verify_service(
             SystemdManagerReadbackOnlyProperty::RootImagePolicy,
             root_image_policy,
         ),
+        requested: request.requested_configuration(),
     })
 }
 
@@ -1135,6 +1212,9 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 mod tests;
 
 #[cfg(test)]
+pub use test_support::peer_connections;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test_support {
     use zbus::{
@@ -1143,7 +1223,10 @@ mod test_support {
     };
 
     /// Connect authenticated peers after registering the fixture's interfaces.
-    pub(super) async fn peer_connections(
+    ///
+    /// # Errors
+    /// Returns a connection setup failure.
+    pub async fn peer_connections(
         configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
     ) -> zbus::Result<(Connection, Connection)> {
         let guid = Guid::generate();

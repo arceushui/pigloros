@@ -50,6 +50,8 @@ python3 "$ROOT/scripts/generate_erasure_conformance_fixtures.py" --check
 
 echo "==> gateway conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_gateway_conformance_fixtures.py" --check
+python3 "$ROOT/scripts/check_gateway_contract.py"
+python3 "$ROOT/scripts/test_check_gateway_contract.py"
 
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check

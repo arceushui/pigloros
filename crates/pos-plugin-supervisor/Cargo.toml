@@ -45,6 +45,7 @@ pos-store = { path = "../pos-store", default-features = false }
 # by the test probe, to close its stdout while it keeps running.
 rustix = { workspace = true, features = ["process", "stdio"] }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]

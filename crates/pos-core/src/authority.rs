@@ -25,8 +25,12 @@ pub use knowledge::{
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityViewV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS,
+    AuthorityPersistenceStateV1, AuthorityViewV1, AuthorizationDenialEvidenceV1,
+    AuthorizationDenialPermitV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
+    AuthorizationDenialSuppressionV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    PersistedAuthorityV1, AUTHORIZATION_DENIAL_RECORD_BYTES,
+    AUTHORIZATION_DENIAL_SUPPRESSION_BYTES, MAX_AUTHORIZATION_DENIALS_PER_READ,
+    MAX_AUTHORIZATION_DENIAL_RECORDS, MAX_PERSISTED_AUTHORITY_GRANTS,
     MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 
@@ -1379,6 +1383,22 @@ impl AuthorizationOutcomeV1 {
     }
 }
 
+/// The evidence an `Expired` decision found outside its validity.
+///
+/// It is not part of the AUD1 record: the evaluator reports it beside the
+/// decision through [`AuthorityEvaluatorV1::authorize_with_expiry`], so a
+/// host can tell an expired authentication from an expired grant or consent
+/// without recomputing the evaluation order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizationExpiryV1 {
+    /// The authenticated Principal evidence is outside its validity window.
+    AuthenticationEvidence,
+    /// A resolved consent grant is outside its validity window.
+    Consent,
+    /// A capability grant in the delegation chain is outside its positions.
+    Grant,
+}
+
 /// Host-owned immutable answer for one exact request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizationDecisionV1 {
@@ -1547,6 +1567,18 @@ impl AuthorityEvaluatorV1 {
         grant_chain: &DelegationChainV1,
         trusted_registry: &AuthorityRegistrySnapshotV1,
     ) -> AuthorizationDecisionV1 {
+        Self::authorize_with_expiry(request, grant_chain, trusted_registry).0
+    }
+
+    /// Evaluate like [`Self::authorize`] and also report which evidence an
+    /// `Expired` decision found outside its validity; `None` for every other
+    /// outcome.
+    #[must_use]
+    pub fn authorize_with_expiry(
+        request: &AuthorizationRequestV1,
+        grant_chain: &DelegationChainV1,
+        trusted_registry: &AuthorityRegistrySnapshotV1,
+    ) -> (AuthorizationDecisionV1, Option<AuthorizationExpiryV1>) {
         let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
         let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
@@ -1607,7 +1639,7 @@ impl AuthorityEvaluatorV1 {
             decision_digest: Hash::zero(),
         };
         decision.decision_digest = decision_digest(&decision);
-        decision
+        (decision, evaluation.expiry)
     }
 }
 
@@ -1616,6 +1648,7 @@ struct AuthorizationEvaluationV1 {
     outcome: AuthorizationOutcomeV1,
     error: Option<AuthorityErrorV1>,
     grant_evidence_is_trusted: bool,
+    expiry: Option<AuthorizationExpiryV1>,
 }
 
 impl AuthorizationEvaluationV1 {
@@ -1624,6 +1657,7 @@ impl AuthorizationEvaluationV1 {
             outcome: AuthorizationOutcomeV1::Active,
             error: None,
             grant_evidence_is_trusted: true,
+            expiry: None,
         }
     }
 
@@ -1632,6 +1666,7 @@ impl AuthorizationEvaluationV1 {
             outcome,
             error,
             grant_evidence_is_trusted: false,
+            expiry: None,
         }
     }
 
@@ -1643,6 +1678,18 @@ impl AuthorizationEvaluationV1 {
             outcome,
             error,
             grant_evidence_is_trusted: true,
+            expiry: None,
+        }
+    }
+
+    /// An `Expired` answer naming the lapsed evidence; only a grant expiry
+    /// keeps the (trusted) grant evidence.
+    const fn expired(expiry: AuthorizationExpiryV1) -> Self {
+        Self {
+            outcome: AuthorizationOutcomeV1::Expired,
+            error: None,
+            grant_evidence_is_trusted: matches!(expiry, AuthorizationExpiryV1::Grant),
+            expiry: Some(expiry),
         }
     }
 }
@@ -1661,7 +1708,7 @@ fn authorization_evaluation(
     if request.at_time < request.authenticated.issued_at
         || request.at_time >= request.authenticated.expires_at
     {
-        return AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None);
+        return AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::AuthenticationEvidence);
     }
     if !trusted_registry.trusts_consent(request) {
         return AuthorizationEvaluationV1::denied(
@@ -1729,10 +1776,9 @@ fn authorization_evaluation(
     }
     match validate_temporal_chain(request, grant_chain) {
         TemporalValidity::Valid => AuthorizationEvaluationV1::active(),
-        TemporalValidity::Expired => AuthorizationEvaluationV1::denied_with_trusted_grant(
-            AuthorizationOutcomeV1::Expired,
-            None,
-        ),
+        TemporalValidity::Expired => {
+            AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::Grant)
+        }
         TemporalValidity::RevokedAtFence => AuthorizationEvaluationV1::denied_with_trusted_grant(
             AuthorizationOutcomeV1::RevokedAtFence,
             Some(AuthorityErrorV1::RevokedAtFence),
@@ -1824,7 +1870,7 @@ fn evaluate_consent_grant(
             Some(AuthorityErrorV1::ConsentMissing),
         )
     } else if request.at_time < grant.valid_from || request.at_time >= grant.valid_until {
-        AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None)
+        AuthorizationEvaluationV1::expired(AuthorizationExpiryV1::Consent)
     } else if grant.revocation_fence.is_some_and(|fence| {
         request
             .consent_at_position

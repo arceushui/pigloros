@@ -1,0 +1,28 @@
+{
+  "name": "unsupported-version-api-major",
+  "operation_id": null,
+  "request": {
+    "method": "POST",
+    "target": "/v2/timelines",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "kitchen"
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unsupported-version",
+      "title": "Unsupported version",
+      "status": 400,
+      "detail": "unsupported API major version",
+      "instance": "/v2/timelines",
+      "code": "unsupported-version",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

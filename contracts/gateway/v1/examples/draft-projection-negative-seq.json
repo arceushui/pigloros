@@ -1,0 +1,27 @@
+{
+  "name": "draft-projection-negative-seq",
+  "operation_id": "getProjection",
+  "request": {
+    "path": {
+      "timeline_id": "01JC0GATEWAYW90T1ME11NE001"
+    },
+    "headers": {},
+    "query": {
+      "at_seq": -1
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "status": 400,
+      "detail": "at_seq is not a sequence",
+      "instance": "/v1/timelines/{timeline_id}/projection",
+      "code": "invalid-request",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

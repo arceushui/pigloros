@@ -1,0 +1,41 @@
+{
+  "name": "unknown-required-schema-event-type",
+  "operation_id": "submitAction",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "device-1-42",
+      "content-type": "application/json"
+    },
+    "body": {
+      "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "capability": "world.action.v1.submit",
+      "payload": {
+        "actor_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+        "body_entity_id": "01JC0GATEWAYF1XTVREB0DY000",
+        "action_kind": "impulse",
+        "params": [
+          0.5,
+          0.25
+        ],
+        "action_scope": 0,
+        "catalogue_version": 1,
+        "tick": 1
+      },
+      "event_type": "world.action.v2"
+    }
+  },
+  "request_valid": false,
+  "response": {
+    "status": 400,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unsupported-version",
+      "title": "Unsupported version",
+      "status": 400,
+      "detail": "unknown event type",
+      "instance": "/v1/timelines/{timeline_id}/actions",
+      "code": "unsupported-version",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

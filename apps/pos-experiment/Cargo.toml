@@ -11,17 +11,23 @@ publish.workspace = true
 # binary's EAI1/EAO1 entry): it runs on the open fixture erasure gate and the
 # generated Plugin registration of the Experiment host. It also compiles the
 # G-PUB non-interference capture adapters (ADR-062 Revision 8 slice N1), whose
-# public Gateway protocol seam needs the Gateway router and a Tokio runtime.
+# public Gateway protocol seam needs the Gateway router and a Tokio runtime, and
+# the Linux-only G-OPS capture adapters (slice N3), which run a WAT guest through
+# the community Plugin supervisor and worker.
 test-support = [
   "pos-core/test-support",
   "pos-runtime/test-support",
+  "dep:pos-plugin-supervisor",
+  "pos-plugin-supervisor/test-support",
+  "dep:pos-plugin-worker",
+  "dep:wat",
   "dep:axum",
   "dep:piglor-gateway",
   "dep:pos-plugin-ledger",
-  "dep:pos-plugin-supervisor",
   "dep:pos-time",
   "dep:tokio",
   "dep:tower",
+  "dep:zeroize",
 ]
 
 # The replay-conformance subject adapter; it is compiled only with `test-support`.
@@ -44,6 +50,21 @@ name = "pos-ni-g-pub-subject"
 path = "src/bin/pos-ni-g-pub-subject.rs"
 required-features = ["test-support"]
 
+# The fresh-process Local subject of the G-OPS rows (ADR-062 Revision 8 slice
+# N3); it is compiled only with `test-support` and runs only on Linux.
+[[bin]]
+name = "pos-ni-g-ops-subject"
+path = "src/bin/pos-ni-g-ops-subject.rs"
+required-features = ["test-support"]
+
+# The community Plugin Component worker the G-OPS subject's supervisor launches
+# (the `pos-plugin-worker` library behind this crate's own binary, so tests can
+# name it); it is compiled only with `test-support` and runs only on Linux.
+[[bin]]
+name = "pos-ni-g-ops-worker"
+path = "src/bin/pos-ni-g-ops-worker.rs"
+required-features = ["test-support"]
+
 # The fresh-process Local subject of the G-FORK row (ADR-062 Revision 8 slice
 # N4); it is compiled only with `test-support` and runs only on Linux.
 [[bin]]
@@ -59,6 +80,7 @@ path = "src/bin/pos-ni-g-plug-subject.rs"
 required-features = ["test-support"]
 
 [dependencies]
+zeroize = { workspace = true, optional = true }
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
@@ -108,6 +130,13 @@ tempfile = "3"
 # without `test-support` never see the dependency.
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-time = { path = "../../crates/pos-time", optional = true }
+# The G-OPS capture adapters (feature `test-support`, slice N3): the community
+# Plugin supervisor, whose `test-support` release fixtures the feature forwards,
+# the worker library and the WAT text compiler of the checked-in guest. The
+# supervisor runs workers only on Linux.
+pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", optional = true }
+pos-plugin-worker = { path = "../pos-plugin-worker", optional = true }
+wat = { workspace = true, optional = true }
 
 [[test]]
 name = "agent_provider_replay"
@@ -142,7 +171,15 @@ name = "non_interference_evidence"
 required-features = ["test-support"]
 
 [[test]]
+name = "non_interference_g_ops"
+required-features = ["test-support"]
+
+[[test]]
 name = "non_interference_g_fork"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_interference_g_archive"
 required-features = ["test-support"]
 
 [[test]]

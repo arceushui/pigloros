@@ -270,6 +270,8 @@ pub struct MemoryStore {
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
     authority_state: AuthorityPersistenceStateV1,
+    /// Denial-evidence records in append order; record `n` has sequence `n + 1`.
+    authorization_denials: Vec<pos_core::AuthorizationDenialEvidenceV1>,
     /// Host-published ADR-021 admission fences keyed by Timeline.
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
@@ -790,6 +792,7 @@ impl MemoryStore {
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
+            authorization_denials: Vec::new(),
             pipeline_admission_fences: HashMap::new(),
             counterfactual_forks: HashMap::new(),
             counterfactual_generation_floors: HashMap::new(),
@@ -3722,6 +3725,50 @@ impl AuthorityPersistencePortV1 for MemoryStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.authority_state.resolve(leaf_grant_id)
     }
+
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        if self.authority_persistence_binding != Some(permit.persistence_binding()) {
+            return Err(AuthorityPersistenceErrorV1::Unavailable);
+        }
+        append_capped(
+            &mut self.authorization_denials,
+            *permit.evidence(),
+            pos_core::MAX_AUTHORIZATION_DENIAL_RECORDS,
+        )
+    }
+
+    fn load_authorization_denials(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        Ok(self
+            .authorization_denials
+            .iter()
+            .zip(1_u64..)
+            .skip(usize::try_from(after).unwrap_or(usize::MAX))
+            .take(limit.min(pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ))
+            .map(|(evidence, sequence)| (sequence, *evidence))
+            .collect())
+    }
+}
+
+/// Append one record unless `records` already holds `capacity`; a full log
+/// fails closed and never prunes.
+fn append_capped<T>(
+    records: &mut Vec<T>,
+    record: T,
+    capacity: u64,
+) -> Result<(), AuthorityPersistenceErrorV1> {
+    if u64::try_from(records.len()).unwrap_or(u64::MAX) >= capacity {
+        return Err(AuthorityPersistenceErrorV1::Unavailable);
+    }
+    records.push(record);
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -13958,6 +14005,17 @@ mod coverage_entrypoints {
                 ErasureReferenceV1::from_digest([18; 32]),
             );
         });
+    }
+
+    #[test]
+    fn denial_evidence_log_refuses_a_record_at_its_capacity_without_pruning() {
+        let mut records = vec![1_u8];
+        assert_eq!(
+            super::append_capped(&mut records, 2, 1),
+            Err(AuthorityPersistenceErrorV1::Unavailable)
+        );
+        assert_eq!(super::append_capped(&mut records, 2, 2), Ok(()));
+        assert_eq!(records, vec![1, 2]);
     }
 
     #[test]

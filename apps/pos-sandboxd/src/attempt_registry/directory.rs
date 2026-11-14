@@ -1,9 +1,13 @@
 //! Planned ownership extended with the exact, still-unmounted directory tree.
 
 use rustix::fs::mkdirat;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 mod removal;
+mod terminal;
+
+pub use terminal::{AttemptUnitTermination, CompletedAttemptCleanup};
 
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
@@ -12,8 +16,9 @@ use super::{
     PlannedAttemptIntent, RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
 };
 use crate::{ExecutionOwnership, RootResourceIdentity};
+use pos_reference::provider_admission::HeldImageAdmission;
 
-pub(super) const DIRECTORY_RECORD_SIZE: usize = 84;
+pub(super) const DIRECTORY_RECORD_SIZE: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DirectoryIdentity {
@@ -45,10 +50,15 @@ pub struct PreparedAttemptDirectory {
     attempt: File,
     root: File,
     identities: [DirectoryIdentity; 2],
+    // The admitted image descriptor's device and inode.
+    image: (u64, u64),
     // Exact visible bytes after replacement, including an uncertain parent fsync.
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
     execution: ExecutionOwnership,
+    // Root activations begun on this tree; each may leave loop/dm resources.
+    // It only grows: see `begin_activation`.
+    activations: AtomicUsize,
 }
 
 impl Drop for PreparedAttemptDirectory {
@@ -58,18 +68,53 @@ impl Drop for PreparedAttemptDirectory {
 }
 
 impl CommittedPlannedAttempt {
-    /// Create the unique attempt/root tree and durably extend its planned intent.
+    /// Create the unique attempt/root tree and durably extend its planned intent
+    /// with the directories' and the admitted image's device and inode.
     ///
-    /// The fixed `attempts` parent must already exist with private permissions.
-    /// Each new directory's parent is fsynced before the identity extension is
+    /// `admission` must hold the image of this intent's SIM1. The fixed
+    /// `attempts` parent must already exist with private permissions. Each new
+    /// directory's parent is fsynced before the identity extension is
     /// published. Existing components are never adopted or replaced.
     ///
     /// # Errors
-    /// Rejects changed intent, unsafe parents, existing components and uncertain
-    /// writes. Any failure closes new commits and leaves owned state for recovery.
+    /// Rejects an admission of another SIM1, or an unreadable image
+    /// descriptor or one with a zero device or inode, before creating
+    /// anything; the planned intent is left for recovery. Also rejects
+    /// changed intent, unsafe parents, existing components and uncertain
+    /// writes; each of these closes new commits and leaves owned state for
+    /// recovery.
     pub fn prepare_directory(
         self,
+        admission: &HeldImageAdmission<'_>,
     ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
+        let sim1 = admission.snapshot().image().manifest().manifest_digest;
+        (sim1 == self.intent.sim1_digest)
+            .then_some(())
+            .ok_or(SystemdAttemptRegistryError::InvalidIntent)
+            .and_then(|()| {
+                registry_io(|| rustix::fs::fstat(admission).map_err(std::io::Error::from))
+                    .map_err(SystemdAttemptRegistryError::from)
+            })
+            .and_then(|image| self.prepare_for_image((image.st_dev, image.st_ino)))
+    }
+
+    /// [`Self::prepare_directory`] for unit tests without an installation,
+    /// recording the fake kernel fixture's held image.
+    #[cfg(test)]
+    pub(crate) fn prepare_fixture_directory(
+        self,
+    ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
+        self.prepare_for_image(crate::FIXTURE_IMAGE)
+    }
+
+    fn prepare_for_image(
+        self,
+        image: (u64, u64),
+    ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
+        // Recovery refuses a zero image identity, so none is ever recorded.
+        if image.0 == 0 || image.1 == 0 {
+            return Err(SystemdAttemptRegistryError::InvalidIntent);
+        }
         let owner = Arc::clone(&self.state);
         let mut state = owner
             .lock()
@@ -79,7 +124,7 @@ impl CommittedPlannedAttempt {
         }
         let result = state
             .reserve_sequence()
-            .and_then(|sequence| self.create_directory(sequence));
+            .and_then(|sequence| self.create_directory(sequence, image));
         state.failed = result.is_err();
         result
     }
@@ -87,6 +132,7 @@ impl CommittedPlannedAttempt {
     fn create_directory(
         self,
         sequence: u64,
+        image: (u64, u64),
     ) -> Result<PreparedAttemptDirectory, SystemdAttemptRegistryError> {
         verify_intent(&self.directory, &self.intent)?;
         validate_directory(&self.directory.runtime, self.directory.owner, true)?;
@@ -108,8 +154,10 @@ impl CommittedPlannedAttempt {
             attempt,
             root,
             identities,
+            image,
             recorded_root: OnceLock::new(),
             execution: ExecutionOwnership::default(),
+            activations: AtomicUsize::new(0),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -131,6 +179,57 @@ impl PreparedAttemptDirectory {
         self.execution.clone()
     }
 
+    /// Fence every later unit start; `false` when one was already requested.
+    pub(crate) fn fence_unsubmitted(&self) -> bool {
+        self.execution.fence_unsubmitted()
+    }
+
+    /// Whether `identity` is the cgroup this attempt's execution bound.
+    pub(crate) fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
+        self.execution.bound_cgroup_is(identity)
+    }
+
+    /// Record that a root activation is about to send its mountfsd request,
+    /// before any loop/dm resource can exist. Intent deletion then requires
+    /// released-root evidence for exactly that one root.
+    ///
+    /// The count never decreases. A request that reached mountfsd and failed
+    /// may still have left loop/dm resources that no released root covers, so
+    /// after a successful retry the count is two and live terminal cleanup is
+    /// refused; the intent stays for restart reconciliation (fail closed).
+    ///
+    /// No activation can begin after terminal cleanup reads this count:
+    /// [`Self::finish_terminal_cleanup`] consumes the directory by value while
+    /// every activation borrows it, so the two cannot interleave.
+    pub(crate) fn begin_activation(&self) {
+        self.activations.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Durably record the boot and time of a `MountImage` request that is
+    /// about to be sent, before it is sent (owner decision D2). Restart
+    /// reconciliation uses it to wait out a request that may still be served.
+    ///
+    /// The marker only makes restart more conservative, so an owner closed
+    /// to new commits still records it: an activation it allows is never
+    /// sent unrecorded.
+    ///
+    /// # Errors
+    /// Refuses a poisoned or exhausted registry owner, and any boot ID, write,
+    /// rename, fsync or readback failure. A failure closes further commits,
+    /// and the request must not be sent.
+    pub(crate) fn record_activation_request(&self) -> Result<(), SystemdAttemptRegistryError> {
+        let mut state = self
+            .planned
+            .state
+            .lock()
+            .map_err(|_| SystemdAttemptRegistryError::ReconciliationRequired)?;
+        let result = state
+            .reserve_sequence()
+            .and_then(|sequence| super::activation::publish(&self.planned.directory, sequence));
+        state.failed |= result.is_err();
+        result
+    }
+
     /// The exact original planned ownership, preserved by the extension.
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {
@@ -141,6 +240,11 @@ impl PreparedAttemptDirectory {
     /// quarantined root mount by descriptor.
     pub(crate) const fn held_directories(&self) -> (&File, &File) {
         (&self.attempt, &self.root)
+    }
+
+    /// The admitted image descriptor's device and inode, as recorded.
+    pub(crate) const fn image(&self) -> (u64, u64) {
+        self.image
     }
 
     /// Verify the durable identity extension and the same unmounted directory tree.
@@ -200,6 +304,8 @@ impl PreparedAttemptDirectory {
             self.identities[0].inode,
             self.identities[1].device,
             self.identities[1].inode,
+            self.image.0,
+            self.image.1,
         ]) {
             slot.copy_from_slice(&value.to_le_bytes());
         }
@@ -361,7 +467,7 @@ mod tests {
         let operation_count = {
             let (_directory, registry) = fixture()?;
             let committed = registry.commit_planned(&planned)?;
-            let (result, count) = with_io_fault(None, || committed.prepare_directory());
+            let (result, count) = with_io_fault(None, || committed.prepare_fixture_directory());
             result?;
             count
         };
@@ -370,7 +476,8 @@ mod tests {
         for fail_at in 0..operation_count {
             let (directory, registry) = fixture()?;
             let committed = registry.commit_planned(&planned)?;
-            let (result, observed) = with_io_fault(Some(fail_at), || committed.prepare_directory());
+            let (result, observed) =
+                with_io_fault(Some(fail_at), || committed.prepare_fixture_directory());
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
             assert!(matches!(
@@ -393,12 +500,16 @@ mod tests {
                     expected.extend_from_slice(&metadata.dev().to_le_bytes());
                     expected.extend_from_slice(&metadata.ino().to_le_bytes());
                 }
+                // The admitted image's device and inode close the stage.
+                expected.extend_from_slice(&crate::FIXTURE_IMAGE.0.to_le_bytes());
+                expected.extend_from_slice(&crate::FIXTURE_IMAGE.1.to_le_bytes());
                 assert_eq!(record, expected);
             } else {
                 assert_eq!(record, planned.encode());
             }
             let records = fs::read_dir(directory.path().join("registry"))?.count();
-            assert!((1..=2).contains(&records));
+            // The intent, the activation marker and an interrupted extension.
+            assert!((2..=3).contains(&records));
             drop(registry);
             assert_eq!(fs::read(record_path)?, record);
             assert_eq!([attempt.exists(), root.exists()], existed);
@@ -425,7 +536,9 @@ mod tests {
     fn directory_readback_io_boundary_failures_close_owner() -> TestResult {
         let operation_count = {
             let (_directory, registry) = fixture()?;
-            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&intent(1)?)?
+                .prepare_fixture_directory()?;
             let (result, count) = with_io_fault(None, || prepared.verify_directory());
             result?;
             count
@@ -434,7 +547,9 @@ mod tests {
         for fail_at in 0..operation_count {
             let (directory, registry) = fixture()?;
             let planned = intent(1)?;
-            let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&planned)?
+                .prepare_fixture_directory()?;
             let path = directory
                 .path()
                 .join("registry")
@@ -486,7 +601,9 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         }
         let registry = SystemdAttemptRegistry::open()?;
-        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let prepared = registry
+            .commit_planned(&intent(1)?)?
+            .prepare_fixture_directory()?;
         assert_eq!(prepared.intent(), &intent(1)?);
         prepared.verify_directory()?;
         drop(registry);
@@ -501,6 +618,33 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_image_identity_prepares_nothing() -> TestResult {
+        let (directory, registry) = fixture()?;
+        for (id, image) in [
+            (1, (0, crate::FIXTURE_IMAGE.1)),
+            (2, (crate::FIXTURE_IMAGE.0, 0)),
+        ] {
+            let planned = intent(id)?;
+            let result = registry.commit_planned(&planned)?.prepare_for_image(image);
+            assert!(matches!(
+                result,
+                Err(SystemdAttemptRegistryError::InvalidIntent)
+            ));
+            let key = planned.unit_name().attempt_component();
+            assert!(!directory.path().join("attempts").join(key).exists());
+            assert_eq!(
+                fs::read(directory.path().join("registry").join(key))?,
+                planned.encode()
+            );
+        }
+        // Nothing closed new commits.
+        registry
+            .commit_planned(&intent(3)?)?
+            .prepare_fixture_directory()?;
+        Ok(())
+    }
+
+    #[test]
     fn eight_attempts_publish_exact_extended_directory_identities() -> TestResult {
         let (directory, registry) = fixture()?;
         for id in 1..=8 {
@@ -511,7 +655,7 @@ mod tests {
             let committed = registry.commit_planned(&intent)?;
             assert!(!path.exists());
             assert_eq!(fs::read(&record)?.len(), 52);
-            let prepared = committed.prepare_directory()?;
+            let prepared = committed.prepare_fixture_directory()?;
             prepared.verify_directory()?;
             let bytes = fs::read(record)?;
             let mut expected = b"PAI2".to_vec();
@@ -523,10 +667,14 @@ mod tests {
                 expected.extend_from_slice(&metadata.dev().to_le_bytes());
                 expected.extend_from_slice(&metadata.ino().to_le_bytes());
             }
+            // The admitted image's device and inode close the 100-byte stage.
+            expected.extend_from_slice(&crate::FIXTURE_IMAGE.0.to_le_bytes());
+            expected.extend_from_slice(&crate::FIXTURE_IMAGE.1.to_le_bytes());
+            assert_eq!(bytes.len(), 100);
             assert_eq!(bytes, expected);
             assert_eq!(fs::read_dir(path.join("root"))?.count(), 0);
         }
-        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         assert_eq!(fs::read_dir(directory.path().join("attempts"))?.count(), 8);
         Ok(())
     }
@@ -545,7 +693,7 @@ mod tests {
                 fs::create_dir(&path)?;
             }
             let before = fs::read(directory.path().join("registry").join(component))?;
-            assert!(committed.prepare_directory().is_err());
+            assert!(committed.prepare_fixture_directory().is_err());
             assert_eq!(
                 fs::read(directory.path().join("registry").join(component))?,
                 before
@@ -572,7 +720,7 @@ mod tests {
                 )?,
                 _ => fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o777))?,
             }
-            assert!(committed.prepare_directory().is_err());
+            assert!(committed.prepare_fixture_directory().is_err());
             assert!(!directory.path().join("attempts").join(key).exists());
             assert!(registry.commit_planned(&intent(2)?).is_err());
         }
@@ -585,7 +733,9 @@ mod tests {
             let (directory, registry) = fixture()?;
             let planned = intent(1)?;
             let key = planned.unit_name().attempt_component();
-            let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&planned)?
+                .prepare_fixture_directory()?;
             let attempts = directory.path().join("attempts");
             let attempt = attempts.join(key);
             let root = attempt.join("root");
@@ -648,10 +798,12 @@ mod tests {
                 })
                 .is_err()),
             }
-            assert!(planned.prepare_directory().is_err());
+            assert!(planned.prepare_fixture_directory().is_err());
         }
         let (_directory, registry) = fixture()?;
-        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let prepared = registry
+            .commit_planned(&intent(1)?)?
+            .prepare_fixture_directory()?;
         assert!(std::panic::catch_unwind(|| {
             let _guard = registry.state.lock();
             std::panic::resume_unwind(Box::new(()));
@@ -672,7 +824,9 @@ mod tests {
     #[test]
     fn the_last_sequence_slot_can_commit_root_but_not_another_attempt() -> TestResult {
         let (runtime, registry) = fixture()?;
-        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let prepared = registry
+            .commit_planned(&intent(1)?)?
+            .prepare_fixture_directory()?;
         let identity = crate::test_fixtures::recorded_identity(&prepared)?;
         registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX - 1;
         prepared.record_root(&identity, || Ok(()))?;
@@ -693,7 +847,9 @@ mod tests {
     fn failed_exhausted_poisoned_and_refused_root_owners_cannot_commit() -> TestResult {
         for fault in 0..4 {
             let (_runtime, registry) = fixture()?;
-            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&intent(1)?)?
+                .prepare_fixture_directory()?;
             let identity = crate::test_fixtures::recorded_identity(&prepared)?;
             match fault {
                 0 => registry.state.lock().map_err(|_| "owner")?.failed = true,
@@ -728,7 +884,9 @@ mod tests {
         }
         let operation_count = {
             let (_directory, registry) = fixture()?;
-            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&intent(1)?)?
+                .prepare_fixture_directory()?;
             let (result, count) = with_io_fault(None, || {
                 prepared
                     .with_verified_parent(SystemdAttemptRegistryError::UnsafeRegistry, || Ok(()))
@@ -738,7 +896,9 @@ mod tests {
         };
         for fail_at in 0..operation_count {
             let (directory, registry) = fixture()?;
-            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let prepared = registry
+                .commit_planned(&intent(1)?)?
+                .prepare_fixture_directory()?;
             let record = directory
                 .path()
                 .join("registry")

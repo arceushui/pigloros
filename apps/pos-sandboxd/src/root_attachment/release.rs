@@ -5,9 +5,28 @@ use std::{future::Future, time::Duration};
 use tokio::time::{sleep, timeout_at, Instant};
 
 use super::{AttachmentKernel, HostKernel, ImageActivationError, VerifiedRootMount};
-use crate::PreparedAttemptDirectory;
+use crate::{ExecutionOwnership, PreparedAttemptDirectory};
 
-const DEVICE_POLL: Duration = Duration::from_millis(10);
+pub(super) const DEVICE_POLL: Duration = Duration::from_millis(10);
+
+/// Evidence that one tree's activated root was detached and its original
+/// loop/dm generations were observed absent within the cleanup deadline.
+///
+/// Only [`VerifiedRootMount::detach`] creates it, bound to the exact prepared
+/// directory it verified. It is consumed by
+/// [`PreparedAttemptDirectory::finish_terminal_cleanup`] and grants nothing
+/// else: no unit absence, directory removal or admission authority.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ReleasedAttemptRoot {
+    owner: ExecutionOwnership,
+}
+
+impl ReleasedAttemptRoot {
+    /// The prepared tree whose root this evidence released.
+    pub(crate) const fn owner(&self) -> &ExecutionOwnership {
+        &self.owner
+    }
+}
 
 impl VerifiedRootMount {
     /// Detach this owned root and prove its original loop/dm generations ended.
@@ -26,9 +45,9 @@ impl VerifiedRootMount {
     /// No block-device descriptors are opened while waiting.
     ///
     /// Success proves only point-in-time original device absence in this boot.
-    /// It leaves intent and directories unchanged and grants no lifecycle,
-    /// fencing, intent-deletion, terminal-evidence or admission authority.
-    /// Subsequent directory removal remains with its existing owner.
+    /// It leaves intent and directories unchanged. The returned evidence lets
+    /// only this directory's terminal cleanup delete its intent last; it grants
+    /// no fencing, terminal-report or admission authority.
     ///
     /// The caller's Tokio runtime must have its time driver enabled. The
     /// deadline gates acceptance of evidence, not a hard wall-clock return:
@@ -49,7 +68,7 @@ impl VerifiedRootMount {
         self,
         directory: &PreparedAttemptDirectory,
         deadline: Instant,
-    ) -> impl Future<Output = Result<(), ImageActivationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_ {
         let release = Release::new(self, directory, deadline);
         async move { release.finish(&HostKernel::system()).await }
     }
@@ -83,7 +102,7 @@ impl<'a> Release<'a> {
     pub(super) async fn finish(
         self,
         kernel: &impl AttachmentKernel,
-    ) -> Result<(), ImageActivationError> {
+    ) -> Result<ReleasedAttemptRoot, ImageActivationError> {
         let Self {
             root,
             mut guard,
@@ -115,7 +134,9 @@ impl<'a> Release<'a> {
                     .with_verified_parent(ImageActivationError::EvidenceMismatch, || Ok(()))?;
                 before(kernel, deadline)?;
                 guard.complete = true;
-                return Ok(());
+                return Ok(ReleasedAttemptRoot {
+                    owner: guard.directory.execution_ownership(),
+                });
             }
             let _wake = timeout_at(deadline, sleep(DEVICE_POLL)).await;
         }
@@ -135,7 +156,10 @@ impl Drop for CleanupGuard<'_> {
     }
 }
 
-fn before(kernel: &impl AttachmentKernel, deadline: Instant) -> Result<(), ImageActivationError> {
+pub(super) fn before(
+    kernel: &impl AttachmentKernel,
+    deadline: Instant,
+) -> Result<(), ImageActivationError> {
     (kernel.now() < deadline)
         .then_some(())
         .ok_or(ImageActivationError::ResourceAbsenceUnverified)

@@ -271,6 +271,23 @@ fn shared_memory_authority_fails_the_durability_read_back() -> TestResult {
 }
 
 #[test]
+fn a_missing_uri_file_is_created_empty_before_schema_refusal_and_can_be_initialized() -> TestResult
+{
+    let directory = TempDir::new()?;
+    let path = authority_path(&directory);
+    let uri = format!("file:{path}");
+    assert!(SqliteTrustedClockAuthorityV1::open(&uri).is_err());
+    let metadata = std::fs::metadata(&path)?;
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 0);
+
+    drop(SqliteStore::open(&path)?);
+    let mut authority = SqliteTrustedClockAuthorityV1::open(&uri)?;
+    assert_eq!(reserve(&mut authority, T0)?.reservation_seq(), 1);
+    Ok(())
+}
+
+#[test]
 fn opening_fails_closed_for_unusable_files() -> TestResult {
     let directory = TempDir::new()?;
     let missing = directory.path().join("missing").join("authority.db");

@@ -1,0 +1,33 @@
+{
+  "name": "draft-export-quota",
+  "operation_id": "createExport",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-18",
+      "content-type": "application/json"
+    },
+    "body": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "include": [
+        "repro-manifest",
+        "events",
+        "trace"
+      ],
+      "external_copy_acknowledged": true
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 429,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:resource-limit-exceeded",
+      "title": "Resource limit exceeded",
+      "status": 429,
+      "detail": "too many concurrent operations",
+      "instance": "/v1/exports",
+      "code": "resource-limit-exceeded",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": true
+    }
+  }
+}

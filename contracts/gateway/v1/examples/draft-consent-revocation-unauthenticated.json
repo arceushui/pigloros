@@ -1,0 +1,27 @@
+{
+  "name": "draft-consent-revocation-unauthenticated",
+  "operation_id": "revokeConsent",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-20",
+      "content-type": "application/json"
+    },
+    "body": {
+      "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 401,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unauthenticated",
+      "title": "Unauthenticated",
+      "status": 401,
+      "detail": "no authenticated principal",
+      "instance": "/v1/me/consent-revocations",
+      "code": "unauthenticated",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

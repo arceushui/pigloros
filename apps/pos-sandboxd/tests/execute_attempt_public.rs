@@ -26,7 +26,7 @@ use std::{
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
 use pos_sandboxd::{
     AdmittedAttempt, ExecuteError, PlannedAttemptIntent, StagingLedger, StagingLimits,
-    SystemdAttemptRegistry,
+    SystemdAttemptRegistry, SystemdAttemptRegistryError,
 };
 
 use pos_reference::provider_admission::execution::{
@@ -55,18 +55,19 @@ fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestRes
     let entry = verified.entry();
     fixed_registry()?;
     let registry = SystemdAttemptRegistry::open()?;
+    let admission = snapshot.admit_held_image()?;
     let own = registry
         .commit_planned(&PlannedAttemptIntent::new(
             request.attempt_id,
             request.authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_directory(&admission)?;
     let foreign = registry
         .commit_planned(&PlannedAttemptIntent::new(
             [0x77; 16],
             request.authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_directory(&admission)?;
 
     let attempt = AdmittedAttempt::from_entry(&entry, &own)?;
     assert_eq!(attempt, attempt.clone());
@@ -108,19 +109,18 @@ fn a_directory_for_another_image_is_rejected() -> TestResult {
     }
     let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
-    let request = snapshot.request();
-    let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 512 * 1024 * 1024,
-    });
-    let (_staging, verified) = staged_execution::verified_input(&staged, &ledger)?;
-    let entry = verified.entry();
     fixed_registry()?;
+    // An admission of this image cannot prepare a directory for another one.
+    let admission = snapshot.admit_held_image()?;
     let other_image = SystemdAttemptRegistry::open()?
-        .commit_planned(&PlannedAttemptIntent::new(request.attempt_id, [0x78; 32])?)?
-        .prepare_directory()?;
+        .commit_planned(&PlannedAttemptIntent::new(
+            snapshot.request().attempt_id,
+            [0x78; 32],
+        )?)?
+        .prepare_directory(&admission);
     assert!(matches!(
-        AdmittedAttempt::from_entry(&entry, &other_image),
-        Err(ExecuteError::DirectoryIdentity)
+        other_image,
+        Err(SystemdAttemptRegistryError::InvalidIntent)
     ));
     Ok(())
 }

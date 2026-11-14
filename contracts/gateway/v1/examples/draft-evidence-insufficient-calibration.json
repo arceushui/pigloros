@@ -1,0 +1,100 @@
+{
+  "name": "draft-evidence-insufficient-calibration",
+  "operation_id": "getPreviewEvidence",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:preview-evidence",
+      "id": "01JC0GATEWAYW90PREV1EW0001",
+      "generation": 2,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "host-derived"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001",
+      "ensemble_id": "01JC0GATEWAYW90ENSEMB1E001",
+      "reactions": [
+        {
+          "fork_ordinal": null,
+          "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+          "seq": 4,
+          "event_id": "01JC0GATEWAYW9EVENT0000001",
+          "entity_id": "01JC0GATEWAYW90S0C1ETY0001",
+          "kind": "society-signal",
+          "event_schema_id": "society.signal"
+        },
+        {
+          "fork_ordinal": 1,
+          "timeline_id": "01JC0GATEWAYW9F0RK00000002",
+          "seq": 5,
+          "event_id": "01JC0GATEWAYW9EVENT0000001",
+          "entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+          "kind": "agent-reaction",
+          "event_schema_id": "agent.action"
+        }
+      ],
+      "trace": [
+        {
+          "ordinal": 0,
+          "kind": "authorization",
+          "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
+          "seq": 3,
+          "node_digest": "1212121212121212121212121212121212121212121212121212121212121212",
+          "input_digests": []
+        },
+        {
+          "ordinal": 1,
+          "kind": "derivation",
+          "timeline_id": "01JC0GATEWAYW9F0RK00000002",
+          "seq": 5,
+          "node_digest": "1313131313131313131313131313131313131313131313131313131313131313",
+          "input_digests": [
+            "1212121212121212121212121212121212121212121212121212121212121212"
+          ]
+        }
+      ],
+      "trace_next_cursor": null,
+      "uncertainty": {
+        "status": "reported",
+        "method": "ensemble-spread",
+        "ensemble_size": 2,
+        "spread_micro": 210000
+      },
+      "calibration": {
+        "status": "insufficient-evidence",
+        "minimum_samples": 30,
+        "observed_samples": 0
+      },
+      "claims": {
+        "replay_claim": "exact",
+        "reproducibility_class": "profile-recomputation"
+      },
+      "plugins": [
+        {
+          "plugin_id": "society",
+          "version": "1.0.0",
+          "release_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+          "trust_state": "admitted"
+        }
+      ],
+      "plugin_metadata": "disclosure-only"
+    }
+  }
+}

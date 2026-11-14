@@ -1,0 +1,21 @@
+{
+  "name": "draft-session-unauthenticated",
+  "operation_id": "getSession",
+  "request": {
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 401,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unauthenticated",
+      "title": "Unauthenticated",
+      "status": 401,
+      "detail": "no authenticated principal",
+      "instance": "/v1/session",
+      "code": "unauthenticated",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

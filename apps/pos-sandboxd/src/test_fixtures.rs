@@ -23,14 +23,28 @@ use pos_reference::{
 use crate::{ActiveAttempt, AdmittedAttempt};
 
 // Shared test helpers remain reachable through this public, test-only module.
-pub use crate::attempt_registry::{root_record_fixture, with_io_fault};
-pub use crate::root_attachment::recorded_identity;
+pub use crate::attempt_registry::{
+    crash_io_now, in_lock_test_process, io_count, io_crashed, root_record_fixture, with_io_crash,
+    with_io_fault,
+};
+pub use crate::restart::{
+    restart_after_crash, CrashSurvivors, RestartClock, Restarted, UncertainProof, SHORT_DEADLINE,
+    SINCE_REQUEST,
+};
+pub use crate::root_attachment::{
+    attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,
+    FakeRecoveredRoots, FakeRootRelease,
+};
+pub use crate::system_bus::{
+    peer_connections, TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop,
+};
 
 /// A complete recheck token for in-process port tests without a kernel mount.
 pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {
     crate::CheckedRoot::rechecked(
         crate::ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component()),
         attempt.clone(),
+        crate::RootIdentity::FIXTURE,
     )
 }
 
@@ -289,4 +303,16 @@ pub mod attempt_directory {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/support/attempt_directory.rs"
     ));
+}
+
+/// A directory standing in for a bound cgroup whose `cgroup.procs` lists
+/// `main_pid`, and that directory held open.
+pub(crate) fn cgroup_listing(main_pid: u32) -> TestResult<(tempfile::TempDir, File)> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("cgroup.procs"),
+        format!("1\n{main_pid}\n"),
+    )?;
+    let held = File::open(directory.path())?;
+    Ok((directory, held))
 }

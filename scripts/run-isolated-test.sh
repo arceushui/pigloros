@@ -1,8 +1,23 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# bash -p reads no BASH_ENV or ENV file and imports no shell functions, so
+# the caller's environment runs nothing here; the fixed PATH below chooses
+# every program this runner starts, and Docker runs under exactly the
+# environment named where it starts. Its daemon is the system socket, or
+# the unix socket PIGLOR_ISOLATED_DOCKER_HOST names (rootless Docker);
+# DOCKER_HOST, DOCKER_CONTEXT and DOCKER_CONFIG are ignored on purpose, so
+# no Docker context or configuration can send the run to another daemon.
 set -euo pipefail
+readonly RUNNER_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=$RUNNER_PATH
 
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 TEST_BINARY TEST_NAME" >&2
+  exit 2
+fi
+
+readonly DOCKER_SOCKET=${PIGLOR_ISOLATED_DOCKER_HOST:-unix:///var/run/docker.sock}
+if [[ ! $DOCKER_SOCKET =~ ^unix:///[A-Za-z0-9._/-]+$ || $DOCKER_SOCKET == *..* ]]; then
+  echo "PIGLOR_ISOLATED_DOCKER_HOST must be unix:// and an absolute socket path" >&2
   exit 2
 fi
 
@@ -64,6 +79,7 @@ fi
 
 set +e
 timeout --signal=TERM --kill-after=5s 30s \
+  env -i "PATH=$RUNNER_PATH" HOME=/nonexistent "DOCKER_HOST=$DOCKER_SOCKET" \
   docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE" \
   "$TEST_BINARY" --exact "$TEST_NAME" --nocapture
 status=$?

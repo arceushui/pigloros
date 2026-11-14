@@ -1,0 +1,19 @@
+{
+  "name": "denied-expired-authentication-events",
+  "operation_id": "listEvents",
+  "request": {},
+  "request_valid": true,
+  "response": {
+    "status": 401,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:unauthenticated",
+      "title": "Unauthenticated",
+      "status": 401,
+      "detail": "authentication not accepted",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "unauthenticated",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

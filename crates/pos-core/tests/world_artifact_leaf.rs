@@ -172,6 +172,9 @@ fn classifications_and_registry_roles_keep_their_exact_wire_codes() -> TestResul
         KeyRoleV1::TimelineIntegritySigning,
         KeyRoleV1::PluginReleaseSigning,
         KeyRoleV1::ExportRecipientEncryption,
+        KeyRoleV1::ConformanceEvaluatorSigning,
+        KeyRoleV1::ConformanceReportSigning,
+        KeyRoleV1::CommunityArtifactEncryption,
     ];
     for (class_code, data_class) in classes.into_iter().enumerate() {
         for (option_code, optionality) in optionalities.into_iter().enumerate() {
@@ -406,7 +409,7 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
         );
     }
     for (role, error) in [
-        (7, WorldArtifactErrorV1::UnsupportedValue),
+        (8, WorldArtifactErrorV1::UnsupportedValue),
         (256, WorldArtifactErrorV1::FieldOutOfBounds),
     ] {
         let mut row = good_key.clone();

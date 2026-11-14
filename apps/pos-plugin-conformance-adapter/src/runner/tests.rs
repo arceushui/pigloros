@@ -667,6 +667,7 @@ fn a_pass_that_reports_another_number_of_members_is_a_wiring_fault() {
         plugin: pos_core::PluginId::new(),
         expected_plugin_id: PLUGIN.to_owned(),
         gate,
+        content_validation: pos_plugin_release::ContentValidationV1::NotPerformed,
         invocation_id: None,
         launch_failure: None,
         sync: Ok(()),

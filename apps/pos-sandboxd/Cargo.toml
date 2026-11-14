@@ -14,12 +14,17 @@ futures-util = { version = "0.3", default-features = false }
 # `process` feature, which gates `fcntl::AtFlags`, is enabled.
 nix = { version = "=0.31.3", default-features = false, features = ["process"] }
 pos-reference = { path = "../../crates/pos-reference" }
+# `event` is for the pidfd liveness `poll` of the kernel observation
+# (ADR-069 R9 §4.4); it creates no process.
 rustix = { version = "1.1.4", default-features = false, features = [
+  "event",
   "fs",
   "mount",
   "net",
+  "param",
   "process",
   "std",
+  "thread",
   "time",
 ] }
 # Adopts the descriptors systemd passes at fixed numbers as `OwnedFd` (Q9.14).
@@ -31,6 +36,7 @@ tokio = { version = "1", default-features = false, features = [
   "net",
   "rt",
   "rt-multi-thread",
+  "sync",
   "time",
 ] }
 zbus = { version = "=6.0.0", default-features = false, features = [
@@ -49,6 +55,15 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tracing",
 ] }
 zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# In-process netlink encoding and decoding for the Local attempt namespace
+# (#911, owner decision 2026-11-09): MIT, no unsafe code, and Linux-only
+# netfilter constants. Socket I/O stays on rustix; netlink-sys, rtnetlink and
+# netlink-proto are not used.
+netlink-packet-core = "=0.9.0"
+netlink-packet-netfilter = "=0.4.0"
+netlink-packet-route = "=0.34.0"
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }

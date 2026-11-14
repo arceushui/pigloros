@@ -1247,6 +1247,17 @@ impl ErasureExecutionHostV1 {
         self.inventory = None;
     }
 
+    /// The authorization cache's hit, miss and eviction counts since the host
+    /// opened or was last poisoned: the read-only `test-support` seam of the
+    /// ADR-059 cache row `NI-CACHE-002` (owner note
+    /// `ADR-062_R8_NonInterference_Operations`, decision 2). It exposes no
+    /// key, decision or latency.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub const fn authorization_cache_counts(&self) -> crate::AuthorizationCacheCountsV1 {
+        self.authorization_cache.counts()
+    }
+
     /// Return the payload-free recovery status for health/minimized-status
     /// consumers.
     #[must_use]
@@ -5938,6 +5949,31 @@ mod tests {
             leaf_grant_id: Hash,
         ) -> Result<PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
             pos_core::AuthorityPersistencePortV1::load_authority(&self.inner, leaf_grant_id)
+        }
+
+        fn record_authorization_denial(
+            &mut self,
+            permit: pos_core::AuthorizationDenialPermitV1,
+        ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+            pos_core::AuthorityPersistencePortV1::record_authorization_denial(
+                &mut self.inner,
+                permit,
+            )
+        }
+
+        fn load_authorization_denials(
+            &self,
+            from: u64,
+            limit: usize,
+        ) -> Result<
+            Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
+            pos_core::AuthorityPersistenceErrorV1,
+        > {
+            pos_core::AuthorityPersistencePortV1::load_authorization_denials(
+                &self.inner,
+                from,
+                limit,
+            )
         }
     }
 

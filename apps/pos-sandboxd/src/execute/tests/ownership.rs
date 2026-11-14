@@ -34,7 +34,7 @@ fn authenticated_owner() -> TestResult<AuthenticatedOwner> {
             request.attempt_id,
             request.authority.sim1_digest,
         )?)?
-        .prepare_directory()?;
+        .prepare_fixture_directory()?;
     Ok(AuthenticatedOwner {
         directory,
         _registry: registry,
@@ -50,6 +50,7 @@ fn job(scenario: &Scenario, attempt: &AdmittedAttempt) -> ExecuteJob {
         attempt: attempt.clone(),
         mode: ModePlan::AirGapped,
         capture_store: Arc::clone(&scenario.store),
+        cancel: scenario.cancel.signal(),
     }
 }
 
@@ -93,6 +94,54 @@ async fn a_completed_or_failed_execution_cannot_be_started_again() -> TestResult
         drop(result);
         refused_owner(&mut scenario, &attempt).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fence_after_the_claim_refuses_the_unit_start() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    let original = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
+        ModePlan::AirGapped,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let ownership = original.attempt.execution_for_test();
+    let fenced = ownership.clone();
+    let recheck = root_for(&scenario.log, &original.attempt);
+    // Terminal cleanup fences the claimed attempt before its unit start.
+    let result = scenario
+        .run_on(&LoopbackNetwork, original, move || {
+            assert!(fenced.fence_unsubmitted());
+            recheck()
+        })
+        .await;
+    let failed = failure(result)?;
+    assert!(matches!(failed.error, ExecuteError::AttemptAlreadyClaimed));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(failed.cgroup.is_none());
+    assert_eq!(scenario.entries(), ["take_unit_end", "recheck"]);
+    assert!(!ownership.bound_cgroup_is(FAKE_CGROUP));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_submitted_execution_records_its_bound_cgroup_and_cannot_be_fenced() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    let original = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
+        ModePlan::AirGapped,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let ownership = original.attempt.execution_for_test();
+    let recheck = root_for(&scenario.log, &original.attempt);
+    let execution = scenario.run_on(&LoopbackNetwork, original, recheck).await?;
+    assert_eq!(execution.cgroup.identity(), FAKE_CGROUP);
+    assert!(ownership.bound_cgroup_is(FAKE_CGROUP));
+    assert!(!ownership.bound_cgroup_is((FAKE_CGROUP.0, FAKE_CGROUP.1 + 1)));
+    // A unit start was requested, so nothing can prove that no unit exists.
+    assert!(!ownership.fence_unsubmitted());
     Ok(())
 }
 
@@ -304,6 +353,7 @@ async fn authenticated_reconstruction_preserves_a_refused_execution_owner() -> T
                     attempt,
                     mode: mismatched,
                     capture_store: Arc::clone(&scenario.store),
+                    cancel: scenario.cancel.signal(),
                 },
                 || Err(ImageActivationError::EvidenceMismatch),
             )

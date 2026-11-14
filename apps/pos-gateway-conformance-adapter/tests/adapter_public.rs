@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, run, AdapterRunErrorV1, ABI_MAJOR,
-    ABI_MINOR, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID,
-    SUBCASE_MISMATCH,
+    executor_declaration, exit_code, normalize_response_v1, observation_v1, run, AdapterRunErrorV1,
+    ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID,
+    SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -517,13 +517,17 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
         normalize_response_v1(json!({
             "events": [{"id": ulid, "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": cursor(ulid, "10"),
-            "error": "anything",
+            "detail": "anything",
+            "instance": format!("/v1/timelines/{ulid}/not-a-ulid/events"),
+            "error": "kept",
             "name": ulid,
         })),
         json!({
             "events": [{"id": "<ulid>", "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": "<cursor>",
-            "error": "<message>",
+            "detail": "<message>",
+            "instance": "/v1/timelines/<ulid>/not-a-ulid/events",
+            "error": "kept",
             "name": ulid,
         })
     );
@@ -649,4 +653,19 @@ fn the_binary_runs_one_attempt_through_its_process_boundary() -> TestResult {
     write_attempt(&mut stream, &foreign)?;
     assert_eq!(spawn(&stream)?.status.code(), Some(3));
     Ok(())
+}
+
+#[test]
+fn an_observation_is_the_status_and_the_normalized_json_or_non_json_body() {
+    assert_eq!(
+        observation_v1(404, None),
+        json!({"status": 404, "body": "non-json"})
+    );
+    assert_eq!(
+        observation_v1(
+            400,
+            Some(json!({"detail": "bad", "code": "invalid-request"}))
+        ),
+        json!({"status": 400, "body": {"json": {"detail": "<message>", "code": "invalid-request"}}})
+    );
 }

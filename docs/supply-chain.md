@@ -33,7 +33,11 @@ CI installs PyYAML 6.0.2 from
 `requirements-pinned-dependencies.txt` using `--require-hashes` and binary-only
 wheels under a commit-pinned Python setup Action and Python 3.12.11. The
 requirement records the SHA-256 hashes for the CPython 3.10 and 3.12 Linux
-x86-64 wheels. The checker also supports the repository host's distro-provided
+x86-64 wheels. The same file pins `jsonschema` 4.26.0 and its dependency closure
+(`attrs`, `jsonschema-specifications`, `referencing`, `rpds-py` and
+`typing-extensions`) for the JSON Schema 2020-12 validation of the Gateway v1
+contract (`scripts/check_gateway_contract.py`, #301); `rpds-py` records the
+CPython 3.12 Linux x86-64 and aarch64 wheel hashes. The checker also supports the repository host's distro-provided
 PyYAML 5.4.1; other versions fail closed until their behavior and artifact
 provenance are reviewed.
 

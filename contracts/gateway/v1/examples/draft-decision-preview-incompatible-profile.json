@@ -1,0 +1,42 @@
+{
+  "name": "draft-decision-preview-incompatible-profile",
+  "operation_id": "createDecisionPreview",
+  "request": {
+    "headers": {
+      "Idempotency-Key": "client-1-5",
+      "content-type": "application/json"
+    },
+    "body": {
+      "scenario_room": {
+        "id": "01JC0GATEWAYW9R00M00000001",
+        "revision": 2,
+        "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+      },
+      "preference": {
+        "id": "01JC0GATEWAYW9PREF0000001A",
+        "revision": 1,
+        "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "option_spec": {
+        "id": "01JC0GATEWAYW9QPT10N00001A",
+        "revision": 1,
+        "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      },
+      "profile_id": "deterministic-air-gapped-v1"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:incompatible-profile",
+      "title": "Incompatible profile",
+      "status": 409,
+      "detail": "this deployment serves no Air-Gapped profile",
+      "instance": "/v1/decision-previews",
+      "code": "incompatible-profile",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

@@ -447,7 +447,10 @@ impl StepPortV1 for EvaluationStepPortV1 {
         self.open
             .as_ref()
             .and_then(|open| open.bound.last())
-            .map(|bound| bound.handle.committed_state().bytes)
+            .map(|bound| {
+                let mut state = bound.handle.committed_state();
+                std::mem::take(&mut state.bytes)
+            })
             .unwrap_or_default()
     }
 

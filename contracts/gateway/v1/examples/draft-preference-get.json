@@ -1,0 +1,47 @@
+{
+  "name": "draft-preference-get",
+  "operation_id": "getPreferenceRevision",
+  "request": {
+    "path": {
+      "preference_id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:preference-revision",
+      "id": "01JC0GATEWAYW9PREF0000001A",
+      "revision": 1,
+      "provenance": {
+        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "origin": "principal-authored"
+      },
+      "execution_profile": {
+        "mode": "local",
+        "profile_id": "deterministic-local-v1",
+        "profile_digest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "network": "denied"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "subject_entity_id": "01JC0GATEWAYF1XTVREACT0R00",
+      "weights": [
+        {
+          "dimension": "nature",
+          "weight_micro": 800000
+        },
+        {
+          "dimension": "cost",
+          "weight_micro": -400000
+        }
+      ],
+      "parent_revision": null,
+      "digest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+    }
+  }
+}

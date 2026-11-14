@@ -23,9 +23,10 @@ use crate::payload::family_text;
 use crate::world::SubCaseRecordV1;
 use crate::{CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SUBCASE_MISMATCH};
 
-/// The 20 closed error names of ADR-061 revision 7 decision 3.
-pub const KNOWN_ERRORS: [&str; 20] = [
+/// The closed error names of ADR-061.
+pub const KNOWN_ERRORS: [&str; 21] = [
     "InvalidManifest",
+    "InvalidBundleContent",
     "ArtifactTrustDenied",
     "ArtifactRevoked",
     "IncompatibleAbi",
@@ -187,12 +188,12 @@ fn timed(result: SubResultV1, times: &[u64]) -> SubResultV1 {
     }
 }
 
-/// Whether `error` is one of the 20 closed names.
+/// Whether `error` is one of the closed names.
 fn is_known(error: &str) -> bool {
     KNOWN_ERRORS.contains(&error)
 }
 
-/// Whether `error` is one of the 20 closed names and `class` is `Authoritative`.
+/// Whether `error` is a closed name and `class` is `Authoritative`.
 fn is_authoritative(error: &str, class: &str) -> bool {
     is_known(error) && class == AUTHORITATIVE
 }

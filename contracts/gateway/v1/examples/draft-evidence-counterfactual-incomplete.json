@@ -1,0 +1,24 @@
+{
+  "name": "draft-evidence-counterfactual-incomplete",
+  "operation_id": "getPreviewEvidence",
+  "request": {
+    "path": {
+      "preview_id": "01JC0GATEWAYW90PREV1EW0001"
+    },
+    "headers": {}
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:counterfactual-incomplete",
+      "title": "Counterfactual incomplete",
+      "status": 409,
+      "detail": "the ensemble suffix did not complete",
+      "instance": "/v1/decision-previews/{preview_id}/evidence",
+      "code": "counterfactual-incomplete",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

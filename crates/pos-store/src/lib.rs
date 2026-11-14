@@ -65,6 +65,7 @@ pub mod classified_fork_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+pub mod community;
 pub mod composition_fallback_registry;
 
 // Test-only. The shared composition fallback registry fixtures under `tests/support` serve the
@@ -95,7 +96,11 @@ pub mod owner_store_admission;
 pub mod owner_store_interlock;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
+#[cfg(target_os = "linux")]
+pub mod protected_sqlite_namespace;
 pub mod stitch;
+#[cfg(any(test, feature = "test-support"))]
+pub mod subject_data_consumer;
 mod timeline_range;
 pub mod trusted_clock;
 

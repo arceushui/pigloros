@@ -17,6 +17,7 @@ use pos_core::store::{EventStore, SeqRange};
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_crypto::plugin_manifest::{PluginManifestErrorV1, PluginReleaseSignatureErrorV1 as Sig};
 use pos_crypto::plugin_trust::PluginTrustErrorV1 as Trust;
+use pos_plugin_content::{PluginBundleContentArtifactV1, PluginBundleContentErrorV1};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, SCOPE, TICK},
     release::{pmf1_digest, Shape, COMPONENT_BYTES},
@@ -32,10 +33,10 @@ use pos_plugin_release::{
 };
 use pos_runtime::community_plugin_host::{
     host_error_for_install_v1, host_error_for_rollback_v1, install_community_release_v1,
-    rollback_community_release_v1, ActivationTargetV1, CommunityEvaluationWorldV1,
-    CommunityInstallErrorV1 as Install, CommunityInstallRequestV1, CommunityPluginExpectationV1,
-    CommunityPluginTrustMaterialV1, CommunityRollbackErrorV1 as Rollback,
-    FixedTrustMaterialSourceV1, GatedCommunityReleaseV1,
+    rollback_community_release_v1, ActivationTargetV1, BundleContentReasonV1,
+    CommunityEvaluationWorldV1, CommunityInstallErrorV1 as Install, CommunityInstallRequestV1,
+    CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1,
+    CommunityRollbackErrorV1 as Rollback, FixedTrustMaterialSourceV1, GatedCommunityReleaseV1,
 };
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1,
@@ -352,8 +353,8 @@ fn a_rollback_to_the_active_release_is_refused_by_the_registry() -> TestResult {
 // The total host error mapping
 // ---------------------------------------------------------------------------
 
-/// The number of arms `index` distinguishes: two outer ones and five wrapped ones.
-const ARMS: usize = 7;
+/// The number of arms `index` distinguishes: two outer ones and six wrapped ones.
+const ARMS: usize = 8;
 const MANIFEST: PluginManifestErrorV1 = PluginManifestErrorV1::InvalidEncoding { ordinal: 3 };
 
 /// The arm of one input in the two rollback enums: `0` and `1` for the outer `Source` and
@@ -369,7 +370,8 @@ const fn index(error: &Rollback) -> usize {
                 Entry::Manifest(_) => 1,
                 Entry::Authorization(_) => 2,
                 Entry::Signature(_) => 3,
-                Entry::Registry(_) => 4,
+                Entry::Content(_) => 4,
+                Entry::Registry(_) => 5,
             }
         }
     }
@@ -385,6 +387,7 @@ fn as_install(error: &Rollback) -> Install {
             Entry::Manifest(inner) => Installer::Manifest(inner),
             Entry::Authorization(inner) => Installer::Authorization(inner),
             Entry::Signature(inner) => Installer::Signature(inner),
+            Entry::Content(inner) => Installer::Content(inner),
             Entry::Registry(inner) => Installer::Registry(inner),
         }),
     }
@@ -420,6 +423,14 @@ fn every_variant_of_both_rollback_errors_has_a_row() {
         (entry(Entry::Manifest(MANIFEST)), INVALID),
         (entry(Entry::Authorization(Trust::PublisherKeyRevoked)), KEY),
         (entry(Entry::Signature(Sig::InvalidSignature)), UNTRUSTED),
+        (
+            entry(Entry::Content(PluginBundleContentErrorV1::Malformed {
+                artifact: PluginBundleContentArtifactV1::Sbom,
+            })),
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::Malformed,
+            },
+        ),
         (reg(Reg::ReleaseNotActive), NOT_ACTIVE),
     ];
     assert_rows(&rows);

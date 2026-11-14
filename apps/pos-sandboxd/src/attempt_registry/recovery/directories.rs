@@ -1,11 +1,14 @@
 //! Correlation of registry claims with held, unmounted attempt directories.
 
-use super::super::{open_directory, require_empty};
+use rustix::fs::{openat2, Mode};
+
+use super::super::{open_directory, remove_empty, require_empty};
 use super::{
     registry_io, validate_directory, Dir, File, MetadataExt, PlannedAttemptIntent,
     RecoveredAttemptIntent, RegistryResult, ResolveFlags, SystemdAttemptRecovery,
     SystemdAttemptRegistryError,
 };
+use crate::RecordedRootEntry;
 
 #[derive(Debug, Eq, PartialEq)]
 struct DirectoryObservation {
@@ -21,7 +24,7 @@ struct DirectoryObservation {
 /// grants no deletion, activation, or admission-reopening authority.
 #[derive(Debug)]
 pub struct RecoveredUnmountedDirectory {
-    _attempt: File,
+    attempt: File,
     _root: Option<File>,
     observation: DirectoryObservation,
 }
@@ -121,6 +124,101 @@ impl UnmountedDirectoryInventory<'_> {
     }
 }
 
+impl UnmountedDirectoryInventory<'_> {
+    /// Remove each held root, then its attempt directory, synchronizing the
+    /// held parent after every removal. The caller proved the attempts clean.
+    pub(super) fn remove_directories(&self) -> RegistryResult<()> {
+        self.directories.iter().try_for_each(|directory| {
+            let component = directory.intent().unit_name().attempt_component();
+            directory
+                .observation
+                .root
+                .map_or(Ok(()), |_| remove_empty(&directory.attempt, "root"))
+                .and_then(|()| remove_empty(&self.parent, component))
+        })
+    }
+}
+
+impl SystemdAttemptRecovery {
+    /// The existing root entry of every attempt directory whose identities a
+    /// committed intent recorded, in canonical order.
+    ///
+    /// A mount is attached only after the directory identities were recorded,
+    /// so no other attempt can carry one. Unknown directories are left to the
+    /// directory inventory, which refuses them.
+    ///
+    /// # Errors
+    /// Rejects changed registry state, unsafe metadata, a changed attempt
+    /// directory identity, unexpected children and a root that is a symlink.
+    pub(crate) fn recorded_root_entries(&self) -> RegistryResult<Vec<RecordedRootEntry>> {
+        self.verify_unchanged()
+            .and_then(|()| open_attempts(self))
+            .and_then(|parent| names(&parent).map(|present| (parent, present)))
+            .and_then(|(parent, present)| {
+                self.entries
+                    .iter()
+                    .filter(|entry| {
+                        !entry.is_temporary()
+                            && present.iter().any(|name| name == entry.component())
+                    })
+                    .filter_map(super::RegistryRecoveryEntry::intent)
+                    .filter_map(|intent| {
+                        intent
+                            .directory_identities
+                            .map(|recorded| (intent, recorded[0]))
+                    })
+                    .map(|(intent, recorded)| {
+                        root_entry(&parent, intent, recorded, self.directory.owner)
+                    })
+                    .filter_map(Result::transpose)
+                    .collect()
+            })
+    }
+}
+
+/// The root entry of one recorded attempt directory, if it has one.
+fn root_entry(
+    parent: &File,
+    intent: &RecoveredAttemptIntent,
+    recorded: (u64, u64),
+    owner: u32,
+) -> RegistryResult<Option<RecordedRootEntry>> {
+    open_directory(
+        parent,
+        intent.planned.unit_name().attempt_component(),
+        ResolveFlags::NO_XDEV,
+    )
+    .and_then(|attempt| validate_directory(&attempt, owner, true).map(|()| attempt))
+    .and_then(|attempt| identity(&attempt).map(|observed| (attempt, observed)))
+    .and_then(|(attempt, observed)| {
+        (observed == recorded)
+            .then_some(attempt)
+            .ok_or(SystemdAttemptRegistryError::UnsafeRegistry)
+    })
+    .and_then(|attempt| names(&attempt).map(|children| (attempt, children)))
+    .and_then(|(attempt, children)| {
+        match children.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            [] => Ok(None),
+            ["root"] => openat2(
+                &attempt,
+                "root",
+                crate::ATTEMPT_ROOT_OPEN,
+                Mode::empty(),
+                crate::ATTEMPT_ROOT_RESOLVE,
+            )
+            .map_err(|_| SystemdAttemptRegistryError::UnsafeRegistry)
+            .map(|root| {
+                Some(RecordedRootEntry {
+                    intent: intent.clone(),
+                    attempt,
+                    root,
+                })
+            }),
+            _ => Err(SystemdAttemptRegistryError::UnsafeRegistry),
+        }
+    })
+}
+
 fn open_attempts(recovery: &SystemdAttemptRecovery) -> RegistryResult<File> {
     let directory = &recovery.directory;
     validate_directory(&directory.runtime, directory.owner, true)?;
@@ -178,7 +276,7 @@ fn read_directory(
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
     Ok(RecoveredUnmountedDirectory {
-        _attempt: attempt,
+        attempt,
         _root: root,
         observation: observed,
     })
@@ -243,7 +341,7 @@ mod tests {
                     private_directory(&attempt.join("root"))?;
                 }
                 _ => {
-                    committed.prepare_directory()?;
+                    committed.prepare_fixture_directory()?;
                 }
             }
         }
@@ -310,7 +408,7 @@ mod tests {
         }
         inventory.verify_unchanged()?;
         drop(inventory);
-        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 9);
         assert_eq!(fs::read_dir(runtime.join("attempts"))?.count(), 7);
         assert!(SystemdAttemptRegistry::open().is_err());
         Ok(())
@@ -353,7 +451,7 @@ mod tests {
                 _ => fs::write(attempts.join("not-a-directory"), b"unexpected")?,
             }
             assert!(recovery.inventory_unmounted_directories().is_err());
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         }
         Ok(())
     }
@@ -385,7 +483,7 @@ mod tests {
         assert_ne!(identity(&File::open(&root)?)?, identity(&held_root)?);
         assert!(partial.verify_unchanged().is_err());
         assert!(recovery.inventory_unmounted_directories().is_err());
-        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         Ok(())
     }
 
@@ -455,8 +553,87 @@ mod tests {
                 with_io_fault(Some(fail_at), || recovery.inventory_unmounted_directories());
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
             assert_eq!(fs::read_dir(directory.path().join("attempts"))?.count(), 7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_root_entries_hold_only_recorded_attempt_roots() -> TestResult {
+        use std::os::fd::AsFd;
+        type Change = fn(&std::path::Path, &std::path::Path) -> TestResult;
+
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::recorded_root_entries_hold_only_recorded_attempt_roots")? {
+            return Ok(());
+        }
+        let attempt = |runtime: &std::path::Path, id| -> TestResult<std::path::PathBuf> {
+            Ok(runtime.join("attempts").join(key(id)?))
+        };
+        // Attempts 4 to 8 recorded both directory identities, 1 to 3 did not.
+        // Attempt 4's root is gone, attempt 8's directories are both gone, and
+        // an unknown attempt 9 is skipped.
+        let (directory, recovery) = fixture()?;
+        let runtime = directory.path();
+        fs::remove_dir(attempt(runtime, 4)?.join("root"))?;
+        fs::remove_dir(attempt(runtime, 8)?.join("root"))?;
+        fs::remove_dir(attempt(runtime, 8)?)?;
+        private_directory(&attempt(runtime, 9)?)?;
+        let entries = recovery.recorded_root_entries()?;
+        let ids: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.intent.planned().attempt_id())
+            .collect();
+        assert_eq!(ids, (5..=7).map(|id| [id; 16]).collect::<Vec<_>>());
+        for (id, entry) in (5..=7).zip(&entries) {
+            let path = attempt(runtime, id)?;
+            let held = entry.attempt.metadata()?;
+            let expected = fs::metadata(&path)?;
+            assert_eq!((held.dev(), held.ino()), (expected.dev(), expected.ino()));
+            let root = rustix::fs::fstat(entry.root.as_fd())?;
+            let expected = fs::metadata(path.join("root"))?;
+            assert_eq!((root.st_dev, root.st_ino), (expected.dev(), expected.ino()));
+        }
+        drop(entries);
+        // An unexpected child, a symlinked root, a replaced attempt directory
+        // and an unsafe attempt directory each refuse as unsafe; a changed
+        // registry requires a new reconciliation.
+        let changes: [Change; 5] = [
+            |_, attempt| Ok(fs::write(attempt.join("extra"), b"")?),
+            |_, attempt| {
+                fs::remove_dir(attempt.join("root"))?;
+                Ok(symlink("/tmp", attempt.join("root"))?)
+            },
+            |runtime, attempt| {
+                fs::rename(attempt, runtime.join("replaced"))?;
+                private_directory(attempt)?;
+                private_directory(&attempt.join("root"))
+            },
+            |_, attempt| {
+                Ok(fs::set_permissions(
+                    attempt,
+                    fs::Permissions::from_mode(0o755),
+                )?)
+            },
+            // Attempt 5's committed intent disappears.
+            |runtime, attempt| {
+                let key = attempt.file_name().ok_or("no attempt component")?;
+                Ok(fs::remove_file(runtime.join("registry").join(key))?)
+            },
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let (directory, recovery) = fixture()?;
+            change(directory.path(), &attempt(directory.path(), 5)?)?;
+            let result = recovery.recorded_root_entries();
+            let refused = if index == 4 {
+                matches!(
+                    result,
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                )
+            } else {
+                matches!(result, Err(SystemdAttemptRegistryError::UnsafeRegistry))
+            };
+            assert!(refused, "change {index}: {result:?}");
         }
         Ok(())
     }

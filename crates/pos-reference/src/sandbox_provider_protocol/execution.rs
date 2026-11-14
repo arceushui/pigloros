@@ -447,7 +447,7 @@ impl AdmissionGrant {
     pub(crate) fn sign_and_encode(
         mut self,
         sign: impl FnOnce(&[u8]) -> Result<[u8; 64], std::io::Error>,
-    ) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+    ) -> Result<(Vec<u8>, [u8; 32]), SandboxProviderProtocolError> {
         let unsigned = self.unsigned_value();
         self.grant_digest = record_digest("AGR1", &Value::Array(unsigned.to_vec()))?;
         self.signature = sign(&super::codec::signature_message("AGR1", &self.grant_digest))
@@ -458,6 +458,7 @@ impl AdmissionGrant {
             bytes_value(&self.grant_digest),
             bytes_value(&self.signature),
         ]))
+        .map(|bytes| (bytes, self.grant_digest))
     }
 
     /// Decode and fully validate exact canonical AGR1 bytes.
