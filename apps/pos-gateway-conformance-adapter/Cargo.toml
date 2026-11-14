@@ -11,25 +11,9 @@ publish.workspace = true
 # Gateways through the public router, and writes one EAO1 observation. It speaks the
 # pos-reference codec; pos-reference does not import it.
 
-[features]
-# The whole crate: its `authorized` composition uses the nonproduction fixture registration of
-# the Gateway action registry, which exists only behind this feature.
-test-support = ["piglor-gateway/test-support"]
-
 [[bin]]
 name = "pos-gateway-conformance-adapter"
 path = "src/main.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "adapter_public"
-path = "tests/adapter_public.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "provider_dispatch_public"
-path = "tests/provider_dispatch_public.rs"
-required-features = ["test-support"]
 
 [dependencies]
 axum = { workspace = true }
