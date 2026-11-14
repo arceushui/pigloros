@@ -14,6 +14,7 @@ mod operations;
 mod policy;
 mod revocation;
 mod revocation_update;
+pub mod termination;
 mod trust;
 
 /// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.

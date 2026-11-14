@@ -15,6 +15,8 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
+mod attempt_classification;
+#[cfg(target_os = "linux")]
 mod attempt_evidence;
 #[cfg(target_os = "linux")]
 mod attempt_registry;
@@ -269,6 +271,8 @@ pub(crate) struct RecordedRootEntry {
 
 #[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
+#[cfg(target_os = "linux")]
+pub use attempt_classification::service_facts;
 #[cfg(target_os = "linux")]
 pub use attempt_evidence::{
     ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources, TerminalServiceError,

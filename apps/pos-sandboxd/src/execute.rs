@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::{select, Either};
 use futures_util::TryFutureExt as _;
+use pos_reference::sandbox_provider_protocol::termination::WATCHDOG_GRACE_NS;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
@@ -75,8 +76,9 @@ const EMPTY_POLL: Duration = Duration::from_millis(10);
 
 /// How long after the watchdog deadline `D` the broker escalates (ADR-069 R9
 /// §4.6.5, `G`): systemd's `RuntimeMaxUSec` stops the unit at `D`, so a kill
-/// at `D` itself would race the enforcer it backs up.
-const ESCALATION_GRACE: Duration = Duration::from_secs(1);
+/// at `D` itself would race the enforcer it backs up. It is the classifier's
+/// grace, so a kill at `D + G` follows a terminal snapshot at or after `D - G`.
+const ESCALATION_GRACE: Duration = Duration::from_nanos(WATCHDOG_GRACE_NS);
 
 /// The systemd operations the execute path needs, behind one port.
 ///
