@@ -15,6 +15,8 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
+mod attempt_classification;
+#[cfg(target_os = "linux")]
 mod attempt_evidence;
 #[cfg(target_os = "linux")]
 mod attempt_registry;
