@@ -2097,7 +2097,7 @@ fn a_stale_or_unattached_handle_installs_no_tick() {
     for writer in [&mut stale, &mut unattached] {
         assert_eq!(
             writer.commit_counterfactual_invalidation(&command),
-            Err(StoreError::StorageFailure)
+            Err(StoreError::ModeBindingStale)
         );
         assert_eq!(written_rows(&path, fork), before);
     }
@@ -2107,7 +2107,7 @@ fn a_stale_or_unattached_handle_installs_no_tick() {
     for writer in [&mut stale, &mut unattached] {
         assert_eq!(
             writer.append_counterfactual_tick(fork, &first, &tick_drafts(&[20, 21], None)),
-            Err(StoreError::StorageFailure)
+            Err(StoreError::ModeBindingStale)
         );
         assert_eq!(written_rows(&path, fork), committed);
     }

@@ -1701,7 +1701,7 @@ impl SqliteStore {
                     let local_seq = local_event.seq;
                     Self::logical_event(prefix, local_event).map(|event| (local_seq, event))
                 })
-                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                .map_err(|error| ForkEventAuthorityErrorV1::from(&error))
             })
             .and_then(|(local_seq, event)| {
                 ForkClassifiedProvenanceV1::derive(

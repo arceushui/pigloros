@@ -2479,7 +2479,7 @@ impl MemoryStore {
                             .map(|event| (local_event, chain_head, event))
                     })
                     .and_then(|prepared| mode.commit_epoch().map(|epoch| (prepared, epoch)))
-                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                    .map_err(|error| ForkEventAuthorityErrorV1::from(&error))
                     .and_then(|((local_event, chain_head, event), epoch)| {
                         ForkClassifiedProvenanceV1::derive(
                             request,
@@ -17353,7 +17353,7 @@ mod admitted_fork_deletion {
             );
             assert_eq!(
                 appended.map(drop),
-                Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+                Err(ForkEventAuthorityErrorV1::ModeBindingStale)
             );
             assert_eq!(sizes(&store), before);
             assert_eq!(store.state(fork).events, events);
