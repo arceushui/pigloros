@@ -1422,6 +1422,24 @@ impl AuthorityPersistencePortV1 for FenceRejectingPorts<'_> {
     ) -> Result<pos_core::PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.inner.load_authority(leaf_grant_id)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.record_authorization_denial(permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.inner.load_authorization_denials(from, limit)
+    }
 }
 
 #[test]
@@ -2438,6 +2456,24 @@ impl AuthorityPersistencePortV1 for CountsPorts<'_> {
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         self.inner.load_authority(leaf_grant_id)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_authorization_denial(
+        &mut self,
+        permit: pos_core::AuthorizationDenialPermitV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.record_authorization_denial(permit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authorization_denials(
+        &self,
+        from: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>, AuthorityPersistenceErrorV1>
+    {
+        self.inner.load_authorization_denials(from, limit)
     }
 }
 
