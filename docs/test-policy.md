@@ -66,9 +66,9 @@ and root Cargo, lint, format and coverage configuration, the workflows and the
 scripts the lane or its consumers run), read from the trusted base revision.
 Failed detection, a base revision without that filter, a pull request at the
 3000-file listing limit, any renamed file, or a failure to list renames runs
-it. Only `cargo-crap` and `ci-gate` depend on the lane directly (`standard-gate`,
-mutation and ASan follow it through `cargo-crap`), so a failed lane does not
-hide the other standard-stage findings. When a pull
+it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
+directly; `standard-gate`, mutation and ASan never wait for it, so a failed lane
+does not hide or delay their findings. When a pull
 request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
 `crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
 `ci-gate` requires the lane's success whenever it is in scope.

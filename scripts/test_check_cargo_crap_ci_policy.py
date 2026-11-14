@@ -843,17 +843,60 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_requires_cargo_crap_in_aggregate_gate(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["standard-gate"]["needs"].remove(
+            lambda workflow: workflow["jobs"]["ci-gate"]["needs"].remove(
                 "cargo-crap"
             )
         )
 
     def test_requires_aggregate_verdict_to_read_cargo_crap(self) -> None:
         def remove_result(workflow: dict) -> None:
-            step = workflow["jobs"]["standard-gate"]["steps"][0]
+            step = workflow["jobs"]["ci-gate"]["steps"][0]
             step["env"].pop("CARGO_CRAP_RESULT")
 
         self.assert_rejected(remove_result)
+
+    def test_ci_gate_cargo_crap_verdict_cannot_be_weakened(self) -> None:
+        for before, after in (
+            ('[[ "${RUST_SCOPE_RESULT}" = false ]]', '[[ "${RUST_SCOPE_RESULT}" != true ]]'),
+            ("expected_cargo_crap=success\n", "expected_cargo_crap=skipped\n"),
+            ("  failed=1\n", "  :\n"),
+        ):
+            with self.subTest(before=before):
+                def weaken(workflow: dict, before=before, after=after) -> None:
+                    step = workflow["jobs"]["ci-gate"]["steps"][0]
+                    step["run"] = step["run"].replace(CHECKER.CI_GATE_CARGO_CRAP_CHECK,
+                                                      CHECKER.CI_GATE_CARGO_CRAP_CHECK.replace(before, after), 1)
+
+                self.assert_rejected(weaken)
+        self.assert_rejected(lambda workflow: workflow["jobs"]["ci-gate"].update({"if": "${{ success() }}"}))
+        self.assert_rejected(lambda workflow: workflow["jobs"]["ci-gate"]["steps"][0]["env"].update(
+            RUST_SCOPE_RESULT="false"))
+
+    def test_ci_gate_rejects_missing_failed_or_skipped_in_scope_cargo_crap(self) -> None:
+        step = self.workflow["jobs"]["ci-gate"]["steps"][0]
+        for rust, event, expected in (("true", "pull_request", "success"),
+                                      ("true", "push", "success"),
+                                      ("", "pull_request", "success"),
+                                      ("false", "pull_request", "skipped")):
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(rust=rust, event=event, result=result):
+                    env = dict(os.environ, **{name: "success" for name in step["env"]})
+                    mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
+                    owner = "success" if event != "pull_request" or rust == "true" else "skipped"
+                    env.update(EVENT_NAME=event, RUST_SCOPE_RESULT=rust, OWNER_WINDOWS_SCOPE="true",
+                               MUTATION_RESULT=mutation, OWNER_WINDOWS_RESULT=owner,
+                               CARGO_CRAP_RESULT=result)
+                    completed = subprocess.run(["bash", "-c", step["run"]], env=env,
+                                               capture_output=True, check=False)
+                    self.assertEqual(completed.returncode == 0, result == expected, completed.stderr)
+
+    def test_standard_gate_and_reports_keep_their_cargo_crap_contract(self) -> None:
+        self.assert_rejected(lambda workflow: workflow["jobs"]["standard-gate"]["needs"].append("cargo-crap"))
+        for name in CHECKER.MAIN_REPORT_JOBS:
+            with self.subTest(job=name):
+                self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(needs="standard-gate"))
+                self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(
+                    {"if": "${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}"}))
 
 
 if __name__ == "__main__":

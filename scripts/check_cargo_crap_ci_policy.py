@@ -110,7 +110,7 @@ ANALYZE_COMMAND = (
 )
 # Standard-stage jobs start from core-gate, beside cargo-crap: none consumes
 # cargo-crap output, so the native Windows lane that cargo-crap waits for never
-# delays or hides their findings. standard-gate still requires cargo-crap.
+# delays or hides their findings. ci-gate requires cargo-crap directly.
 STAGED_MAIN_JOBS = {
     "rustdoc": ["ci_change_scope", "core-gate"],
     "reference-evaluator-release": ["ci_change_scope", "core-gate"],
@@ -125,6 +125,19 @@ STAGED_MAIN_JOBS = {
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
     "asan-build": ["ci_change_scope", "core-gate"],
 }
+
+
+CI_GATE_CARGO_CRAP_CHECK = (
+    "expected_cargo_crap=success\n"
+    'if [[ "${RUST_SCOPE_RESULT}" = false ]]; then\n'
+    "  expected_cargo_crap=skipped\n"
+    "fi\n"
+    'if [[ "${CARGO_CRAP_RESULT}" != "${expected_cargo_crap}" ]]; then\n'
+    '  echo "CARGO_CRAP_RESULT=${CARGO_CRAP_RESULT}" >&2\n'
+    "  failed=1\n"
+    "fi\n"
+)
+MAIN_REPORT_JOBS = ("modules-structure", "depgraph")
 
 
 class PolicyError(RuntimeError):
@@ -500,21 +513,43 @@ def check_workflow(
         "green main must publish the next trusted baseline",
     )
 
-    aggregate = jobs.get("standard-gate")
-    require(isinstance(aggregate, dict), "missing aggregate standard-gate")
-    require("cargo-crap" in aggregate.get("needs", []), "standard-gate must need cargo-crap")
+    # cargo-crap waits for the native Windows lane. ci-gate requires it, so
+    # standard-gate (which mutation and ASan follow) must not wait for it.
+    standard = jobs.get("standard-gate")
+    require(isinstance(standard, dict), "missing aggregate standard-gate")
+    require("cargo-crap" not in standard.get("needs", []),
+            "standard-gate must not delay mutation and ASan behind cargo-crap")
+    aggregate = jobs.get("ci-gate")
+    require(isinstance(aggregate, dict), "missing aggregate ci-gate")
+    require(aggregate.get("if") == "${{ always() }}", "ci-gate must always evaluate cargo-crap")
+    require("cargo-crap" in aggregate.get("needs", []), "ci-gate must need cargo-crap")
     aggregate_steps = aggregate.get("steps")
-    require(isinstance(aggregate_steps, list), "standard-gate steps must be an array")
-    verdict = named_step(aggregate_steps, "Require normal blocking checks")
+    require(isinstance(aggregate_steps, list), "ci-gate steps must be an array")
+    verdict = named_step(aggregate_steps, "Require every blocking CI job to pass")
     require(
         verdict.get("env", {}).get("CARGO_CRAP_RESULT")
         == "${{ needs.cargo-crap.result }}",
-        "standard-gate must read the cargo-crap result",
+        "ci-gate must read the cargo-crap result",
     )
     require(
-        "CARGO_CRAP_RESULT" in verdict.get("run", ""),
-        "standard-gate must reject a non-success cargo-crap result",
+        verdict.get("env", {}).get("RUST_SCOPE_RESULT")
+        == "${{ needs.ci_change_scope.outputs.rust }}",
+        "ci-gate must read the trusted Rust scope",
     )
+    require(
+        CI_GATE_CARGO_CRAP_CHECK in verdict.get("run", ""),
+        "ci-gate must reject a non-success cargo-crap result in Rust scope",
+    )
+    for name in MAIN_REPORT_JOBS:
+        report = jobs.get(name)
+        require(isinstance(report, dict), f"missing main report job {name!r}")
+        require(report.get("needs") == ["standard-gate", "cargo-crap"],
+                f"{name} must wait for standard-gate and cargo-crap")
+        require(
+            report.get("if") == "${{ github.event_name != 'pull_request' && "
+            "needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}",
+            f"{name} must run only after successful standard checks and cargo-crap",
+        )
 
     for name, needs in STAGED_MAIN_JOBS.items():
         check_staged_main_job(jobs, name, needs)

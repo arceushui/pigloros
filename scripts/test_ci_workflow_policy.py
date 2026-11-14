@@ -441,6 +441,7 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 
 STANDARD_STAGE_RUNNER_CAP = 8
 LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-crap"})
+CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
 # Heavy jobs released by core-gate. Browser parity follows WASM packaging on
 # the same budget. cargo-crap starts beside them but compiles nothing (pinned
 # binary, cargo metadata and LCOV parsing in a 10-minute budget), and
@@ -475,8 +476,8 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     crap = jobs.get("cargo-crap", {})
     if "strategy" in crap or crap.get("timeout-minutes") != 10 or "core-gate" not in job_needs(crap):
         raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
-    if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != ["standard-gate"]:
-        raise AssertionError("only standard-gate may wait for cargo-crap")
+    if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
+        raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
     if started != STANDARD_STAGE_JOBS:
         raise AssertionError("standard stage must start exactly the counted jobs")
     if len(started) > STANDARD_STAGE_RUNNER_CAP:
@@ -490,11 +491,11 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
 
 
-# cargo-crap consumes the native LCOV; standard-gate requires cargo-crap, and
-# mutation and the ASan shards follow standard-gate. Nothing else may wait.
+# cargo-crap consumes the native LCOV and ci-gate requires both results. The
+# main-only reports keep requiring cargo-crap. Mutation, ASan and every
+# standard-stage job never wait for the lane.
 OWNER_WINDOWS_DOWNSTREAM = sorted((
-    "cargo-crap", "standard-gate", "mutation-checks", "mutation-required",
-    "asan", "asan-gate", "ci-gate", "modules-structure", "depgraph",
+    "cargo-crap", "ci-gate", "modules-structure", "depgraph",
 ))
 
 
@@ -1223,7 +1224,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w["jobs"]["standard-gate"]["needs"].append("owner-bridge-windows"),
             lambda w: w["jobs"]["rustdoc"]["needs"].append("cargo-crap"),
             lambda w: w["jobs"]["codeql"].update(needs=["ci_change_scope", "cargo-crap"]),
-            lambda w: w["jobs"]["asan-build"]["needs"].append("standard-gate"),
+            lambda w: w["jobs"]["asan-build"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["standard-gate"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["mutation-checks"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["asan"]["needs"].append("cargo-crap"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_SCOPE="false"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0].update(run="true"),
@@ -1271,6 +1275,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     self.assertEqual(
                         self.run_ci_gate(EVENT_NAME=event, RUST_SCOPE_RESULT=rust,
                                          OWNER_WINDOWS_SCOPE=owner, MUTATION_RESULT=mutation,
+                                         CARGO_CRAP_RESULT="skipped" if rust == "false" else "success",
                                          OWNER_WINDOWS_RESULT=result),
                         result == expected,
                     )
@@ -1787,7 +1792,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "wait for every standard-stage job": lambda w: w["jobs"]["standard-gate"][
                 "needs"
             ].remove("asan-build"),
-            "only standard-gate may wait for cargo-crap": lambda w: w["jobs"]["audit"][
+            "only ci-gate and the main-only reports may wait for cargo-crap": lambda w: w["jobs"]["audit"][
                 "needs"
             ].append("cargo-crap"),
             "one lightweight runner released by core-gate": lambda w: w["jobs"]["cargo-crap"].update(
@@ -1923,7 +1928,6 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
  'if': '${{ always() }}',
  'needs': ['ci_change_scope',
            'core-gate',
-           'cargo-crap',
            'rustdoc',
            'reference-evaluator-release',
            'materialize-conformance-bundles',
@@ -1940,7 +1944,6 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
  'steps': [{'name': 'Require normal blocking checks',
             'env': {'RUST_SCOPE': '${{ needs.ci_change_scope.outputs.rust }}',
                     'CORE_RESULT': '${{ needs.core-gate.result }}',
-                    'CARGO_CRAP_RESULT': '${{ needs.cargo-crap.result }}',
                     'RUSTDOC_RESULT': '${{ needs.rustdoc.result }}',
                     'REFERENCE_RESULT': '${{ needs.reference-evaluator-release.result '
                                         '}}',
@@ -1963,8 +1966,7 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
                    '  expected=skipped\n'
                    'fi\n'
                    'for result in \\\n'
-                   '  "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" '
-                   '\\\n'
+                   '  "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \\\n'
                    '  "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \\\n'
                    '  "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \\\n'
                    '  "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}" \\\n'
