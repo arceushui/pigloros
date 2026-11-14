@@ -94,6 +94,15 @@ fn temporary_database() -> Result<(tempfile::TempDir, String), Box<dyn std::erro
     Ok((directory, path))
 }
 
+fn binding_epoch(host: &mut ErasureExecutionHostV1) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(host
+        .gateway_mode_binding()
+        .load_mode_binding()?
+        .ok_or("the store has no binding")?
+        .binding_epoch()
+        .get())
+}
+
 fn reference(id: &str, byte: u8) -> GatewayModeProfileRefV1 {
     GatewayModeProfileRefV1::try_new(id, [byte; 32])
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
@@ -265,7 +274,7 @@ fn encoded(items: Vec<Value>) -> Vec<u8> {
 fn the_decoder_accepts_only_exact_canonical_records() {
     let local = compiled_bytes(GatewayModeProfileIdV1::Local);
     assert!(decode_gmp1(local).is_some());
-    assert!(decode_gmp1(&[0; GMP1_MAX_BYTES + 1]).is_none());
+    assert!(decode_gmp1(&[0; 4_097]).is_none());
     assert!(decode_gmp1(&[0xff]).is_none());
     assert!(decode_gmp1(&[0x01]).is_none());
     let mut trailing = local.to_vec();
@@ -486,16 +495,17 @@ fn a_one_hop_rotation_advances_the_epoch() -> TestResult {
 fn the_first_serve_binds_an_empty_store_and_a_restart_attaches() -> TestResult {
     let (_directory, path) = temporary_database()?;
     let mut first = sqlite_host(&path)?;
-    let bound = bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut first)?;
-    assert_eq!(bound.binding_epoch.get(), 1);
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut first)?;
+    assert_eq!(binding_epoch(&mut first)?, 1);
     drop(first);
     let mut restarted = sqlite_host(&path)?;
-    let attached =
-        bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut restarted)?;
-    assert_eq!(attached.binding_epoch.get(), 1);
-    assert!(attached
-        .disclosure()
-        .contains("gateway-mode-local-v1 (26d6c7e7"));
+    bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, &loopback(), &mut restarted)?;
+    let current = restarted
+        .gateway_mode_binding()
+        .load_mode_binding()?
+        .ok_or("the store has no binding")?;
+    assert_eq!(current.binding_epoch().get(), 1);
+    assert_eq!(hex(&current.profile().profile_digest()), LOCAL_DIGEST_HEX);
     drop(restarted);
     let mut switched = sqlite_host(&path)?;
     assert_eq!(
@@ -566,16 +576,12 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     assert!(refused.is_err());
     drop(serving);
     let mut reopened = sqlite_host(&path)?;
-    assert_eq!(
-        bind_gateway_mode_v1(
-            GatewayModeProfileIdV1::AirGapped,
-            &loopback(),
-            &mut reopened
-        )?
-        .binding_epoch
-        .get(),
-        2
-    );
+    bind_gateway_mode_v1(
+        GatewayModeProfileIdV1::AirGapped,
+        &loopback(),
+        &mut reopened,
+    )?;
+    assert_eq!(binding_epoch(&mut reopened)?, 2);
     assert_eq!(reopened.command_sender()?.logical_head(timeline)?, head);
     Ok(())
 }

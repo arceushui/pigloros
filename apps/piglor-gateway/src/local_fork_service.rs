@@ -40,8 +40,8 @@ use crate::{
     },
     router_for_addr,
     startup::{
-        announce_listening, announce_mode_binding, bound_router, open_recovered_erasure_host,
-        shutdown_or_stale, stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
+        announce_listening, bound_router, open_recovered_erasure_host, shutdown_or_stale,
+        stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
     },
     AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
@@ -425,7 +425,6 @@ async fn serve_started(
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
     announce_listening(addr);
-    announce_mode_binding(mode);
     let serve_result = axum::serve(tcp, app)
         .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
         .await;
