@@ -5950,6 +5950,31 @@ mod tests {
         ) -> Result<PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
             pos_core::AuthorityPersistencePortV1::load_authority(&self.inner, leaf_grant_id)
         }
+
+        fn record_authorization_denial(
+            &mut self,
+            permit: pos_core::AuthorizationDenialPermitV1,
+        ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+            pos_core::AuthorityPersistencePortV1::record_authorization_denial(
+                &mut self.inner,
+                permit,
+            )
+        }
+
+        fn load_authorization_denials(
+            &self,
+            from: u64,
+            limit: usize,
+        ) -> Result<
+            Vec<(u64, pos_core::AuthorizationDenialEvidenceV1)>,
+            pos_core::AuthorityPersistenceErrorV1,
+        > {
+            pos_core::AuthorityPersistencePortV1::load_authorization_denials(
+                &self.inner,
+                from,
+                limit,
+            )
+        }
     }
 
     impl pos_core::EventStore for FaultStoreV1 {

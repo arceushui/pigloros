@@ -1,0 +1,19 @@
+{
+  "name": "unavailable-revocation-state-events",
+  "operation_id": "listEvents",
+  "request": {},
+  "request_valid": true,
+  "response": {
+    "status": 503,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:temporarily-unavailable",
+      "title": "Temporarily unavailable",
+      "status": 503,
+      "detail": "revocation state unavailable",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "temporarily-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": true
+    }
+  }
+}
