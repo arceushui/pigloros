@@ -163,7 +163,7 @@ mod lifecycle_coverage_tests {
             ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
             ErasureHostErrorV1::AuthorizationDenied
             | ErasureHostErrorV1::Conflict
-            | ErasureHostErrorV1::AdapterFailure => host_command_rejected(),
+            | ErasureHostErrorV1::AdapterFailure => crate::executor::host_command_rejected(),
             ErasureHostErrorV1::ModeBindingStale => CoreError::ModeBindingStale,
         }
     }

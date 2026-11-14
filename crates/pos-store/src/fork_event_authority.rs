@@ -132,7 +132,7 @@ impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
         CLASSIFIED_AUTHORITY_ERRORS
             .get(error as usize)
             .copied()
-            .unwrap_or(ClassifiedCounterfactualErrorV1::Provenance(
+            .unwrap_or(Self::Provenance(
                 ClassifiedProvenanceErrorV1::CorruptAuthority,
             ))
     }
