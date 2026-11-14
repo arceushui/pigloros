@@ -836,7 +836,8 @@ impl GatewayModeStoreLockV1 {
 /// The lock file of the store at `sqlite_path`:
 /// `<canonical store path>.gateway-mode.lock`. The store path is resolved
 /// through every symlink (its parent directory when the file does not exist
-/// yet), so every alias of one store names the same lock.
+/// yet), so every alias of one store names the same lock. A directory is no
+/// store and has no lock.
 fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
     let path = Path::new(".").join(sqlite_path);
     path.canonicalize()
@@ -847,6 +848,7 @@ fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
                 .zip(path.file_name())
                 .map(|(directory, name)| directory.join(name))
         })
+        .filter(|store| !store.is_dir())
         .and_then(|store| {
             store.file_name().map(|name| {
                 let mut lock = name.to_os_string();
