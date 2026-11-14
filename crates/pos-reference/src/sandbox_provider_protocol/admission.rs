@@ -1527,7 +1527,7 @@ const fn attempt_limit(limit_id: u8, attempt: &CaseAttempt) -> u64 {
     }
 }
 
-fn effective_limits_digest(
+pub(super) fn effective_limits_digest(
     limits: &[SandboxLimit],
     broker_caps_digest: [u8; 32],
     apt1_digest: [u8; 32],

@@ -7,8 +7,8 @@ use pos_reference::sandbox_provider_protocol::{
 };
 
 use super::oracle::{
-    bounds_raw_size, checks_envelope, encode, filled, integer, rejects_every_retyped_node, seal,
-    text, unhex, with, TestResult,
+    bounds_raw_size, checks_envelope, encode, filled, integer, rejects_every_retyped_node,
+    rejects_malformed_encodings, seal, text, unhex, with, TestResult,
 };
 use super::vectors::{RQE1_A, RQE1_A_DIGEST, RQE1_B, RQE1_B_DIGEST};
 
@@ -248,6 +248,7 @@ fn rqe1_every_value_code_round_trips() -> TestResult {
 #[test]
 fn rqe1_rule_1_envelope_size_and_types() -> TestResult {
     checks_envelope(&unhex(RQE1_A)?, decode)?;
+    rejects_malformed_encodings(&unhex(RQE1_A)?, decode)?;
     bounds_raw_size(1024 * 1024, decode);
     rejects_every_retyped_node(&unhex(RQE1_A)?, decode)?;
     rejects_every_retyped_node(&every_code_record()?, decode)?;
@@ -528,5 +529,75 @@ fn rqe1_encoder_applies_the_decoder_rules() -> TestResult {
     )]);
     let decoded = RequestedConfigurationEvidence::new(&descriptors)?;
     assert_eq!(decoded.fields(), &descriptors);
+    Ok(())
+}
+
+#[test]
+fn rqe1_rule_3_requested_codes_follow_the_table() -> TestResult {
+    let flagged = || Value::Array(vec![Value::Bool(true), Value::Array(Vec::new())]);
+    let empty = || Value::Array(Vec::new());
+    for (name, code, payload) in [
+        ("RootDirectory", 1, text("/run/root")),
+        ("SystemCallFilter", 5, flagged()),
+        ("RestrictAddressFamilies", 5, flagged()),
+        ("BindReadOnlyPaths", 6, empty()),
+        ("MemoryMax", 2, integer(1)),
+        ("MemorySwapMax", 2, integer(1)),
+        ("TasksMax", 2, integer(1)),
+        ("CPUQuotaPerSecUSec", 2, integer(1)),
+        ("RuntimeMaxUSec", 2, integer(1)),
+        ("LimitNOFILE", 2, integer(1)),
+        ("LimitFSIZE", 2, integer(1)),
+        ("FileDescriptorStoreMax", 3, integer(1)),
+        ("TemporaryFileSystem", 7, empty()),
+        ("ExecStart", 8, empty()),
+        ("ExtraFileDescriptors", 9, empty()),
+    ] {
+        assert_eq!(
+            decode(&requested_only(vec![entry(name, dbus(code, payload))])?),
+            Ok(()),
+            "{name}"
+        );
+        // Every fixed name rejects a value of another code.
+        let wrong = if code == 2 {
+            dbus(3, integer(1))
+        } else {
+            dbus(2, integer(1))
+        };
+        assert_eq!(
+            decode(&requested_only(vec![entry(name, wrong)])?),
+            Err(ProtocolError::InconsistentFields),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        decode(&requested_only(vec![entry(
+            "RootImagePolicy",
+            dbus(1, text("x"))
+        )])?),
+        Err(ProtocolError::InconsistentFields)
+    );
+    // A static hardening property keeps its own signature.
+    assert_eq!(
+        decode(&requested_only(vec![entry("Type", dbus(1, text("exec")))])?),
+        Ok(())
+    );
+    for status in [0, 2] {
+        let (mut requested, mut readback) = every_code()?;
+        for list in [&mut requested, &mut readback] {
+            for property in list.iter_mut() {
+                if let Value::Array(parts) = property {
+                    if parts[0] == text("MemoryMax") {
+                        parts[1] = dbus(3, integer(1024));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            decode(&record(status, Some(requested), Some(readback))?),
+            Err(ProtocolError::InconsistentFields),
+            "status {status}"
+        );
+    }
     Ok(())
 }

@@ -9,8 +9,8 @@ use pos_reference::sandbox_provider_protocol::{
 };
 
 use super::oracle::{
-    bounds_raw_size, checks_envelope, encode, filled, integer, rejects_every_retyped_node, unhex,
-    unsigned, with, TestResult,
+    bounds_raw_size, checks_envelope, encode, filled, integer, rejects_every_retyped_node,
+    rejects_malformed_encodings, unhex, unsigned, with, TestResult,
 };
 use super::vectors::{
     KOE1_A, KOE1_A_DIGEST, KOE1_B, KOE1_B_DIGEST, RQE1_A_DIGEST, RQE1_B_DIGEST,
@@ -157,6 +157,7 @@ fn koe1_digest_is_the_sau1_event_11_observed_state_digest() -> TestResult {
 fn koe1_rule_1_envelope_size_types_and_devices() -> TestResult {
     let vector = unhex(KOE1_A)?;
     checks_envelope(&vector, decode)?;
+    rejects_malformed_encodings(&vector, decode)?;
     bounds_raw_size(4096, decode);
     rejects_every_retyped_node(&vector, decode)?;
     rejects_every_retyped_node(&unhex(KOE1_B)?, decode)?;

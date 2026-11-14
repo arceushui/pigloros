@@ -25,7 +25,7 @@ const MAX_MINOR: u32 = 1_048_575;
 const MAX_PID: u32 = 4_194_304;
 
 /// A kernel device number as `[major, minor]`, never a raw `st_dev`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceNumber {
     /// The major number, `0..=4095`.
     pub major: u32,
@@ -80,7 +80,7 @@ fn device_inode_value(device: DeviceNumber, inode: u64) -> Value {
 }
 
 /// One namespace: its nsfs device and inode.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamespaceIdentity {
     /// The nsfs device's major number.
     pub major: u32,
@@ -111,7 +111,7 @@ impl NamespaceIdentity {
 }
 
 /// One block device generation: its device number and disk sequence.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockIdentity {
     /// The device number.
     pub device: DeviceNumber,
@@ -134,7 +134,7 @@ impl BlockIdentity {
 }
 
 /// The attached root mount: its mount ID and device.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RootMount {
     /// The mount ID.
     pub mount_id: u64,

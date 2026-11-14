@@ -1870,6 +1870,7 @@ fn write_authenticated_execution(
     spx1: &[u8],
     execution: &mut AuthenticatedProviderExecution,
 ) -> Result<(), ()> {
+    let negative_probe = execution.negative_probe_evidence();
     let staged = execution.with_verified_reply_output(
         |result, grant, receipt, audit_records, descriptor, reader| {
             encode_authenticated_reply(
@@ -1882,6 +1883,7 @@ fn write_authenticated_execution(
                         receipt: Some(receipt),
                         audit_records,
                         output: Some(descriptor),
+                        negative_probe,
                     },
                 },
             )
@@ -1903,6 +1905,7 @@ fn write_authenticated_execution(
                     receipt: Some(execution.spr1_bytes()),
                     audit_records: execution.sau1_frames(),
                     output: None,
+                    negative_probe,
                 },
             },
         )
