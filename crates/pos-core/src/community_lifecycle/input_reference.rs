@@ -37,7 +37,7 @@ pub struct CommunityNativeNodeReferenceV1 {
 }
 
 impl CommunityNativeNodeReferenceV1 {
-    fn validate(self) -> Result<()> {
+    pub(super) fn validate(self) -> Result<()> {
         if self.store_incarnation == [0; 16]
             || self.producer_ordinal == 0
             || self.node_digest == Hash::zero()
