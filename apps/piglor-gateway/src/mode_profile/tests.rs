@@ -6,6 +6,7 @@ use pos_core::{GatewayModeBindingKindV1, GatewayModeBindingPortV1 as _};
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroU64;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
