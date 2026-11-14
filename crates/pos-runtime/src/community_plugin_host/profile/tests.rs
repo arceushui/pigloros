@@ -65,10 +65,10 @@ fn the_constant_runtime_passes_the_validating_constructor() -> TestResult {
     )
     .map_err(|error| format!("{error:?}"))?;
     assert_eq!(constant, rebuilt, "the constant violates its own table");
-    assert_eq!(constant.wasmtime_version(), "49.0.5");
+    assert_eq!(constant.wasmtime_version(), "50.0.1");
     assert_eq!(constant.resolved_features().len(), 6);
     assert_eq!(constant.engine().max_wasm_stack, 524_288);
-    assert_eq!(constant.trap_table().len(), 50, "one row per trap code");
+    assert_eq!(constant.trap_table().len(), 54, "one row per trap code");
     Ok(())
 }
 
