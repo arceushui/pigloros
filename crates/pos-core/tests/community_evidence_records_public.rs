@@ -202,7 +202,8 @@ fn scope_binding_matches_independent_wire_and_scope_cover_digest() -> TestResult
 #[test]
 fn scope_binding_admits_empty_rows_and_compares_rows_by_value() -> TestResult {
     let record = Binding::new(binding_input(&[], &[]))?;
-    let decoded = Binding::from_canonical_cbor(&record.to_canonical_cbor())?;
+    let encoded = record.to_canonical_cbor();
+    let decoded = Binding::from_canonical_cbor(&encoded)?;
     assert!(decoded.as_input().coverage_rows.is_empty());
     assert!(decoded.as_input().scope_members.is_empty());
     let rows = coverage();
@@ -552,7 +553,8 @@ fn provenance_matches_independent_wire_and_owner_provenance_digest() -> TestResu
         assert!(decoded.as_input() == record.as_input());
     }
     let empty = Provenance::new(provenance_input(&[]))?;
-    let decoded = Provenance::from_canonical_cbor(&empty.to_canonical_cbor())?;
+    let encoded = empty.to_canonical_cbor();
+    let decoded = Provenance::from_canonical_cbor(&encoded)?;
     assert!(decoded.as_input().source_root_refs.is_empty());
     Ok(())
 }
