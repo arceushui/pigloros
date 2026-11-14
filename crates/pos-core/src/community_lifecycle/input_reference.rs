@@ -586,6 +586,7 @@ impl<'a> CommunityTypedInputRefsV1<'a> {
             + match self.0 {
                 RefRows::Typed(rows) => rows
                     .iter()
+                    .copied()
                     .map(CommunityTypedInputRefV1::encoded_len)
                     .sum::<usize>(),
                 RefRows::Canonical { bytes, .. } => bytes.len(),
