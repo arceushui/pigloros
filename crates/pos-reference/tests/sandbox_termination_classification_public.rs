@@ -317,7 +317,7 @@ const fn counter_values(counters: &CgroupCounters) -> [u64; 6] {
 }
 
 /// Missing evidence (R9 O6) and §4.6.3's required fields.
-fn oracle_missing(facts: &TerminationFacts) -> bool {
+const fn oracle_missing(facts: &TerminationFacts) -> bool {
     let progress = facts.progress as u8;
     let snapshots = facts.baseline.is_some() && facts.terminal.is_some();
     (facts.unit.is_some() && !snapshots)
@@ -530,17 +530,17 @@ fn dimension<T: Copy + 'static>(values: &[T], set: fn(&mut TerminationFacts, T))
 }
 
 fn enumerate(
-    facts: TerminationFacts,
+    facts: &TerminationFacts,
     dimensions: &[Vec<Setter>],
     visit: &mut dyn FnMut(&TerminationFacts),
 ) {
     match dimensions.split_first() {
-        None => visit(&facts),
+        None => visit(facts),
         Some((first, rest)) => {
             for setter in first {
-                let mut next = facts;
+                let mut next = *facts;
                 setter(&mut next);
-                enumerate(next, rest, visit);
+                enumerate(&next, rest, visit);
             }
         }
     }
@@ -548,7 +548,7 @@ fn enumerate(
 
 /// Check every point of the Cartesian product of `dimensions` over `base`.
 /// Returns the number of points and how many reached the fallback.
-fn exhaust(base: TerminationFacts, dimensions: &[Vec<Setter>]) -> (usize, usize) {
+fn exhaust(base: &TerminationFacts, dimensions: &[Vec<Setter>]) -> (usize, usize) {
     let mut points = 0;
     let mut fallbacks = 0;
     enumerate(base, dimensions, &mut |facts| {
@@ -622,7 +622,7 @@ fn with_observation(
 #[test]
 fn every_lifecycle_code_and_status_is_placed_exactly_once() {
     let (points, fallbacks) = exhaust(
-        completed(),
+        &completed(),
         &[
             dimension(&PROGRESS, |facts, value| facts.progress = value),
             dimension(&LAUNCH, |facts, value| facts.launch_failure = value),
@@ -642,7 +642,7 @@ fn every_lifecycle_code_and_status_is_placed_exactly_once() {
 fn every_unit_phase_value_and_watchdog_class_is_placed_exactly_once() {
     let services = services();
     let (points, fallbacks) = exhaust(
-        completed(),
+        &completed(),
         &[
             dimension(&PROGRESS, |facts, value| facts.progress = value),
             dimension(&BOOLS, |facts, present| {
@@ -702,7 +702,7 @@ fn every_identity_disagreement_is_a_contradiction_and_free_space_is_not() {
         Some(BarrierFailure::RecheckObservationUnavailable),
     ];
     let (points, _) = exhaust(
-        completed(),
+        &completed(),
         &[
             dimension(&OBSERVATIONS[..2], |facts, value| facts.observed = value),
             dimension(&BOOLS, |facts, differs| {
@@ -777,14 +777,14 @@ fn every_time_order_and_counter_change_is_placed_exactly_once() {
         ],
         |facts, value| facts.service = value,
     ));
-    let (points, _) = exhaust(completed(), &dimensions);
+    let (points, _) = exhaust(&completed(), &dimensions);
     assert_eq!(points, 3 * 729 * 2 * 2);
 }
 
 #[test]
 fn every_transfer_capture_and_network_class_is_placed_exactly_once() {
     let (points, fallbacks) = exhaust(
-        completed(),
+        &completed(),
         &[
             dimension(&PROGRESS, |facts, value| facts.progress = value),
             dimension(&BOOLS, |facts, value| facts.input_complete = value),
