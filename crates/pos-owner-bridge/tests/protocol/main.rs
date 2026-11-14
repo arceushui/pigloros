@@ -5,6 +5,7 @@ mod channel;
 mod driver_paths;
 mod enrollment;
 mod fakes;
+mod opening;
 mod oracle;
 mod quarantine;
 mod restart_probe;
@@ -539,6 +540,11 @@ enum Hook {
         from: u32,
         to: u32,
     },
+    /// A lifecycle event reaches the surface after the selected host CAS wins.
+    LifecycleAfterCas {
+        event: SurfaceEvent,
+        new: u32,
+    },
     /// This lifecycle event surfaces right after the page starts its `WebAuthn` call.
     LifecycleAfterReceived(SurfaceEvent),
     /// The listener reports a second document completion at this moment.
@@ -589,7 +595,35 @@ impl Wrapped {
         })
     }
 
-    /// A second document completion reaches the listener at its scripted moment.
+    /// Queue one lifecycle event after the selected successful host CAS.
+    fn queue_lifecycle_after_cas(
+        &mut self,
+        buffers: &mut Buffers,
+        now: Duration,
+        op: HostOp,
+        phase: HookPhase,
+    ) {
+        let (
+            Hook::LifecycleAfterCas {
+                event,
+                new: expected,
+            },
+            HostOp::Cas {
+                new,
+                won: Some(true),
+                ..
+            },
+            HookPhase::After,
+        ) = (&self.hook, op, phase)
+        else {
+            return;
+        };
+        if new == *expected && !self.injected {
+            self.injected = true;
+            buffers.schedule(now, *event);
+        }
+    }
+
     fn complete_again(&self, op: HostOp, phase: HookPhase) {
         let Hook::SecondCompletion(moment) = self.hook else {
             return;
@@ -655,6 +689,7 @@ impl PageModel for Wrapped {
     fn on_host_op(&mut self, buffers: &mut Buffers, now: Duration, op: HostOp, phase: HookPhase) {
         self.inner.on_host_op(buffers, now, op, phase);
         self.complete_again(op, phase);
+        self.queue_lifecycle_after_cas(buffers, now, op, phase);
         match (&self.hook, op, phase) {
             (Hook::TearBetweenCopies, HostOp::Copy { pair, count: 1 }, HookPhase::After) => {
                 buffers.set_reply_byte(pair, 80, 0xee);

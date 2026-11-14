@@ -7,10 +7,10 @@
 # an `OR` expression with the first accepted licence in this order.
 #
 # Scope: the non-dev dependency graph of every workspace binary on the
-# deny.toml graph target. Private (unpublished) workspace crates are
+# deny.toml graph targets. Private (unpublished) workspace crates are
 # PiglorOS's own code and are skipped, as in deny.toml.
 
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 ignore-dev-dependencies = true
 private = { ignore = true }
 accepted = [
