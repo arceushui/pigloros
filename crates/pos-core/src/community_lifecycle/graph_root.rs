@@ -18,8 +18,10 @@ use zeroize::Zeroizing;
 /// Maximum canonical CGR1 encoding.
 pub const MAX_COMMUNITY_GRAPH_ROOT_BYTES_V1: usize = 65_536;
 
-/// Most roots that can fit the byte bound: a native reference is at least
-/// 1 + 17 + 1 + 1 + 34 = 54 bytes, and 65,536 / 54 is 1213.
+/// Loose guard on the root count, checked before any root is read. It is
+/// 65,536 divided by the smallest native reference (1 + 17 + 1 + 1 + 34 =
+/// 54 bytes). The 65,536-byte encoded bound remains the real limit: with
+/// the other fields, fewer roots than this always fit.
 const MAX_GRAPH_ROOTS: usize = 1213;
 
 /// Profile 1 graph maxima from `graph_policy_bytes`: registrations, edges,

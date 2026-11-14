@@ -1409,6 +1409,23 @@ fn graph_root_count_is_capped_before_any_root_is_read() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_near_maximal_root_set_is_accepted_and_round_trips() -> TestResult {
+    // Producers 1..=23 with nodes 0..=23 are 54-byte roots and nodes
+    // 24..=51 are 55-byte roots: 552 + 644 = 1196 roots, 65,383 bytes.
+    let roots: Vec<NativeRef> = (1..=23)
+        .flat_map(|producer| (0..=51).map(move |node| native(producer, node, 50)))
+        .collect();
+    assert_eq!(roots.len(), 1196);
+    let root = Root::new(root_input(NativeRefs::from_references(&roots), counts()))?;
+    let bytes = root.to_canonical_cbor();
+    assert_eq!(bytes.len(), 65_383);
+    let decoded = Root::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded.as_input().roots.len(), 1196);
+    assert_eq!(&*decoded.to_canonical_cbor(), &*bytes);
+    Ok(())
+}
+
 fn widest_factual_refs(owner: &str, count: u64) -> Vec<TypedRef<'_>> {
     (0..count)
         .map(|index| TypedRef::Factual {
