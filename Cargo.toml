@@ -36,6 +36,7 @@ members = [
   "apps/pos-gateway-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
+  "apps/piglor-owner",
   "apps/piglor-world-client",
 ]
 resolver = "2"
@@ -82,6 +83,9 @@ httparse = { version = "=1.10.1", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 getrandom = "=0.4.3"
+# ADR-110 Windows shim; non-Windows consumers do not inherit this dependency.
+windows = { version = "=0.62.2", default-features = false, features = ["std"] }
+webview2-com = "=0.39.1"
 # ADR-091/097 subject key wrap and subject ciphertext (ADR-110 §3 pins).
 aes-gcm = { version = "=0.11.1", default-features = false, features = [
   "aes",

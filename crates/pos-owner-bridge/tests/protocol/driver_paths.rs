@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use pos_owner_bridge::ceremony::driver::Step;
 use pos_owner_bridge::ceremony::plan::{Budget, CeremonyPlan, Registration, Verified};
-use pos_owner_bridge::ceremony::timing::SERVED_SETTLE;
+use pos_owner_bridge::ceremony::timing::{EXIT_WINDOW, SERVED_SETTLE};
 use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
 use pos_owner_bridge::fake::honest::{AbortBehavior, CreatePrf, Delivery, HonestConfig, Tamper};
 use pos_owner_bridge::fake::signer::{ReplyShape, FIXTURE_COSE_KEY};
@@ -77,6 +77,11 @@ fn an_honest_create_registers_the_credential_and_cleans_up() -> TestResult {
     assert_eq!(registration.sign_count, 0);
     assert_eq!(*driver.prf(), prf);
     assert!(driver.request_clear());
+    let receipt = driver
+        .first_receipt_at()
+        .ok_or("page receipt was not retained after cleanup")?;
+    assert!(receipt >= driver.t0());
+    assert!(receipt < driver.t0() + pos_owner_bridge::ceremony::timing::READINESS);
     let log = rig.handle.log();
     assert_eq!(rig.handle.pair_count(), 1);
     let opened = log
@@ -933,6 +938,59 @@ fn an_exit_timeout_quarantines_and_a_late_exit_completes_cleanup() -> TestResult
 }
 
 #[test]
+fn a_late_exit_dispatched_on_the_deadline_step_cannot_win_over_expiry() -> TestResult {
+    for delay in [
+        EXIT_WINDOW
+            .checked_sub(Duration::from_nanos(1))
+            .ok_or("exit window is shorter than one nanosecond")?,
+        EXIT_WINDOW,
+        EXIT_WINDOW + Duration::from_nanos(1),
+    ] {
+        let mut rig = DriverRig::new(
+            honest(0),
+            SurfaceConfig {
+                exit_delay: None,
+                ..SurfaceConfig::default()
+            },
+        )?;
+        let mut driver = new_driver(create_plan(&rig.clock));
+        for _ in 0..1_000 {
+            driver.step(&mut rig.env());
+            if controller_closed(&rig) {
+                break;
+            }
+            rig.clock.advance(Duration::from_millis(10));
+        }
+        assert!(controller_closed(&rig));
+        assert_eq!(driver.next_wake(), Some(rig.clock.now() + EXIT_WINDOW));
+        // No intermediate polling: the matching exit and elapsed deadline are
+        // first visible together in one public driver step.
+        rig.handle.schedule(
+            rig.clock.elapsed() + delay,
+            SurfaceEvent::BrowserExited { browser_pid: 4242 },
+        );
+        rig.clock.advance(delay);
+        let result = rig.step_to_end(&mut driver);
+        if delay < EXIT_WINDOW {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                failure(&result)?,
+                BridgeError::Quarantine(QuarantineCode::CleanupTimeout)
+            );
+            // Quarantine wipes the live plan immediately. A successful driver
+            // retains its Zeroizing plan until the driver is consumed/dropped.
+            assert!(driver.plan_secrets_clear());
+            assert_eq!(rig.store.records_now().len(), 1);
+            assert!(driver.poll_cleanup(&mut rig.env()));
+        }
+        assert!(driver.request_clear());
+        assert!(rig.store.records_now().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn unfinished_cleanup_keeps_waiting_until_it_can_finish() -> TestResult {
     use pos_owner_bridge::fake::host::StoreOp;
     let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
@@ -1454,5 +1512,110 @@ fn a_posted_pair_keeps_its_request_payload_after_the_host_zeroes_the_buffer() ->
     let options = decode_create_options(&payload).boxed()?;
     assert_eq!(options.challenge().as_bytes(), &challenge);
     assert_eq!(options.ceremony_id(), CeremonyId::from_bytes(bytes16(0)));
+    Ok(())
+}
+
+#[test]
+fn events_queued_at_the_consuming_cas_fail_and_wipe_before_release() -> TestResult {
+    for event in [
+        SurfaceEvent::RendererFailed,
+        SurfaceEvent::BrowserExited { browser_pid: 4242 },
+    ] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::LifecycleAfterCas { event, new: 3 },
+            SurfaceConfig::default(),
+        )?;
+        let plan = get_plan(&rig.clock, stored_fixture(0)?);
+        let (result, driver) = rig.run(plan);
+        assert_eq!(
+            failure(&result)?,
+            lifecycle(LifecycleCode::RendererFailed),
+            "{event:?}"
+        );
+        assert!(driver.request_clear(), "{event:?}");
+        assert_eq!(*driver.prf(), [0; 32], "{event:?}");
+        assert!(rig
+            .handle
+            .log()
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::HostCopy { state: 3, .. })));
+    }
+    Ok(())
+}
+
+#[test]
+fn events_queued_after_the_release_cas_preserve_a_verified_result() -> TestResult {
+    for event in [
+        SurfaceEvent::RendererFailed,
+        SurfaceEvent::BrowserExited { browser_pid: 4242 },
+    ] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::LifecycleAfterCas { event, new: 4 },
+            SurfaceConfig::default(),
+        )?;
+        let plan = get_plan(&rig.clock, stored_fixture(0)?);
+        let (result, driver) = rig.run(plan);
+        assert!(result.is_ok(), "{event:?}: {result:?}");
+        assert!(driver.request_clear(), "{event:?}");
+        assert_ne!(*driver.prf(), [0; 32], "{event:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn another_browsers_exit_at_consuming_does_not_discard_success() -> TestResult {
+    let event = SurfaceEvent::BrowserExited { browser_pid: 7 };
+    let mut rig = DriverRig::with_hook(
+        honest(0),
+        Hook::LifecycleAfterCas { event, new: 3 },
+        SurfaceConfig::default(),
+    )?;
+    let plan = get_plan(&rig.clock, stored_fixture(0)?);
+    let (result, driver) = rig.run(plan);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(driver.request_clear());
+    assert_ne!(*driver.prf(), [0; 32]);
+    Ok(())
+}
+
+#[test]
+fn consuming_event_at_the_generation_limit_fails_closed() -> TestResult {
+    let mut rig = DriverRig::with_hook(
+        honest(0),
+        Hook::LifecycleAfterCas {
+            event: SurfaceEvent::RendererFailed,
+            new: 3,
+        },
+        SurfaceConfig::default(),
+    )?;
+    let plan = get_plan(&rig.clock, stored_fixture(0)?).with_generation(u32::MAX);
+    let (result, driver) = rig.run(plan);
+    assert_eq!(
+        failure(&result)?,
+        BridgeError::Unavailable(UnavailableCode::GenerationExhausted)
+    );
+    assert!(driver.request_clear());
+    assert_eq!(*driver.prf(), [0; 32]);
+    Ok(())
+}
+
+#[test]
+fn enrollment_budget_does_not_interrupt_consuming_verification() -> TestResult {
+    for delay in [Duration::from_secs(2), Duration::from_secs(3)] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::SlowSecondCopy(delay),
+            SurfaceConfig::default(),
+        )?;
+        let plan = create_plan(&rig.clock)
+            .with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(3)));
+        let (result, driver) = rig.run(plan);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(driver.request_clear());
+        assert!(rig.store.records_now().is_empty());
+        assert!(rig.handle.log().contains(&LogEntry::Finished));
+    }
     Ok(())
 }

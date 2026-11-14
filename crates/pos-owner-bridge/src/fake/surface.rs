@@ -481,20 +481,27 @@ impl FakeSurfaceHandle {
 }
 
 impl OwnerWebSurface for FakeSurface {
-    fn open(&mut self, spec: &SurfaceSpec) -> Result<ProcessIdentity, SurfaceError> {
+    fn open(
+        &mut self,
+        spec: &SurfaceSpec,
+    ) -> std::task::Poll<Result<ProcessIdentity, SurfaceError>> {
         let mut inner = self.inner.borrow_mut();
         inner.tick();
-        Inner::fault(inner.config.faults.open)?;
+        if let Err(error) = Inner::fault(inner.config.faults.open) {
+            return std::task::Poll::Ready(Err(error));
+        }
         inner.folder = Some(spec.folder_name.clone());
         let at = inner.clock.elapsed();
         inner.buffers.log.push(LogEntry::Opened { at });
-        Ok(inner.config.identity)
+        std::task::Poll::Ready(Ok(inner.config.identity))
     }
 
-    fn navigate(&mut self) -> Result<NavigationId, SurfaceError> {
+    fn navigate(&mut self) -> std::task::Poll<Result<NavigationId, SurfaceError>> {
         let mut inner = self.inner.borrow_mut();
         let now = inner.tick();
-        Inner::fault(inner.config.faults.navigate)?;
+        if let Err(error) = Inner::fault(inner.config.faults.navigate) {
+            return std::task::Poll::Ready(Err(error));
+        }
         inner.navigation += 1;
         let id = NavigationId(inner.navigation);
         let loaded = now + inner.config.load_delay;
@@ -508,7 +515,7 @@ impl OwnerWebSurface for FakeSurface {
         inner.loopback.set_served(count, integrity);
         let Inner { page, buffers, .. } = &mut *inner;
         page.on_script_start(buffers, loaded);
-        Ok(id)
+        std::task::Poll::Ready(Ok(id))
     }
 
     fn create_and_write(

@@ -1,0 +1,17 @@
+[package]
+name = "piglor-owner"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Local owner executable entry point (ADR-110)"
+
+[dependencies]
+pos-owner-bridge = { path = "../../crates/pos-owner-bridge" }
+
+[target.'cfg(windows)'.dependencies]
+pos-owner-bridge-windows = { path = "../../crates/pos-owner-bridge-windows" }
+
+[lints]
+workspace = true
