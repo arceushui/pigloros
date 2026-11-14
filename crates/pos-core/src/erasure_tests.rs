@@ -1780,6 +1780,7 @@ fn erasure_host_errors_have_stable_payload_free_codes() {
         ErasureHostErrorV1::AdapterFailure,
         ErasureHostErrorV1::ModeBindingStale,
     ];
+    assert_eq!(errors.len(), ErasureHostErrorV1::COUNT);
     assert_eq!(
         errors.map(ErasureHostErrorV1::code),
         [0_u64, 1, 2, 3, 4, 5, 6]
