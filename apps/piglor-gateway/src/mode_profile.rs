@@ -17,6 +17,8 @@
 //!
 //! ```compile_fail,E0451
 //! let _handle = piglor_gateway::mode_profile::GatewayModeBindingV1 {
+//!     profile: unimplemented!(),
+//!     composition: unimplemented!(),
 //!     stale: Default::default(),
 //! };
 //! ```
