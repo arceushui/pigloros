@@ -188,6 +188,88 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
 
+    def test_native_coverage_download_and_toolchain_pins_cannot_be_substituted(self) -> None:
+        for index, action in (
+            (1, "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de"),
+            (4, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+        ):
+            with self.subTest(step=index):
+                self.assert_rejected(
+                    lambda workflow: workflow["jobs"]["cargo-crap"]["steps"][index].update(
+                        {"uses": action}
+                    )
+                )
+
+    def test_native_coverage_steps_cannot_skip_ignore_or_substitute_evidence(self) -> None:
+        for name in (
+            "Download hosted native LCOV",
+            "Bind native and Linux coverage to this checkout",
+        ):
+            for key, value in (
+                ("if", "${{ false }}"),
+                ("continue-on-error", True),
+                ("run", "echo fabricated coverage"),
+                ("env", {"PYTHONPATH": "/tmp/substituted-program"}),
+                ("with", {"name": "owner-windows-lcov-another-checkout"}),
+            ):
+                with self.subTest(step=name, control=key):
+                    self.assert_rejected(
+                        lambda workflow: self.cargo_crap_step(workflow, name).update(
+                            {key: value}
+                        )
+                    )
+
+    def test_native_coverage_steps_cannot_be_removed_duplicated_or_reordered(self) -> None:
+        for name in (
+            "Download hosted native LCOV",
+            "Bind native and Linux coverage to this checkout",
+        ):
+            def remove(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                steps.remove(self.cargo_crap_step(workflow, name))
+
+            def duplicate(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                steps.append(copy.deepcopy(self.cargo_crap_step(workflow, name)))
+
+            def reorder(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                step = self.cargo_crap_step(workflow, name)
+                steps.remove(step)
+                steps.append(step)
+
+            for mutation in (remove, duplicate, reorder):
+                with self.subTest(step=name, mutation=mutation.__name__):
+                    self.assert_rejected(mutation)
+
+    def test_both_scoring_paths_require_the_joined_coverage(self) -> None:
+        for name in ("Generate trusted current baseline", "Analyze CRAP score changes"):
+            with self.subTest(step=name):
+                def replace_input(workflow: dict) -> None:
+                    step = self.cargo_crap_step(workflow, name)
+                    step["run"] = step["run"].replace(
+                        "/cargo-crap-coverage.lcov", "/coverage.lcov"
+                    )
+
+                self.assert_rejected(replace_input)
+
+    def test_coverage_merger_is_pinned_as_a_complete_program(self) -> None:
+        source = (ROOT / CHECKER.COVERAGE_MERGER).read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "merge_owner_bridge_lcov.py"
+            path.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+            CHECKER.check_workflow(
+                ROOT / ".github/workflows/ci.yml", coverage_merger_path=path
+            )
+            path.write_text(source + "\nraise SystemExit(0)\n", encoding="utf-8")
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_workflow(
+                    ROOT / ".github/workflows/ci.yml", coverage_merger_path=path
+                )
+            path.unlink()
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_coverage_merger(path)
+
     def test_exclusions_are_the_literal_test_owned_allowlist(self) -> None:
         for step_name in (
             "Generate trusted current baseline",
