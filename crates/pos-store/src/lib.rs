@@ -65,6 +65,7 @@ pub mod classified_fork_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+pub mod community;
 pub mod composition_fallback_registry;
 
 // Test-only. The shared composition fallback registry fixtures under `tests/support` serve the
