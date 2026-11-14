@@ -2,6 +2,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -80,13 +81,13 @@ impl TimedRead for TcpStream {
 }
 
 /// One deadline-limited read. `None` is the silent outcome: end of stream
-/// or a failed read.
+/// or a failed read. A receipt is never empty, so the caller always advances.
 fn read_step<S: TimedRead>(
     stream: &mut S,
     room: &mut [u8],
     left: Duration,
     #[cfg(feature = "test-support")] silent: &mut impl FnMut(SilentReason),
-) -> Option<usize> {
+) -> Option<NonZeroUsize> {
     let outcome = stream
         .limit_next_read(left)
         .and_then(|()| stream.read(room));
@@ -106,7 +107,7 @@ fn read_step<S: TimedRead>(
             });
             None
         }
-        Ok(received) => Some(received),
+        Ok(received) => NonZeroUsize::new(received),
     }
 }
 
@@ -150,7 +151,7 @@ pub(super) fn read_request<S: TimedRead>(
         if filled == 0 {
             deadline = observed_at + timeouts.header;
         }
-        filled += received;
+        filled += received.get();
         if buffer.get(..filled).is_some_and(header_end) {
             return ReadOutcome::Complete(filled);
         }
