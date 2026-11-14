@@ -657,7 +657,6 @@ mod native_tests {
         use std::io::Read as _;
 
         let mut held = pass(File::open(path));
-        let old_identity = pass(crate::Native::file_identity(&held));
         let before = pass(ledger.read_nonce_ledger_bytes());
         let candidate = b"candidate while old file is held";
         let result = ledger.replace_nonce_ledger_bytes(candidate);
@@ -665,28 +664,20 @@ mod native_tests {
         pass(held.read_to_end(&mut old_bytes));
         assert_eq!(old_bytes, before);
         assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
-        if result.is_ok() {
-            let new_file = pass(File::open(path));
-            let new_identity = pass(crate::Native::file_identity(&new_file));
-            assert_ne!(old_identity, new_identity);
-            assert_eq!(pass(ledger.read_nonce_ledger_bytes()), candidate);
-            drop(new_file);
-            drop(held);
-            pass(ledger.replace_nonce_ledger_bytes(&before));
-        } else {
-            assert_eq!(result, Err(unavailable()));
-            assert_eq!(pass(ledger.read_nonce_ledger_bytes()), before);
-            let temporary = base.join("PiglorOS").join(TEMPORARY);
-            assert_eq!(pass(fs::read(&temporary)), candidate);
-            drop(held);
-            let recovered = pass(guard.open_nonce_ledger());
-            assert!(!temporary.exists());
-            assert_eq!(pass(recovered.read_nonce_ledger_bytes()), before);
-            let later = b"later independent raw commit";
-            pass(recovered.replace_nonce_ledger_bytes(later));
-            assert_eq!(pass(recovered.read_nonce_ledger_bytes()), later);
-            pass(recovered.replace_nonce_ledger_bytes(&before));
-        }
+        // Windows refuses to replace the ledger while another handle holds
+        // the old image, so the staged candidate must survive for recovery.
+        assert_eq!(result, Err(unavailable()));
+        assert_eq!(pass(ledger.read_nonce_ledger_bytes()), before);
+        let temporary = base.join("PiglorOS").join(TEMPORARY);
+        assert_eq!(pass(fs::read(&temporary)), candidate);
+        drop(held);
+        let recovered = pass(guard.open_nonce_ledger());
+        assert!(!temporary.exists());
+        assert_eq!(pass(recovered.read_nonce_ledger_bytes()), before);
+        let later = b"later independent raw commit";
+        pass(recovered.replace_nonce_ledger_bytes(later));
+        assert_eq!(pass(recovered.read_nonce_ledger_bytes()), later);
+        pass(recovered.replace_nonce_ledger_bytes(&before));
     }
 
     fn raw_untrusted_values(ledger: &WindowsNonceLedger<'_>) {
@@ -797,10 +788,8 @@ mod native_tests {
                 loop {
                     let read = fs::read(&marker);
                     assert!(
-                        matches!(
-                            read.as_ref().err().map(io::Error::kind),
-                            None | Some(io::ErrorKind::NotFound)
-                        ),
+                        [None, Some(io::ErrorKind::NotFound)]
+                            .contains(&read.as_ref().err().map(io::Error::kind)),
                         "storage probe marker could not be read"
                     );
                     let observed = read.unwrap_or_default();
