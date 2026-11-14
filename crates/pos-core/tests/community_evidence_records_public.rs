@@ -88,12 +88,23 @@ fn noncanonical(valid: &[u8]) -> [Vec<u8>; 5] {
     [wide_version, indefinite, short, trailing, truncated]
 }
 
-fn operation_value(operation: Operation) -> [Value; 2] {
-    match operation {
-        Operation::Pass(key) => [uint(0), bytes(&key.to_canonical_cbor())],
+/// `[kind, identity]`; a pass identity is the nested CPK1
+/// `[magic, 1, T, G, ordinal]`, built independently here.
+fn operation_value(operation: Operation) -> Fallible<[Value; 2]> {
+    Ok(match operation {
+        Operation::Pass(key) => [
+            uint(0),
+            bytes(&encode(&Value::Array(vec![
+                bytes(b"CPK1"),
+                uint(1),
+                bytes(&key.timeline().inner().to_bytes()),
+                bytes(&key.generation()),
+                uint(key.ordinal()),
+            ]))?),
+        ],
         Operation::Initialization(id) => [uint(1), bytes(&id)],
         Operation::Control(id) => [uint(2), bytes(&id)],
-    }
+    })
 }
 
 // ---------------------------------------------------------------- CSB1
@@ -147,9 +158,9 @@ const fn binding_input<'a>(rows: &'a [Coverage], scope: &'a [Member]) -> Binding
         evidence_not_after_micros: HORIZON,
     }
 }
-fn binding_value(input: &BindingInput<'_>, rows: &[Coverage], scope: &[Member]) -> Value {
-    let [kind, identity] = operation_value(input.operation);
-    Value::Array(vec![
+fn binding_value(input: &BindingInput<'_>, rows: &[Coverage], scope: &[Member]) -> Fallible<Value> {
+    let [kind, identity] = operation_value(input.operation)?;
+    Ok(Value::Array(vec![
         bytes(b"CSB1"),
         uint(1),
         bytes(&input.store_incarnation),
@@ -163,7 +174,7 @@ fn binding_value(input: &BindingInput<'_>, rows: &[Coverage], scope: &[Member]) 
         Value::Array(vec![text("pos.community.actual-input-scope"), uint(1)]),
         bytes(input.policy_revision.as_bytes()),
         uint(input.evidence_not_after_micros),
-    ])
+    ]))
 }
 
 #[test]
@@ -182,7 +193,7 @@ fn scope_binding_matches_independent_wire_and_scope_cover_digest() -> TestResult
         };
         let record = Binding::new(input)?;
         let encoded = record.to_canonical_cbor();
-        let expected = encode(&binding_value(&input, &rows, &scope))?;
+        let expected = encode(&binding_value(&input, &rows, &scope)?)?;
         assert_eq!(encoded.as_slice(), expected.as_slice());
         assert_eq!(record.digest(), domain_digest("ScopeCover", &expected));
         let decoded = Binding::from_canonical_cbor(&encoded)?;
@@ -315,9 +326,9 @@ fn decoders_refuse_an_over_maximum_count_before_reading_rows() -> TestResult {
         .position(|window| window == [0x80, 0x80, 0x82])
         .ok_or("empty row arrays")?;
     let mut rows = empty.to_vec();
-    rows.splice(position..=position, [0x19, 0x10, 0x01]);
+    rows.splice(position..=position, [0x99, 0x10, 0x01]);
     let mut members = empty.to_vec();
-    members.splice(position + 1..=position + 1, [0x19, 0x08, 0x01]);
+    members.splice(position + 1..=position + 1, [0x99, 0x08, 0x01]);
     for patched in [rows, members] {
         assert_eq!(
             Binding::from_canonical_cbor(&patched).map(drop),
@@ -388,7 +399,7 @@ fn scope_binding_at_both_maxima_fits_and_one_more_is_refused() -> TestResult {
         Err(Error::BoundsExceeded)
     );
 
-    let mut value = binding_value(&binding_input(&over_rows, &[]), &over_rows, &[]);
+    let mut value = binding_value(&binding_input(&over_rows, &[]), &over_rows, &[])?;
     let encoded = encode(&value)?;
     assert_eq!(
         Binding::from_canonical_cbor(&encoded).map(drop),
@@ -408,7 +419,7 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
     let rows = coverage();
     let scope = members();
     let input = binding_input(&rows, &scope);
-    let valid = binding_value(&input, &rows, &scope);
+    let valid = binding_value(&input, &rows, &scope)?;
     let rules = [
         Value::Array(vec![text("pos.community.actual-input-scopf"), uint(1)]),
         Value::Array(vec![text("pos.community.actual-input-scope"), uint(2)]),
@@ -422,6 +433,32 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
             Err(Error::InvalidBinding)
         );
     }
+    // Non-preferred rule heads are encoding errors, not a foreign rule: a
+    // widened array head, a widened text head and a widened version.
+    let encoded = Binding::new(input)?.to_canonical_cbor();
+    let rule = encoded
+        .windows(3)
+        .position(|window| window == [0x82, 0x78, 0x20])
+        .ok_or("rule head")?;
+    let version = rule + 3 + 32;
+    for (range, widened) in [
+        (rule..=rule, vec![0x98, 0x02]),
+        (rule + 1..=rule + 2, vec![0x79, 0x00, 0x20]),
+        (version..=version, vec![0x18, 0x01]),
+    ] {
+        let mut patched = encoded.to_vec();
+        patched.splice(range, widened);
+        assert_eq!(
+            Binding::from_canonical_cbor(&patched).map(drop),
+            Err(Error::InvalidEncoding)
+        );
+    }
+    let mut long_rule = valid.clone();
+    fields(&mut long_rule)?[10] = Value::Array(vec![text(&"r".repeat(129)), uint(1)]);
+    assert_eq!(
+        Binding::from_canonical_cbor(&encode(&long_rule)?).map(drop),
+        Err(Error::BoundsExceeded)
+    );
     let mut bad_row = valid.clone();
     fields(&mut bad_row)?[8] = Value::Array(vec![Value::Array(vec![bytes(&[40; 32])])]);
     let mut bad_operation = valid.clone();
@@ -512,9 +549,9 @@ const fn provenance_input<'a>(refs: &'a [TypedRef<'a>]) -> ProvenanceInput<'a> {
         evidence_not_after_micros: HORIZON,
     }
 }
-fn provenance_value(input: &ProvenanceInput<'_>, refs: Vec<Value>) -> Value {
-    let [kind, identity] = operation_value(input.operation);
-    Value::Array(vec![
+fn provenance_value(input: &ProvenanceInput<'_>, refs: Vec<Value>) -> Fallible<Value> {
+    let [kind, identity] = operation_value(input.operation)?;
+    Ok(Value::Array(vec![
         bytes(b"CPV1"),
         uint(1),
         bytes(&input.store_incarnation),
@@ -528,7 +565,7 @@ fn provenance_value(input: &ProvenanceInput<'_>, refs: Vec<Value>) -> Value {
         bytes(input.rule_bundle_digest.as_bytes()),
         bytes(input.budget_identity.as_bytes()),
         uint(input.evidence_not_after_micros),
-    ])
+    ]))
 }
 
 #[test]
@@ -546,7 +583,7 @@ fn provenance_matches_independent_wire_and_owner_provenance_digest() -> TestResu
         };
         let record = Provenance::new(input)?;
         let encoded = record.to_canonical_cbor();
-        let expected = encode(&provenance_value(&input, sources_values()))?;
+        let expected = encode(&provenance_value(&input, sources_values())?)?;
         assert_eq!(encoded.as_slice(), expected.as_slice());
         assert_eq!(record.digest(), domain_digest("OwnerProvenance", &expected));
         let decoded = Provenance::from_canonical_cbor(&encoded)?;
@@ -669,7 +706,7 @@ fn provenance_at_the_source_maximum_fits_and_one_more_is_refused() -> TestResult
     let values = (1..=max + 1)
         .map(|producer| native_value(&native(producer, 0)))
         .collect();
-    let value = provenance_value(&provenance_input(&[]), values);
+    let value = provenance_value(&provenance_input(&[]), values)?;
     assert_eq!(
         Provenance::from_canonical_cbor(&encode(&value)?).map(drop),
         Err(Error::BoundsExceeded)
@@ -680,7 +717,7 @@ fn provenance_at_the_source_maximum_fits_and_one_more_is_refused() -> TestResult
 #[test]
 fn provenance_decoder_refuses_malformed_fields() -> TestResult {
     let refs = sources();
-    let valid = provenance_value(&provenance_input(&refs), sources_values());
+    let valid = provenance_value(&provenance_input(&refs), sources_values())?;
     let mut bad_ref = valid.clone();
     fields(&mut bad_ref)?[9] = Value::Array(vec![Value::Array(vec![uint(9)])]);
     let mut short_identity = valid.clone();
@@ -1046,13 +1083,40 @@ fn every_decoder_refuses_a_widened_inner_integer() -> TestResult {
         Materialization::from_canonical_cbor(&widened).map(drop),
         Err(Error::InvalidEncoding)
     );
-    // Both records end with the horizon 1000, `19 03 e8`; widen it.
+    // The CSB1 coverage-count head and its first row head follow the
+    // input-identity hash (`0x14` bytes); the CPV1 source-count head follows
+    // the scope-binding hash (`0x15` bytes). Widen each.
     let binding = Binding::new(binding_input(&coverage(), &members()))?.to_canonical_cbor();
+    let rows = binding
+        .windows(3)
+        .position(|window| window == [0x14, 0x82, 0x82])
+        .ok_or("coverage heads")?
+        + 1;
+    for head in [rows, rows + 1] {
+        let mut widened = binding.to_vec();
+        widened.splice(head..=head, [0x98, 0x02]);
+        assert_eq!(
+            Binding::from_canonical_cbor(&widened).map(drop),
+            Err(Error::InvalidEncoding)
+        );
+    }
+    let provenance = Provenance::new(provenance_input(&sources()))?.to_canonical_cbor();
+    let sources_head = provenance
+        .windows(3)
+        .position(|window| window == [0x15, 0x82, 0x82])
+        .ok_or("source heads")?
+        + 1;
+    let mut widened = provenance.to_vec();
+    widened.splice(sources_head..=sources_head, [0x98, 0x02]);
+    assert_eq!(
+        Provenance::from_canonical_cbor(&widened).map(drop),
+        Err(Error::InvalidEncoding)
+    );
+    // Both records end with the horizon 1000, `19 03 e8`; widen it.
     assert_eq!(
         Binding::from_canonical_cbor(&widen_final_horizon(&binding)?).map(drop),
         Err(Error::InvalidEncoding)
     );
-    let provenance = Provenance::new(provenance_input(&sources()))?.to_canonical_cbor();
     assert_eq!(
         Provenance::from_canonical_cbor(&widen_final_horizon(&provenance)?).map(drop),
         Err(Error::InvalidEncoding)
@@ -1068,4 +1132,69 @@ fn widen_final_horizon(encoded: &[u8]) -> Fallible<Vec<u8>> {
     let mut widened = encoded[..split].to_vec();
     widened.extend_from_slice(&[0x1a, 0, 0, 0x03, 0xe8]);
     Ok(widened)
+}
+
+const HEAD_WIDTHS: [u64; 5] = [1, 24, 1_000, 70_000, MAX_HORIZON];
+
+fn assert_exact(encoded: &[u8], capacity: usize) {
+    assert_eq!(capacity, encoded.len());
+}
+
+/// The CSB1 and CPV1 encoders size their wiped buffer exactly, for every
+/// operation form, every head width, typed and decoded rows, and both maxima.
+#[test]
+fn encoders_size_their_buffers_exactly() -> TestResult {
+    let pass = PassKey::new(timeline(1), GENERATION, u64::MAX)?;
+    let operations = [
+        Operation::Initialization(OPERATION_ID),
+        Operation::Control([6; 16]),
+        Operation::Pass(pass),
+    ];
+    let refs = sources();
+    for (operation, horizon) in operations.into_iter().zip(HEAD_WIDTHS).chain(
+        HEAD_WIDTHS
+            .into_iter()
+            .map(|horizon| (Operation::Initialization(OPERATION_ID), horizon)),
+    ) {
+        let scope = members().map(|member| Member {
+            not_after_micros: horizon,
+            ..member
+        });
+        let rows = coverage();
+        let binding = Binding::new(BindingInput {
+            operation,
+            evidence_not_after_micros: horizon,
+            ..binding_input(&rows, &scope)
+        })?;
+        let encoded = binding.to_canonical_cbor();
+        assert_exact(&encoded, encoded.capacity());
+        let decoded = Binding::from_canonical_cbor(&encoded)?;
+        let again = decoded.to_canonical_cbor();
+        assert_exact(&again, again.capacity());
+        assert_eq!(again.as_slice(), encoded.as_slice());
+
+        let provenance = Provenance::new(ProvenanceInput {
+            operation,
+            evidence_not_after_micros: horizon,
+            ..provenance_input(&refs)
+        })?;
+        let encoded = provenance.to_canonical_cbor();
+        assert_exact(&encoded, encoded.capacity());
+        let decoded = Provenance::from_canonical_cbor(&encoded)?;
+        let again = decoded.to_canonical_cbor();
+        assert_exact(&again, again.capacity());
+    }
+    let empty = Binding::new(binding_input(&[], &[]))?.to_canonical_cbor();
+    assert_exact(&empty, empty.capacity());
+    let rows = many_coverage(MAX_COMMUNITY_COVERAGE_ROWS_V1 as u64);
+    let scope = many_members(MAX_COMMUNITY_SCOPE_MEMBERS_V1 as u64);
+    let full = Binding::new(binding_input(&rows, &scope))?.to_canonical_cbor();
+    assert_exact(&full, full.capacity());
+    let owner = "o".repeat(128);
+    let widest = widest_factual_refs(&owner, MAX_COMMUNITY_EXPANDED_INPUTS_V1 as u64);
+    let full = Provenance::new(provenance_input(&widest))?.to_canonical_cbor();
+    assert_exact(&full, full.capacity());
+    let none = Provenance::new(provenance_input(&[]))?.to_canonical_cbor();
+    assert_exact(&none, none.capacity());
+    Ok(())
 }

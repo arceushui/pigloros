@@ -7,8 +7,8 @@
 
 use super::member_progress::{encode_factual_node, read_factual_node, valid_factual_node};
 use super::{
-    bounded_bytes, canonical_end, encode_coordinates, fixed_bytes, read_coordinates, read_hash,
-    read_head, validate_coordinates, CommunityFactualNodeReferenceV1,
+    bounded_bytes, canonical_end, encode_coordinates, fixed_bytes, head_len, read_coordinates,
+    read_hash, read_head, validate_coordinates, CommunityFactualNodeReferenceV1,
     CommunityLifecycleErrorV1 as Error, CommunityMetadataSchemaV1, Result,
 };
 use crate::{
@@ -539,6 +539,24 @@ impl<'a> CommunityTypedInputRefsV1<'a> {
                 })
             })
         })
+    }
+
+    /// Exact length of [`Self::encode`]'s array. A typed row is measured by
+    /// encoding it into wiped staging pre-sized above the widest reference
+    /// (a 244-byte factual reference with a 128-byte owner).
+    pub(super) fn encoded_len(self) -> usize {
+        head_len(self.len() as u64)
+            + match self.0 {
+                RefRows::Typed(rows) => rows
+                    .iter()
+                    .map(|reference| {
+                        let mut staging = Zeroizing::new(Vec::with_capacity(256));
+                        reference.encode(&mut staging);
+                        staging.len()
+                    })
+                    .sum::<usize>(),
+                RefRows::Canonical { bytes, .. } => bytes.len(),
+            }
     }
 
     pub(super) fn encode(self, out: &mut Vec<u8>) {
