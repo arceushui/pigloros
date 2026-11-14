@@ -1741,6 +1741,8 @@ fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
     })
 }
 
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
     #[cfg(unix)]
     {
@@ -1770,6 +1772,8 @@ fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
     OWNER_KEY_PLATFORM
 }
 
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     let mode = {
