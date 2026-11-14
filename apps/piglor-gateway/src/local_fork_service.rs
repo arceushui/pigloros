@@ -508,7 +508,15 @@ mod tests {
             store,
             composition,
         )
-        .and_then(|host| open_with_credentials(host, managed, owntracks_owner_key, &test_mode()))
+        .and_then(|host| {
+            let mode = test_mode();
+            open_with_credentials(
+                crate::mode_profile::test_attach_host(host, &mode),
+                managed,
+                owntracks_owner_key,
+                &mode,
+            )
+        })
     }
 
     /// The loopback Fork-admission composition of the managed deployment

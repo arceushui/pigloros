@@ -167,9 +167,11 @@ fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)
             let store = ScratchStore::new();
             store_host(&store)
                 .and_then(|mut host| bind_local_mode(&mut host))
-                .and_then(|mode| provision_store(&store).map(|()| mode))
-                .and_then(|mode| {
-                    store_host(&store).and_then(|host| local_gateway(host, None, &mode).ok())
+                .and_then(|_| provision_store(&store))
+                .and_then(|()| store_host(&store))
+                .and_then(|mut host| {
+                    bind_local_mode(&mut host)
+                        .and_then(|mode| local_gateway(host, None, &mode).ok())
                 })
                 .map(|gateway| (gateway, Some(store)))
         }
@@ -188,8 +190,8 @@ fn store_host(store: &ScratchStore) -> Option<ErasureExecutionHostV1> {
     .ok()
 }
 
-/// Bind the empty store of `host` to the Local execution mode over a loopback composition, as
-/// the first `serve` does.
+/// Bind the store of `host` to the Local execution mode over a loopback composition, as every
+/// `serve` does: the first binds the empty store, a later one attaches to that binding.
 fn bind_local_mode(host: &mut ErasureExecutionHostV1) -> Option<GatewayModeBindingV1> {
     bind_gateway_mode_v1(
         GatewayModeProfileIdV1::Local,

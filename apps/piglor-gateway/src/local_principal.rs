@@ -752,7 +752,11 @@ mod tests {
         let path = sqlite_path(&directory)?;
         let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None, &mode)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         Ok(Served {
             _directory: directory,
             path,
@@ -1548,9 +1552,13 @@ mod tests {
             Some(LocalPrincipalErrorV1::Corrupt)
         );
         drop(store);
-        let error = local_gateway(sqlite_host(&path)?, None, &mode)
-            .err()
-            .ok_or("a conflicting record never serves")?;
+        let error = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )
+        .err()
+        .ok_or("a conflicting record never serves")?;
         assert!(error.to_string().contains("restore the store"));
         Ok(())
     }
@@ -1594,7 +1602,11 @@ mod tests {
                     store,
                     &ErasureCoordinatorCompositionV1::closed(),
                 )?;
-                let gateway = local_gateway(host, owner_key.as_ref(), &mode)?;
+                let gateway = local_gateway(
+                    crate::mode_profile::test_attach_host(host, &mode),
+                    owner_key.as_ref(),
+                    &mode,
+                )?;
                 let authorization = gateway
                     .authorization
                     .clone()
@@ -1621,7 +1633,11 @@ mod tests {
         let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
         record_revocation(&path, &provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None, &mode)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         let app = app_of(gateway.clone());
         let (status, problem) = create(&app, Some(actor()?)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1650,7 +1666,11 @@ mod tests {
 
         // Unprovisioned: protected routes fail closed and nothing is written.
         let mode = bind_local(&path)?;
-        let gateway = local_gateway(open_host()?, None, &mode)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         assert!(gateway.has_authorization());
         gateway.shutdown().await?;
         drop(gateway);
@@ -1658,7 +1678,11 @@ mod tests {
 
         provision_local_principal(&mut SqliteStore::open(&path)?, &served_provision()?)?;
         let recorded = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
-        let gateway = local_gateway(open_host()?, None, &mode)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         let app = router(AppState {
             gateway: gateway.clone(),
             ledger_view: LedgerView::default(),
