@@ -8,7 +8,7 @@
 <body>
 <p id="s">Waiting for your security key.</p>
 <script>
-(function () {
+function ownerProtocol(credentials, nativePort) {
   "use strict";
   var T0 = performance.now();
   var STATE = 10;
@@ -38,7 +38,7 @@
   function release(buf) {
     if (buf === undefined || buf.released) { return; }
     buf.released = true;
-    try { window.chrome.webview.releaseBuffer(buf.ab); } catch (e) { /* already gone */ }
+    try { nativePort().releaseBuffer(buf.ab); } catch (e) { /* already gone */ }
   }
 
   function releaseEntry(entry) { release(entry.request); release(entry.reply); }
@@ -244,7 +244,7 @@
           },
           signal: a.controller.signal
         };
-        call = navigator.credentials.create(options);
+        call = credentials.create(options);
       } else {
         options = {
           publicKey: {
@@ -255,7 +255,7 @@
           },
           signal: a.controller.signal
         };
-        call = navigator.credentials.get(options);
+        call = credentials.get(options);
       }
     } catch (e) { onError(a); return; }
     a.pending = true;
@@ -334,9 +334,9 @@
   }
 
   function waitForWebview() {
-    if (window.chrome && window.chrome.webview) {
+    if (nativePort()) {
       clearInterval(webviewTimer);
-      window.chrome.webview.addEventListener("sharedbufferreceived", onBuffer);
+      nativePort().addEventListener("sharedbufferreceived", onBuffer);
     } else if (performance.now() - T0 > WEBVIEW_LIMIT_MS) {
       clearInterval(webviewTimer);
     }
@@ -346,7 +346,12 @@
   webviewTimer = setInterval(waitForWebview, WEBVIEW_POLL_MS);
   setTimeout(expire, DEADLINE_MS);
   waitForWebview();
-})();
+}
+ownerProtocol({
+  create: function (options) { return navigator.credentials.create(options); },
+  get: function (options) { return navigator.credentials.get(options); }
+}, function () { return window.chrome && window.chrome.webview; });
+
 </script>
 </body>
 </html>
