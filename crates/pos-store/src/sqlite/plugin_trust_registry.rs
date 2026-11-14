@@ -44,6 +44,7 @@ use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_content::ValidatedPluginBundleContentV1;
 use rusqlite::Connection;
 
 use super::plugin_trust_registry_rows::{self as rows, storage_error, RegistryResult};
@@ -246,13 +247,21 @@ impl SqliteStore {
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         let connection = &self.conn;
         schema::require_present(connection)?;
         let scope = input.anchor.scope();
         let transaction = SqliteTransactionV1 { connection };
-        match plan_admit(&transaction, input, projection, release_proof, activation)? {
+        match plan_admit(
+            &transaction,
+            input,
+            projection,
+            release_proof,
+            content_proof,
+            activation,
+        )? {
             AdmitPlanV1::Replay(decision) => rows::raise_utc(connection, scope, input.utc.as_i64())
                 .map(|()| AdmittedPluginReleaseReceiptV1 {
                     decision: *decision,
@@ -277,13 +286,21 @@ impl SqliteStore {
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
+        content_proof: &ValidatedPluginBundleContentV1,
         activation: &ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let connection = &self.conn;
         schema::require_present(connection)?;
         let scope = input.anchor.scope();
         let transaction = SqliteTransactionV1 { connection };
-        match plan_rollback(&transaction, input, target, release_proof, activation)? {
+        match plan_rollback(
+            &transaction,
+            input,
+            target,
+            release_proof,
+            content_proof,
+            activation,
+        )? {
             RollbackPlanV1::Replay(facts) => rows::raise_utc(connection, scope, input.utc.as_i64())
                 .map(|()| PluginRollbackReceiptV1 {
                     facts: *facts,
@@ -406,7 +423,10 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
@@ -418,7 +438,13 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
             tick,
         };
         self.plugin_trust_event_transaction(activation.timeline, &|store: &Self| {
-            store.admit_in_transaction(&input, projection, release_proof, &activation)
+            store.admit_in_transaction(
+                &input,
+                projection,
+                release_proof,
+                content_proof,
+                &activation,
+            )
         })
     }
 
@@ -446,7 +472,10 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (release_proof, content_proof): (
+            &VerifiedPluginReleaseSignatureV1,
+            &ValidatedPluginBundleContentV1,
+        ),
         TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
@@ -458,7 +487,7 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
             tick,
         };
         self.plugin_trust_event_transaction(activation.timeline, &|store: &Self| {
-            store.rollback_in_transaction(&input, target, release_proof, &activation)
+            store.rollback_in_transaction(&input, target, release_proof, content_proof, &activation)
         })
     }
 

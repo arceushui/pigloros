@@ -69,8 +69,8 @@ pub use guest_error::{
     GuestPluginErrorV1, PluginErrorCodeV1,
 };
 pub use host_error::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+    AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    HostFailureClassV1, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 pub use initialization::{
     CommunityInitializationProducerInputV1, CommunityInitializationProducerV1,

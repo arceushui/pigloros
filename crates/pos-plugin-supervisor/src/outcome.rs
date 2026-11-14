@@ -5,7 +5,7 @@
 //! ([`MemberPassV1`](pos_runtime::community_plugin_host::MemberPassV1)) and, when the member's
 //! Driver launched, the invocation receipt of that pass. The record carries no claim about
 //! signature validity: the gate's verdict is the `Refused` result, and `content_validation` is
-//! the fact that the release content was not validated (decision 12).
+//! the content fact issued by the execution gate (ADR-061 R12).
 
 use pos_plugin_release::ContentValidationV1;
 use pos_runtime::community_plugin_host::{
@@ -89,7 +89,7 @@ pub struct CommunityPluginSubjectOutcomeV1 {
     /// The Execution Mode: the receipt's negotiated mode when a receipt exists, else the
     /// caller's.
     pub mode: CommunityPluginModeV1,
-    /// What was checked about the release content: until #574 the constant `NotPerformed`.
+    /// What was checked about the release content at the execution gate.
     pub content_validation: ContentValidationV1,
     /// How the pass ended for the Plugin.
     pub result: CommunityPluginSubjectResultV1,
@@ -129,7 +129,7 @@ impl CommunityPluginSubjectOutcomeV1 {
                 .and_then(|receipt| receipt.negotiated.execution_profile_digest()),
             tick,
             mode: receipt.map_or(mode, |receipt| receipt.negotiated.mode()),
-            content_validation: ContentValidationV1::NotPerformed,
+            content_validation: entry.content_validation,
             result: result_of(entry, receipt),
         }
     }

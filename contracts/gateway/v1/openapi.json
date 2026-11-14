@@ -310,6 +310,34 @@
               }
             }
           },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "default": {
             "$ref": "#/components/responses/Problem"
           }
@@ -424,6 +452,24 @@
           },
           "503": {
             "description": "`temporarily-unavailable`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6778,6 +6824,51 @@
         "runtime": {
           "code": "resource-limit-exceeded",
           "status": 429
+        }
+      }
+    },
+    "principal_denial_records_per_minute": {
+      "value": 60,
+      "unit": "denial records",
+      "scope": "per-principal",
+      "origin": "new",
+      "source": "apps/piglor-gateway MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE (#1359); a fixed one-minute window that bounds durable denial evidence and never decides an authority result",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
+    "denial_records_per_minute": {
+      "value": 600,
+      "unit": "denial records",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "apps/piglor-gateway MAX_DENIAL_RECORDS_PER_MINUTE (#1359); the host-wide bound of the same window",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "resource-limit-exceeded",
+          "status": 429
+        }
+      }
+    },
+    "authority_denial_records": {
+      "value": 10000000,
+      "unit": "denial records",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "pos-core MAX_AUTHORIZATION_DENIAL_RECORDS (#1359); a full authority store refuses further denial evidence and never prunes it",
+      "surface": "served",
+      "direction": "request",
+      "enforced_by": {
+        "runtime": {
+          "code": "temporarily-unavailable",
+          "status": 503
         }
       }
     }

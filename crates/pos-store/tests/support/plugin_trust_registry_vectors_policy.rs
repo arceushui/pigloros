@@ -46,7 +46,7 @@ fn a_denied_admission_records_nothing_until_advance_policy_records_it() -> TestR
     let revoking = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![two.release_digest()],
+            revoked_artifacts: vec![two.release_digest()?],
             ..Spec::default().at(51, 6)
         },
         &tps_after(&genesis),
@@ -88,7 +88,7 @@ fn a_denied_admission_records_nothing_until_advance_policy_records_it() -> TestR
     let again = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![two.release_digest()],
+            revoked_artifacts: vec![two.release_digest()?],
             ..Spec::default().at(52, 7)
         },
         &tps_after(&genesis),
@@ -132,7 +132,11 @@ fn advance_policy_initializes_absent_floors_from_the_first_evidence() -> TestRes
 
 #[test]
 fn a_tps1_only_artifact_denial_blocks_admission_but_not_advance_policy() -> TestResult {
-    for denied in [[0x03; 32], [0x12; 32], [0x30; 32]] {
+    for denied in [
+        release_two().pmf1_digest()?,
+        release_two().release_digest()?,
+        release_two().descriptor_digests()?[0],
+    ] {
         let mut h = Harness::<Store>::open()?;
         let genesis = h.env.genesis()?;
         let tps = TpsSpec {
@@ -302,9 +306,12 @@ fn rollback_moves_the_pointer_to_a_retained_release_and_never_lowers_a_floor() -
     assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
     assert_eq!(receipt.scope(), "scope");
     assert_eq!(receipt.plugin_id(), "plugin-a");
-    assert_eq!(receipt.target_pmf1_digest(), [0x01; 32]);
-    assert_eq!(receipt.target_release_digest(), [0x11; 32]);
-    assert_eq!(receipt.replaced_pmf1_digest(), [0x03; 32]);
+    assert_eq!(receipt.target_pmf1_digest(), release_one().pmf1_digest()?);
+    assert_eq!(
+        receipt.target_release_digest(),
+        release_one().release_digest()?
+    );
+    assert_eq!(receipt.replaced_pmf1_digest(), release_two().pmf1_digest()?);
     assert_eq!(receipt.tps1_digest(), later.tps1_digest());
     assert_eq!(receipt.tps1_epoch(), 2);
     assert_eq!(receipt.tps1_effective_position(), 9);
@@ -315,7 +322,10 @@ fn rollback_moves_the_pointer_to_a_retained_release_and_never_lowers_a_floor() -
     assert_eq!(receipt.activation_event().seq().as_u64(), 3);
 
     let after = h.snapshot(&[&one, &two])?;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_one().pmf1_digest()?
+    );
     assert_eq!(
         h.active("plugin-a")?.activation_event(),
         receipt.activation_event()
@@ -329,9 +339,12 @@ fn rollback_moves_the_pointer_to_a_retained_release_and_never_lowers_a_floor() -
     assert_eq!(row.kind(), PluginTrustLedgerKindV1::Rollback);
     assert_eq!(row.row_seq(), 5);
     assert_eq!(row.plugin_id(), Some("plugin-a"));
-    assert_eq!(row.pmf1_digest(), Some([0x01; 32]));
-    assert_eq!(row.release_digest(), Some([0x11; 32]));
-    assert_eq!(row.previous_active_pmf1_digest(), Some([0x03; 32]));
+    assert_eq!(row.pmf1_digest(), Some(release_one().pmf1_digest()?));
+    assert_eq!(row.release_digest(), Some(release_one().release_digest()?));
+    assert_eq!(
+        row.previous_active_pmf1_digest(),
+        Some(release_two().pmf1_digest()?)
+    );
     assert_eq!(row.activation_event(), Some(receipt.activation_event()));
     assert_eq!(row.trusted_utc_second(), Some(52));
     assert_eq!(row.tick(), Some(7));
@@ -341,15 +354,15 @@ fn rollback_moves_the_pointer_to_a_retained_release_and_never_lowers_a_floor() -
 }
 
 #[test]
-fn rollback_requires_an_active_release_and_a_non_active_target() -> TestResult {
+fn rollback_rejects_an_unknown_or_already_active_target() -> TestResult {
     let mut h = Harness::<Store>::open()?;
     let genesis = h.env.genesis()?;
     let one = release_one();
     h.admit(&genesis, &one, 1)??;
 
-    // The target digest is retained, but no release of that Plugin ID is active.
+    // A genuine closure for a different Plugin ID has a different PMF1 digest.
     let fabricated = ManifestSpec::new("plugin-b", 0x01, 0x11, None);
-    h.assert_rollback_denied(&genesis, &fabricated, RegistryError::NoActiveRelease)?;
+    h.assert_rollback_denied(&genesis, &fabricated, RegistryError::UnknownRollbackTarget)?;
 
     // The pointer was reached by an admission, so the target is active.
     h.assert_rollback_denied(&genesis, &one, RegistryError::RollbackTargetActive)?;
@@ -372,7 +385,7 @@ fn an_identical_rollback_replays_and_any_other_identity_is_target_active() -> Te
     assert_eq!(replay.activation_event(), first.activation_event());
     assert_eq!(replay.trusted_utc_second(), 51);
     assert_eq!(replay.tick(), 6);
-    assert_eq!(replay.replaced_pmf1_digest(), [0x03; 32]);
+    assert_eq!(replay.replaced_pmf1_digest(), release_two().pmf1_digest()?);
     let after = h.snapshot(&[&one, &two])?;
     assert_eq!(after.events, before.events);
     assert_eq!(after.ledger, before.ledger);
@@ -428,13 +441,17 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
         &other_genesis.tps1,
         &other_genesis.evidence,
         &ManifestSpec::new("plugin-a", 0x50, 0x60, None).projection()?,
-        &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
+        (
+            &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
+            &ManifestSpec::new("plugin-a", 0x50, 0x60, None).content_proof()?,
+        ),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 3),
     )?;
     let foreign_digest_in_other_scope = release_one();
     assert_eq!(
-        h.store.retained_release_decision("scope-two", [0x01; 32])?,
+        h.store
+            .retained_release_decision("scope-two", release_one().pmf1_digest()?)?,
         None
     );
     assert_eq!(
@@ -443,7 +460,10 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
             &other_genesis.tps1,
             &other_genesis.evidence,
             &foreign_digest_in_other_scope.projection()?,
-            &foreign_digest_in_other_scope.release_proof()?,
+            (
+                &foreign_digest_in_other_scope.release_proof()?,
+                &foreign_digest_in_other_scope.content_proof()?
+            ),
             TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
             activation(h.timeline, 4)
         ),
@@ -474,7 +494,7 @@ fn rollback_reports_policy_denials_before_an_unknown_target() -> TestResult {
     let revoked_artifact = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![target.release_digest()],
+            revoked_artifacts: vec![target.release_digest()?],
             ..Spec::default()
         },
         &tps_after(&genesis),
@@ -494,7 +514,7 @@ fn rollback_reports_policy_denials_before_an_unknown_target() -> TestResult {
     let tps_denied = h.env.material(
         &spec(1, 2),
         &TpsSpec {
-            extra_artifacts: vec![target.pmf1_digest()],
+            extra_artifacts: vec![target.pmf1_digest()?],
             ..tps_after(&genesis)
         },
     )?;
@@ -544,10 +564,13 @@ fn rollback_ignores_the_chain_rule_and_the_forward_move_is_also_a_rollback() -> 
 
     // R1 is neither the active release nor its successor, yet it is a valid target.
     h.rollback(&genesis, &one, 5)??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_one().pmf1_digest()?
+    );
     assert_eq!(
         h.active("plugin-b")?.pmf1_digest(),
-        [0x21; 32],
+        ManifestSpec::new("plugin-b", 0x21, 0x31, None).pmf1_digest()?,
         "one Plugin ID's rollback never displaces another's pointer"
     );
 
@@ -559,9 +582,15 @@ fn rollback_ignores_the_chain_rule_and_the_forward_move_is_also_a_rollback() -> 
         RegistryError::ReleaseChainViolation,
     )?;
     h.rollback(&genesis, &two, 6)??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_two().pmf1_digest()?
+    );
     h.admit(&genesis, &relinked_three, 7)??;
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x09; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        relinked_three.pmf1_digest()?
+    );
     Ok(())
 }
 
@@ -590,7 +619,7 @@ fn a_stored_receipt_grants_no_authority_after_a_later_revocation() -> TestResult
     let revoking = h.env.material(
         &Spec {
             epochs: 2,
-            revoked_artifacts: vec![one.release_digest()],
+            revoked_artifacts: vec![one.release_digest()?],
             ..Spec::default().at(51, 6)
         },
         &tps_after(&genesis),
@@ -607,7 +636,7 @@ fn a_stored_receipt_grants_no_authority_after_a_later_revocation() -> TestResult
     )?;
     let retained = h
         .store
-        .retained_release_decision("scope", one.pmf1_digest())?
+        .retained_release_decision("scope", one.pmf1_digest()?)?
         .ok_or("no decision")?;
     assert_eq!(&retained, receipt.decision());
     Ok(())
@@ -629,7 +658,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
@@ -641,7 +670,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
@@ -689,7 +718,7 @@ fn two_scopes_keep_independent_floors_pointers_and_ledgers() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        &one.release_proof()?,
+        (&one.release_proof()?, &one.content_proof()?),
         TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
@@ -775,7 +804,11 @@ fn every_admission_denial_names_its_error_and_changes_nothing() -> TestResult {
         &one,
         RegistryError::Trust(PluginTrustErrorV1::PublisherKeyRevoked),
     )?;
-    for revoked in [[0x11; 32], [0x30; 32], [0x33; 32]] {
+    for revoked in [
+        release_one().release_digest()?,
+        release_one().descriptor_digests()?[0],
+        release_one().descriptor_digests()?[1],
+    ] {
         let artifact_denied = genesis_after(
             &h,
             &Spec {
@@ -816,7 +849,7 @@ fn every_admission_denial_names_its_error_and_changes_nothing() -> TestResult {
         &h,
         &spec(1, 2),
         TpsSpec {
-            extra_artifacts: vec![one.pmf1_digest()],
+            extra_artifacts: vec![one.pmf1_digest()?],
             ..TpsSpec::default()
         },
     )?;
@@ -878,9 +911,12 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
     assert_eq!(decision.scope(), "scope");
     assert_eq!(decision.plugin_id(), "plugin-a");
-    assert_eq!(decision.pmf1_digest(), [0x03; 32]);
-    assert_eq!(decision.release_digest(), [0x12; 32]);
-    assert_eq!(decision.previous_release_digest(), Some([0x11; 32]));
+    assert_eq!(decision.pmf1_digest(), release_two().pmf1_digest()?);
+    assert_eq!(decision.release_digest(), release_two().release_digest()?);
+    assert_eq!(
+        decision.previous_release_digest(),
+        Some(release_one().release_digest()?)
+    );
     assert_eq!(decision.tps1_digest(), material.tps1_digest());
     assert_eq!(decision.tps1_epoch(), 2);
     assert_eq!(decision.tps1_effective_position(), 11);
@@ -892,7 +928,8 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     assert_eq!(decision.trusted_utc_second(), 51);
     assert_eq!(decision.tick(), 6);
     assert_eq!(
-        h.store.retained_release_decision("scope", [0x03; 32])?,
+        h.store
+            .retained_release_decision("scope", release_two().pmf1_digest()?)?,
         Some(decision.clone())
     );
 
@@ -909,8 +946,8 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     let active = h.active("plugin-a")?;
     assert_eq!(active.scope(), "scope");
     assert_eq!(active.plugin_id(), "plugin-a");
-    assert_eq!(active.pmf1_digest(), [0x03; 32]);
-    assert_eq!(active.release_digest(), [0x12; 32]);
+    assert_eq!(active.pmf1_digest(), release_two().pmf1_digest()?);
+    assert_eq!(active.release_digest(), release_two().release_digest()?);
     assert_eq!(active.activation_event(), decision.activation_event());
 
     let rows = h.ledger()?;
@@ -925,9 +962,12 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     assert_eq!(row.trusted_utc_second(), Some(51));
     assert_eq!(row.tick(), Some(6));
     assert_eq!(row.plugin_id(), Some("plugin-a"));
-    assert_eq!(row.pmf1_digest(), Some([0x03; 32]));
-    assert_eq!(row.release_digest(), Some([0x12; 32]));
-    assert_eq!(row.previous_active_pmf1_digest(), Some([0x01; 32]));
+    assert_eq!(row.pmf1_digest(), Some(release_two().pmf1_digest()?));
+    assert_eq!(row.release_digest(), Some(release_two().release_digest()?));
+    assert_eq!(
+        row.previous_active_pmf1_digest(),
+        Some(release_one().pmf1_digest()?)
+    );
     assert_eq!(row.activation_event(), Some(decision.activation_event()));
     let identity = decision.activation_event();
     assert_eq!(identity.event_type(), "plugin.activation.v1");
@@ -1121,11 +1161,17 @@ fn a_rollback_whose_release_proof_differs_in_one_field_is_a_mismatch() -> TestRe
             RegistryError::ReleaseProofMismatch,
         )?;
     }
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_two().pmf1_digest()?
+    );
     // The bound proof rolls back to the same target afterwards.
     let receipt = h.rollback(&genesis, &one, 3)??;
     assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
+    assert_eq!(
+        h.active("plugin-a")?.pmf1_digest(),
+        release_one().pmf1_digest()?
+    );
     Ok(())
 }
 
@@ -1156,7 +1202,7 @@ fn a_release_proof_is_checked_after_authorization_and_before_the_tps1_denial() -
     let three_denied = h.env.material(
         &spec(1, 2),
         &TpsSpec {
-            extra_artifacts: vec![three.pmf1_digest()],
+            extra_artifacts: vec![three.pmf1_digest()?],
             ..tps_after(&genesis)
         },
     )?;
@@ -1172,7 +1218,7 @@ fn a_release_proof_is_checked_after_authorization_and_before_the_tps1_denial() -
     let one_denied = h.env.material(
         &spec(1, 2),
         &TpsSpec {
-            extra_artifacts: vec![one.pmf1_digest()],
+            extra_artifacts: vec![one.pmf1_digest()?],
             ..tps_after(&genesis)
         },
     )?;

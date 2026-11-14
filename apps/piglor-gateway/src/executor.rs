@@ -5,7 +5,8 @@
 //! dedicated OS thread.
 use crate::{
     authorization::{
-        GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationError,
+        DenialEvidenceBatch, DenialEvidenceReceipt, GatewayAuthorization,
+        GatewayAuthorizationDecision, GatewayAuthorizationError,
     },
     AdmittedAction, EventNotice,
 };
@@ -16,12 +17,13 @@ use pos_core::{
     ids::TimelineId,
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
-    ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PreparedOwnTracksIngressV1, ProposedAction,
-    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AuthorityErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit, ConsentGrantedV1,
+    ConsentRevocationReservation, ConsentRevokedV1, CoreError, ErasureHostErrorV1,
+    ErasureProtectedOperationV1, ErasureReferenceV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1, ForkAuthenticationPolicyV1,
+    ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -1000,7 +1002,31 @@ pub(crate) struct StoreExecutor {
     control: Arc<ExecutorControl>,
 }
 
+/// A handle that does not keep its executor alive: a background task holds
+/// it so that a Gateway dropped without a shutdown releases the worker's
+/// command channel instead of waiting on the task.
+#[derive(Clone)]
+pub(crate) struct WeakStoreExecutor {
+    control: std::sync::Weak<ExecutorControl>,
+}
+
+impl WeakStoreExecutor {
+    /// The executor, while any strong handle still owns it.
+    pub(crate) fn upgrade(&self) -> Option<StoreExecutor> {
+        self.control
+            .upgrade()
+            .map(|control| StoreExecutor { control })
+    }
+}
+
 impl StoreExecutor {
+    /// A handle that does not keep this executor alive.
+    pub(crate) fn downgrade(&self) -> WeakStoreExecutor {
+        WeakStoreExecutor {
+            control: Arc::downgrade(&self.control),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
         drop(
@@ -1470,6 +1496,20 @@ impl StoreExecutor {
     ) -> Result<PurgeOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::Action(Box::new(
             PurgeActionReceiptsCommand { limit, reply }
+        )))
+    }
+    /// Durably record one batch of denial evidence in its own store command.
+    pub(crate) async fn record_denial_evidence(
+        &self,
+        authorization: Arc<GatewayAuthorization>,
+        batch: DenialEvidenceBatch,
+    ) -> Result<DenialEvidenceReceipt, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            DenialEvidenceCommand {
+                authorization,
+                batch,
+                reply
+            }
         )))
     }
     pub(crate) async fn remove_append_identities_bounded(
@@ -2187,6 +2227,48 @@ impl WorkerCommandV1 for PurgeActionReceiptsCommand {
             ),
         };
         drop(self.reply.send(result));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// Append one batch of denial evidence to the host's authority store.
+///
+/// It runs as its own Write-class command, after the caller released the
+/// commit fence, so an authority replacement never waits behind it. The
+/// receipt names exactly what committed; a host fault commits nothing. Only
+/// the test-only `Generic` and `Gateway` stores lack the authority ports;
+/// production always runs on `Host`.
+struct DenialEvidenceCommand {
+    authorization: Arc<GatewayAuthorization>,
+    batch: DenialEvidenceBatch,
+    reply: oneshot::Sender<Result<DenialEvidenceReceipt, StoreExecutorError>>,
+}
+
+impl WorkerCommandV1 for DenialEvidenceCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            authorization,
+            batch,
+            reply,
+        } = *self;
+        let receipt = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| {
+                        authorization.record_denial(ports, &batch)
+                    })
+                })
+                .unwrap_or_default(),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                DenialEvidenceReceipt::default()
+            }
+        };
+        drop(reply.send(Ok(receipt)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -3114,7 +3196,7 @@ fn execute_host_action_admission(
                                 .with_scheduled_admission(|ports| admission.admit(ports))
                                 .map_err(host_action_error)
                                 .and_then(|admitted| {
-                                    admitted.map_err(ActionCommandError::Admission)
+                                    admitted.map_err(|error| commit_fence_refusal(&decision, error))
                                 })
                                 .and_then(|admitted| {
                                     committed_action(sender, context.timeline, &admitted)
@@ -3260,6 +3342,58 @@ fn retain_admitted_action_release(
         if !action.duplicate() {
             publish_action_notice(context.bus, context.timeline, action.event());
         }
+    }
+}
+
+/// Type a store refusal at the commit fence. A revocation or expiry the
+/// store composed from the persisted authority chain is a pending authority
+/// denial of the decision just rechecked; the Gateway records its evidence in
+/// a separate store command after it releases the commit fence. Every other
+/// refusal keeps its own error.
+fn commit_fence_refusal(
+    decision: &GatewayAuthorizationDecision,
+    error: HumanActionAdmissionErrorV1,
+) -> ActionCommandError {
+    match error {
+        HumanActionAdmissionErrorV1::NotAdmitted(outcome) => commit_fence_authority(&outcome)
+            .and_then(|(authority, safe_error)| {
+                GatewayAuthorization::deny_at_commit_fence(decision, authority, safe_error)
+            })
+            .map_or_else(
+                || ActionCommandError::Admission(HumanActionAdmissionErrorV1::NotAdmitted(outcome)),
+                |pending| {
+                    ActionCommandError::Authorization(GatewayAuthorizationError::Denied(pending))
+                },
+            ),
+        other => ActionCommandError::Admission(other),
+    }
+}
+
+/// The AUD1 outcome and safe-error code of a store outcome that denies the
+/// operation's authority; `None` for every other outcome. The match has no
+/// wildcard, so a new `PipelineOutcomeV1` variant fails to compile until it
+/// is classified here.
+pub(crate) const fn commit_fence_authority(
+    outcome: &PipelineOutcomeV1,
+) -> Option<(AuthorizationOutcomeV1, Option<AuthorityErrorV1>)> {
+    match outcome {
+        PipelineOutcomeV1::AuthorityRevoked => Some((
+            AuthorizationOutcomeV1::RevokedAtFence,
+            Some(AuthorityErrorV1::RevokedAtFence),
+        )),
+        PipelineOutcomeV1::AuthorityExpired => Some((AuthorizationOutcomeV1::Expired, None)),
+        PipelineOutcomeV1::PolicyIndeterminate
+        | PipelineOutcomeV1::Rejected
+        | PipelineOutcomeV1::InvalidObservation
+        | PipelineOutcomeV1::ResourceExhausted
+        | PipelineOutcomeV1::InvalidPluginResult
+        | PipelineOutcomeV1::InvalidProviderResult
+        | PipelineOutcomeV1::DomainConflict
+        | PipelineOutcomeV1::AdmissionConflict
+        | PipelineOutcomeV1::Committed(_)
+        | PipelineOutcomeV1::RecoveredDuplicate(_)
+        | PipelineOutcomeV1::InvalidDependencyDeclaration
+        | PipelineOutcomeV1::DependencySetExhausted => None,
     }
 }
 
@@ -4540,6 +4674,32 @@ mod tests {
             receiver,
         );
         Ok(())
+    }
+
+    #[test]
+    fn expired_denial_evidence_command_replies_without_recording() {
+        let timeline = TimelineId::new();
+        let authorization = Arc::new(test_authorization_for(EntityId::new()));
+        let Err(crate::authorization::GatewayAuthorizationError::Denied(pending)) = authorization
+            .authorize(GatewayAuthorizationRequest::action(
+                EntityId::new(),
+                timeline,
+                "world.action.v1",
+                "world.action.v1.submit",
+                WallTime::now(),
+            ))
+        else {
+            std::panic::resume_unwind(Box::new("an unknown actor is denied"));
+        };
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::DenialEvidenceCommand {
+                batch: authorization.admit_denial_record(pending).test_value(),
+                authorization,
+                reply,
+            })),
+            receiver,
+        );
     }
 
     #[test]
