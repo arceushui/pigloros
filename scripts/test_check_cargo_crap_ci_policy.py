@@ -739,6 +739,22 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_codeql_waits_for_core_gate_except_on_documentation_only_prs(self) -> None:
+        condition = self.workflow["jobs"]["codeql"]["if"]
+        for before, after in (
+            (" || needs.ci_change_scope.outputs.rust == 'false'", ""),
+            ("needs.ci_change_scope.outputs.rust == 'false'", "needs.ci_change_scope.outputs.rust != 'true'"),
+            ("needs.core-gate.result == 'success' ||", "needs.core-gate.result != 'failure' ||"),
+            ("needs.ci_change_scope.result == 'success' && ", ""),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, condition)
+                self.assert_rejected(
+                    lambda workflow, before=before, after=after: workflow["jobs"]["codeql"].update(
+                        {"if": condition.replace(before, after)}
+                    )
+                )
+
     def test_requires_scoped_cargo_crap(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update(

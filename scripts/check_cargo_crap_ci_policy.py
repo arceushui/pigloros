@@ -183,12 +183,13 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
 # edit to that condition must be made in both places.
 CODEQL_CONDITION = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "needs.core-gate.result == 'success' }}"
+    "(needs.core-gate.result == 'success' || "
+    "needs.ci_change_scope.outputs.rust == 'false') }}"
 )
 
 
 def check_codeql_job(jobs: dict) -> None:
-    """CodeQL waits for core-gate, which also succeeds for docs-only PRs.
+    """CodeQL waits for core-gate on Rust PRs but always runs for docs-only PRs.
 
     The main ruleset's code_scanning rule needs an uploaded analysis for every
     pull-request head, so a Rust-scope skip would make documentation-only pull
@@ -204,7 +205,7 @@ def check_codeql_job(jobs: dict) -> None:
     require(isinstance(condition, str), "codeql must have a job condition")
     require(
         " ".join(condition.split()) == CODEQL_CONDITION,
-        "codeql must run for every pull request once core-gate succeeds",
+        "codeql must run once core-gate succeeds, and always for documentation-only pull requests",
     )
 
 

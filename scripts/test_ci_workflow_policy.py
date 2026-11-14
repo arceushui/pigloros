@@ -156,11 +156,12 @@ OWNER_WINDOWS_SCOPE_STEP = {
     "run": (
         'scope=true\n'
         'if [[ "${DETECTED}" = false ]]; then\n'
-        '  if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then\n'
+        '  if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then\n'
         "    echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'\n"
         '  elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then\n'
         "    echo '::warning::The pull request number is unavailable; running the Windows owner lane.'\n"
-        '  elif ! renamed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
+        '  elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \\\n'
+        '    "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
         '    --jq \'.[] | select(.status == "renamed") | .filename\')"; then\n'
         "    echo '::warning::Renamed files could not be listed; running the Windows owner lane.'\n"
         '  elif [[ -n "${renamed}" ]]; then\n'
@@ -799,7 +800,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         output, calls = self.resolve_owner_windows_scope(detected="false")
         self.assertEqual(output, "owner_windows=false\n")
         self.assertEqual(calls, [
-            "api", "--paginate", "repos/owner/repository/pulls/848/files",
+            "api", "--method", "GET", "--paginate", "-f", "per_page=100",
+            "repos/owner/repository/pulls/848/files",
             "--jq", '.[] | select(.status == "renamed") | .filename',
         ])
         detected = OWNER_WINDOWS_SCOPE_STEP["env"]["DETECTED"]
@@ -810,6 +812,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         for label, overrides in (
             ("api limit", {"changed": "3000"}),
             ("over api limit", {"changed": "3001"}),
+            ("zero-padded api limit", {"changed": "03000"}),
             ("unknown count", {"changed": ""}),
             ("malformed count", {"changed": "12; true"}),
             ("unknown pull request", {"number": ""}),
@@ -821,9 +824,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             with self.subTest(label=label):
                 output, _ = self.resolve_owner_windows_scope(detected="false", **overrides)
                 self.assertEqual(output, "owner_windows=true\n")
-        output, calls = self.resolve_owner_windows_scope(detected="false", changed="2999")
-        self.assertEqual(output, "owner_windows=false\n")
-        self.assertTrue(calls)
+        for changed in ("2999", "0999", "08"):
+            with self.subTest(changed=changed):
+                output, calls = self.resolve_owner_windows_scope(detected="false", changed=changed)
+                self.assertEqual(output, "owner_windows=false\n")
+                self.assertTrue(calls)
         output, calls = self.resolve_owner_windows_scope(detected="false", changed="3000")
         self.assertEqual(calls, [])
 
@@ -869,7 +874,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 '"${DETECTED}" = false', '"${DETECTED}" != true')),
             lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.owner_windows }}"),
             lambda w: step(w).update(**{"if": "steps.scope.outcome == 'success'"}),
-            lambda w: step(w).update(run=step(w)["run"].replace("CHANGED_FILES >= 3000", "CHANGED_FILES > 3000")),
+            lambda w: step(w).update(run=step(w)["run"].replace("10#${CHANGED_FILES} >= 3000", "10#${CHANGED_FILES} > 3000")),
+            lambda w: step(w).update(run=step(w)["run"].replace("10#${CHANGED_FILES}", "CHANGED_FILES")),
+            lambda w: step(w).update(run=step(w)["run"].replace(" -f per_page=100", "")),
+            lambda w: step(w).update(run=step(w)["run"].replace("--method GET ", "")),
             lambda w: step(w).update(run=step(w)["run"].replace('select(.status == "renamed")', 'select(.status == "moved")')),
             lambda w: step(w).update(run=step(w)["run"].replace("elif ! renamed=", "elif renamed=")),
             lambda w: step(w)["env"].pop("GH_TOKEN"),
@@ -1065,8 +1073,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         jobs = workflow["jobs"]
         condition = " ".join(jobs["codeql"]["if"].split())
         self.assertEqual(jobs["codeql"]["needs"], ["ci_change_scope", "core-gate"])
-        self.assertIn("needs.core-gate.result == 'success'", condition)
-        self.assertNotIn("outputs.rust", condition)
+        self.assertEqual(condition, "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+                         "(needs.core-gate.result == 'success' || "
+                         "needs.ci_change_scope.outputs.rust == 'false') }}")
         self.assertNotIn("cargo-crap", condition)
         required = jobs["codeql-required"]
         self.assertEqual(required["name"], "CodeQL (Rust)")

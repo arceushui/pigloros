@@ -121,11 +121,12 @@ jobs:
         run: |
           scope=true
           if [[ "${DETECTED}" = false ]]; then
-            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then
+            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then
               echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'
             elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
               echo '::warning::The pull request number is unavailable; running the Windows owner lane.'
-            elif ! renamed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+            elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
               --jq '.[] | select(.status == "renamed") | .filename')"; then
               echo '::warning::Renamed files could not be listed; running the Windows owner lane.'
             elif [[ -n "${renamed}" ]]; then
@@ -1198,8 +1199,8 @@ jobs:
 
   # Always runs, including for documentation-only pull requests: the main
   # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
-  # and a skipped job uploads none, which leaves the PR unmergeable. It waits
-  # for core-gate, which succeeds for documentation-only PRs as well.
+  # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
+  # wait for core-gate; documentation-only PRs run it even if preflight fails.
   codeql:
     name: CodeQL (Rust)
     needs:
@@ -1207,7 +1208,8 @@ jobs:
       - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.core-gate.result == 'success' }}
+      (needs.core-gate.result == 'success' ||
+      needs.ci_change_scope.outputs.rust == 'false') }}
     permissions:
       actions: read
       contents: read
