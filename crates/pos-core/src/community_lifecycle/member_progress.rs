@@ -301,18 +301,21 @@ fn validate_reference(reference: CommunityProgressReferenceV1<'_>) -> Result<()>
     let valid = match reference {
         CommunityProgressReferenceV1::None => true,
         CommunityProgressReferenceV1::Pending(hash) => hash != Hash::zero(),
-        CommunityProgressReferenceV1::Factual(node) => {
-            !node.owner_id.is_empty()
-                && node.owner_id.len() <= MAX_DEPENDENCY_OWNER_ID_BYTES_V1
-                && node.schema_id != 0
-                && node.artifact_digest != Hash::zero()
-        }
+        CommunityProgressReferenceV1::Factual(node) => valid_factual_node(node),
     };
     if valid {
         Ok(())
     } else {
         Err(Error::InvalidBinding)
     }
+}
+
+/// Whether an existing IDP1 coordinate has its required local fields.
+pub(super) fn valid_factual_node(node: CommunityFactualNodeReferenceV1<'_>) -> bool {
+    !node.owner_id.is_empty()
+        && node.owner_id.len() <= MAX_DEPENDENCY_OWNER_ID_BYTES_V1
+        && node.schema_id != 0
+        && node.artifact_digest != Hash::zero()
 }
 
 fn encode_events(out: &mut Vec<u8>, events: CommunityCarriedEventsV1<'_>) {
@@ -385,19 +388,30 @@ fn encode_reference(out: &mut Vec<u8>, reference: CommunityProgressReferenceV1<'
             encode_hash(out, hash);
         }
         CommunityProgressReferenceV1::Factual(node) => {
-            let length = node_bytes(node);
             out.extend_from_slice(&[0x82, 2]);
-            encode_head(out, 2, length as u64);
-            // Write directly behind the bstr head: no temporary node/owner copy.
-            out.push(0x86);
-            encode_head(out, 0, node.tick);
-            encode_head(out, 0, u64::from(node.scheduler_position));
-            encode_bytes(out, node.owner_id.as_bytes(), 3);
-            encode_head(out, 0, u64::from(node.output_ordinal));
-            encode_head(out, 0, u64::from(node.schema_id));
-            encode_hash(out, node.artifact_digest);
+            encode_factual_node(out, node);
         }
     }
+}
+
+/// Encode the exact six-field IDP1 node as one nested byte string.
+pub(super) fn encode_factual_node(out: &mut Vec<u8>, node: CommunityFactualNodeReferenceV1<'_>) {
+    encode_head(out, 2, node_bytes(node) as u64);
+    // Write directly behind the bstr head: no temporary node/owner copy.
+    out.push(0x86);
+    encode_head(out, 0, node.tick);
+    encode_head(out, 0, u64::from(node.scheduler_position));
+    encode_bytes(out, node.owner_id.as_bytes(), 3);
+    encode_head(out, 0, u64::from(node.output_ordinal));
+    encode_head(out, 0, u64::from(node.schema_id));
+    encode_hash(out, node.artifact_digest);
+}
+
+/// Read one nested six-field IDP1 node byte string.
+pub(super) fn read_factual_node<'a>(
+    cursor: &mut CborCursor<'a>,
+) -> Result<CommunityFactualNodeReferenceV1<'a>> {
+    bounded_bytes(cursor, MAX_NODE_BYTES).and_then(read_node)
 }
 
 fn read_event(cursor: &mut CborCursor<'_>) -> Result<CommunityCarriedEventV1> {
@@ -474,9 +488,7 @@ fn read_reference<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityProgressRe
         read_head(cursor, 0).and_then(|tag| match (fields, tag) {
             (1, 0) => Ok(CommunityProgressReferenceV1::None),
             (2, 1) => read_hash(cursor).map(CommunityProgressReferenceV1::Pending),
-            (2, 2) => bounded_bytes(cursor, MAX_NODE_BYTES)
-                .and_then(read_node)
-                .map(CommunityProgressReferenceV1::Factual),
+            (2, 2) => read_factual_node(cursor).map(CommunityProgressReferenceV1::Factual),
             _ => Err(Error::InvalidEncoding),
         })
     })
