@@ -79,6 +79,37 @@ impl TimedRead for TcpStream {
     }
 }
 
+/// One deadline-limited read. `None` is the silent outcome: end of stream
+/// or a failed read.
+fn read_step<S: TimedRead>(
+    stream: &mut S,
+    room: &mut [u8],
+    left: Duration,
+    #[cfg(feature = "test-support")] silent: &mut impl FnMut(SilentReason),
+) -> Option<usize> {
+    let outcome = stream
+        .limit_next_read(left)
+        .and_then(|()| stream.read(room));
+    match outcome {
+        Ok(0) => {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Eof);
+            None
+        }
+        Err(error) => {
+            #[cfg(not(feature = "test-support"))]
+            drop(error);
+            #[cfg(feature = "test-support")]
+            silent(match error.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SilentReason::Timeout,
+                _ => SilentReason::Other,
+            });
+            None
+        }
+        Ok(received) => Some(received),
+    }
+}
+
 /// Read one request head with the first-byte and header deadlines.
 pub(super) fn read_request<S: TimedRead>(
     stream: &mut S,
@@ -98,26 +129,14 @@ pub(super) fn read_request<S: TimedRead>(
             return ReadOutcome::Silent;
         };
         let (_, room) = buffer.split_at_mut(filled.min(REQUEST_BUFFER_BYTES));
-        let outcome = stream
-            .limit_next_read(left)
-            .and_then(|()| stream.read(room));
-        let received = match outcome {
-            Ok(0) => {
-                #[cfg(feature = "test-support")]
-                silent(SilentReason::Eof);
-                return ReadOutcome::Silent;
-            }
-            Err(error) => {
-                #[cfg(not(feature = "test-support"))]
-                drop(error);
-                #[cfg(feature = "test-support")]
-                silent(match error.kind() {
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SilentReason::Timeout,
-                    _ => SilentReason::Other,
-                });
-                return ReadOutcome::Silent;
-            }
-            Ok(received) => received,
+        let Some(received) = read_step(
+            stream,
+            room,
+            left,
+            #[cfg(feature = "test-support")]
+            &mut silent,
+        ) else {
+            return ReadOutcome::Silent;
         };
         let observed_at = clock.now();
         if filled == 0 {
