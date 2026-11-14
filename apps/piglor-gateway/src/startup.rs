@@ -65,16 +65,6 @@ pub fn announce_listening(addr: SocketAddr) {
     ));
 }
 
-/// Announce the bound execution mode on standard error (ADR-134 §4).
-pub fn announce_mode_binding(mode: &GatewayModeBindingV1) {
-    let mut output = io::stderr().lock();
-    drop(writeln!(
-        output,
-        "piglor-gateway serving execution mode {}",
-        mode.disclosure()
-    ));
-}
-
 /// The router of a bound Gateway: after it answers a stale-binding refusal
 /// (`503`), the serve loop stops (ADR-134 §8).
 pub fn bound_router(router: Router, mode: &GatewayModeBindingV1) -> Router {
@@ -147,7 +137,6 @@ mod tests {
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             [],
         );
-        announce_mode_binding(&mode);
         assert_eq!(stale_binding_exit(&mode), Ok(()));
         shutdown_or_stale(async {}, &mode).await;
         let waiting = shutdown_or_stale(std::future::pending(), &mode);

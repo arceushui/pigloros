@@ -38,7 +38,6 @@ use std::{
     ffi::OsString,
     fmt,
     net::SocketAddr,
-    num::NonZeroU64,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -53,20 +52,14 @@ use pos_core::{
 };
 use pos_runtime::ErasureExecutionHostV1;
 
-use gmp1::{
-    Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, GMP1_MAGIC, GMP1_PLATFORM_LINUX, GMP1_VERSION,
-    LOCAL_MODE_PROFILE_ID,
-};
+use gmp1::{Gmp1RecordV1, AIR_GAPPED_MODE_PROFILE_ID, LOCAL_MODE_PROFILE_ID};
 
-#[cfg(target_os = "linux")]
 mod compiled {
     include!(concat!(env!("OUT_DIR"), "/gateway_mode_profiles.rs"));
 }
 
 /// Digest domain of one canonical GMP1 record, distinct from EPF1's.
 const GMP1_DIGEST_DOMAIN: &[u8] = b"PiglorOS.GatewayModeProfile.v1\0";
-/// Maximum canonical bytes of one GMP1 record.
-const GMP1_MAX_BYTES: usize = 4_096;
 /// Ingress tag of a loopback TCP HTTP listener.
 const INGRESS_LOOPBACK_HTTP: u8 = 1;
 /// Ingress tag of a non-loopback, public read-only (spectator) listener.
@@ -279,20 +272,16 @@ impl GatewayModeProfileV1 {
 }
 
 /// Decode one canonical GMP1 record; `None` for anything else, EPF1 bytes
-/// included.
+/// included. The magic, version and platform fields are checked by the exact
+/// re-encoding, which writes their only valid values; a GMP1 that fits its
+/// rules is far below the 4 KiB bound.
 fn decode_gmp1(bytes: &[u8]) -> Option<Gmp1RecordV1> {
-    if bytes.len() > GMP1_MAX_BYTES {
-        return None;
-    }
     let items = ciborium::de::from_reader::<Value, _>(bytes)
         .ok()?
         .into_array()
         .ok()?;
-    let [magic, version, id, semantic_version, mode, network_allowed, ingress, predicates, freshness, registration, platform, previous] =
+    let [_magic, _version, id, semantic_version, mode, network_allowed, ingress, predicates, freshness, registration, _platform, previous] =
         <[Value; 12]>::try_from(items).ok()?;
-    let header = text(magic)? == GMP1_MAGIC
-        && small(&version)? == GMP1_VERSION
-        && small(&platform)? == GMP1_PLATFORM_LINUX;
     let record = Gmp1RecordV1 {
         mode_profile_id: text(id)?,
         semantic_version: text(semantic_version)?,
@@ -304,7 +293,7 @@ fn decode_gmp1(bytes: &[u8]) -> Option<Gmp1RecordV1> {
         registration_profile_id: optional_text(registration).ok()?,
         previous_mode_profile_digest: optional_digest(previous).ok()?,
     };
-    (header && record.validate().is_ok() && record.encode() == bytes).then_some(record)
+    (record.validate().is_ok() && record.encode() == bytes).then_some(record)
 }
 
 fn text(value: Value) -> Option<String> {
@@ -347,8 +336,8 @@ fn optional_digest(value: Value) -> Result<Option<[u8; 32]>, ()> {
     }
 }
 
-/// The compiled profile of `id` (Linux only).
-#[cfg(target_os = "linux")]
+/// The compiled profile of `id`. Execution-mode profiles serve Linux only;
+/// every other platform fails closed.
 pub(crate) fn installed_gateway_mode_profile_v1(
     id: GatewayModeProfileIdV1,
 ) -> Result<GatewayModeProfileV1, GatewayModeBindingErrorV1> {
@@ -356,15 +345,11 @@ pub(crate) fn installed_gateway_mode_profile_v1(
         GatewayModeProfileIdV1::Local => compiled::GATEWAY_MODE_LOCAL_V1,
         GatewayModeProfileIdV1::AirGapped => compiled::GATEWAY_MODE_AIR_GAPPED_V1,
     };
-    GatewayModeProfileV1::decode(id, bytes)
-}
-
-/// Execution-mode profiles are compiled only for Linux.
-#[cfg(not(target_os = "linux"))]
-pub(crate) const fn installed_gateway_mode_profile_v1(
-    _id: GatewayModeProfileIdV1,
-) -> Result<GatewayModeProfileV1, GatewayModeBindingErrorV1> {
-    Err(GatewayModeBindingErrorV1::UnsupportedPlatform)
+    refuse(
+        !cfg!(target_os = "linux"),
+        GatewayModeBindingErrorV1::UnsupportedPlatform,
+    )
+    .and_then(|()| GatewayModeProfileV1::decode(id, bytes))
 }
 
 /// Run startup predicates 1 to 4, the pure configuration checks, for `id`
@@ -527,7 +512,6 @@ impl GatewayExecutionModeRevisionV1 {
 pub struct GatewayModeBindingV1 {
     profile: GatewayModeProfileV1,
     network_grants: BTreeSet<GatewayNetworkGrantV1>,
-    binding_epoch: NonZeroU64,
     stale: Arc<GatewayModeStaleSignalV1>,
 }
 
@@ -538,15 +522,10 @@ impl fmt::Debug for GatewayModeBindingV1 {
 }
 
 impl GatewayModeBindingV1 {
-    fn new(
-        profile: GatewayModeProfileV1,
-        network_grants: BTreeSet<GatewayNetworkGrantV1>,
-        record: &GatewayModeBindingRecordV1,
-    ) -> Self {
+    fn new(profile: GatewayModeProfileV1, network_grants: BTreeSet<GatewayNetworkGrantV1>) -> Self {
         Self {
             profile,
             network_grants,
-            binding_epoch: record.binding_epoch(),
             stale: Arc::default(),
         }
     }
@@ -575,16 +554,6 @@ impl GatewayModeBindingV1 {
     pub(crate) fn stale_signal(&self) -> Arc<GatewayModeStaleSignalV1> {
         Arc::clone(&self.stale)
     }
-
-    /// The operator disclosure of this binding.
-    pub(crate) fn disclosure(&self) -> String {
-        format!(
-            "{} ({}) at binding epoch {}",
-            self.profile.id.as_str(),
-            self.profile.digest.to_hex(),
-            self.binding_epoch
-        )
-    }
 }
 
 /// Bind the opened store of `host` to the compiled profile `id`.
@@ -608,9 +577,8 @@ pub fn bind_gateway_mode_v1(
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| verify_predicates(&profile, composition).map(|()| profile))
         .and_then(|profile| {
-            bind_store(host.gateway_mode_binding(), &profile).map(|record| {
-                GatewayModeBindingV1::new(profile, composition.network_grants.clone(), &record)
-            })
+            bind_store(host.gateway_mode_binding(), &profile)
+                .map(|_| GatewayModeBindingV1::new(profile, composition.network_grants.clone()))
         })
 }
 
@@ -742,34 +710,32 @@ impl GatewayModeStoreLockV1 {
         Self::acquire(sqlite_path, true)
     }
 
-    #[cfg(target_os = "linux")]
+    /// Open the lock file and take a non-blocking `flock` on it (the
+    /// standard library's file lock is `flock(2)` on Linux). Other platforms
+    /// fail closed.
     fn acquire(sqlite_path: &str, exclusive: bool) -> Result<Self, GatewayModeBindingErrorV1> {
-        let operation = if exclusive {
-            rustix::fs::FlockOperation::NonBlockingLockExclusive
-        } else {
-            rustix::fs::FlockOperation::NonBlockingLockShared
-        };
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(format!("{sqlite_path}.gateway-mode.lock"))
-            .ok()
-            .and_then(|file| {
-                rustix::fs::flock(&file, operation)
-                    .ok()
-                    .map(|()| Self { _file: file })
-            })
-            .ok_or(GatewayModeBindingErrorV1::StoreLockUnavailable)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    const fn acquire(
-        _sqlite_path: &str,
-        _exclusive: bool,
-    ) -> Result<Self, GatewayModeBindingErrorV1> {
-        Err(GatewayModeBindingErrorV1::UnsupportedPlatform)
+        refuse(
+            !cfg!(target_os = "linux"),
+            GatewayModeBindingErrorV1::UnsupportedPlatform,
+        )
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(format!("{sqlite_path}.gateway-mode.lock"))
+                .ok()
+                .and_then(|file| {
+                    let locked = if exclusive {
+                        file.try_lock()
+                    } else {
+                        file.try_lock_shared()
+                    };
+                    locked.ok().map(|()| Self { _file: file })
+                })
+                .ok_or(GatewayModeBindingErrorV1::StoreLockUnavailable)
+        })
     }
 }
 
@@ -835,14 +801,7 @@ pub(crate) fn test_binding(
 ) -> GatewayModeBindingV1 {
     let profile = installed_gateway_mode_profile_v1(id)
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
-    let reference = profile
-        .reference()
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
-    GatewayModeBindingV1::new(
-        profile,
-        grants.into_iter().collect(),
-        &GatewayModeBindingRecordV1::new(reference, NonZeroU64::MIN),
-    )
+    GatewayModeBindingV1::new(profile, grants.into_iter().collect())
 }
 
 /// Bind an empty unit-test store to the compiled `id`, as the first `serve`

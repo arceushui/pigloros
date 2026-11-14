@@ -770,6 +770,14 @@ mod tests {
         std::fs::write(&policy_path, "schema_version = 1\ninvalid = true\n").test_ok()?;
         let database = database.to_str().test_ok()?.to_owned();
         let key_path = key_path.to_str().test_ok()?.to_owned();
+        // An unknown two- or three-argument command is not a revoke or rotate.
+        for unknown in [
+            vec!["bogus".to_owned(), database.clone()],
+            vec!["bogus".to_owned(), database.clone(), key_path.clone()],
+        ] {
+            let usage = super::execute(&unknown).test_err()?;
+            assert!(usage.to_string().contains("Usage:"), "{usage}");
+        }
         let timeline = TimelineId::new().to_string();
         let entity = EntityId::new().to_string();
 

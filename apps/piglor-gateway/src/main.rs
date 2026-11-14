@@ -34,8 +34,8 @@ use piglor_gateway::mode_profile::{
     GatewayServeCompositionV1,
 };
 use piglor_gateway::startup::{
-    announce_listening, announce_mode_binding, bound_router, open_recovered_erasure_host,
-    shutdown_or_stale, stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
+    announce_listening, bound_router, open_recovered_erasure_host, shutdown_or_stale,
+    stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
 };
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
@@ -595,7 +595,6 @@ async fn serve_gateway(
         Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
     announce_listening(addr);
-    announce_mode_binding(mode);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
         .await;
@@ -1921,6 +1920,18 @@ mod erasure_gate_coverage_tests {
             .err()
             .ok_or("migrate-mode accepted a malformed command")?;
         assert_eq!(usage.to_string(), MIGRATE_MODE_USAGE);
+        for flags in [("--to", "--from"), ("--from", "--into")] {
+            let misnamed = migrate_mode(&[
+                path.clone(),
+                flags.0.to_owned(),
+                "gateway-mode-air-gapped-v1".to_owned(),
+                flags.1.to_owned(),
+                "gateway-mode-local-v1".to_owned(),
+            ])
+            .err()
+            .ok_or("migrate-mode accepted misnamed flags")?;
+            assert_eq!(misnamed.to_string(), MIGRATE_MODE_USAGE);
+        }
         assert!(
             migrate_mode_command(&["piglor-gateway".to_owned(), "version".to_owned()]).is_none()
         );
