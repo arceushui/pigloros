@@ -277,7 +277,9 @@ fn oracle_contradiction(facts: &TerminationFacts) -> Option<u8> {
             facts
                 .unit
                 .is_some_and(|unit| (unit.invocation_id, unit.cgroup) != (invocation_id, cgroup))
-                || work != facts.work_after.map(|after| after.mount)
+                || work
+                    .zip(facts.work_after)
+                    .is_some_and(|(observed, after)| observed != after.mount)
         }
         _ => false,
     };
@@ -318,7 +320,6 @@ const fn counter_values(counters: &CgroupCounters) -> [u64; 6] {
 fn oracle_missing(facts: &TerminationFacts) -> bool {
     let progress = facts.progress as u8;
     let snapshots = facts.baseline.is_some() && facts.terminal.is_some();
-    let timeout = code_of(facts.service, |service| service.result as u8) == Some(3);
     (facts.unit.is_some() && !snapshots)
         || (progress == 2 && facts.service.is_none())
         || (progress == 2
@@ -326,7 +327,12 @@ fn oracle_missing(facts: &TerminationFacts) -> bool {
         || (progress >= 1 && facts.start_job.is_none())
         || (facts.unit.is_none()
             && matches!(facts.observed, KernelObservationFacts::Observed { .. }))
-        || (timeout && facts.terminal.is_none())
+        || match facts.observed {
+            KernelObservationFacts::Observed { work, .. } => {
+                work.is_some() != facts.work_after.is_some()
+            }
+            _ => false,
+        }
 }
 
 /// `terminal.observed-at >= D - G`, in exact integer arithmetic.
@@ -488,6 +494,15 @@ fn check(facts: &TerminationFacts) -> bool {
     let expected = oracle(facts);
     let found = observed(&classification);
     assert_eq!(found, expected, "{facts:?}");
+    // The fallback is reached exactly when nothing is a candidate, nothing
+    // contradicts and the literal `Completed` conditions fail.
+    assert_eq!(
+        found.fallback,
+        found.contradiction.is_none()
+            && !found.candidates.contains(&true)
+            && !oracle_completed(facts),
+        "{facts:?}"
+    );
     assert!(
         expected.code.is_none_or(|code| (1..=10).contains(&code)),
         "{facts:?}"
@@ -1240,9 +1255,10 @@ fn a_broker_kill_without_a_systemd_timeout_is_an_enforcement_failure() {
 }
 
 #[test]
-fn a_timeout_without_a_terminal_snapshot_is_missing_evidence() {
-    let facts = TerminationFacts {
+fn a_timeout_before_any_cgroup_was_bound_follows_the_r9_rows() {
+    let unbound = |start_job| TerminationFacts {
         progress: AttemptProgressCode::StartedNotReleased,
+        start_job: Some(start_job),
         unit: None,
         baseline: None,
         terminal: None,
@@ -1252,14 +1268,22 @@ fn a_timeout_without_a_terminal_snapshot_is_missing_evidence() {
             0,
         )),
         ending: None,
+        work_after: None,
         observed: KernelObservationFacts::NotReached,
-        cancel_source: Some(CancelSource::CancelRequest),
         ..completed()
     };
-    check(&facts);
-    let classification = facts.classify();
-    assert_eq!(classification.code(), Some(TerminalCode::Cancelled));
-    assert!(classification
+    // A start job that timed out is a protocol failure, not missing evidence.
+    let timed_out_start = unbound(StartJobResult::Timeout);
+    check(&timed_out_start);
+    let classification = timed_out_start.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+    assert!(!classification.quarantined());
+    // A started unit that timed out unreleased places nowhere: the fallback.
+    let unplaced = unbound(StartJobResult::Done);
+    assert!(check(&unplaced));
+    let classification = unplaced.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(!classification
         .candidates()
         .contains(TerminalCode::CleanupFailed));
     assert!(!classification.candidates().contains(TerminalCode::Watchdog));

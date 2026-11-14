@@ -628,7 +628,8 @@ impl TerminationFacts {
     }
 
     /// The KOE1 observation disagrees with the unit, or its `/work` mount
-    /// or capacity with `work-after`. Free space is never compared.
+    /// or capacity with a present `work-after`. Free space is never
+    /// compared.
     fn observation_disagrees(&self) -> bool {
         match self.observed {
             KernelObservationFacts::Observed {
@@ -638,7 +639,9 @@ impl TerminationFacts {
             } => {
                 self.unit.is_some_and(|unit| {
                     unit.invocation_id != invocation_id || unit.cgroup != cgroup
-                }) || work != self.work_after.map(|after| after.mount)
+                }) || work
+                    .zip(self.work_after)
+                    .is_some_and(|(observed, after)| observed != after.mount)
             }
             KernelObservationFacts::NotReached | KernelObservationFacts::ObservationFailed => false,
         }
@@ -660,16 +663,16 @@ impl TerminationFacts {
     }
 
     /// The broker killed although systemd did not time out, or systemd timed
-    /// out before the authorized deadline (or with no terminal snapshot to
-    /// prove the deadline).
+    /// out before the authorized deadline.
     fn enforcement_disagrees(&self) -> bool {
         let timed_out = self.timed_out();
         (self.ending.is_some_and(EndingCode::broker_killed) && !timed_out)
-            || (timed_out && !self.watchdog_reached())
+            || (timed_out && self.terminal.is_some() && !self.watchdog_reached())
     }
 
     /// Required evidence is absent (R9 O6): a unit without both snapshots,
-    /// or a field §4.6.3 requires at this progress.
+    /// a field §4.6.3 requires at this progress, or one of KOE1 `work` and
+    /// `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
         let released = matches!(self.progress, AttemptProgressCode::Released);
         (self.unit.is_some() && (self.baseline.is_none() || self.terminal.is_none()))
@@ -682,6 +685,18 @@ impl TerminationFacts {
                 && self.start_job.is_none())
             || (self.unit.is_none()
                 && matches!(self.observed, KernelObservationFacts::Observed { .. }))
+            || self.work_presence_differs()
+    }
+
+    /// KOE1 recorded `/work` and `work-after` did not, or the reverse: both
+    /// follow ELM1 limit 9, so one of them is missing.
+    const fn work_presence_differs(&self) -> bool {
+        match self.observed {
+            KernelObservationFacts::Observed { work, .. } => {
+                work.is_some() != self.work_after.is_some()
+            }
+            KernelObservationFacts::NotReached | KernelObservationFacts::ObservationFailed => false,
+        }
     }
 
     /// The code-2 candidates other than a contradiction.
