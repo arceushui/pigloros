@@ -10,7 +10,9 @@ permissions:
 jobs:
   owner-bridge-windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # ADR-131 D7 (accepted 2026-11-15): 90-minute overall budget; inner
+    # fixture deadlines are unchanged.
+    timeout-minutes: 90
     env:
       RUSTC_BOOTSTRAP: '1'
     steps:
