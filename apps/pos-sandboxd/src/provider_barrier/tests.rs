@@ -13,6 +13,8 @@ use rustix::{
     process::{getgid, getpid, getuid},
 };
 
+use std::os::fd::AsFd;
+
 use super::*;
 use crate::test_fixtures::{authority, TestResult, ATTEMPT};
 
@@ -132,11 +134,102 @@ impl UnitIdentitySource for TestIdentity {
     }
 }
 
-struct TestObserved(Option<[u8; 32]>);
+/// The cgroup view the barrier tests release with: the observation fakes
+/// never read it, and the production readback tests bring their own.
+fn cgroup_view() -> CgroupView<'static> {
+    static STDIN: std::sync::OnceLock<std::io::Stdin> = std::sync::OnceLock::new();
+    CgroupView::new(STDIN.get_or_init(std::io::stdin).as_fd(), (0x63, 0x67))
+}
+
+/// One fixed kernel observation, as two observations of an unchanged unit.
+fn observation(main_pid: u32) -> TestResult<KernelObservation> {
+    let namespaces = crate::ProviderNamespaces::observe()?;
+    let provider = crate::NamespaceSet::for_test_shifted(namespaces.namespaces());
+    let (_directory, procs) = crate::test_fixtures::cgroup_listing(main_pid)?;
+    let provider = crate::ProviderNamespaces::for_test(provider);
+    let unit = || Ok::<_, KernelObservationError>((main_pid, INVOCATION));
+    let context = ObservationContext::new(
+        CgroupView::new(procs.as_fd(), (0x63, 0x67)),
+        crate::RootIdentity::FIXTURE,
+        ADAPTER_IDENTITY,
+        [7; 32],
+        false,
+    );
+    let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
+    let observed = readback.observe(&unit, &context)?;
+    Ok(*observed.observation())
+}
+
+/// The KOE1 digest stand-in: a fixed value for any accepted `ReadyV1`.
+struct FixedDigest;
+
+impl crate::ObservedStateDigest for FixedDigest {
+    fn observed_state_digest(
+        &self,
+        ready1_digest: [u8; 32],
+        _observation: &KernelObservation,
+    ) -> [u8; 32] {
+        assert_ne!(ready1_digest, [0; 32]);
+        OBSERVED_READBACK
+    }
+}
+
+/// How the fake observation behaves after `ReadyV1`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Observing {
+    /// The same observation, both times, without reading the unit.
+    Stable,
+    /// No observation at all.
+    Unavailable,
+    /// The recheck observes another `MainPID`.
+    Changes,
+    /// The recheck observes nothing.
+    VanishesOnRecheck,
+    /// Both observations read the unit identity through the barrier.
+    ReadsUnit,
+}
+
+struct TestObserved {
+    behaviour: Observing,
+    calls: AtomicUsize,
+    first: KernelObservation,
+    second: KernelObservation,
+}
+
+impl TestObserved {
+    fn new(behaviour: Observing) -> TestResult<Self> {
+        Ok(Self {
+            behaviour,
+            calls: AtomicUsize::new(0),
+            first: observation(own_pid())?,
+            second: observation(own_pid()).map(|first| first.with_main_pid_for_test(1))?,
+        })
+    }
+}
 
 impl ObservedReadback for TestObserved {
-    fn observed_digest(&self) -> Result<[u8; 32], ObservedReadbackUnavailable> {
-        self.0.ok_or(ObservedReadbackUnavailable)
+    fn observe(
+        &self,
+        unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
+        _context: &ObservationContext<'_>,
+    ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        match (self.behaviour, call) {
+            (Observing::Unavailable, _) | (Observing::VanishesOnRecheck, 1..) => {
+                Err(ObservedReadbackUnavailable(KernelObservationError::Exited))
+            }
+            (Observing::Changes, 1..) => Ok(ObservedUnit::new(&self.second)),
+            (Observing::ReadsUnit, _) => unit()
+                .map(|_| ObservedUnit::new(&self.first))
+                .map_err(ObservedReadbackUnavailable),
+            _ => Ok(ObservedUnit::new(&self.first)),
+        }
+    }
+
+    fn digest(&self, ready1_digest: [u8; 32], observation: &KernelObservation) -> [u8; 32] {
+        assert_ne!(ready1_digest, [0; 32]);
+        assert_eq!(*observation, self.first);
+        OBSERVED_READBACK
     }
 }
 
@@ -173,11 +266,15 @@ fn barrier_with(
     refusal: Refusal,
     identity: TestIdentity,
 ) -> TestResult<TestBarrier> {
-    let observed = (!matches!(refusal, Refusal::NoObservation)).then_some(OBSERVED_READBACK);
+    let observing = if matches!(refusal, Refusal::NoObservation) {
+        Observing::Unavailable
+    } else {
+        Observing::Stable
+    };
     let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
     let check = AuthorityCheck::new(
         root_check(refusal, attempt),
-        TestObserved(observed),
+        TestObserved::new(observing)?,
         cancelled,
     );
     Ok(ProviderReleaseBarrier::new(
@@ -328,7 +425,9 @@ async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
         barrier_for(SandboxExecutionMode::Local, Refusal::None, own_pid())?;
     let launcher = launcher(&mut barrier)?;
     assert!(barrier.sent_release().is_none());
-    barrier.release(&active(attempt, GENEROUS_MS)).await?;
+    barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await?;
     let received = launcher.join().map_err(|_| "launcher thread")?;
     Ok((barrier, received))
 }
@@ -354,7 +453,10 @@ async fn refused(refusal: Refusal, claimed_pid: u32) -> TestResult<BarrierError>
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, refusal, claimed_pid)?;
     let launcher = launcher(&mut barrier)?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(barrier.sent_release().is_none());
     // The launcher is never answered: closing the channel shows it no release.
     drop(barrier);
@@ -413,7 +515,10 @@ async fn a_silent_launcher_is_cut_off_at_the_attempt_deadline() -> TestResult {
     // Hold the unit's end open and send nothing.
     let _unit_end = barrier.prepare(&attempt)?.1;
     let started = Instant::now();
-    let error = barrier.release(&active(attempt, 300)).await.err();
+    let error = barrier
+        .release(&active(attempt, 300), cgroup_view())
+        .await
+        .err();
     assert!(started.elapsed() >= Duration::from_millis(250));
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(matches!(
@@ -428,7 +533,10 @@ async fn an_unreadable_unit_identity_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     barrier.identity.behaviour = Behaviour::MainPidDown;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::Identity(_))));
     Ok(())
 }
@@ -441,7 +549,10 @@ async fn the_unit_identity_is_read_after_the_other_rechecks() -> TestResult {
     let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationDrifts);
     let mut barrier = barrier_with(&attempt, Refusal::Cancelled, identity)?;
     let launcher = launcher(&mut barrier)?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(
         error,
         Some(BarrierError::Refused(RecheckRefusal::Cancelled))
@@ -457,7 +568,10 @@ async fn a_manager_that_never_answers_is_cut_off_at_the_attempt_deadline() -> Te
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     barrier.identity.behaviour = Behaviour::Hangs;
     let started = Instant::now();
-    let error = barrier.release(&active(attempt, 300)).await.err();
+    let error = barrier
+        .release(&active(attempt, 300), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::Expired)));
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(barrier.sent_release().is_none());
@@ -469,7 +583,10 @@ async fn an_unreadable_invocation_id_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     barrier.identity.behaviour = Behaviour::InvocationDown;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::Identity(_))));
     Ok(())
 }
@@ -479,7 +596,10 @@ async fn a_release_channel_that_takes_no_timeout_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     barrier.provider_end = StdOwnedFd::from(std::fs::File::open("/dev/null")?);
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::Timeout(_))));
     Ok(())
 }
@@ -510,7 +630,10 @@ async fn an_attempt_past_its_deadline_is_not_released() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     let error = barrier
-        .release(&ActiveAttempt::record(attempt, Instant::now()))
+        .release(
+            &ActiveAttempt::record(attempt, Instant::now()),
+            cgroup_view(),
+        )
         .await
         .err();
     assert!(matches!(error, Some(BarrierError::Expired)));
@@ -521,7 +644,10 @@ async fn an_attempt_past_its_deadline_is_not_released() -> TestResult {
 async fn an_unobservable_launcher_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, u32::MAX)?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::LauncherIdentity)));
     Ok(())
 }
@@ -530,7 +656,10 @@ async fn an_unobservable_launcher_is_refused() -> TestResult {
 async fn a_current_thread_runtime_is_refused_without_panicking() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await
+        .err();
     assert!(matches!(error, Some(BarrierError::RuntimeFlavor)));
     Ok(())
 }
@@ -581,7 +710,10 @@ async fn refused_with(behaviour: Behaviour, milliseconds: u64) -> TestResult<Bar
     let identity = TestIdentity::behaving(own_pid(), behaviour);
     let mut barrier = barrier_with(&attempt, Refusal::None, identity)?;
     let launcher = launcher(&mut barrier)?;
-    let error = barrier.release(&active(attempt, milliseconds)).await.err();
+    let error = barrier
+        .release(&active(attempt, milliseconds), cgroup_view())
+        .await
+        .err();
     drop(barrier);
     assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
     error.ok_or_else(|| "the release was not refused".into())
@@ -636,9 +768,9 @@ async fn a_second_release_is_refused_after_the_first() -> TestResult {
     )?;
     let launcher = launcher(&mut barrier)?;
     let attempt = active(attempt, GENEROUS_MS);
-    assert!(barrier.release(&attempt).await.is_err());
+    assert!(barrier.release(&attempt, cgroup_view()).await.is_err());
     assert!(matches!(
-        barrier.release(&attempt).await.err(),
+        barrier.release(&attempt, cgroup_view()).await.err(),
         Some(BarrierError::AlreadyAttempted)
     ));
     drop(barrier);
@@ -653,15 +785,16 @@ async fn a_dropped_release_leaves_the_barrier_usable() -> TestResult {
     let attempt = active(attempt, GENEROUS_MS);
     barrier.identity.behaviour = Behaviour::Hangs;
     // The caller gives up while the manager does not answer.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), barrier.release(&attempt))
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        barrier.release(&attempt, cgroup_view())
+    )
+    .await
+    .is_err());
     assert!(barrier.sent_release().is_none());
     barrier.identity.behaviour = Behaviour::Normal;
     let launcher = launcher(&mut barrier)?;
-    barrier.release(&attempt).await?;
+    barrier.release(&attempt, cgroup_view()).await?;
     let received = launcher.join().map_err(|_| "launcher thread")?;
     check_release(&barrier, received.as_ref())
 }
@@ -774,7 +907,9 @@ async fn a_barrier_rejects_a_different_valid_attempt_before_handoff_or_identity_
         Err(BarrierError::AttemptMismatch)
     ));
     assert!(matches!(
-        barrier.release(&active(other.clone(), GENEROUS_MS)).await,
+        barrier
+            .release(&active(other.clone(), GENEROUS_MS), cgroup_view())
+            .await,
         Err(BarrierError::AttemptMismatch)
     ));
     assert_eq!(barrier.identity.main_pid_reads.load(Ordering::SeqCst), 0);
@@ -797,7 +932,9 @@ async fn assert_valid_attempt_still_releases(
     attempt: AdmittedAttempt,
 ) -> TestResult {
     let launcher = launcher(&mut barrier)?;
-    barrier.release(&active(attempt, GENEROUS_MS)).await?;
+    barrier
+        .release(&active(attempt, GENEROUS_MS), cgroup_view())
+        .await?;
     assert!(launcher.join().map_err(|_| "launcher thread")?.is_some());
     Ok(())
 }
@@ -844,9 +981,15 @@ async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest()
     barrier.check.root = root_check(Refusal::None, &attempt);
     let launcher = launcher(&mut barrier)?;
     assert!(matches!(
-        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await,
         Err(BarrierError::Refused(RecheckRefusal::UnitChanged))
     ));
+    // The ReadyV1 was accepted before the launcher check refused it.
+    let evidence = barrier.evidence();
+    assert!(evidence.ready1_digest().is_some());
+    assert!(evidence.observation().is_none());
     drop(barrier);
     assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
     Ok(())
@@ -885,7 +1028,9 @@ async fn assert_foreign_root_refuses_release(
     barrier.check.root = root_check(Refusal::None, &other);
     let launcher = launcher(&mut barrier)?;
     assert!(matches!(
-        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await,
         Err(BarrierError::Refused(RecheckRefusal::Root(
             ImageActivationError::EvidenceMismatch
         )))
@@ -951,7 +1096,9 @@ async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileReleaseSign
     )?;
     let launcher = launcher(&mut barrier)?;
     assert!(matches!(
-        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await,
         Err(BarrierError::Release(ReleaseBarrierError::Sign(_)))
     ));
     assert!(barrier.sent_release().is_none());
@@ -993,11 +1140,261 @@ async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestR
         },
         launcher: &held,
         refusal: RefCell::new(None),
+        observing: super::Observing {
+            cgroup: cgroup_view(),
+            adapter: ADAPTER_IDENTITY,
+            observed_fdl1_digest: [7; 32],
+            work: false,
+        },
+        ready: Cell::new(None),
+        frozen: RefCell::new(None),
     };
     // Model a valid Ready followed by provider preemption. Immediate manager
     // reads can complete even when Tokio's timeout is already due; the
     // original deadline must still forbid a release after the final recheck.
-    let result = tokio::task::block_in_place(|| bounded.rechecked());
+    let result = tokio::task::block_in_place(|| bounded.rechecked([1; 32]));
     assert!(matches!(result, Err(RecheckRefusal::Expired)));
     Ok(())
+}
+
+/// The kernel observation of ADR-069 R9 §4.4 around the release: frozen
+/// after `ReadyV1`, re-derived by the recheck, and handed to the lifecycle.
+mod kernel_observation {
+
+    use super::*;
+
+    async fn observed_with(
+        observing: Observing,
+        behaviour: Behaviour,
+    ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
+        let attempt =
+            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+        let identity = TestIdentity::behaving(own_pid(), behaviour);
+        let mut barrier = barrier_with(&attempt, Refusal::None, identity)?;
+        barrier.check.observed = TestObserved::new(observing)?;
+        let launcher = launcher(&mut barrier)?;
+        let released = barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await;
+        let evidence = barrier.evidence();
+        drop(barrier);
+        let received = launcher.join().map_err(|_| "launcher thread")?;
+        assert_eq!(received.as_ref(), evidence.release());
+        Ok((evidence, released))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_released_unit_hands_its_ready_observation_and_release_to_the_lifecycle() -> TestResult
+    {
+        let (evidence, released) = observed_with(Observing::ReadsUnit, Behaviour::Normal).await?;
+        released?;
+        let release = evidence.release().ok_or("no release")?;
+        assert_eq!(evidence.ready1_digest(), Some(release.fields.ready1_digest));
+        assert_eq!(release.fields.observed_readback_digest, OBSERVED_READBACK);
+        let observation = evidence.observation().ok_or("no observation")?;
+        assert_eq!(observation.main_pid(), own_pid());
+        assert!(evidence.work().is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_that_observes_other_kernel_state_is_not_released() -> TestResult {
+        let (evidence, released) = observed_with(Observing::Changes, Behaviour::Normal).await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::ObservationChanged))
+        ));
+        // A denied release still names the ReadyV1 and the frozen observation.
+        assert!(evidence.ready1_digest().is_some());
+        assert!(evidence.observation().is_some());
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_that_cannot_observe_again_is_not_released() -> TestResult {
+        let (evidence, released) =
+            observed_with(Observing::VanishesOnRecheck, Behaviour::Normal).await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::Observation(_)))
+        ));
+        assert!(evidence.observation().is_some());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unavailable_first_observation_keeps_only_the_ready_digest() -> TestResult {
+        let (evidence, released) = observed_with(Observing::Unavailable, Behaviour::Normal).await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::Observation(_)))
+        ));
+        assert!(evidence.ready1_digest().is_some());
+        assert!(evidence.observation().is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_unreadable_during_the_observation_is_not_released() -> TestResult {
+        let (_evidence, released) = observed_with(
+            Observing::ReadsUnit,
+            Behaviour::InvocationBreaksAfterFirstRead,
+        )
+        .await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::Observation(
+                ObservedReadbackUnavailable(KernelObservationError::Identity)
+            )))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancellation_outranks_a_refusal_made_before_it_was_checked() -> TestResult {
+        let attempt =
+            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+        let mut barrier = barrier_with(&attempt, Refusal::Cancelled, TestIdentity::new(own_pid()))?;
+        // The first observation fails before the binding reads the flag.
+        barrier.check.observed = TestObserved::new(Observing::Unavailable)?;
+        let launcher = launcher(&mut barrier)?;
+        let released = barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .await;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::Cancelled))
+        ));
+        drop(barrier);
+        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreleased_barrier_has_no_evidence() -> TestResult {
+        let (mut barrier, _attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        let evidence = barrier.evidence();
+        assert!(evidence.ready1_digest().is_none());
+        assert!(evidence.observation().is_none());
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_executable_is_a_changed_unit_only_for_another_main_pid() -> TestResult {
+        let (barrier, attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        let held = hold_launcher(own_pid(), attempt.launcher())?;
+        let bounded = Bounded {
+            check: &barrier.check,
+            admitted: &attempt,
+            deadline_monotonic_ns: monotonic_ns(),
+            deadline: Instant::now(),
+            identity: &barrier.identity,
+            unit_name: attempt.unit_name(),
+            snapshot: UnitSnapshot {
+                main_pid: own_pid(),
+                invocation: INVOCATION,
+                launcher: held.identity,
+            },
+            launcher: &held,
+            refusal: RefCell::new(None),
+            observing: super::super::Observing {
+                cgroup: cgroup_view(),
+                adapter: ADAPTER_IDENTITY,
+                observed_fdl1_digest: [7; 32],
+                work: false,
+            },
+            ready: Cell::new(None),
+            frozen: RefCell::new(None),
+        };
+        assert!(matches!(
+            bounded.unreadable(own_pid()),
+            RecheckRefusal::ExecutableUnreadable
+        ));
+        assert!(matches!(
+            bounded.unreadable(own_pid() + 1),
+            RecheckRefusal::UnitChanged
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_production_readback_observes_the_launcher_through_procfs() -> TestResult {
+        // No `/work` is requested: this test process has none to observe.
+        let mut limits = crate::test_fixtures::execution_limits(GENEROUS_MS);
+        limits[9].value = 0;
+        let attempt =
+            AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
+                .with_limits(limits);
+        let own = crate::ProviderNamespaces::observe()?;
+        let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
+            own.namespaces(),
+        ));
+        let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
+        let check = AuthorityCheck::new(
+            root_check(Refusal::None, &attempt),
+            readback,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut barrier = ProviderReleaseBarrier::new(
+            &attempt,
+            fresh_nonce()?,
+            BarrierEvidence {
+                adapter_identity: ADAPTER_IDENTITY,
+            },
+            test_signer(),
+            TestIdentity::new(own_pid()),
+            check,
+        )?;
+        let unit_end = StdOwnedFd::from(barrier.prepare(&attempt)?.1);
+        let parameters = &barrier.parameters;
+        let ready = LauncherReady::new(LauncherReadyFields {
+            attempt_id: parameters.attempt_id,
+            nonce: parameters.nonce,
+            launch_instance_id: INVOCATION,
+            launcher_digest: barrier.admitted.launcher().digest,
+            launcher_identity: observe_executable(own_pid())?,
+            sim1_digest: parameters.sim1_digest,
+            adapter_digest: barrier.adapter_digest,
+            adapter_identity: ADAPTER_IDENTITY,
+            launch_parameter_digest: parameters.digest,
+            expected_fdl1_digest: parameters.expected_fdl1_digest,
+            observed_fdl1_digest: parameters.expected_fdl1_digest,
+        })?
+        .to_canonical_cbor()?;
+        let launcher = thread::spawn(move || {
+            send_ready(&unit_end, &ready)?;
+            receive_release(&unit_end)
+        });
+        let (_directory, procs) = crate::test_fixtures::cgroup_listing(own_pid())?;
+        let identity = procs.metadata()?;
+        let cgroup = CgroupView::new(procs.as_fd(), (identity.dev(), identity.ino()));
+        barrier
+            .release(&active(attempt, GENEROUS_MS), cgroup)
+            .await?;
+        let evidence = barrier.evidence();
+        let received = launcher.join().map_err(|_| "launcher thread")?;
+        assert_eq!(received.as_ref(), evidence.release());
+        // The release binds the digest the production readback derived.
+        let release = evidence.release().ok_or("no release")?;
+        assert_eq!(release.fields.observed_readback_digest, OBSERVED_READBACK);
+        let observation = evidence.observation().ok_or("no observation")?;
+        assert_eq!(observation.main_pid(), own_pid());
+        assert_eq!(observation.invocation_id(), INVOCATION);
+        assert_eq!(observation.launcher(), observe_executable(own_pid())?);
+        assert_eq!(observation.adapter(), ADAPTER_IDENTITY);
+        assert_eq!(observation.root(), crate::RootIdentity::FIXTURE);
+        assert_eq!(observation.cgroup().inode(), identity.ino());
+        assert_eq!(observation.namespaces(), own.namespaces());
+        assert_eq!(observation.provider_namespaces(), provider.namespaces());
+        assert_eq!(
+            observation.observed_fdl1_digest(),
+            barrier.parameters.expected_fdl1_digest
+        );
+        assert_eq!(observation.work(), None);
+        Ok(())
+    }
 }

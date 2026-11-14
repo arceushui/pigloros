@@ -1029,3 +1029,42 @@ fn the_two_name_list_kinds_clone_as_themselves() -> Result<(), zbus::Error> {
     ));
     Ok(())
 }
+
+/// RQE1 `requested` (ADR-069 R9 §4.3): each value in its submitted shape, and
+/// the descriptor array by name only.
+#[test]
+fn the_requested_configuration_is_the_submitted_values_with_descriptor_names_only(
+) -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::Local {
+        host_service: descriptor()?,
+    })?;
+    let requested_names = filter()?.requested_property().1;
+    let configuration = request.requested_configuration();
+    let submitted = exact_readback(&request, &requested_names);
+    assert_eq!(
+        configuration
+            .iter()
+            .map(crate::RequestedConfigurationProperty::name)
+            .collect::<Vec<_>>(),
+        EXPECTED_PROPERTY_NAMES
+    );
+    for (recorded, value) in configuration.iter().zip(&submitted) {
+        let expected = match value.value() {
+            SystemdTransientUnitReadbackValue::StringArray(names)
+                if recorded.name() == "ExtraFileDescriptors" =>
+            {
+                crate::RequestedConfigurationValue::DescriptorNames(names.clone())
+            }
+            value => crate::RequestedConfigurationValue::Typed(value.clone()),
+        };
+        assert_eq!(*recorded.value(), expected, "{}", recorded.name());
+    }
+    assert_eq!(
+        configuration[41].value(),
+        &crate::RequestedConfigurationValue::DescriptorNames(vec![
+            "piglor-host-service-v1".to_owned(),
+            "piglor-release-v1".to_owned(),
+        ])
+    );
+    Ok(())
+}

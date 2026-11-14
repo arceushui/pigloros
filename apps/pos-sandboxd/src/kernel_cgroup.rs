@@ -412,6 +412,10 @@ impl crate::UnitCgroup for BoundAttemptCgroup {
     fn identity(&self) -> (u64, u64) {
         (self.identity.device, self.identity.inode)
     }
+
+    fn directory(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.directory)
+    }
 }
 
 fn relative_cgroup_path(path: &str) -> Result<&str, AttemptCgroupError> {

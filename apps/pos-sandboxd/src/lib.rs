@@ -15,6 +15,8 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
+mod attempt_evidence;
+#[cfg(target_os = "linux")]
 mod attempt_registry;
 #[cfg(target_os = "linux")]
 mod execute;
@@ -22,6 +24,8 @@ mod hardening;
 #[cfg(target_os = "linux")]
 mod image_activator;
 mod kernel_cgroup;
+#[cfg(target_os = "linux")]
+mod kernel_observation;
 #[cfg(target_os = "linux")]
 pub mod launcher;
 #[cfg(target_os = "linux")]
@@ -266,10 +270,20 @@ pub(crate) struct RecordedRootEntry {
 #[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
+pub use attempt_evidence::{
+    ReleaseOutcome, ReleaseResources, ResourceEvidence, TerminalResources, TerminalServiceError,
+};
+#[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptCancel, AttemptEnding, AttemptExecution, CancelSignal, ExecuteError,
     ExecuteFailure, ExecuteJob, LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest,
     UnitCgroup, UnitHost, UnitKiller, UnitState,
+};
+#[cfg(target_os = "linux")]
+pub use kernel_observation::{
+    BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
+    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext,
+    ObservedStateDigest, ObservedUnit, ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
 };
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
@@ -368,6 +382,7 @@ pub use transient_unit::{
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
+pub use transient_unit::{RequestedConfigurationProperty, RequestedConfigurationValue};
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
