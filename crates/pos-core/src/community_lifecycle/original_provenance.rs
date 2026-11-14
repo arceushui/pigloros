@@ -7,12 +7,12 @@
 //! names the operation's own future object, registration or receipt. Valid
 //! bytes do not prove that any source exists, is current or is authorized.
 
-use super::envelope::{encode_operation, read_operation, validate_operation};
+use super::envelope::{encode_operation, operation_len, read_operation, validate_operation};
 use super::input_reference::{CommunityTypedInputRefV1, CommunityTypedInputRefsV1};
 use super::native_node::MAX_COMMUNITY_EXPANDED_INPUTS_V1;
 use super::{
-    canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates, read_hash, read_head,
-    record_cursor, record_prefix, validate_coordinates, validate_horizon,
+    canonical_end, digest, encode_coordinates, fixed_bytes, head_len, read_coordinates, read_hash,
+    read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
     CommunityArtifactOperationV1, CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, TimelineId};
@@ -86,12 +86,19 @@ impl<'a> CommunityOriginalProvenanceV1<'a> {
         &self.0
     }
 
-    /// Encode the complete preferred CPV1 into zeroizing storage pre-sized to
-    /// the record bound, so no reallocation leaves an unwiped copy.
+    /// Encode the complete preferred CPV1 into zeroizing storage sized
+    /// exactly, so no reallocation leaves an unwiped copy.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
-        let mut out = Zeroizing::new(Vec::with_capacity(MAX_PROVENANCE));
+        let mut out = Zeroizing::new(Vec::with_capacity(
+            7 + 17
+                + 34
+                + operation_len(input.operation)
+                + 4 * 34
+                + input.source_root_refs.encoded_len()
+                + head_len(input.evidence_not_after_micros),
+        ));
         record_prefix(&mut out, 13, *b"CPV1");
         encode_bytes(&mut out, &input.store_incarnation, 2);
         encode_coordinates(&mut out, input.timeline, input.generation);

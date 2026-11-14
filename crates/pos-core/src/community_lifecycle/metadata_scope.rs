@@ -1,8 +1,8 @@
 //! Exact minimal CSM1 scope cover. Opaque references never resolve authority.
 
 use super::{
-    canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates, read_hash, read_head,
-    record_cursor, record_prefix, validate_coordinates, validate_horizon,
+    canonical_end, digest, encode_coordinates, fixed_bytes, head_len, read_coordinates, read_hash,
+    read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
     CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, TimelineId};
@@ -300,6 +300,18 @@ pub(super) fn encode_members(out: &mut Vec<u8>, members: CommunityScopeMembersV1
         ScopeRows::Typed(rows) => rows.iter().for_each(|member| encode_member(out, *member)),
         ScopeRows::Canonical { bytes, .. } => out.extend_from_slice(bytes),
     }
+}
+
+/// Exact length of [`encode_members`]'s array for `members`.
+pub(super) fn members_len(members: CommunityScopeMembersV1<'_>) -> usize {
+    head_len(members.len() as u64)
+        + match members.0 {
+            ScopeRows::Typed(rows) => rows
+                .iter()
+                .map(|member| 120 + head_len(member.not_after_micros))
+                .sum::<usize>(),
+            ScopeRows::Canonical { bytes, .. } => bytes.len(),
+        }
 }
 
 fn encode_member(out: &mut Vec<u8>, member: CommunityScopeMemberV1) {

@@ -457,6 +457,17 @@ const fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
     }
 }
 
+/// Exact length of the preferred CBOR head [`encode_head`] writes for `value`.
+const fn head_len(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
 fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
     let mut hasher = Zeroizing::new(blake3::Hasher::new());
     hasher.update(domain);

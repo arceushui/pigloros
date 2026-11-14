@@ -8,16 +8,16 @@
 //! owner derived these scopes, or that the union equals `scope_members`: the
 //! concrete extractor performs those checks.
 
-use super::envelope::{encode_operation, read_operation, validate_operation};
+use super::envelope::{encode_operation, operation_len, read_operation, validate_operation};
 use super::metadata_scope::{
-    encode_members, read_members, validate_members, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
+    encode_members, members_len, read_members, validate_members, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
     MAX_SCOPE_ENCODING,
 };
 use super::{
-    canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates, read_hash, read_head,
-    record_cursor, record_prefix, validate_coordinates, validate_horizon,
-    CommunityArtifactOperationV1, CommunityLifecycleErrorV1 as Error, CommunityScopeMembersV1,
-    Result,
+    bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, head_len,
+    read_coordinates, read_hash, read_head, record_cursor, record_prefix, validate_coordinates,
+    validate_horizon, CommunityArtifactOperationV1, CommunityLifecycleErrorV1 as Error,
+    CommunityScopeMembersV1, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash, TimelineId};
 use zeroize::Zeroizing;
@@ -27,6 +27,10 @@ pub const MAX_COMMUNITY_COVERAGE_ROWS_V1: usize = 4096;
 const MAX_BINDING: usize = 1_048_576;
 /// Exact fixed `scope_rule`.
 const SCOPE_RULE: &str = "pos.community.actual-input-scope";
+/// `["pos.community.actual-input-scope", 1]`: array, text head and text, version.
+const SCOPE_RULE_BYTES: usize = 1 + 2 + SCOPE_RULE.len() + 1;
+/// Decoder bound on a foreign rule's text; longer text is `BoundsExceeded`.
+const MAX_RULE_TEXT: usize = 128;
 const COVERAGE_ROW_BYTES: usize = 1 + 2 * 34;
 const _: () = assert!(
     256 + MAX_COMMUNITY_COVERAGE_ROWS_V1 * COVERAGE_ROW_BYTES + MAX_SCOPE_ENCODING < MAX_BINDING
@@ -213,12 +217,12 @@ impl<'a> CommunityScopeBindingV1<'a> {
         &self.0
     }
 
-    /// Encode the complete preferred CSB1 into zeroizing storage pre-sized to
-    /// the record bound, so no reallocation leaves an unwiped copy.
+    /// Encode the complete preferred CSB1 into zeroizing storage sized
+    /// exactly, so no reallocation leaves an unwiped copy.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
-        let mut out = Zeroizing::new(Vec::with_capacity(MAX_BINDING));
+        let mut out = Zeroizing::new(Vec::with_capacity(encoded_len(input)));
         record_prefix(&mut out, 13, *b"CSB1");
         encode_bytes(&mut out, &input.store_incarnation, 2);
         encode_coordinates(&mut out, input.timeline, input.generation);
@@ -252,6 +256,21 @@ impl<'a> CommunityScopeBindingV1<'a> {
                 .and_then(|input| canonical_end(&cursor).and_then(|()| Self::new(input)))
         })
     }
+}
+
+/// Exact CSB1 length: framing and version (7), incarnation (17), T and G
+/// (34), the operation, the input and policy hashes (2 x 34), the two row
+/// arrays, the rule and the horizon.
+fn encoded_len(input: &CommunityScopeBindingInputV1<'_>) -> usize {
+    7 + 17
+        + 34
+        + operation_len(input.operation)
+        + 2 * 34
+        + head_len(input.coverage_rows.len() as u64)
+        + input.coverage_rows.len() * COVERAGE_ROW_BYTES
+        + members_len(input.scope_members)
+        + SCOPE_RULE_BYTES
+        + head_len(input.evidence_not_after_micros)
 }
 
 fn read_body<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityScopeBindingInputV1<'a>> {
@@ -293,8 +312,22 @@ fn encode_scope_rule(out: &mut Vec<u8>) {
     encode_head(out, 0, 1);
 }
 
+/// Parse the rule structurally: a non-preferred or truncated encoding is
+/// `InvalidEncoding`; a well-formed rule that is not this one is
+/// `InvalidBinding`.
 fn read_scope_rule(cursor: &mut CborCursor<'_>) -> Result<()> {
-    let mut expected = Vec::with_capacity(40);
-    encode_scope_rule(&mut expected);
-    cursor.fixed(&expected).map_err(|_| Error::InvalidBinding)
+    read_head(cursor, 4).and_then(|fields| {
+        if fields != 2 {
+            return Err(Error::InvalidBinding);
+        }
+        bounded_text(cursor, MAX_RULE_TEXT).and_then(|rule| {
+            read_head(cursor, 0).and_then(|version| {
+                if rule == SCOPE_RULE && version == 1 {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidBinding)
+                }
+            })
+        })
+    })
 }

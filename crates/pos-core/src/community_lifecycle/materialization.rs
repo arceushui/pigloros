@@ -57,7 +57,8 @@ pub struct CommunityMaterializationReferenceV1 {
     pub owner_reference: Hash,
     /// ARD1 artifact class; must be the record family's class.
     pub artifact_class: ErasureArtifactClassV1,
-    /// Physical COW1 address, distinct from the ARD1 artifact digest.
+    /// Physical COW1 address. Only nonzero is checked here; the owner
+    /// resolves it independently of the ARD1 artifact digest.
     pub object_address: Hash,
     /// ARD1 artifact digest.
     pub artifact_digest: Hash,
