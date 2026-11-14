@@ -8,9 +8,11 @@
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityArtifactOperationV1 as Operation, CommunityFactualNodeReferenceV1 as FactualNode,
-    CommunityLifecycleErrorV1 as Error, CommunityMaterializationInputV1 as MaterializationInput,
+    CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1 as LocatorProducer,
+    CommunityMaterializationInputV1 as MaterializationInput,
     CommunityMaterializationReferenceV1 as Materialized,
-    CommunityMaterializationV1 as Materialization, CommunityNativeNodeReferenceV1 as NativeRef,
+    CommunityMaterializationV1 as Materialization, CommunityMetadataLocatorV1 as Locator,
+    CommunityMetadataSchemaV1 as Schema, CommunityNativeNodeReferenceV1 as NativeRef,
     CommunityOriginalProvenanceInputV1 as ProvenanceInput,
     CommunityOriginalProvenanceV1 as Provenance, CommunityPassKeyV1 as PassKey,
     CommunityProducerBindingV1 as Producer, CommunityScopeBindingInputV1 as BindingInput,
@@ -459,6 +461,71 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
         Binding::from_canonical_cbor(&encode(&long_rule)?).map(drop),
         Err(Error::BoundsExceeded)
     );
+    // Well-formed items of the record grammar that are not the rule.
+    let rule_text = || text("pos.community.actual-input-scope");
+    let foreign = [
+        uint(1),
+        bytes(b"r"),
+        rule_text(),
+        Value::Null,
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Array(vec![rule_text(), text("1")]),
+        Value::Array(vec![rule_text(), uint(1), uint(1)]),
+        Value::Array(vec![Value::Array(vec![uint(1)])]),
+        Value::Array(vec![uint(1); 8]),
+    ];
+    for rule in foreign {
+        let mut value = valid.clone();
+        fields(&mut value)?[10] = rule;
+        assert_eq!(
+            Binding::from_canonical_cbor(&encode(&value)?).map(drop),
+            Err(Error::InvalidBinding)
+        );
+    }
+    let over = [
+        Value::Array(vec![uint(1); 9]),
+        Value::Array(vec![Value::Array(vec![Value::Array(Vec::new())])]),
+        bytes(&[0; 129]),
+    ];
+    for rule in over {
+        let mut value = valid.clone();
+        fields(&mut value)?[10] = rule;
+        assert_eq!(
+            Binding::from_canonical_cbor(&encode(&value)?).map(drop),
+            Err(Error::BoundsExceeded)
+        );
+    }
+    // Items outside the record grammar: a negative integer, a map, a float
+    // and the simple values just outside false..=null.
+    let outside = [
+        Value::Integer((-1).into()),
+        Value::Map(Vec::new()),
+        Value::Float(1.5),
+    ];
+    for rule in outside {
+        let mut value = valid.clone();
+        fields(&mut value)?[10] = rule;
+        assert_eq!(
+            Binding::from_canonical_cbor(&encode(&value)?).map(drop),
+            Err(Error::InvalidEncoding)
+        );
+    }
+    let mut null_rule = valid.clone();
+    fields(&mut null_rule)?[10] = Value::Null;
+    let null_rule = encode(&null_rule)?;
+    let null = null_rule
+        .windows(3)
+        .position(|window| window == [0xf6, 0x58, 0x20])
+        .ok_or("null rule")?;
+    for simple in [0xf3, 0xf7] {
+        let mut patched = null_rule.clone();
+        patched[null] = simple;
+        assert_eq!(
+            Binding::from_canonical_cbor(&patched).map(drop),
+            Err(Error::InvalidEncoding)
+        );
+    }
     let mut bad_row = valid.clone();
     fields(&mut bad_row)?[8] = Value::Array(vec![Value::Array(vec![bytes(&[40; 32])])]);
     let mut bad_operation = valid.clone();
@@ -1184,6 +1251,27 @@ fn encoders_size_their_buffers_exactly() -> TestResult {
         let again = decoded.to_canonical_cbor();
         assert_exact(&again, again.capacity());
     }
+    // A CPK1 is always 42..=50 bytes, so its byte-string head is always two
+    // bytes; both ends of that range are measured.
+    let short_pass = PassKey::new(timeline(1), GENERATION, 1)?;
+    for operation in [Operation::Pass(short_pass), Operation::Pass(pass)] {
+        let rows = many_coverage(30);
+        let binding = Binding::new(BindingInput {
+            operation,
+            ..binding_input(&rows, &[])
+        })?
+        .to_canonical_cbor();
+        assert_exact(&binding, binding.capacity());
+        let every = every_ref_variant();
+        let provenance = Provenance::new(ProvenanceInput {
+            operation,
+            ..provenance_input(&every)
+        })?;
+        let encoded = provenance.to_canonical_cbor();
+        assert_exact(&encoded, encoded.capacity());
+        let again = Provenance::from_canonical_cbor(&encoded)?.to_canonical_cbor();
+        assert_exact(&again, again.capacity());
+    }
     let empty = Binding::new(binding_input(&[], &[]))?.to_canonical_cbor();
     assert_exact(&empty, empty.capacity());
     let rows = many_coverage(MAX_COMMUNITY_COVERAGE_ROWS_V1 as u64);
@@ -1197,4 +1285,55 @@ fn encoders_size_their_buffers_exactly() -> TestResult {
     let none = Provenance::new(provenance_input(&[]))?.to_canonical_cbor();
     assert_exact(&none, none.capacity());
     Ok(())
+}
+
+/// One typed reference of every variant and locator form, in canonical order,
+/// with ordinals, roles and slots of several head widths.
+const fn every_ref_variant() -> [TypedRef<'static>; 5] {
+    [
+        TypedRef::Native(native(300, 70_000)),
+        TypedRef::Factual {
+            timeline: timeline(4),
+            node: FactualNode {
+                tick: 5,
+                scheduler_position: 1,
+                owner_id: "plugin.a",
+                output_ordinal: 0,
+                schema_id: 9,
+                artifact_digest: hash(10),
+            },
+            record_digest: hash(12),
+        },
+        TypedRef::Artifact {
+            owner_reference: hash(13),
+            artifact_class: Class::CausalTrace,
+            artifact_digest: hash(14),
+            registration_address: hash(15),
+            source_scope_binding_digest: hash(16),
+        },
+        TypedRef::Metadata {
+            schema: Schema::Cmb1,
+            locator: Locator {
+                timeline: timeline(1),
+                generation: GENERATION,
+                producer: LocatorProducer::Native(9),
+                record_role: 2,
+                slot: 300,
+            },
+            envelope_address: hash(17),
+            private_record_digest: hash(18),
+        },
+        TypedRef::Metadata {
+            schema: Schema::Cmb1,
+            locator: Locator {
+                timeline: timeline(1),
+                generation: GENERATION,
+                producer: LocatorProducer::Control([6; 16]),
+                record_role: 70,
+                slot: 2,
+            },
+            envelope_address: hash(17),
+            private_record_digest: hash(18),
+        },
+    ]
 }

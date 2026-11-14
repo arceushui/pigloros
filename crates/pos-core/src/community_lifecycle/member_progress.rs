@@ -1,8 +1,9 @@
 //! Complete CMS1 metadata; a decoded progress record cannot restore live cells.
 
 use super::{
-    bounded_bytes, bounded_text, canonical_end, fixed_bytes, read_hash, read_hashes, read_head,
-    record_cursor, record_prefix, CommunityLifecycleErrorV1 as Error, Result,
+    bounded_bytes, bounded_text, canonical_end, fixed_bytes, head_len as uint_bytes, read_hash,
+    read_hashes, read_head, record_cursor, record_prefix, CommunityLifecycleErrorV1 as Error,
+    Result,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, DependencyNodeCoordinateV1, Hash, Seq,
@@ -333,16 +334,6 @@ fn encode_events(out: &mut Vec<u8>, events: CommunityCarriedEventsV1<'_>) {
     }
 }
 
-const fn uint_bytes(value: u64) -> usize {
-    match value {
-        0..=23 => 1,
-        24..=255 => 2,
-        256..=65535 => 3,
-        65536..=4_294_967_295 => 5,
-        _ => 9,
-    }
-}
-
 fn encoded_bytes(input: &CommunityMemberProgressInputV1<'_>) -> usize {
     let rows = match input.carried_events.0 {
         CarriedRows::Typed(events) => events
@@ -370,7 +361,7 @@ fn reference_bytes(reference: CommunityProgressReferenceV1<'_>) -> usize {
     }
 }
 
-fn node_bytes(node: CommunityFactualNodeReferenceV1<'_>) -> usize {
+pub(super) fn node_bytes(node: CommunityFactualNodeReferenceV1<'_>) -> usize {
     1 + uint_bytes(node.tick)
         + uint_bytes(u64::from(node.scheduler_position))
         + uint_bytes(node.owner_id.len() as u64)

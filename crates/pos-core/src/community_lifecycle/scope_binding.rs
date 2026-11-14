@@ -14,7 +14,7 @@ use super::metadata_scope::{
     MAX_SCOPE_ENCODING,
 };
 use super::{
-    bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, head_len,
+    bounded_bytes, bounded_text, canonical_end, digest, encode_coordinates, fixed_bytes, head_len,
     read_coordinates, read_hash, read_head, record_cursor, record_prefix, validate_coordinates,
     validate_horizon, CommunityArtifactOperationV1, CommunityLifecycleErrorV1 as Error,
     CommunityScopeMembersV1, Result,
@@ -29,8 +29,11 @@ const MAX_BINDING: usize = 1_048_576;
 const SCOPE_RULE: &str = "pos.community.actual-input-scope";
 /// `["pos.community.actual-input-scope", 1]`: array, text head and text, version.
 const SCOPE_RULE_BYTES: usize = 1 + 2 + SCOPE_RULE.len() + 1;
-/// Decoder bound on a foreign rule's text; longer text is `BoundsExceeded`.
+/// Decoder bounds on a foreign rule item: string length, array arity and
+/// array nesting. Beyond them the item is `BoundsExceeded`.
 const MAX_RULE_TEXT: usize = 128;
+const MAX_RULE_ITEMS: u64 = 8;
+const MAX_RULE_DEPTH: u8 = 2;
 const COVERAGE_ROW_BYTES: usize = 1 + 2 * 34;
 const _: () = assert!(
     256 + MAX_COMMUNITY_COVERAGE_ROWS_V1 * COVERAGE_ROW_BYTES + MAX_SCOPE_ENCODING < MAX_BINDING
@@ -312,22 +315,54 @@ fn encode_scope_rule(out: &mut Vec<u8>) {
     encode_head(out, 0, 1);
 }
 
-/// Parse the rule structurally: a non-preferred or truncated encoding is
-/// `InvalidEncoding`; a well-formed rule that is not this one is
-/// `InvalidBinding`.
+/// Read the rule item. Malformed or non-preferred bytes, and items outside
+/// the record grammar (negative integers, maps, tags, floats), are
+/// `InvalidEncoding`; an over-bound item is `BoundsExceeded`; any other
+/// well-formed item that is not this exact rule is `InvalidBinding`. Preferred
+/// encodings are unique, so the item equals the rule exactly when its bytes do.
 fn read_scope_rule(cursor: &mut CborCursor<'_>) -> Result<()> {
-    read_head(cursor, 4).and_then(|fields| {
-        if fields != 2 {
-            return Err(Error::InvalidBinding);
-        }
-        bounded_text(cursor, MAX_RULE_TEXT).and_then(|rule| {
-            read_head(cursor, 0).and_then(|version| {
-                if rule == SCOPE_RULE && version == 1 {
+    let mut original = cursor.clone();
+    let start = cursor.position();
+    skip_rule_item(cursor, 0).and_then(|()| {
+        original
+            .take(cursor.position() - start)
+            .map_err(Error::from)
+            .and_then(|item| {
+                let mut expected = Vec::with_capacity(SCOPE_RULE_BYTES);
+                encode_scope_rule(&mut expected);
+                if item == expected.as_slice() {
                     Ok(())
                 } else {
                     Err(Error::InvalidBinding)
                 }
             })
-        })
     })
+}
+
+/// Consume one preferred definite item of the closed record grammar: an
+/// unsigned integer, a byte or text string, an array, `false`, `true` or
+/// `null`, within the rule bounds.
+fn skip_rule_item(cursor: &mut CborCursor<'_>, depth: u8) -> Result<()> {
+    let mut peek = cursor.clone();
+    peek.byte()
+        .map_err(Error::from)
+        .and_then(|initial| match initial >> 5 {
+            0 => read_head(cursor, 0).map(drop),
+            2 => bounded_bytes(cursor, MAX_RULE_TEXT).map(drop),
+            3 => bounded_text(cursor, MAX_RULE_TEXT).map(drop),
+            4 if depth < MAX_RULE_DEPTH => read_head(cursor, 4).and_then(|count| {
+                if count > MAX_RULE_ITEMS {
+                    Err(Error::BoundsExceeded)
+                } else {
+                    (0..count).try_for_each(|_| skip_rule_item(cursor, depth + 1))
+                }
+            }),
+            4 => Err(Error::BoundsExceeded),
+            7 if (0xf4..=0xf6).contains(&initial) => consume_simple(cursor),
+            _ => Err(Error::InvalidEncoding),
+        })
+}
+
+fn consume_simple(cursor: &mut CborCursor<'_>) -> Result<()> {
+    cursor.byte().map(drop).map_err(Error::from)
 }
