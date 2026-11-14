@@ -728,10 +728,13 @@ impl TerminationFacts {
             || self.work_presence_differs()
     }
 
-    /// The snapshots and the deadline follow the unit (R9 §4.6.3): a unit
-    /// needs both snapshots and a readable `D`, and a snapshot needs a unit.
+    /// The snapshots and the deadline follow the unit (R9 §4.6.3).
+    ///
+    /// A unit needs both snapshots, and a snapshot needs a unit. `D` is read
+    /// once the start job is done (R9 §4.6.5), so it is required only then:
+    /// a failed start job may leave `ActiveEnterTimestampMonotonic` unset.
     const fn unit_evidence_missing(&self) -> bool {
-        let started = !matches!(self.progress, AttemptProgressCode::NotStarted);
+        let started = matches!(self.start_job, Some(StartJobResult::Done));
         let bound = self.unit.is_some();
         (bound
             && (self.baseline.is_none()

@@ -365,13 +365,13 @@ const fn oracle_missing(facts: &TerminationFacts) -> bool {
 
 /// R9 §4.6.3, read row by row: `baseline` is present only if `unit` is
 /// (else missing evidence); `terminal` is present iff `baseline` is; and an
-/// unreadable `ActiveEnterTimestampMonotonic` is missing evidence (§4.6.5)
-/// once a unit was started.
-const fn oracle_unit_evidence_missing(facts: &TerminationFacts) -> bool {
-    let started = !matches!(facts.progress, AttemptProgressCode::NotStarted);
+/// unreadable `ActiveEnterTimestampMonotonic` is missing evidence (§4.6.5:
+/// `D` is read once the start job is done).
+fn oracle_unit_evidence_missing(facts: &TerminationFacts) -> bool {
+    let done = facts.start_job == Some(StartJobResult::Done);
     (facts.baseline.is_some() && facts.unit.is_none())
         || (facts.terminal.is_some() != facts.baseline.is_some())
-        || (started && facts.unit.is_some() && facts.watchdog_deadline.is_none())
+        || (done && facts.unit.is_some() && facts.watchdog_deadline.is_none())
 }
 
 /// `terminal.observed-at >= D - G`, in exact integer arithmetic.
@@ -1549,6 +1549,21 @@ fn an_unreadable_activation_is_missing_evidence_once_a_unit_exists() {
     assert!(classification
         .candidates()
         .contains(TerminalCode::CleanupFailed));
+    // A failed start job may leave the activation unset: no `D`, still the
+    // protocol failure R9 row 10 names, with no missing evidence.
+    let failed_start = TerminationFacts {
+        progress: AttemptProgressCode::StartedNotReleased,
+        start_job: Some(StartJobResult::Failed),
+        watchdog_deadline: None,
+        service: None,
+        ending: None,
+        output_capture: None,
+        ..completed()
+    };
+    check(&failed_start);
+    let classification = failed_start.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::ProtocolFailure));
+    assert!(!classification.quarantined());
     // Before any unit, `D` never selects a code.
     let revoked = TerminationFacts {
         watchdog_deadline: None,
