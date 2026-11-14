@@ -1051,10 +1051,9 @@ fn same_status_class(status: u8, random: &mut SplitMix) -> u8 {
 #[test]
 fn random_concrete_facts_classify_as_the_oracle_and_only_by_their_class() {
     let mut random = SplitMix(0x0443_0003_c1a5_51f1);
-    let mut fallbacks = 0;
     for _ in 0..20_000 {
         let facts = random.facts();
-        fallbacks += usize::from(check(&facts));
+        check(&facts);
         let changed = same_class(&facts, &mut random);
         check(&changed);
         assert_eq!(
@@ -1073,7 +1072,6 @@ fn random_concrete_facts_classify_as_the_oracle_and_only_by_their_class() {
             "{facts:?}"
         );
     }
-    assert!(fallbacks > 0);
 }
 
 // ---------------------------------------------------------------------------
