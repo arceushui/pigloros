@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import hashlib
 import sys
 
 import yaml
@@ -14,6 +15,9 @@ INSTALL_ACTION = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea3
 UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 DOWNLOAD_ACTION = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
+COVERAGE_MERGER = "scripts/merge_owner_bridge_lcov.py"
+COVERAGE_MERGER_SHA256 = '5aded2c2efd208194ac002c902ea86773e95b75dddbd2323c8f5e4303768a99d'
+MERGE_COVERAGE_COMMAND = 'python scripts/merge_owner_bridge_lcov.py --linux "${{ runner.temp }}/coverage.lcov" --native "${{ runner.temp }}/owner-windows-lcov/owner-windows.lcov" --receipt "${{ runner.temp }}/owner-windows-lcov/owner-windows-lcov-receipt.json" --workspace "${{ github.workspace }}" --checkout "${{ github.sha }}" --output "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
 SCOPED_JOB_IF = (
     "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
@@ -61,7 +65,7 @@ TEST_ONLY_EXCLUSIONS = (
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
-    '--lcov "${{ runner.temp }}/coverage.lcov" '
+    '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     +
@@ -70,7 +74,7 @@ GENERATE_BASELINE_COMMAND = (
 )
 ANALYZE_COMMAND = (
     "cargo crap --workspace "
-    '--lcov "${{ runner.temp }}/coverage.lcov" '
+    '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
     +
@@ -237,11 +241,22 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     )
 
 
+def check_coverage_merger(path: pathlib.Path | None = None) -> None:
+    path = path or pathlib.Path(__file__).with_name("merge_owner_bridge_lcov.py")
+    try:
+        digest = hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    except (OSError, UnicodeError) as error:
+        raise PolicyError(f"native coverage merger is unavailable: {error}") from error
+    require(digest == COVERAGE_MERGER_SHA256, "native coverage merger differs from its reviewed program")
+
+
 def check_workflow(
     workflow_path: pathlib.Path,
     baseline_resolver_path: pathlib.Path | None = None,
+    coverage_merger_path: pathlib.Path | None = None,
 ) -> None:
     check_baseline_resolver(baseline_resolver_path)
+    check_coverage_merger(coverage_merger_path)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
@@ -308,7 +323,16 @@ def check_workflow(
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 12, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 14, "cargo-crap must contain the exact trusted step sequence")
+    require([step.get("name") for step in steps] == [
+        None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
+        "Bind native and Linux coverage to this checkout", "Reject repository cargo-crap configuration",
+        "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
+        "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
+        "Upload cargo-crap report", "Publish trusted main baseline",
+    ], "cargo-crap evidence steps must retain their reviewed order")
+    require(steps[1] == {"uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
+                         "with": {"toolchain": "1.97.1"}}, "cargo-crap toolchain changed")
 
     require(
         steps[0] == {"uses": CHECKOUT_ACTION, "with": {"fetch-depth": 0}},
@@ -336,6 +360,13 @@ def check_workflow(
         },
         "cargo-crap must download the exact hosted LCOV artifact",
     )
+    require(named_step(steps, "Download hosted native LCOV") == {
+        "name": "Download hosted native LCOV", "uses": DOWNLOAD_ACTION,
+        "with": {"name": "owner-windows-lcov-${{ github.sha }}", "path": "${{ runner.temp }}/owner-windows-lcov"},
+    }, "cargo-crap must download native LCOV for this checkout")
+    require(named_step(steps, "Bind native and Linux coverage to this checkout") == {
+        "name": "Bind native and Linux coverage to this checkout", "run": MERGE_COVERAGE_COMMAND,
+    }, "cargo-crap must bind actual hosted counters before scoring")
     require(
         named_step(steps, "Reject repository cargo-crap configuration")
         == {
