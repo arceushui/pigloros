@@ -5967,6 +5967,7 @@ dependencies = [
 name = "pos-owner-bridge-windows"
 version = "0.1.0"
 dependencies = [
+ "pos-crypto",
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
  "sha2 0.11.1",

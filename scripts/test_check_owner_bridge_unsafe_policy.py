@@ -1400,6 +1400,158 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
         ])
 
 
+def test_ledger_creation_boundary() -> None:
+    path = f"{SHIM}/src/ffi/ledger_storage.rs"
+    require_rejected("unconstrained ledger creator", {path: CFG + "fn create_private_ledger_file() { CreateFileW(); }\n"}, [
+        f"{path}: ADR-132 ledger creator executable body differs from the authorized boundary",
+        f"{path}: ADR-132 ledger creator signature and visibility changed",
+        f"{path}: ADR-132 ledger creator must use the exact current-SID owner and DACL",
+        f"{path}: ADR-132 creator must use the pinned SDK and shared allocation owner",
+    ])
+    require_rejected("relocated CreateFileW", {OPS: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(OPS, 2, "ADR-132 CreateFileW reference is outside the creator"),
+        at(OPS, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
+    ])
+    require_rejected("other function CreateFileW", {path: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(path, 2, "ADR-132 CreateFileW reference is outside the creator"),
+        at(path, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
+    ])
+    require_rejected("aliased CreateFileW", {OPS: CFG + "use api::CreateFileW as Hidden;\n"}, [
+        at(OPS, 2, "ADR-132 CreateFileW aliases are forbidden"),
+        at(OPS, 2, "ADR-132 CreateFileW reference is outside the creator"),
+    ])
+    require_accepted("test-only handle query", {path: CFG + "#[cfg(test)]\nfn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"})
+    require_rejected("product handle query", {path: CFG + "fn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"}, [
+        at(path, 2, "ADR-132 handle witness requires cfg(test)"),
+    ])
+    require_rejected("feature-gated handle query", {path: CFG + '#[cfg(feature = "test-support")]\nfn fixture_handle_not_inheritable() { GetHandleInformation(); }\n'}, [
+        at(path, 3, "ADR-132 handle witness requires cfg(test)"),
+    ])
+    require_rejected("relocated handle query", {OPS: CFG + "fn elsewhere() { GetHandleInformation(); }\n"}, [
+        at(OPS, 2, "ADR-132 handle query belongs only in the fixture witness"),
+    ])
+    require_rejected("aliased handle query", {OPS: CFG + "use api::GetHandleInformation as Hidden;\n"}, [
+        at(OPS, 2, "ADR-132 handle query aliases are forbidden"),
+    ])
+
+    creator_source = (ROOT / SHIM / "src/ffi/ledger_storage.rs").read_text(encoding="utf-8")
+    adapter_source = (ROOT / SHIM / "src/adapter/ledger_storage.rs").read_text(encoding="utf-8")
+
+    def creator_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_creator(path, source, scanned.code, CHECKER._function_spans(scanned.code), found)
+        return found
+
+    def caller_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_creator_calls(
+            "src/adapter/ledger_storage.rs", "adapter", scanned.code,
+            CHECKER._attributes(scanned.code), CHECKER._function_spans(scanned.code), found,
+        )
+        return found
+
+    def origin_errors(relative: str, source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_origin(relative, "origin", source, scanned.code, CHECKER._function_spans(scanned.code), found)
+        return found
+
+    assert not creator_errors(creator_source)
+    for old, new in [
+        ("FILE_FLAG_WRITE_THROUGH,\n                None,", "FILE_ATTRIBUTE_NORMAL,\n                None,"),
+        ("CREATE_NEW,\n                FILE_ATTRIBUTE_NORMAL", "OPEN_ALWAYS,\n                FILE_ATTRIBUTE_NORMAL"),
+        ("bInheritHandle: false.into()", "bInheritHandle: true.into()"),
+        ('O:{sid}D:P(A;;FA;;;{sid})', 'O:{sid}D:P(A;;FA;;;WD)'),
+        ("let sid = super::directory::current_sid()?;", "let sid = supplied_sid()?;"),
+        ("pub(crate) fn create_private_ledger_file", "pub fn create_private_ledger_file"),
+        ("use super::directory::LocalMemory;", "use crate::OtherMemory as LocalMemory;"),
+    ]:
+        assert old in creator_source, old
+        assert creator_errors(creator_source.replace(old, new, 1)), old
+
+    assert not caller_errors(adapter_source)
+    for old, new in [
+        ("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path)"),
+        ("create_private_ledger_file(&temporary_path)", "other_creator(&temporary_path)"),
+        ("self.open_existing(LEDGER))\n            .and_then(|previous| {", "self.open_existing(TEMPORARY))\n            .and_then(|previous| {"),
+        ("_guard: &'guard WindowsSubjectEncryptorLock", "_guard: &'guard ()"),
+        ("#[cfg(test)]\nmod native_tests", "#[cfg(feature = \"test-support\")]\nmod native_tests"),
+    ]:
+        assert old in adapter_source, old
+        assert caller_errors(adapter_source.replace(old, new, 1)), old
+    assert caller_errors(adapter_source + "\nfn forged() { crate::Native::create_private_ledger_file(path); }\n")
+    assert creator_errors(creator_source.replace("bInheritHandle: false.into()", "bInheritHandle: true.into() // bInheritHandle: false.into()", 1))
+    assert caller_errors(adapter_source.replace("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path) /* create_private_ledger_file(&temporary_path) */", 1))
+    executable_decoy = '''
+    impl WindowsNonceLedger<'_> {
+        fn unused_correct_sequence(&self, bytes: &[u8]) -> Result<(), ()> {
+            if bytes.len() > LIMIT {
+                return Err(());
+            }
+            let ledger_path = self.path.join(LEDGER);
+            let temporary_path = self.path.join(TEMPORARY);
+            self.admit_directory()
+                .and_then(|()| self.open_existing(LEDGER))
+                .and_then(|previous| {
+                    crate::Native::create_private_ledger_file(&temporary_path)
+                        .and_then(|temporary| {
+                            self.validate_file(&temporary, &temporary_path)
+                                .map(|()| temporary)
+                        })
+                        .map(|temporary| {
+                            let _ = (&previous, &temporary, &ledger_path);
+                        })
+                })
+        }
+    }
+    '''
+    wrong_real_path = adapter_source.replace("let temporary_path = self.path.join(TEMPORARY);", "let temporary_path = self.path.join(LEDGER);", 1)
+    decoy_source = wrong_real_path.replace("mod native_tests {\n    use super::*;", "mod native_tests {\n    use super::*;\n" + executable_decoy, 1)
+    assert decoy_source != wrong_real_path
+    assert any("held-guard admitted staging path" in error for error in caller_errors(decoy_source))
+    sequence_head = '''self.admit_directory()
+            .and_then(|()| self.open_existing(LEDGER))
+            .and_then(|previous| {'''
+    sequence_tail = ".and_then(|()| after(CommitStage::ReadBack))"
+    assert adapter_source.count(sequence_head) == 1 and adapter_source.count(sequence_tail) == 1
+    sequence_begin = adapter_source.index(sequence_head)
+    sequence_end = adapter_source.index(sequence_tail) + len(sequence_tail)
+    assert sequence_begin < sequence_end
+    real_sequence = adapter_source[sequence_begin:sequence_end]
+    assert "create_private_ledger_file(&temporary_path)" in real_sequence
+    inactive_sequence = (
+        adapter_source[:sequence_begin]
+        + "if false { return " + real_sequence + "; }\n        Err(())"
+        + adapter_source[sequence_end:]
+    )
+    assert any("held-guard admitted staging path" in error for error in caller_errors(inactive_sequence))
+    for old, new in [
+        ("fn replace_observing(\n", "#[cfg(test)]\n    fn replace_observing(\n"),
+        ("impl<'guard> WindowsNonceLedger<'guard> {", "#[cfg(test)]\nimpl<'guard> WindowsNonceLedger<'guard> {"),
+    ]:
+        assert old in adapter_source, old
+        assert caller_errors(adapter_source.replace(old, new, 1)), old
+    assert not origin_errors("src/adapter/ledger_storage.rs", adapter_source)
+    for old, new in [
+        ('join("PiglorOS")', 'join("Other")'),
+        ('"subject-nonce-ledger.v1.tmp"', '"different.tmp"'),
+        ('"subject-nonce-ledger.v1"', '"different-primary"'),
+        ("require_dos_path(&path)\n", "Ok::<(), ()>(())\n"),
+        (".and_then(|()| admit_or_create_directory(&path).ok().ok_or(()))\n", "\n"),
+        (".and_then(|()| crate::Native::require_private_file(file))\n", "\n"),
+        (".and_then(|links| (links == 1).then_some(()).ok_or(()))\n", "\n"),
+        ("if is_absent(path) {\n        crate::create_private_directory(path)", "if is_absent(path) {\n        Ok(())"),
+        (".and_then(|same| same.then_some(()).ok_or(()))", ".map(|_same| ())"),
+        ("const REPARSE_POINT: u32 = 0x400;", "const REPARSE_POINT: u32 = 0;"),
+    ]:
+        assert old in adapter_source, old
+        assert origin_errors("src/adapter/ledger_storage.rs", adapter_source.replace(old, new, 1)), old
+    guard_source = (ROOT / SHIM / "src/adapter/nonce_ledger.rs").read_text(encoding="utf-8")
+    assert not origin_errors("src/adapter/nonce_ledger.rs", guard_source)
+    assert origin_errors("src/adapter/nonce_ledger.rs", guard_source.replace("crate::SubjectMutex::acquire()", "other_mutex()", 1))
+
 def test_owned_process_fault_authority() -> None:
     path = ROOT / SHIM / "src/ffi/process_fault.rs"
     original = path.read_text()
@@ -2291,6 +2443,8 @@ def main() -> None:
     test_cli()
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
+    test_ledger_creation_boundary()
+
     test_owned_process_fault_authority()
     test_pending_model_callback_references_are_read_only()
     test_fault_profile_bindings()
