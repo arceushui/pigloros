@@ -55,7 +55,7 @@
 //!   `Ok(None)`, even when the deleted Fork committed that generation, so a
 //!   recovering caller cannot mistake a deleted Fork for "nothing committed".
 //! - **Outcome unknown.** Backend failures map through the crate's shared
-//!   `counterfactual_port_error`, so a `CoreError::StorageOutcomeUnknown`
+//!   `CounterfactualStoreErrorV1::from`, so a `CoreError::StorageOutcomeUnknown`
 //!   would surface as `OutcomeUnknown`. `MemoryStore` never produces one on
 //!   these paths: every fallible step runs on staged copies, and installing
 //!   is infallible, so a write either commits entirely or fails having
@@ -130,7 +130,7 @@ use pos_core::{
 };
 
 use super::{MemoryStore, TimelineState};
-use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+use crate::COUNTERFACTUAL_SEAL;
 
 mod classified;
 mod dependency;
@@ -310,7 +310,7 @@ impl ForkEntriesV1<'_> {
                 head,
                 provenance: Vec::new(),
             })
-            .map_err(|error| counterfactual_port_error(&error))
+            .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
     }
 
     /// Install a staged Tick's Events on the Fork Timeline, and the `EOR1` and
@@ -350,7 +350,7 @@ fn stage_tick(
     drafts: &PipelineDraftBatchV1,
 ) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
     crate::ensure_non_geographic_drafts(drafts.drafts(), entries.fork)
-        .map_err(|error| counterfactual_port_error(&error))
+        .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
         .and_then(|()| entries.stage_events(drafts))
 }
 
@@ -399,7 +399,7 @@ fn fenced_result<T, E: From<CounterfactualStoreErrorV1>>(
     result: Result<Result<T, E>, CoreError>,
 ) -> Result<T, E> {
     result
-        .map_err(|error| E::from(counterfactual_port_error(&error)))
+        .map_err(|error| E::from(pos_core::CounterfactualStoreErrorV1::from(&error)))
         .and_then(std::convert::identity)
 }
 
@@ -439,7 +439,7 @@ fn staged_tick_head(staged: &TimelineState) -> Result<Seq, CoreError> {
 impl MemoryStore {
     fn ensure_visible_fork(&self, fork: TimelineId) -> Result<(), CounterfactualStoreErrorV1> {
         self.ensure_generic_timeline_visibility(fork)
-            .map_err(|error| counterfactual_port_error(&error))
+            .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
             .and_then(|()| {
                 if self.state(fork).timeline.meta.fork_point.is_some() {
                     Ok(())
@@ -1096,7 +1096,7 @@ mod tests {
             store.mode_binding.attach_epoch_for_test(attached);
             assert_eq!(
                 store.commit_counterfactual_invalidation(&command),
-                Err(CounterfactualStoreErrorV1::StorageFailure)
+                Err(CounterfactualStoreErrorV1::ModeBindingStale)
             );
             assert_eq!(snapshot(&store, fork), before);
         }
@@ -1117,7 +1117,7 @@ mod tests {
             store.mode_binding.attach_epoch_for_test(attached);
             assert_eq!(
                 store.append_counterfactual_tick(fork, &expected, &drafts),
-                Err(CounterfactualStoreErrorV1::StorageFailure)
+                Err(CounterfactualStoreErrorV1::ModeBindingStale)
             );
             assert_eq!(snapshot(&store, fork), committed);
         }

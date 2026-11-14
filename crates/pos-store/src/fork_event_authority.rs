@@ -27,22 +27,38 @@ use crate::ForkAdmissionAuthoritySessionV1;
 pub enum ForkEventAuthorityErrorV1 {
     /// The host request cannot produce a valid canonical record.
     #[error("invalid Fork Event authority request")]
-    InvalidRequest,
+    InvalidRequest = 0,
     /// The live session or its host-issued source scope is unavailable.
     #[error("Fork Event authority is unauthenticated")]
-    Unauthenticated,
+    Unauthenticated = 1,
     /// The host-resolved source is absent from the child's admitted classifier.
     #[error("Fork Event source is rejected by the admitted classifier")]
-    ClassifierRejected,
+    ClassifierRejected = 2,
     /// A stable operation ID was reused with unequal durable inputs.
     #[error("Fork Event authority conflicts with a committed operation")]
-    Conflict,
+    Conflict = 3,
     /// The immutable FAR1/classifier/provenance graph is incomplete or unequal.
     #[error("Fork Event authority is corrupt")]
-    CorruptAuthority,
+    CorruptAuthority = 4,
     /// The adapter cannot determine whether its transaction committed.
     #[error("Fork Event authority storage outcome is indeterminate")]
-    StorageIndeterminate,
+    StorageIndeterminate = 5,
+    /// The adapter's attached Gateway mode-binding epoch is stale (ADR-134
+    /// §8); the append committed nothing.
+    #[error("Fork Event append found the Gateway mode binding stale")]
+    ModeBindingStale = 6,
+}
+
+/// The authority error of a failed classified-append write step: a stale
+/// mode binding committed nothing and keeps its own error; any other step
+/// failure leaves the outcome indeterminate.
+impl From<&pos_core::CoreError> for ForkEventAuthorityErrorV1 {
+    fn from(error: &pos_core::CoreError) -> Self {
+        match error {
+            pos_core::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::StorageIndeterminate,
+        }
+    }
 }
 
 /// Closed ADR-099 revision 12 provenance rejections of a classified
@@ -84,28 +100,24 @@ impl From<CounterfactualStoreErrorV1> for ClassifiedCounterfactualErrorV1 {
 }
 
 /// The total ADR-099 revision 12 mapping of a classified-append authority
-/// error. `ClassifierRejected` and `Conflict` cannot follow a host-internal
-/// source and a fresh operation, so they can only mean corrupt authority; an
-/// indeterminate step inside the counterfactual transaction is a known
-/// rollback.
+/// error, indexed by its discriminant. `ClassifierRejected` and `Conflict`
+/// cannot follow a host-internal source and a fresh operation, so they can
+/// only mean corrupt authority; an indeterminate step inside the
+/// counterfactual transaction is a known rollback, and a stale mode binding
+/// keeps its own error.
+const CLASSIFIED_AUTHORITY_ERRORS: [ClassifiedCounterfactualErrorV1; 7] = [
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::StorageFailure),
+    ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::ModeBindingStale),
+];
+
 impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
     fn from(error: ForkEventAuthorityErrorV1) -> Self {
-        match error {
-            ForkEventAuthorityErrorV1::InvalidRequest => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest)
-            }
-            ForkEventAuthorityErrorV1::Unauthenticated => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated)
-            }
-            ForkEventAuthorityErrorV1::ClassifierRejected
-            | ForkEventAuthorityErrorV1::Conflict
-            | ForkEventAuthorityErrorV1::CorruptAuthority => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority)
-            }
-            ForkEventAuthorityErrorV1::StorageIndeterminate => {
-                Self::Store(CounterfactualStoreErrorV1::StorageFailure)
-            }
-        }
+        CLASSIFIED_AUTHORITY_ERRORS[error as usize]
     }
 }
 
@@ -5172,10 +5184,22 @@ mod classified_counterfactual_tests {
                 Authority::StorageIndeterminate,
                 Classified::Store(CounterfactualStoreErrorV1::StorageFailure),
             ),
+            (
+                Authority::ModeBindingStale,
+                Classified::Store(CounterfactualStoreErrorV1::ModeBindingStale),
+            ),
         ];
         for (error, expected) in cases {
             assert_eq!(Classified::from(error), expected, "{error:?}");
         }
+        assert_eq!(
+            Authority::from(&pos_core::CoreError::ModeBindingStale),
+            Authority::ModeBindingStale
+        );
+        assert_eq!(
+            Authority::from(&pos_core::CoreError::Storage(String::new())),
+            Authority::StorageIndeterminate
+        );
         for error in [
             CounterfactualStoreErrorV1::OutcomeUnknown,
             CounterfactualStoreErrorV1::ForkNotFound,

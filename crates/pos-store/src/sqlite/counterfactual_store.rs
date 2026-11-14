@@ -104,7 +104,7 @@
 //!   deleted Fork for "nothing committed", matching the `MemoryStore` adapter.
 //! - **Outcome unknown.** A write whose commit or rollback failed is
 //!   `CoreError::StorageOutcomeUnknown`, reported through the crate's shared
-//!   `counterfactual_port_error` as `OutcomeUnknown`; a rejection never hides
+//!   `CounterfactualStoreErrorV1::from` as `OutcomeUnknown`; a rejection never hides
 //!   it. When that write leaves the connection still inside a transaction
 //!   (one the failed write may have left open, or the host's outer
 //!   transaction holding the write's unreleased savepoint), it marks the
@@ -220,7 +220,7 @@ use super::{
     begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, seq_as_i64,
     sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
-use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+use crate::COUNTERFACTUAL_SEAL;
 
 mod classified;
 mod dependency;
@@ -826,7 +826,7 @@ fn decode_generation_record(
 }
 
 fn settle<T, E: From<StoreError>>(staged: Staged<T, E>) -> Result<T, E> {
-    staged.unwrap_or_else(|error| Err(counterfactual_port_error(&error).into()))
+    staged.unwrap_or_else(|error| Err(pos_core::CounterfactualStoreErrorV1::from(&error).into()))
 }
 
 /// Statements that open, release, and abandon one port read: a deferred read
@@ -1255,7 +1255,7 @@ impl SqliteStore {
     /// left open, so it is settled at once.
     fn settle_write<T, E: From<StoreError>>(&self, staged: Staged<T, E>) -> Result<T, E> {
         // Inner rejections never carry `OutcomeUnknown`: only
-        // `counterfactual_port_error` maps `StorageOutcomeUnknown` onto it, so
+        // `CounterfactualStoreErrorV1::from` maps `StorageOutcomeUnknown` onto it, so
         // the in-doubt mark keys on the outer storage error.
         let unknown = matches!(staged, Err(CoreError::StorageOutcomeUnknown(_)));
         self.counterfactual_write_in_doubt.set(
