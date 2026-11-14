@@ -59,6 +59,15 @@ outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
 `covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
 
+That job runs on every push to `main` and on pull requests whose changes touch
+the paths in the `owner_windows` filter of `.github/rust-scope.yml` (the owner
+crates, `pos-crypto`, workspace manifests and toolchain, the workflows and the
+scripts the lane or its consumers run), read from the trusted base revision.
+Failed detection or a base revision without that filter runs it. When a pull
+request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
+`crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
+`ci-gate` requires the lane's success whenever it is in scope.
+
 The Windows job runs the complete native test suite, including all 1,000 real
 readiness cases, once under coverage instrumentation. Portable bridge and owner
 executable tests run separately, along with native doctests. The retained runtime

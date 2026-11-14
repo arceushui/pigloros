@@ -188,12 +188,11 @@ EXPECTED_STEP_ENV = {
 EXPECTED_SCOPE_JOB = [
     "ci_change_scope",
     "standard-gate",
-    "mutation-checks",
     "asan-build",
 ]
+# The shards run beside diff mutation testing; ci-gate requires both results.
 EXPECTED_SCOPE_IF = (
     "${{ !cancelled() && needs.standard-gate.result == 'success' && "
-    "(needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && "
     "needs.asan-build.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
 )

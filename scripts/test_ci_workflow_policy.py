@@ -9,6 +9,7 @@ import fnmatch
 import hashlib
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import tempfile
@@ -94,7 +95,7 @@ RUSTDOC_JOB_IF = (
 )
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
-REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies", "owner-bridge-windows")
+REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
 PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
 PINNED_DEPENDENCIES_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
@@ -111,6 +112,42 @@ EXPECTED_EXCLUDES = {
     "!**/*.rst",
     "!.agents/**",
     "!docs/**",
+}
+# Every path the native Windows owner lane builds, lints, tests or executes,
+# plus the gates that consume its evidence. Keep this a subset check: the
+# filter may grow, it must never lose one of these.
+REQUIRED_OWNER_WINDOWS_PATTERNS = (
+    "crates/pos-owner-bridge-windows/**",
+    "crates/pos-owner-bridge/**",
+    "crates/pos-owner-bridge-codec/**",
+    "apps/piglor-owner/**",
+    "crates/pos-crypto/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/**",
+    ".github/workflows/owner-bridge-windows.yml",
+    ".github/workflows/ci.yml",
+    ".github/rust-scope.yml",
+    "scripts/*owner*",
+    "scripts/*cargo_crap*",
+)
+OWNER_WINDOWS_LANE_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+    "needs.ci_change_scope.outputs.owner_windows == 'true' }}"
+)
+OWNER_WINDOWS_SCOPE_STEP = {
+    "name": "Resolve the Windows-owner scope",
+    "id": "owner_windows",
+    "env": {
+        "DETECTED": "${{ github.event_name == 'pull_request' && "
+        "steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}",
+    },
+    "run": "if [[ \"${DETECTED}\" = false ]]; then\n"
+    "  printf 'owner_windows=false\\n' >> \"$GITHUB_OUTPUT\"\n"
+    "else\n"
+    "  printf 'owner_windows=true\\n' >> \"$GITHUB_OUTPUT\"\n"
+    "fi\n",
 }
 CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
 CORE_JOB_IF = (
@@ -140,15 +177,33 @@ def assert_core_sdk_headroom(workflow: dict) -> None:
             )
 
 
-def load_patterns() -> list[str]:
+def load_patterns(key: str = "rust") -> list[str]:
     with FILTER_PATH.open(encoding="utf-8") as stream:
         filters = yaml.load(stream, Loader=UniqueKeys)
-    if not isinstance(filters, dict) or not isinstance(filters.get("rust"), list):
-        raise AssertionError("rust-scope.yml must define a rust pattern list")
-    patterns = filters["rust"]
+    if not isinstance(filters, dict) or not isinstance(filters.get(key), list):
+        raise AssertionError(f"rust-scope.yml must define a {key} pattern list")
+    patterns = filters[key]
     if not all(isinstance(pattern, str) for pattern in patterns):
         raise AssertionError("rust-scope.yml patterns must be strings")
     return patterns
+
+
+def assert_owner_windows_filter(patterns: list[str]) -> None:
+    """The owner filter is positive-only and keeps every lane input."""
+    if any(pattern.startswith("!") for pattern in patterns):
+        raise AssertionError("owner_windows must not exclude paths")
+    missing = [pattern for pattern in REQUIRED_OWNER_WINDOWS_PATTERNS if pattern not in patterns]
+    if missing:
+        raise AssertionError(f"owner_windows lost required lane inputs: {missing}")
+
+
+def owner_windows_lane_required(paths: list[str], patterns: list[str]) -> bool:
+    """Approximate paths-filter's picomatch: `*` stays in one segment."""
+    def matches(path: str, pattern: str) -> bool:
+        if pattern.endswith("/**"):
+            return path.startswith(pattern[:-2])
+        return fnmatch.fnmatchcase(path, pattern) and path.count("/") == pattern.count("/")
+    return any(matches(path, pattern) for path in paths for pattern in patterns)
 
 
 def load_workflow(workflow_path: pathlib.Path) -> dict:
@@ -371,25 +426,47 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
 
 
 def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
-    """The Windows lane blocks core CI and reuses the completed ledger slot."""
+    """The Windows lane runs beside core CI and blocks its direct consumers."""
+    jobs = workflow["jobs"]
     expected = {
         "name": "owner-bridge-windows",
         "needs": ["ci_change_scope", "ledger-windows"],
-        "if": "${{ needs.ci_change_scope.outputs.rust == 'true' }}",
+        "if": OWNER_WINDOWS_LANE_IF,
         "uses": "./.github/workflows/owner-bridge-windows.yml",
         "permissions": {"contents": "read"},
     }
-    if workflow["jobs"].get("owner-bridge-windows") != expected:
+    if jobs.get("owner-bridge-windows") != expected:
         raise AssertionError("owner Windows lane must follow the completed ledger runner")
-    gate = workflow["jobs"]["preflight-gate"]
-    if "owner-bridge-windows" not in job_needs(gate):
-        raise AssertionError("owner Windows lane must block preflight")
+    scope = jobs["ci_change_scope"]
+    if scope.get("outputs", {}).get("owner_windows") != (
+        "${{ steps.owner_windows.outputs.owner_windows }}"
+    ):
+        raise AssertionError("owner Windows scope must come only from its resolving step")
+    resolving = [step for step in scope["steps"] if step.get("id") == "owner_windows"]
+    if resolving != [OWNER_WINDOWS_SCOPE_STEP] or scope["steps"][-1] != OWNER_WINDOWS_SCOPE_STEP:
+        raise AssertionError("owner Windows scope must default to the full lane")
+    preflight = jobs["preflight-gate"]
+    if "owner-bridge-windows" in job_needs(preflight) or "owner-bridge-windows" in str(preflight):
+        raise AssertionError("owner Windows lane must not delay the core stage")
+    consumers = sorted(name for name, job in jobs.items()
+                       if "owner-bridge-windows" in job_needs(job))
+    if consumers != ["cargo-crap", "ci-gate"]:
+        raise AssertionError("only cargo-crap and ci-gate may wait for the owner Windows lane")
+    gate = jobs["ci-gate"]
     step = gate["steps"][0]
     if step["env"].get("OWNER_WINDOWS_RESULT") != "${{ needs.owner-bridge-windows.result }}":
-        raise AssertionError("preflight must use the actual owner Windows result")
-    for result in ("success", "skipped"):
-        if f'test "${{OWNER_WINDOWS_RESULT}}" = {result}' not in step["run"]:
-            raise AssertionError("preflight must enforce the owner Windows scope result")
+        raise AssertionError("ci-gate must use the actual owner Windows result")
+    if step["env"].get("OWNER_WINDOWS_SCOPE") != "${{ needs.ci_change_scope.outputs.owner_windows }}":
+        raise AssertionError("ci-gate must use the trusted owner Windows scope")
+    for fragment in (
+        "expected_owner_windows=skipped",
+        'if [[ "${EVENT_NAME}" != pull_request \\\n'
+        '  || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_WINDOWS_SCOPE}" != false ) ]]; then\n'
+        "  expected_owner_windows=success\n",
+        'if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then',
+    ):
+        if fragment not in step["run"]:
+            raise AssertionError("ci-gate must enforce the owner Windows scope result")
     try:
         native_policy.check(native)
     except native_policy.PolicyError as error:
@@ -548,6 +625,92 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_owner_windows_filter_keeps_every_lane_input(self) -> None:
+        patterns = load_patterns("owner_windows")
+        assert_owner_windows_filter(patterns)
+        for pattern in REQUIRED_OWNER_WINDOWS_PATTERNS:
+            with self.subTest(removed=pattern), self.assertRaises(AssertionError):
+                assert_owner_windows_filter([p for p in patterns if p != pattern])
+        with self.assertRaises(AssertionError):
+            assert_owner_windows_filter(patterns + ["!crates/pos-owner-bridge-windows/README.md"])
+
+    def test_owner_windows_filter_covers_every_lane_input_path(self) -> None:
+        patterns = load_patterns("owner_windows")
+        native = (ROOT / ".github/workflows/owner-bridge-windows.yml").read_text(encoding="utf-8")
+        scripts = sorted(set(re.findall(r"scripts/[A-Za-z0-9_.-]+\.(?:py|ps1|sh)", native)))
+        self.assertEqual(scripts, [
+            "scripts/check_owner_bridge_unsafe_policy.py",
+            "scripts/observe-owner-desktop.ps1",
+            "scripts/owner_bridge_windows_cov_ignore.py",
+            "scripts/prepare-owner-runtime.ps1",
+        ])
+        for path in (*scripts,
+                     "scripts/owner_bridge_runtime.py",
+                     "scripts/merge_owner_bridge_lcov.py",
+                     "scripts/owner_bridge_windows_workflow_policy.py",
+                     "scripts/check_cargo_crap_report.py",
+                     "scripts/resolve_cargo_crap_baseline.sh",
+                     "crates/pos-owner-bridge-windows/unsafe-inventory.toml",
+                     "crates/pos-owner-bridge-windows/runtime-manifest.v1",
+                     "crates/pos-owner-bridge-windows/covgate.toml",
+                     "crates/pos-owner-bridge-windows/README.md",
+                     "crates/pos-owner-bridge/src/lib.rs",
+                     "crates/pos-owner-bridge-codec/Cargo.toml",
+                     "apps/piglor-owner/src/main.rs",
+                     "crates/pos-crypto/src/lib.rs",
+                     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+                     ".cargo/audit.toml",
+                     ".github/workflows/ci.yml",
+                     ".github/workflows/owner-bridge-windows.yml",
+                     ".github/rust-scope.yml"):
+            with self.subTest(path=path):
+                self.assertTrue(owner_windows_lane_required([path], patterns))
+        for path in ("crates/pos-core/src/lib.rs", "crates/pos-store/Cargo.toml",
+                     "scripts/check_asan_ci_policy.py", "crates/Cargo.toml",
+                     "docs/test-policy.md"):
+            with self.subTest(path=path):
+                self.assertFalse(owner_windows_lane_required([path], patterns))
+
+    def test_owner_windows_scope_resolves_only_explicit_false_to_a_skip(self) -> None:
+        step = OWNER_WINDOWS_SCOPE_STEP
+        # Absent filter key, failed or skipped detection and non-pull-request
+        # events all reach the step as an empty value.
+        for detected, expected in (("false", "false"), ("true", "true"), ("", "true"),
+                                   ("False", "true"), ("0", "true"), ("unknown", "true")):
+            with self.subTest(detected=detected), tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory) / "output"
+                subprocess.run(["bash", "-e", "-c", step["run"]], check=True,
+                               env=dict(os.environ, DETECTED=detected, GITHUB_OUTPUT=str(output)))
+                self.assertEqual(output.read_text(encoding="utf-8"), f"owner_windows={expected}\n")
+        detected = step["env"]["DETECTED"]
+        for guard in ("github.event_name == 'pull_request'", "steps.scope.outcome == 'success'"):
+            self.assertIn(guard, detected)
+
+    def test_owner_windows_scope_rejects_weakened_resolution(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+
+        def step(w):
+            return next(s for s in w["jobs"]["ci_change_scope"]["steps"] if s.get("id") == "owner_windows")
+
+        for change in (
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                owner_windows="${{ steps.scope.outputs.owner_windows }}"),
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                owner_windows="${{ steps.owner_windows.outputs.owner_windows || 'false' }}"),
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].pop("owner_windows"),
+            lambda w: step(w).update(run=step(w)["run"].replace(
+                '"${DETECTED}" = false', '"${DETECTED}" != true')),
+            lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.owner_windows }}"),
+            lambda w: step(w).update(**{"if": "steps.scope.outcome == 'success'"}),
+            lambda w: step(w).update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["ci_change_scope"]["steps"].remove(step(w)),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(mutated, native)
 
     def test_codeql_prepares_inputs_before_unchanged_analysis(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
@@ -793,7 +956,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         assert_core_jobs_run_on_main_push(workflow)
 
-    def test_windows_owner_lane_is_blocking_and_sequenced_before_core(self) -> None:
+    def test_windows_owner_lane_is_blocking_and_runs_beside_core(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
         assert_owner_windows_lane(workflow, native)
@@ -875,32 +1038,89 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w["jobs"].pop("owner-bridge-windows"),
             lambda w: w["jobs"]["owner-bridge-windows"].update(needs=["ci_change_scope"]),
             lambda w: w["jobs"]["owner-bridge-windows"].update(**{"continue-on-error": True}),
-            lambda w: w["jobs"]["preflight-gate"]["needs"].remove("owner-bridge-windows"),
-            lambda w: w["jobs"]["preflight-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
-            lambda w: w["jobs"]["preflight-gate"]["steps"][0].update(run="true"),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.owner_windows == 'true' }}"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+                         "needs.ci_change_scope.outputs.owner_windows != 'false' && false }}"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+                         "github.event_name == 'pull_request' && "
+                         "needs.ci_change_scope.outputs.owner_windows == 'true' }}"}),
+            lambda w: w["jobs"]["preflight-gate"]["needs"].append("owner-bridge-windows"),
+            lambda w: w["jobs"]["ci-gate"]["needs"].remove("owner-bridge-windows"),
+            lambda w: w["jobs"]["cargo-crap"]["needs"].remove("owner-bridge-windows"),
+            lambda w: w["jobs"]["standard-gate"]["needs"].append("owner-bridge-windows"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_SCOPE="false"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0].update(run="true"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0].update(
+                run=w["jobs"]["ci-gate"]["steps"][0]["run"].replace(
+                    '"${OWNER_WINDOWS_SCOPE}" != false', '"${OWNER_WINDOWS_SCOPE}" = true')),
         ):
             mutated = copy.deepcopy(workflow)
             change(mutated)
             with self.assertRaises(AssertionError):
                 assert_owner_windows_lane(mutated, native)
 
-    def test_windows_owner_preflight_executes_fail_closed_for_every_result(self) -> None:
-        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]["steps"][0]
-        base = dict(os.environ, **{name: "success" for name in gate["env"]})
-        base.update(EVENT_NAME="pull_request", RUST_SCOPE="true")
-        for scope, expected in (("true", "success"), ("false", "skipped")):
-            env = dict(base, RUST_SCOPE=scope)
-            for name in ("POLICY_RESULT", "PLUGIN_FIXTURES_RESULT", "NOTICES_RESULT"):
-                env[name] = expected
+    def test_preflight_no_longer_waits_for_the_windows_owner_lane(self) -> None:
+        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]
+        self.assertNotIn("owner-bridge-windows", gate["needs"])
+        self.assertNotIn("OWNER_WINDOWS", gate["steps"][0]["run"])
+        self.assertNotIn("OWNER_WINDOWS_RESULT", gate["steps"][0]["env"])
+
+    def run_ci_gate(self, **overrides: str) -> bool:
+        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ci-gate"]["steps"][0]
+        env = dict(os.environ, **{name: "success" for name in gate["env"]})
+        env.update(EVENT_NAME="pull_request", RUST_SCOPE_RESULT="true",
+                   OWNER_WINDOWS_SCOPE="true")
+        env.update(overrides)
+        return subprocess.run(["bash", "-c", gate["run"]], env=env,
+                              capture_output=True, check=False).returncode == 0
+
+    def test_ci_gate_requires_the_windows_owner_result_exactly_when_in_scope(self) -> None:
+        cases = (
+            # event, rust scope, owner scope, required owner result
+            ("pull_request", "true", "true", "success"),
+            ("pull_request", "true", "", "success"),
+            ("pull_request", "true", "unknown", "success"),
+            ("pull_request", "true", "false", "skipped"),
+            ("pull_request", "false", "true", "skipped"),
+            ("pull_request", "false", "false", "skipped"),
+            ("push", "true", "true", "success"),
+            ("push", "true", "false", "success"),
+            ("workflow_dispatch", "true", "false", "success"),
+        )
+        for event, rust, owner, expected in cases:
+            mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
             for result in ("success", "failure", "cancelled", "skipped", ""):
-                with self.subTest(scope=scope, result=result):
-                    actual = subprocess.run(
-                        ["bash", "-c", gate["run"]],
-                        env=dict(env, OWNER_WINDOWS_RESULT=result),
-                        capture_output=True,
-                        check=False,
+                with self.subTest(event=event, rust=rust, owner=owner, result=result):
+                    self.assertEqual(
+                        self.run_ci_gate(EVENT_NAME=event, RUST_SCOPE_RESULT=rust,
+                                         OWNER_WINDOWS_SCOPE=owner, MUTATION_RESULT=mutation,
+                                         OWNER_WINDOWS_RESULT=result),
+                        result == expected,
                     )
-                    self.assertEqual(actual.returncode == 0, result == expected)
+
+    def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
+        jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        asan = jobs["asan"]
+        self.assertEqual(asan["needs"], ["ci_change_scope", "standard-gate", "asan-build"])
+        self.assertNotIn("mutation", asan["if"])
+        self.assertIn("needs.standard-gate.result == 'success'", asan["if"])
+        self.assertIn("needs.asan-build.result == 'success'", asan["if"])
+        self.assertEqual(jobs["mutation-checks"]["needs"], ["ci_change_scope", "standard-gate"])
+        for name in ("mutation-checks", "asan-gate"):
+            self.assertIn(name, jobs["ci-gate"]["needs"])
+        for mutation in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(mutation=mutation):
+                self.assertFalse(self.run_ci_gate(MUTATION_RESULT=mutation))
+        for asan in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(asan=asan):
+                self.assertFalse(self.run_ci_gate(ASAN_RESULT=asan))
+        self.assertTrue(self.run_ci_gate())
+        self.assertFalse(self.run_ci_gate(EVENT_NAME="push", MUTATION_RESULT="success"))
+        self.assertTrue(self.run_ci_gate(EVENT_NAME="push", MUTATION_RESULT="skipped"))
 
     def test_failed_native_diagnostics_cannot_qualify_or_weaken_measurement(self) -> None:
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")

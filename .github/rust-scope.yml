@@ -9,3 +9,24 @@ rust:
   - '!**/*.rst'
   - '!.agents/**'
   - '!docs/**'
+# The native Windows owner lane runs on a pull request only when it changes a
+# path the lane builds, lints, tests or executes, or a gate that consumes its
+# evidence. Transitive path dependencies of pos-crypto (pos-core,
+# pos-plugin-release, ...) are deliberately not listed: every push to main
+# still runs the complete lane. A base revision without this key, or failed
+# change detection, runs the lane.
+owner_windows:
+  - crates/pos-owner-bridge-windows/**
+  - crates/pos-owner-bridge/**
+  - crates/pos-owner-bridge-codec/**
+  - apps/piglor-owner/**
+  - crates/pos-crypto/**
+  - Cargo.toml
+  - Cargo.lock
+  - rust-toolchain.toml
+  - .cargo/**
+  - .github/workflows/owner-bridge-windows.yml
+  - .github/workflows/ci.yml
+  - .github/rust-scope.yml
+  - scripts/*owner*
+  - scripts/*cargo_crap*

@@ -24,8 +24,34 @@ SCOPED_JOB_IF = (
     "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && "
+    "(needs.owner-bridge-windows.result == 'success' || "
+    "(needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
+)
+# The native lane ran unless the trusted scope explicitly said 'false'. Every
+# native-only step uses NATIVE_MEASURED and every Linux-only step uses
+# NATIVE_SKIPPED, so an empty or unknown scope fails closed to the merge.
+NATIVE_MEASURED = "${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}"
+NATIVE_SKIPPED = "${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}"
+SHIM_ALLOW_ENV = {
+    "NATIVE_SHIM_ALLOW": (
+        "${{ needs.ci_change_scope.outputs.owner_windows == 'false' && "
+        "'crates/pos-owner-bridge-windows/**' || '' }}"
+    ),
+}
+SHIM_ALLOW_ARG = '${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"} '
+LINUX_ONLY_COVERAGE_COMMAND = (
+    'cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"'
+)
+DROP_SHIM_BASELINE_COMMAND = (
+    "set -euo pipefail\n"
+    'baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"\n'
+    "jq -e '.entries |= map(select(.file | gsub(\"\\\\\\\\\"; \"/\") | "
+    "test(\"(^|/)crates/pos-owner-bridge-windows/\") | not))' \\\n"
+    '  "${baseline}" > "${baseline}.scoped"\n'
+    'mv "${baseline}.scoped" "${baseline}"\n'
 )
 TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -68,8 +94,8 @@ GENERATE_BASELINE_COMMAND = (
     '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
-    +
-    "--format json "
+    + SHIM_ALLOW_ARG
+    + "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
 ANALYZE_COMMAND = (
@@ -77,8 +103,8 @@ ANALYZE_COMMAND = (
     '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
-    +
-    '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
+    + SHIM_ALLOW_ARG
+    + '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
@@ -312,8 +338,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage", "core-gate"],
-        "cargo-crap must wait for every core gate and hosted coverage",
+        job.get("needs") == ["ci_change_scope", "coverage", "core-gate", "owner-bridge-windows"],
+        "cargo-crap must wait for every core gate, hosted coverage and the native lane",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -323,11 +349,14 @@ def check_workflow(
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 14, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
     require([step.get("name") for step in steps] == [
         None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
-        "Bind native and Linux coverage to this checkout", "Reject repository cargo-crap configuration",
+        "Bind native and Linux coverage to this checkout",
+        "Use Linux coverage without the unmeasured native shim",
+        "Reject repository cargo-crap configuration",
         "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
+        "Drop the unmeasured native shim from the trusted baseline",
         "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
         "Upload cargo-crap report", "Publish trusted main baseline",
     ], "cargo-crap evidence steps must retain their reviewed order")
@@ -361,12 +390,23 @@ def check_workflow(
         "cargo-crap must download the exact hosted LCOV artifact",
     )
     require(named_step(steps, "Download hosted native LCOV") == {
-        "name": "Download hosted native LCOV", "uses": DOWNLOAD_ACTION,
+        "name": "Download hosted native LCOV", "if": NATIVE_MEASURED, "uses": DOWNLOAD_ACTION,
         "with": {"name": "owner-windows-lcov-${{ github.sha }}", "path": "${{ runner.temp }}/owner-windows-lcov"},
     }, "cargo-crap must download native LCOV for this checkout")
     require(named_step(steps, "Bind native and Linux coverage to this checkout") == {
-        "name": "Bind native and Linux coverage to this checkout", "run": MERGE_COVERAGE_COMMAND,
+        "name": "Bind native and Linux coverage to this checkout", "if": NATIVE_MEASURED,
+        "run": MERGE_COVERAGE_COMMAND,
     }, "cargo-crap must bind actual hosted counters before scoring")
+    require(named_step(steps, "Use Linux coverage without the unmeasured native shim") == {
+        "name": "Use Linux coverage without the unmeasured native shim", "if": NATIVE_SKIPPED,
+        "run": LINUX_ONLY_COVERAGE_COMMAND,
+    }, "cargo-crap may score Linux LCOV alone only when the native lane is out of scope")
+    require(named_step(steps, "Drop the unmeasured native shim from the trusted baseline") == {
+        "name": "Drop the unmeasured native shim from the trusted baseline",
+        "if": "${{ steps.baseline.outputs.run-id != '' && "
+              "needs.ci_change_scope.outputs.owner_windows == 'false' }}",
+        "run": DROP_SHIM_BASELINE_COMMAND,
+    }, "only an out-of-scope native lane may drop shim entries from the trusted baseline")
     require(
         named_step(steps, "Reject repository cargo-crap configuration")
         == {
@@ -411,13 +451,14 @@ def check_workflow(
         == {
             "name": "Generate trusted current baseline",
             "if": "${{ steps.baseline.outputs.bootstrap == 'true' }}",
+            "env": SHIM_ALLOW_ENV,
             "run": GENERATE_BASELINE_COMMAND,
         },
         "trusted current baseline generation changed",
     )
     require(
         named_step(steps, "Analyze CRAP score changes")
-        == {"name": "Analyze CRAP score changes", "run": ANALYZE_COMMAND},
+        == {"name": "Analyze CRAP score changes", "env": SHIM_ALLOW_ENV, "run": ANALYZE_COMMAND},
         "cargo-crap analysis command changed",
     )
     require(

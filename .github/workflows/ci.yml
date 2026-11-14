@@ -60,7 +60,10 @@ env:
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
 # any Cargo-heavy work. The core gates then run together, followed by at
-# most eight standard jobs. Mutation and ASan are the final expensive stages.
+# most eight standard jobs. Mutation and the ASan shards are the final
+# expensive stage and run beside each other. The native Windows owner lane
+# starts after the ledger Windows runner and runs beside the core and standard
+# stages; cargo-crap (native LCOV) and ci-gate wait for its result directly.
 
 jobs:
 
@@ -73,6 +76,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
+      owner_windows: ${{ steps.owner_windows.outputs.owner_windows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -99,6 +103,20 @@ jobs:
         id: full
         if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+      # Only an explicit 'false' from successful detection skips the native
+      # Windows owner lane. paths-filter emits nothing for a key the base
+      # revision's filter file lacks, and failed detection, non-pull-request
+      # events and a missing filter file all leave the value empty: run it.
+      - name: Resolve the Windows-owner scope
+        id: owner_windows
+        env:
+          DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}
+        run: |
+          if [[ "${DETECTED}" = false ]]; then
+            printf 'owner_windows=false\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'owner_windows=true\n' >> "$GITHUB_OUTPUT"
+          fi
 
   trunk-pr:
     # Keep this display name stable: the main-branch ruleset requires it.
@@ -128,7 +146,6 @@ jobs:
       - conformance-non-linux
       - plugin-component-fixtures
       - third-party-notices
-      - owner-bridge-windows
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -143,7 +160,6 @@ jobs:
           NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
           PLUGIN_FIXTURES_RESULT: ${{ needs.plugin-component-fixtures.result }}
           NOTICES_RESULT: ${{ needs.third-party-notices.result }}
-          OWNER_WINDOWS_RESULT: ${{ needs.owner-bridge-windows.result }}
         run: |
           set -euo pipefail
           test "${SCOPE_RESULT}" = success
@@ -158,12 +174,10 @@ jobs:
             test "${POLICY_RESULT}" = success
             test "${PLUGIN_FIXTURES_RESULT}" = success
             test "${NOTICES_RESULT}" = success
-            test "${OWNER_WINDOWS_RESULT}" = success
           else
             test "${POLICY_RESULT}" = skipped
             test "${PLUGIN_FIXTURES_RESULT}" = skipped
             test "${NOTICES_RESULT}" = skipped
-            test "${OWNER_WINDOWS_RESULT}" = skipped
           fi
 
   fmt:
@@ -677,12 +691,15 @@ jobs:
       - name: Exercise native-width canonical length arithmetic
         run: cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked canonical_length_tests -- --include-ignored
 
-  # This replaces the completed ledger Windows runner before core validation,
-  # so the owner lane cannot become a ninth heavy standard-stage runner.
+  # The owner lane reuses the completed ledger Windows runner and then runs
+  # beside the core and standard stages instead of gating preflight. It is not
+  # a standard-stage runner: cargo-crap consumes its native LCOV and ci-gate
+  # requires its result, both through a direct dependency. Pull requests run it
+  # only for Windows-owner changes; every other event always runs it.
   owner-bridge-windows:
     name: owner-bridge-windows
     needs: [ci_change_scope, ledger-windows]
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' }}
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' && needs.ci_change_scope.outputs.owner_windows == 'true' }}
     uses: ./.github/workflows/owner-bridge-windows.yml
     permissions:
       contents: read
@@ -936,9 +953,12 @@ jobs:
       - ci_change_scope
       - coverage
       - core-gate
+      - owner-bridge-windows
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
-    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # The native lane must succeed unless the trusted scope explicitly left it
+    # out of this pull request.
+    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -958,11 +978,13 @@ jobs:
           name: coverage-lcov-${{ github.sha }}
           path: ${{ runner.temp }}
       - name: Download hosted native LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: owner-windows-lcov-${{ github.sha }}
           path: ${{ runner.temp }}/owner-windows-lcov
       - name: Bind native and Linux coverage to this checkout
+        if: ${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}
         run: >
           python scripts/merge_owner_bridge_lcov.py
           --linux "${{ runner.temp }}/coverage.lcov"
@@ -971,6 +993,12 @@ jobs:
           --workspace "${{ github.workspace }}"
           --checkout "${{ github.sha }}"
           --output "${{ runner.temp }}/cargo-crap-coverage.lcov"
+      # Without the native lane the shim has no measured counters. Score the
+      # Linux LCOV alone and hide only the shim from scoring (below), so its
+      # functions are neither invented green nor scored pessimistically.
+      - name: Use Linux coverage without the unmeasured native shim
+        if: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}
+        run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       - name: Resolve trusted cargo-crap baseline
@@ -989,8 +1017,18 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.baseline.outputs.run-id }}
+      - name: Drop the unmeasured native shim from the trusted baseline
+        if: ${{ steps.baseline.outputs.run-id != '' && needs.ci_change_scope.outputs.owner_windows == 'false' }}
+        run: |
+          set -euo pipefail
+          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
+          jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-bridge-windows/") | not))' \
+            "${baseline}" > "${baseline}.scoped"
+          mv "${baseline}.scoped" "${baseline}"
       - name: Generate trusted current baseline
         if: ${{ steps.baseline.outputs.bootstrap == 'true' }}
+        env:
+          NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1029,9 +1067,12 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
+        env:
+          NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
@@ -1070,6 +1111,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
@@ -1238,9 +1280,9 @@ jobs:
     needs:
       - ci_change_scope
       - standard-gate
-      - mutation-checks
       - asan-build
-    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # The shards run beside diff mutation testing; ci-gate requires both.
+    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -1781,6 +1823,7 @@ jobs:
       - standard-gate
       - mutation-checks
       - asan-gate
+      - owner-bridge-windows
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1794,6 +1837,8 @@ jobs:
           STANDARD_RESULT: ${{ needs.standard-gate.result }}
           MUTATION_RESULT: ${{ needs.mutation-checks.result }}
           ASAN_RESULT: ${{ needs.asan-gate.result }}
+          OWNER_WINDOWS_SCOPE: ${{ needs.ci_change_scope.outputs.owner_windows }}
+          OWNER_WINDOWS_RESULT: ${{ needs.owner-bridge-windows.result }}
         run: |
           set -euo pipefail
           failed=0
@@ -1816,6 +1861,18 @@ jobs:
           fi
           if [[ "${MUTATION_RESULT}" != "${expected_mutation}" ]]; then
             echo "MUTATION_RESULT=${MUTATION_RESULT}" >&2
+            failed=1
+          fi
+
+          # Every non-pull-request event runs the native Windows owner lane; a
+          # pull request runs it for Rust-affecting Windows-owner changes.
+          expected_owner_windows=skipped
+          if [[ "${EVENT_NAME}" != pull_request \
+            || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_WINDOWS_SCOPE}" != false ) ]]; then
+            expected_owner_windows=success
+          fi
+          if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then
+            echo "OWNER_WINDOWS_RESULT=${OWNER_WINDOWS_RESULT}" >&2
             failed=1
           fi
 
