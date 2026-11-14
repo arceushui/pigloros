@@ -612,9 +612,7 @@ fn migration_refuses_unbound_mismatched_and_identical_modes() -> TestResult {
     let directory_path = directory.path().to_str().ok_or("path is not UTF-8")?;
     assert_eq!(
         migrate_gateway_mode_v1(directory_path, Local, AirGapped).err(),
-        Some(GatewayModeErrorV1::Store(
-            pos_core::GatewayModeBindingErrorV1::Unbound
-        ))
+        Some(GatewayModeErrorV1::StoreLockUnavailable)
     );
     Ok(())
 }

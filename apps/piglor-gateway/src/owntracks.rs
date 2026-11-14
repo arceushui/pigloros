@@ -938,6 +938,14 @@ mod tests {
             super::execute(&["revoke".to_owned(), directory.display().to_string()]).test_err()?;
         assert_eq!(
             unopenable.to_string(),
+            "store execution-mode lock is unavailable"
+        );
+        let garbage = directory.join("garbage.db");
+        std::fs::write(&garbage, b"not a database").test_ok()?;
+        let unopenable =
+            super::execute(&["revoke".to_owned(), garbage.display().to_string()]).test_err()?;
+        assert_eq!(
+            unopenable.to_string(),
             "OwnTracks enrollment state is unavailable"
         );
         std::fs::remove_dir_all(directory).test_ok()?;
