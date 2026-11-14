@@ -3,8 +3,9 @@
 #![warn(clippy::pedantic)]
 //! `piglor-gateway` — Wave 6 local-first HTTP/WebSocket gateway (ADR-014 / #69).
 //!
-//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. Host-bound Principal
-//! authorization is opt-in through [`GatewayAuthorization`].
+//! JSON HTTP envelope; CBOR payloads into [`pos_core::store::EventStore`]. The production serve
+//! composition ([`local_principal::local_gateway`]) requires host-bound Principal authorization
+//! ([`GatewayAuthorization`]) for every protected operation.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(test)]
@@ -27,6 +28,8 @@ pub mod local_fork_coordinator;
 pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
+pub mod local_principal;
+pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
@@ -35,14 +38,15 @@ pub mod startup;
 pub use authorization::{
     AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
     GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
-    GatewayAuthorityDenial, GatewayAuthorization, GatewayAuthorizationAudit,
-    GatewayAuthorizationDecision, GatewayAuthorizationError, GatewayAuthorizationRequest,
-    GatewayAuthorizationTarget, LocalAuthenticationAdapter, PendingAuthorityDenial,
-    RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
-    MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
+    GatewayAuthorityDenial, GatewayAuthoritySourceV1, GatewayAuthorization,
+    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
+    GatewayAuthorizationRequest, GatewayAuthorizationTarget, GatewayOperationV1,
+    LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
+    MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
+pub use operation::{GatewayOperationPermitV1, OperationAuthority, OperationSpecV1};
 #[cfg(test)]
 use pos_core::store::{AppendIdentity, AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
@@ -741,6 +745,87 @@ mod coverage_tests {
         drop(gateway);
     }
 
+    /// A private 32-byte owner key in `directory`, which is created with
+    /// `mode` when it does not exist yet.
+    #[cfg(unix)]
+    fn private_owner_key(directory: &Path, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(directory).test_ok();
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).test_ok();
+        let key = directory.join("owner.key");
+        std::fs::write(&key, [7_u8; 32]).test_ok();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).test_ok();
+        key
+    }
+
+    /// Every ancestor of the owner key is checked: each is a real
+    /// directory, the key's own directory is never group- or
+    /// other-writable, and a writable directory above it must be sticky.
+    #[cfg(unix)]
+    #[test]
+    fn owntracks_owner_key_ancestors_must_be_private_real_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().test_ok();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).test_ok();
+        let root = root.path();
+
+        // A clean 0700 chain loads; the temporary directory above it may
+        // be the system's sticky world-writable one.
+        let clean = private_owner_key(&root.join("clean"), 0o700);
+        assert!(OwnTracksOwnerKey::load(&clean).is_ok());
+        // Mode bits outside group and other write never refuse a parent.
+        let read_only = private_owner_key(&root.join("read-only"), 0o755);
+        assert!(OwnTracksOwnerKey::load(&read_only).is_ok());
+
+        // A sticky world-writable directory above the key's parent is
+        // accepted.
+        std::fs::create_dir(root.join("shared")).test_ok();
+        let below_sticky = private_owner_key(&root.join("shared").join("private"), 0o700);
+        std::fs::set_permissions(root.join("shared"), std::fs::Permissions::from_mode(0o1777))
+            .test_ok();
+        assert!(OwnTracksOwnerKey::load(&below_sticky).is_ok());
+
+        // The key's own directory, group- or other-writable, is refused
+        // even when sticky.
+        for mode in [0o1770, 0o1707, 0o770, 0o707] {
+            let parent = root.join(format!("parent-{mode:o}"));
+            let key = private_owner_key(&parent, 0o700);
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A writable directory above the parent that is not sticky is
+        // refused.
+        for mode in [0o770, 0o707] {
+            let open = root.join(format!("open-{mode:o}"));
+            std::fs::create_dir(&open).test_ok();
+            let key = private_owner_key(&open.join("private"), 0o700);
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A symlinked ancestor is refused although the key it reaches is
+        // private and complete.
+        std::fs::create_dir(root.join("real")).test_ok();
+        private_owner_key(&root.join("real").join("private"), 0o700);
+        symlink(root.join("real"), root.join("link")).test_ok();
+        let through_link = root.join("link").join("private").join("owner.key");
+        assert!(std::fs::read(&through_link).is_ok());
+        assert!(OwnTracksOwnerKey::load(&through_link).is_err());
+
+        // A non-directory ancestor is refused by the ancestor check itself:
+        // the file is not group- or other-writable, so only its type
+        // refuses it (through `load` the path would also fail later).
+        std::fs::write(root.join("file"), [1_u8]).test_ok();
+        std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o644))
+            .test_ok();
+        let under_file = root.join("file").join("owner.key");
+        assert!(crate::validate_owner_key_ancestors(&under_file).is_err());
+        assert!(OwnTracksOwnerKey::load(&under_file).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn owntracks_owner_key_load_requires_an_existing_private_32_byte_file() {
@@ -1099,6 +1184,28 @@ pub struct Gateway {
     pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     authorization: Option<Arc<GatewayAuthorization>>,
+    /// Whether protected operations need [`Self::authorization`] (always set
+    /// with it), so a composition without its authorizer fails closed.
+    authorization_required: bool,
+}
+
+/// Whether a composition protects its operations, and with which authorizer.
+enum GatewayProtection {
+    /// The in-process harness composition: nothing is protected.
+    Unprotected,
+    /// Every protected operation requires the authorizer; without one it
+    /// answers `401`.
+    Required(Option<Arc<GatewayAuthorization>>),
+}
+
+impl GatewayProtection {
+    /// The authorizer and whether protected operations require one.
+    fn into_parts(self) -> (Option<Arc<GatewayAuthorization>>, bool) {
+        match self {
+            Self::Unprotected => (None, false),
+            Self::Required(authorization) => (authorization, true),
+        }
+    }
 }
 
 /// Action kinds admitted by the Gateway World approver.
@@ -1258,9 +1365,8 @@ fn gateway_action_registry_builder(
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
-// registration authority. They exist only in unit tests and behind the
-// `test-support` feature, which no deployable graph enables, so they never
-// enter the release builder.
+// registration authority. They exist only in unit tests, so they never enter
+// the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1268,7 +1374,7 @@ fn gateway_action_registry_builder(
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1280,19 +1386,17 @@ fn fixture_action_registry_builder(
     )
 }
 
-/// Build a nonproduction, action-capable Gateway around a verified erasure host.
+/// Build a unit-test, action-capable Gateway around a verified erasure host.
 ///
 /// The action registry is the fixture registration of the reviewed Gateway
-/// entry, and `authorization` is whatever the caller pins: this composition is
-/// fixture-only and is never a source of production authority (ADR-108). It
-/// exists only in unit tests and behind the `test-support` feature, for the
-/// gateway-client-conformance subject adapter (#1295).
+/// entry, and `authorization` is whatever the test pins: this composition is
+/// never a source of production authority (ADR-108). Production composes its
+/// authorizer only through [`Gateway::require_authorization`] (#1361).
 ///
 /// # Errors
 /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn gateway_with_erasure_host_and_authorization(
+#[cfg(test)]
+pub(crate) fn gateway_with_erasure_host_and_authorization(
     host: ErasureExecutionHostV1,
     bodies: impl IntoIterator<Item = EntityId>,
     authorization: GatewayAuthorization,
@@ -1313,7 +1417,7 @@ pub fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        Some(Arc::new(authorization)),
+        GatewayProtection::Required(Some(Arc::new(authorization))),
     )
 }
 
@@ -1696,60 +1800,73 @@ impl OwnTracksOwnerKey {
     }
 }
 
+/// Whether this platform has the owner-key file checks: they exist on Unix
+/// only, and every other platform refuses the owner key (fails closed).
 #[cfg(unix)]
-fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
-    }
-}
-
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> = Ok(());
 #[cfg(not(unix))]
-fn absolute_owner_key_path(_path: &Path) -> Result<PathBuf, GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> =
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+
+// One item per name with an internal `cfg` split: same-name `cfg` twins
+// would be paired by line in the cargo-crap baseline.
+fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
+    OWNER_KEY_PLATFORM.and_then(|()| {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
+        }
+    })
 }
 
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
-    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
-    for (distance, ancestor) in parent.ancestors().enumerate() {
-        let metadata = std::fs::symlink_metadata(ancestor)
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
-        let mode = metadata.mode();
-        let writable_by_group_or_other = mode & 0o022 != 0;
-        let sticky = mode & 0o1000 != 0;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || (writable_by_group_or_other && (distance == 0 || !sticky))
-        {
-            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        let parent = path
+            .parent()
+            .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        for (distance, ancestor) in parent.ancestors().enumerate() {
+            let metadata = std::fs::symlink_metadata(ancestor)
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+            let mode = metadata.mode();
+            let writable_by_group_or_other = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            // `symlink_metadata` never reports a symlink as a directory, so
+            // this also refuses every symlinked ancestor.
+            if !metadata.is_dir() || (writable_by_group_or_other && (distance == 0 || !sticky)) {
+                return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+            }
         }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    OWNER_KEY_PLATFORM
 }
 
-#[cfg(not(unix))]
-fn validate_owner_key_ancestors(_path: &Path) -> Result<(), GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
-}
-
-#[cfg(unix)]
+// Without Unix the body is const-evaluable, but the Unix body is not.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    metadata.mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-const fn owner_key_is_permissive(_metadata: &std::fs::Metadata) -> bool {
-    true
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode()
+    };
+    // Without Unix permission bits every key is treated as permissive.
+    #[cfg(not(unix))]
+    let mode = {
+        let _ = metadata;
+        0o777
+    };
+    mode & 0o077 != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2074,9 +2191,10 @@ impl Gateway {
         owntracks_enabled: bool,
         action_registry: Result<Arc<PluginRegistry>, pos_runtime::RuntimeError>,
         consent_authority: ConsentAuthority,
-        authorization: Option<Arc<GatewayAuthorization>>,
+        protection: GatewayProtection,
     ) -> Result<Self, GatewayError> {
         let action_registry = action_registry.map_err(GatewayError::ActionRegistry)?;
+        let (authorization, authorization_required) = protection.into_parts();
         Ok(Self {
             store,
             bus,
@@ -2087,6 +2205,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization,
+            authorization_required,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2119,6 +2238,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2153,8 +2273,23 @@ impl Gateway {
                     Arc::new(registry)
                 }),
             consent_authority,
-            None,
+            GatewayProtection::Unprotected,
         )
+    }
+
+    /// Construct an unprotected Gateway for an in-process test harness.
+    ///
+    /// Every operation is served without a Principal decision. It exists for
+    /// the gateway-client-conformance `open` composition and the
+    /// non-interference harnesses only; no binary path composes it (a
+    /// structure test checks this), and production composes
+    /// [`local_principal::local_gateway`].
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot be bound.
+    #[doc(hidden)]
+    pub fn unprotected_for_harness(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(host, GatewayProtection::Unprotected)
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
@@ -2164,12 +2299,27 @@ impl Gateway {
     /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
     /// single-consumer command stream.
     ///
-    /// Protected actions remain unavailable until the host supplies an
-    /// installed policy through the authorized constructor.
+    /// Every protected operation requires `authorization`; without it (an
+    /// unprovisioned host) each answers `401`. Actions also need an
+    /// installed World action catalogue (#461).
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
+    pub(crate) fn new_with_erasure_host(
+        host: ErasureExecutionHostV1,
+        authorization: Option<GatewayAuthorization>,
+    ) -> Result<Self, GatewayError> {
+        Self::with_empty_registry(
+            host,
+            GatewayProtection::Required(authorization.map(Arc::new)),
+        )
+    }
+
+    /// The Gateway over `host` without a World action catalogue.
+    fn with_empty_registry(
+        host: ErasureExecutionHostV1,
+        protection: GatewayProtection,
+    ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
         let store = executor::StoreExecutor::new_with_erasure_host(
@@ -2186,7 +2336,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            protection,
         )
     }
 
@@ -2221,21 +2371,22 @@ impl Gateway {
                 gate,
             ),
             consent_authority,
-            Some(Arc::new(authorization)),
+            GatewayProtection::Required(Some(Arc::new(authorization))),
         )
     }
 
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
-    /// Protected Gateway actions remain unavailable; `OwnTracks` ingress is
-    /// independently authenticated by its owner key.
+    /// `OwnTracks` ingress is independently authenticated by its owner key;
+    /// every other protected operation requires `authorization`.
     ///
     /// # Errors
     /// Returns a store error if the recovered host cannot be bound.
-    pub fn new_with_owntracks_erasure_host(
+    pub(crate) fn new_with_owntracks_erasure_host(
         host: ErasureExecutionHostV1,
         owner_key: &OwnTracksOwnerKey,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2254,7 +2405,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )
     }
 
@@ -2274,6 +2425,7 @@ impl Gateway {
         host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<&OwnTracksOwnerKey>,
         slot: executor::ForkAdmissionSlotV1,
+        authorization: Option<GatewayAuthorization>,
     ) -> Result<(Self, executor::ForkAdmissionSubmitterV1), GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -2293,7 +2445,7 @@ impl Gateway {
                 gate,
             )),
             consent_authority,
-            None,
+            GatewayProtection::Required(authorization.map(Arc::new)),
         )?;
         Ok((gateway, submitter))
     }
@@ -2326,6 +2478,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2338,7 +2491,7 @@ impl Gateway {
     ///
     /// Test-only: the store has no authority ports, so every denial fails
     /// closed as unavailable evidence (503) and is never answered as a
-    /// denial. No production or `test-support` composition can build it.
+    /// denial. No production composition can build it.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new_with_world_bodies_and_authorization(
@@ -2376,6 +2529,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: Some(Arc::new(authorization)),
+            authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2411,6 +2565,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2447,6 +2602,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2484,6 +2640,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup())
     }
@@ -2515,6 +2672,7 @@ impl Gateway {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         }
         .schedule_startup_consent_cleanup()
     }
@@ -2636,10 +2794,18 @@ impl Gateway {
         self.store.erasure_status().await.map_err(Into::into)
     }
 
-    /// Return whether this Gateway has a provider-neutral host authorizer.
+    /// Return whether this Gateway protects its operations: it has a
+    /// provider-neutral host authorizer, or its composition requires one and
+    /// fails closed without it.
     #[must_use]
     pub const fn has_authorization(&self) -> bool {
-        self.authorization.is_some()
+        self.authorization_required
+    }
+
+    /// Whether this Gateway requires an authorizer it does not have (an
+    /// unprovisioned host), so every protected route answers `401`.
+    pub(crate) const fn is_unprovisioned(&self) -> bool {
+        self.authorization_required && self.authorization.is_none()
     }
 
     /// Drain queued store commands and join the dedicated worker.
@@ -2648,6 +2814,7 @@ impl Gateway {
     /// Returns a typed executor lifecycle error when the worker cannot drain,
     /// join, or complete within its bounded shutdown deadline.
     pub async fn shutdown(&self) -> Result<(), GatewayError> {
+        self.wait_for_admitted_operations().await;
         self.flush_denial_markers_before_shutdown().await;
         self.store.shutdown().await.map_err(Into::into)
     }
@@ -2896,7 +3063,7 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
-        if self.authorization.is_some() {
+        if self.has_authorization() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
         self.read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
@@ -3072,8 +3239,8 @@ impl Gateway {
             limit,
             WallTime::now(),
         );
-        let fence = authorization.commit_fence().await;
-        if let Err(error) = authorization.authorize(request) {
+        let fence = self.current_fence(authorization).await;
+        if let Err(error) = fence.authorize(authorization, request) {
             // The denial's evidence is written after the fence is released,
             // so an authority replacement never waits behind it.
             drop(fence);
@@ -3182,15 +3349,18 @@ impl Gateway {
             Ok(timeline) => timeline,
             Err(error) => return Err(error),
         };
-        let fence = authorization.commit_fence().await;
+        let fence = self.current_fence(&authorization).await;
         let maximum = self.limits.max_events_per_timeline;
-        let admitted = match authorization.authorize(GatewayAuthorizationRequest::action(
-            request.proposal.actor_entity_id,
-            timeline,
-            request.proposal.event_type.as_str(),
-            request.proposal.capability.as_str(),
-            WallTime::now(),
-        )) {
+        let admitted = match fence.authorize(
+            &authorization,
+            GatewayAuthorizationRequest::action(
+                request.proposal.actor_entity_id,
+                timeline,
+                request.proposal.event_type.as_str(),
+                request.proposal.capability.as_str(),
+                WallTime::now(),
+            ),
+        ) {
             Ok(decision) => {
                 self.store
                     .admit_action(
@@ -3279,6 +3449,32 @@ impl Gateway {
             Ok(Some(recorded)) => GatewayError::AuthorizationDenied(recorded),
             Ok(None) => GatewayError::AuthorizationEvidenceUnavailable,
             Err(error) => error.into(),
+        }
+    }
+
+    /// Wait for every operation admitted under the authority fence (a
+    /// detached mutation task included) to complete before the store stops.
+    ///
+    /// The wait is bounded by the shutdown deadline: an operation still
+    /// running then (a hung Ledger write, for example) is reported and
+    /// abandoned, and the store shuts down under it.
+    async fn wait_for_admitted_operations(&self) {
+        let Some(authorization) = &self.authorization else {
+            return;
+        };
+        if tokio::time::timeout(
+            executor::SHUTDOWN_DEADLINE,
+            authorization.wait_for_admitted_operations(),
+        )
+        .await
+        .is_err()
+        {
+            use std::io::Write as _;
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "piglor-gateway shutdown: admitted operations still running at the shutdown \
+                 deadline were abandoned"
+            ));
         }
     }
 
@@ -3537,6 +3733,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3552,6 +3749,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         }
     }
 
@@ -3576,6 +3774,7 @@ impl Gateway {
                 gate,
             ),
             authorization: None,
+            authorization_required: false,
         }
     }
 }
@@ -4068,7 +4267,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
 
         assert!(!gateway.has_authorization());
         let timeline = gateway.create_timeline("foundation").await.test_ok();
@@ -4118,7 +4317,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_erasure_host(host),
+            Gateway::unprotected_for_harness(host),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
 
@@ -4146,7 +4345,7 @@ mod tests {
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
-            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32])),
+            Gateway::new_with_owntracks_erasure_host(host, &OwnTracksOwnerKey([0; 32]), None),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
     }
@@ -4329,7 +4528,7 @@ mod tests {
                     "world.unowned".to_owned(),
                 )),
                 ConsentAuthority::new(),
-                None,
+                GatewayProtection::Unprotected,
             ),
             Err(GatewayError::ActionRegistry(
                 pos_runtime::RuntimeError::UnknownEventType(_)
@@ -5077,7 +5276,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway
             .create_timeline("generationless-cursor")
             .await
@@ -7278,6 +7477,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_create.create_timeline("x").await,
@@ -7296,6 +7496,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             fail_list.create_timeline("x").await,
@@ -7340,6 +7541,7 @@ mod tests {
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
             authorization: None,
+            authorization_required: false,
         };
         assert!(matches!(
             missing
@@ -7384,6 +7586,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = empty_append.create_timeline("e").await.test_ok();
         let err = empty_append
@@ -7409,6 +7612,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_get_timeline
             .append_action(
@@ -7433,6 +7637,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let tl = fail_append.create_timeline("a").await.test_ok();
         let err = fail_append
@@ -7458,6 +7663,7 @@ mod tests {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             authorization: None,
+            authorization_required: false,
         };
         let err = fail_read
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7517,6 +7723,7 @@ mod tests {
                 pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 authorization: None,
+                authorization_required: false,
             };
             let error = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
@@ -7851,7 +8058,7 @@ mod coverage_entrypoints {
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
-        let gateway = Gateway::new_with_erasure_host(host)?;
+        let gateway = Gateway::unprotected_for_harness(host)?;
         assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);
         let timeline = gateway.create_timeline("host-owned-gateway").await?;
         let entity = EntityId::new();

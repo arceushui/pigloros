@@ -52,11 +52,14 @@ listener) of the same Gateway with raw HTTP requests, without any socket. No net
 in either execution mode, so Local and Air-Gapped executions are the same.
 
 - `open`: no host authorizer (the default Gateway).
-- `authorized`: the nonproduction fixture registration of the Gateway action registry and a
-  fixture authority, explicitly fixture-only, from which no production authority is sourced
-  (ADR-108). Its Principal holds one grant for actor `01JC0GATEWAYF1XTVREACT0R00`: resource
-  `timeline.events`, action `read`, purpose `read`, audience `gateway`. It grants no action.
-  The fixture World body is `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
+- `authorized`: the production serve composition with a fixture Local Principal document,
+  from which no production authority is sourced (ADR-108). The document is provisioned and
+  recomposed through the production Local Principal path, and the Gateway requires that
+  Principal for every protected operation. Its one grant is for actor
+  `01JC0GATEWAYF1XTVREACT0R00` and the operations `timeline.create` (resource `timeline`, action
+  `create`) and `timeline.events.read` (resource `timeline.events`, action `read`), audience
+  `gateway`. It grants no action or signal. Action payloads name the World body
+  `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
   `x-piglor-actor-entity: 01JC0GATEWAYF1XTVREACT0R00`.
 
 A request `body` is sent as compact JSON with `content-type: application/json`. Every request

@@ -225,14 +225,111 @@ pub enum GatewayAuthorizationTarget {
         from_position: Seq,
         limit: usize,
     },
+    /// One [`GatewayOperationV1`], on a Timeline when the operation names
+    /// one (an append) and on the host when it does not (a create).
+    Operation { timeline_id: Option<TimelineId> },
 }
 
-impl GatewayAuthorizationTarget {
+/// One protected Gateway operation, keyed by the capability `resource` and
+/// `action` a Principal's grant must cover, and the `purpose` it is
+/// evaluated for (#1361).
+///
+/// The named constants are the closed set this Gateway serves; the Local
+/// Principal is provisioned with grants named by [`Self::name`]. Later
+/// operations (#303, #304, #309) add a constant with a fresh resource and
+/// action pair and authorize through [`crate::Gateway::authorize_operation`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GatewayOperationV1 {
+    name: &'static str,
+    resource: &'static str,
+    action: &'static str,
+    purpose: &'static str,
+}
+
+impl GatewayOperationV1 {
+    /// `POST /v1/timelines`: create a root Timeline.
+    pub const CREATE_TIMELINE: Self =
+        Self::new("timeline.create", "timeline", "create", "operation");
+    /// `POST /v1/timelines/{timeline_id}/signals`: append one Society Signal.
+    pub const APPEND_SIGNAL: Self = Self::new(
+        "timeline.signals.append",
+        "society.signal",
+        "append",
+        "operation",
+    );
+    /// `POST /v1/ledger/predictions`: register one Prediction Ledger entry.
+    pub const CREATE_PREDICTION: Self = Self::new(
+        "ledger.predictions.create",
+        "ledger.prediction",
+        "create",
+        "operation",
+    );
+    /// `GET /v1/timelines/{timeline_id}/events`, as [`GatewayAuthorizationRequest::read`] builds it.
+    pub const READ_EVENTS: Self =
+        Self::new("timeline.events.read", "timeline.events", "read", "read");
+    /// `POST /v1/timelines/{timeline_id}/actions`, as [`GatewayAuthorizationRequest::action`]
+    /// builds it for `world.action.v1`.
+    pub const SUBMIT_WORLD_ACTION: Self = Self::new(
+        "world.action.v1.submit",
+        "world.action.v1",
+        "world.action.v1.submit",
+        "action",
+    );
+    /// Every operation this Gateway serves, in name order.
+    pub const ALL: [Self; 5] = [
+        Self::CREATE_PREDICTION,
+        Self::CREATE_TIMELINE,
+        Self::READ_EVENTS,
+        Self::APPEND_SIGNAL,
+        Self::SUBMIT_WORLD_ACTION,
+    ];
+
+    /// An operation keyed by `resource` and `action`, evaluated for `purpose`.
     #[must_use]
-    pub const fn timeline_id(self) -> TimelineId {
-        match self {
-            Self::Action { timeline_id } | Self::Read { timeline_id, .. } => timeline_id,
+    pub const fn new(
+        name: &'static str,
+        resource: &'static str,
+        action: &'static str,
+        purpose: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            resource,
+            action,
+            purpose,
         }
+    }
+
+    /// The operation name a Local Principal grant lists.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// The capability resource.
+    #[must_use]
+    pub const fn resource(self) -> &'static str {
+        self.resource
+    }
+
+    /// The capability action.
+    #[must_use]
+    pub const fn action(self) -> &'static str {
+        self.action
+    }
+
+    /// The purpose the operation is evaluated for.
+    #[must_use]
+    pub const fn purpose(self) -> &'static str {
+        self.purpose
+    }
+
+    /// The served operation named `name`, if any.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.name == name)
     }
 }
 
@@ -319,6 +416,45 @@ impl GatewayAuthorizationRequest {
             data_category: event_type,
             action: capability.into(),
             purpose: "action".to_owned(),
+            audience: "gateway".to_owned(),
+            at_time,
+            at_position: Seq::ZERO,
+            authority_timeline: None,
+            consent_timeline: None,
+            consent_at_position: None,
+            use_count: 1,
+            budget: 1,
+            consent_policy_revision: Hash::zero(),
+            capability_policy_revision: Hash::zero(),
+            revocation_state_current: true,
+            consent: ConsentEvidenceV1::NotRequired,
+            environment_constraints: Vec::new(),
+        }
+    }
+
+    /// Build the request of one [`GatewayOperationV1`] by `actor_entity_id`,
+    /// bound to `target_timeline` when the operation names one.
+    #[must_use]
+    pub fn operation(
+        actor_entity_id: EntityId,
+        operation: GatewayOperationV1,
+        target_timeline: Option<TimelineId>,
+        at_time: WallTime,
+    ) -> Self {
+        Self {
+            target: GatewayAuthorizationTarget::Operation {
+                timeline_id: target_timeline,
+            },
+            actor_entity_id,
+            subject_id: None,
+            participant_id: None,
+            plugin_id: None,
+            installation_id: None,
+            principal_role: AuthorityRoleV1::Actor,
+            resource: operation.resource().to_owned(),
+            data_category: operation.resource().to_owned(),
+            action: operation.action().to_owned(),
+            purpose: operation.purpose().to_owned(),
             audience: "gateway".to_owned(),
             at_time,
             at_position: Seq::ZERO,
@@ -495,12 +631,40 @@ impl GatewayAuthorizationDecision {
     }
 }
 
+/// The trusted source a host recomposes its pinned authority from (#1361).
+///
+/// A host whose authorizer names a source reads the source's recorded chain
+/// from its store before each protected decision; when the store is ahead of
+/// the pinned chain (a revocation recorded by another writer), the host
+/// recomposes the view and the registry that attests it together, so a
+/// revocation is current (owner decision D10 on #302) and is answered
+/// `revoked` (D3).
+pub trait GatewayAuthoritySourceV1: Send + Sync {
+    /// The leaf grant the store records this host's authority under.
+    fn leaf_grant_id(&self) -> Hash;
+
+    /// The view and attesting registry of one recorded chain, or `None`
+    /// when the source cannot reproduce that chain exactly.
+    fn recompose(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)>;
+}
+
+/// The authority a host decides with: one recorded chain and the registry
+/// that attests it, always replaced together.
+struct PinnedAuthorityV1 {
+    view: AuthorityViewV1,
+    registry: AuthorityRegistrySnapshotV1,
+}
+
 /// Host-owned authority evaluator used by Gateway protected seams.
 #[derive(Clone)]
 pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
-    authority: Arc<RwLock<Arc<AuthorityViewV1>>>,
-    registry: AuthorityRegistrySnapshotV1,
+    authority: Arc<RwLock<Arc<PinnedAuthorityV1>>>,
+    registry_digest: Hash,
+    source: Option<Arc<dyn GatewayAuthoritySourceV1>>,
     persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
     commit_lock: Arc<AsyncRwLock<()>>,
@@ -534,9 +698,13 @@ impl GatewayAuthorization {
     ) -> Self {
         Self {
             adapter,
-            authority: Arc::new(RwLock::new(Arc::new(authority))),
             persistence: AuthorityPersistenceHostV1::new(&registry),
-            registry,
+            registry_digest: registry.registry_digest(),
+            authority: Arc::new(RwLock::new(Arc::new(PinnedAuthorityV1 {
+                view: authority,
+                registry,
+            }))),
+            source: None,
             revocation_state_current,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
@@ -559,18 +727,18 @@ impl GatewayAuthorization {
             .and_then(|authenticated| {
                 self.authority
                     .read()
-                    .map(|view| Arc::clone(&view))
+                    .map(|pinned| Arc::clone(&pinned))
                     .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
-                    .and_then(|view| {
-                        let authority = view.authority();
-                        core_request(&request, &authenticated, authority, &self.registry)
+                    .and_then(|pinned| {
+                        let authority = pinned.view.authority();
+                        core_request(&request, &authenticated, authority, &pinned.registry)
                             .map_err(|_| GatewayAuthorizationError::RequestUnavailable)
                             .map(|core_request| {
                                 let (decision, expiry) =
                                     AuthorityEvaluatorV1::authorize_with_expiry(
                                         &core_request,
                                         authority.chain(),
-                                        &self.registry,
+                                        &pinned.registry,
                                     );
                                 GatewayAuthorizationDecision {
                                     request,
@@ -760,22 +928,147 @@ impl GatewayAuthorization {
     /// Replace the pinned authority snapshot at a host-controlled fence.
     ///
     /// The same commit lock used by Gateway appends prevents an update from
-    /// racing a final authorization check and append.
+    /// racing a final authorization check and append. An authorizer with a
+    /// [`GatewayAuthoritySourceV1`] rebuilds the attesting registry with the
+    /// view through that source, exactly as a store refresh does, so a
+    /// revocation learned here is answered `revoked`. The replacement is the
+    /// host's own in-process decision and is installed as given; a later
+    /// store refresh never rolls it back, because a refresh installs only a
+    /// record ahead of the pinned chain.
     ///
     /// # Errors
     /// Returns [`GatewayAuthorizationError::AuthorityUnavailable`] when the
-    /// host authority lock is poisoned and cannot be replaced safely.
+    /// host authority lock is poisoned and cannot be replaced safely, or the
+    /// source cannot reproduce `authority` under this host's registry digest.
     pub async fn replace_authority(
         &self,
         authority: AuthorityViewV1,
     ) -> Result<(), GatewayAuthorizationError> {
         let _guard = self.commit_lock.write().await;
+        self.pinned_for(authority)
+            .and_then(|pinned| self.install(pinned))
+    }
+
+    /// Attach the source this host recomposes its authority from.
+    #[must_use]
+    pub fn with_source(mut self, source: Arc<dyn GatewayAuthoritySourceV1>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// The leaf grant this host's source records its authority under.
+    pub(crate) fn source_leaf(&self) -> Option<Hash> {
+        self.source
+            .as_ref()
+            .map(|source| GatewayAuthoritySourceV1::leaf_grant_id(source.as_ref()))
+    }
+
+    /// Whether the store's `persisted` chain is ahead of the pinned one: a
+    /// later revocation epoch or Timeline position another writer recorded.
+    /// A chain this host learned first (through [`Self::replace_authority`])
+    /// is never rolled back by an older record.
+    pub(crate) fn is_behind(&self, persisted: &PersistedAuthorityV1) -> bool {
+        let pinned = self.pinned();
+        let current = pinned.view.authority();
+        (persisted.revocation_epoch(), persisted.head_position())
+            > (current.revocation_epoch(), current.head_position())
+    }
+
+    /// Recompose the pinned view and registry from the store's `persisted`
+    /// chain under the commit-fence write guard, so no decision or admitted
+    /// operation interleaves.
+    ///
+    /// The comparison is repeated under the guard: a refresh that raced a
+    /// newer one never installs its older record over the newer pin.
+    pub(crate) async fn refresh(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Result<(), GatewayAuthorizationError> {
+        let _guard = self.commit_lock.write().await;
+        if !self.is_behind(persisted) {
+            return Ok(());
+        }
+        self.recomposed(persisted)
+            .and_then(|pinned| self.install(pinned))
+    }
+
+    /// Decide `request` as a host that cannot vouch for its revocation
+    /// state: a store whose authority record could not be read or
+    /// recomposed. A covered request is denied `RevocationStateStale`
+    /// (`503`, retryable; D3 on #302), never answered as unauthenticated.
+    pub(crate) fn authorize_with_stale_state(
+        &self,
+        request: GatewayAuthorizationRequest,
+    ) -> Result<GatewayAuthorizationDecision, GatewayAuthorizationError> {
+        let mut stale = self.clone();
+        stale.revocation_state_current = false;
+        stale.authorize(request)
+    }
+
+    /// Wait until every operation admitted under the commit fence has
+    /// released it.
+    pub(crate) async fn wait_for_admitted_operations(&self) {
+        drop(self.commit_lock.write().await);
+    }
+
+    /// The source's view and registry for `persisted`, under this host's
+    /// unchanged registry digest.
+    fn recomposed(
+        &self,
+        persisted: &PersistedAuthorityV1,
+    ) -> Result<PinnedAuthorityV1, GatewayAuthorizationError> {
+        self.source
+            .as_ref()
+            .and_then(|source| source.recompose(persisted))
+            .filter(|(_, registry)| registry.registry_digest() == self.registry_digest)
+            .map(|(view, registry)| PinnedAuthorityV1 { view, registry })
+            .ok_or(GatewayAuthorizationError::AuthorityUnavailable)
+    }
+
+    /// The pinned authority of a replacement view: rebuilt through the
+    /// source when there is one, else with the current registry.
+    fn pinned_for(
+        &self,
+        view: AuthorityViewV1,
+    ) -> Result<PinnedAuthorityV1, GatewayAuthorizationError> {
+        if self.source.is_none() {
+            return Ok(PinnedAuthorityV1 {
+                registry: self.pinned().registry.clone(),
+                view,
+            });
+        }
+        self.recomposed(view.authority()).and_then(|pinned| {
+            (pinned.view == view)
+                .then_some(pinned)
+                .ok_or(GatewayAuthorizationError::AuthorityUnavailable)
+        })
+    }
+
+    /// Swap in a complete pinned authority.
+    fn install(&self, pinned: PinnedAuthorityV1) -> Result<(), GatewayAuthorizationError> {
         self.authority
             .write()
             .map(|mut current| {
-                *current = Arc::new(authority);
+                *current = Arc::new(pinned);
             })
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
+    }
+
+    /// The current pinned authority; replacement only swaps a complete
+    /// snapshot, so a poisoned lock still holds a whole one.
+    fn pinned(&self) -> Arc<PinnedAuthorityV1> {
+        Arc::clone(
+            &self
+                .authority
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// The registry the host currently decides with.
+    #[cfg(test)]
+    pub(crate) fn registry_for_test(&self) -> AuthorityRegistrySnapshotV1 {
+        self.pinned().registry.clone()
     }
 
     /// Retain one accepted action's minimized authorization audit.
@@ -846,26 +1139,16 @@ impl GatewayAuthorization {
         &self,
         store: &mut dyn AuthorityPersistencePortV1,
     ) -> Result<(Hash, PersistedAuthorityV1), AuthorityPersistenceErrorV1> {
-        // Replacement only swaps a complete snapshot, so a poisoned lock
-        // still holds a whole view; only its shared handle is cloned.
-        let view = Arc::clone(
-            &self
-                .authority
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let pinned = self.pinned();
         self.persistence
-            .persist_authority(store, &view)
+            .persist_authority(store, &pinned.view)
             .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
     /// The pinned authority registry digest and revocation-freshness claim
     /// that select this host's execution profile.
     pub(crate) const fn execution_profile(&self) -> (Hash, bool) {
-        (
-            self.registry.registry_digest(),
-            self.revocation_state_current,
-        )
+        (self.registry_digest, self.revocation_state_current)
     }
 }
 
@@ -1144,22 +1427,7 @@ fn fallback_to_grant_policy_revision(value: Hash, fallback: Hash) -> Hash {
 fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.GatewayAuthorizationRequest.v1\0");
-    match request.target {
-        GatewayAuthorizationTarget::Action { timeline_id } => {
-            hasher.update(&[0]);
-            hasher.update(&timeline_bytes(timeline_id));
-        }
-        GatewayAuthorizationTarget::Read {
-            timeline_id,
-            from_position,
-            limit,
-        } => {
-            hasher.update(&[1]);
-            hasher.update(&timeline_id.inner().to_bytes());
-            hasher.update(&from_position.as_u64().to_be_bytes());
-            hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
-        }
-    }
+    digest_target(&mut hasher, request.target);
     hasher.update(&entity_bytes(request.actor_entity_id));
     digest_optional_fixed(&mut hasher, request.subject_id.map(entity_bytes));
     digest_optional_fixed(&mut hasher, request.participant_id.map(entity_bytes));
@@ -1207,6 +1475,30 @@ fn operation_binding(request: &GatewayAuthorizationRequest) -> Hash {
         hasher.update(constraint.as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Bind the exact protected target of one request.
+fn digest_target(hasher: &mut blake3::Hasher, target: GatewayAuthorizationTarget) {
+    match target {
+        GatewayAuthorizationTarget::Action { timeline_id } => {
+            hasher.update(&[0]);
+            hasher.update(&timeline_bytes(timeline_id));
+        }
+        GatewayAuthorizationTarget::Read {
+            timeline_id,
+            from_position,
+            limit,
+        } => {
+            hasher.update(&[1]);
+            hasher.update(&timeline_id.inner().to_bytes());
+            hasher.update(&from_position.as_u64().to_be_bytes());
+            hasher.update(&u64::try_from(limit).unwrap_or(u64::MAX).to_be_bytes());
+        }
+        GatewayAuthorizationTarget::Operation { timeline_id } => {
+            hasher.update(&[2]);
+            digest_optional_fixed(hasher, timeline_id.map(timeline_bytes));
+        }
+    }
 }
 
 fn entity_bytes(value: EntityId) -> [u8; 16] {
@@ -1384,9 +1676,19 @@ mod tests {
     fn fixture_with_actor(actor: EntityId) -> Fixture {
         fixture_with_scope(
             actor,
-            vec!["timeline.events".to_owned(), "world.action.v1".to_owned()],
-            vec!["read".to_owned(), "world.action.v1.submit".to_owned()],
-            vec!["action".to_owned(), "read".to_owned()],
+            [
+                "ledger.prediction",
+                "society.signal",
+                "timeline",
+                "timeline.events",
+                "world.action.v1",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            ["append", "create", "read", "world.action.v1.submit"]
+                .map(str::to_owned)
+                .to_vec(),
+            ["action", "operation", "read"].map(str::to_owned).to_vec(),
         )
     }
 
@@ -1548,7 +1850,7 @@ mod tests {
         GatewayAuthorization::new(
             adapter,
             fixture.authority.clone(),
-            fixture.authorization.registry.clone(),
+            fixture.authorization.registry_for_test(),
         )
     }
 
@@ -1561,9 +1863,9 @@ mod tests {
     ) -> GatewayAuthorization {
         fixture_with_scope(
             actor,
-            vec!["world.action.v1".to_owned()],
-            vec!["world.action.v1.submit".to_owned()],
-            vec!["action".to_owned()],
+            vec!["timeline".to_owned(), "world.action.v1".to_owned()],
+            vec!["create".to_owned(), "world.action.v1.submit".to_owned()],
+            vec!["action".to_owned(), "operation".to_owned()],
         )
         .authorization
     }
@@ -1879,22 +2181,43 @@ mod tests {
         assert_eq!(audit.request_digest(), decision.request_digest());
         assert_eq!(audit.decision_digest(), decision.decision_digest());
         assert_eq!(audit.event_id(), None);
+    }
+
+    #[test]
+    fn served_operations_are_closed_and_keyed_by_resource_and_action() {
+        let names = GatewayOperationV1::ALL.map(GatewayOperationV1::name);
+        let mut sorted = names;
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+        for operation in GatewayOperationV1::ALL {
+            assert_eq!(GatewayOperationV1::named(operation.name()), Some(operation));
+        }
+        assert_eq!(GatewayOperationV1::named("timeline.delete"), None);
+        let custom = GatewayOperationV1::new("scenario.create", "scenario", "create", "operation");
         assert_eq!(
-            GatewayAuthorizationTarget::Action {
-                timeline_id: fixture.target_timeline,
-            }
-            .timeline_id(),
-            fixture.target_timeline
+            (custom.resource(), custom.action(), custom.purpose()),
+            ("scenario", "create", "operation")
         );
+        let request = GatewayAuthorizationRequest::operation(
+            EntityId::new(),
+            custom,
+            None,
+            WallTime::from_micros(1),
+        );
+        assert_eq!(request.resource, "scenario");
+        assert_eq!(request.action, "create");
+        assert_eq!(request.purpose, "operation");
         assert_eq!(
-            GatewayAuthorizationTarget::Read {
-                timeline_id: fixture.target_timeline,
-                from_position: Seq::from_u64(3),
-                limit: 2,
-            }
-            .timeline_id(),
-            fixture.target_timeline
+            request.target,
+            GatewayAuthorizationTarget::Operation { timeline_id: None }
         );
+        let bound = GatewayAuthorizationRequest::operation(
+            request.actor_entity_id,
+            custom,
+            Some(TimelineId::new()),
+            request.at_time,
+        );
+        assert_ne!(operation_binding(&request), operation_binding(&bound));
     }
 
     /// Authorize `request`, require a pending denial and check that its ADN1
@@ -1966,7 +2289,7 @@ mod tests {
                 fixture.authenticated.clone(),
             )),
             fixture.authority.clone(),
-            fixture.authorization.registry,
+            fixture.authorization.registry_for_test(),
             false,
         );
         let pending = denied(&stale, request);
@@ -2057,7 +2380,7 @@ mod tests {
         let mut foreign = pos_store::memory::MemoryStore::new();
         foreign
             .bind_authority_persistence(
-                AuthorityPersistenceHostV1::new(&fixture.authorization.registry)
+                AuthorityPersistenceHostV1::new(&fixture.authorization.registry_for_test())
                     .persistence_binding(),
             )
             .test_ok();

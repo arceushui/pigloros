@@ -24,6 +24,9 @@ macro_rules! output_stderr {
 use piglor_gateway::local_fork_service::{
     provision_local_fork_admission_authority, serve_local_fork_admission, LocalForkAdmissionPathsV1,
 };
+use piglor_gateway::local_principal::local_gateway;
+#[cfg(target_os = "linux")]
+use piglor_gateway::local_principal::provision_local_principal_from_credentials;
 use piglor_gateway::startup::{
     announce_listening, open_recovered_erasure_host, stop_after_bind_failure, GatewayHostStoreV1,
 };
@@ -46,6 +49,8 @@ type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 const GATEWAY_CREDENTIAL_DIRECTORY: &str = "/run/credentials/piglor-gateway.service";
 const PROVISION_CREDENTIAL_DIRECTORY: &str =
     "/run/credentials/piglor-gateway-fork-admission-provision.service";
+const LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY: &str =
+    "/run/credentials/piglor-gateway-local-principal-provision.service";
 const FORK_ADMISSION_SOCKET: &str = "/run/pigloros/fork-admission.sock";
 
 fn handle_run_error(e: &dyn std::error::Error) {
@@ -155,30 +160,8 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
                 ledger_write,
             ))
         }
-        Some("provision-local-fork-authority") => {
-            #[cfg(target_os = "linux")]
-            {
-                let Some(sqlite_path) = args.get(2) else {
-                    return Err("provision-local-fork-authority requires an SQLite path".into());
-                };
-                if args.len() != 3 {
-                    return Err(
-                        "provision-local-fork-authority accepts exactly an SQLite path".into(),
-                    );
-                }
-                provision_local_fork_admission_authority(
-                    sqlite_path,
-                    &credential_directory_from(
-                        credential_directory,
-                        PROVISION_CREDENTIAL_DIRECTORY,
-                    )?,
-                )
-                .map_err(Into::into)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Err("fork admission requires Linux Unix peer credentials".into())
-            }
+        Some(command @ ("provision-local-fork-authority" | "provision-local-principal")) => {
+            provision_command(command, args, credential_directory)
         }
         Some("fork-admission-provision") => Err(
             "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
@@ -189,7 +172,7 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             Ok(())
         }
         _ => {
-            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>] [--require-local-fork-authority]|provision-local-fork-authority <sqlite-path>|version>");
+            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>] [--require-local-fork-authority]|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|version>");
             output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             output_stderr!("  owntracks status <sqlite-path>");
             output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
@@ -199,8 +182,49 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             output_stderr!(
                 "  provision-local-fork-authority is available only to its installed systemd unit"
             );
+            output_stderr!(
+                "  provision-local-principal is available only to its installed systemd unit"
+            );
             Ok(())
         }
+    }
+}
+
+/// `provision-local-fork-authority <sqlite-path>` and `provision-local-principal
+/// <sqlite-path>`: one-shot provisioning, only under each command's systemd unit.
+fn provision_command(
+    command: &str,
+    args: &[String],
+    credential_directory: Option<OsString>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(sqlite_path) = args.get(2) else {
+            return Err(format!("{command} requires an SQLite path").into());
+        };
+        if args.len() != 3 {
+            return Err(format!("{command} accepts exactly an SQLite path").into());
+        }
+        let provisioned = if command == "provision-local-principal" {
+            provision_local_principal_from_credentials(
+                sqlite_path,
+                &credential_directory_from(
+                    credential_directory,
+                    LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY,
+                )?,
+            )
+        } else {
+            provision_local_fork_admission_authority(
+                sqlite_path,
+                &credential_directory_from(credential_directory, PROVISION_CREDENTIAL_DIRECTORY)?,
+            )
+        };
+        provisioned.map_err(Into::into)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop((args, credential_directory));
+        Err(format!("{command} requires Linux systemd credentials").into())
     }
 }
 
@@ -282,7 +306,7 @@ fn credential_directory_from(
     directory: Option<OsString>,
     expected: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let directory = directory.ok_or("managed Fork authority requires CREDENTIALS_DIRECTORY")?;
+    let directory = directory.ok_or("systemd credentials require CREDENTIALS_DIRECTORY")?;
     let directory = PathBuf::from(directory);
     validate_credential_directory(directory, expected)
 }
@@ -293,7 +317,7 @@ fn validate_credential_directory(
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     (directory == *expected)
         .then_some(directory)
-        .ok_or_else(|| "Fork authority credential directory does not match its systemd unit".into())
+        .ok_or_else(|| "credential directory does not match its systemd unit".into())
 }
 
 const fn is_spectator_deployment(addr: SocketAddr) -> bool {
@@ -332,22 +356,21 @@ fn gateway_for_startup_with_recovery(
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
     composition: &ErasureCoordinatorCompositionV1,
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
+    // D1 on #302: every protected route requires the Local Principal the
+    // store records; an unprovisioned store answers them `401`.
     match (owntracks_owner_key, sqlite_path) {
-        (Some(owner_key), Some(path)) => {
-            let host = open_recovered_erasure_host(
-                StoreConfig::Sqlite {
-                    path: path.to_owned(),
-                },
-                GatewayHostStoreV1::OwnTracks,
-                composition,
-            )?;
-            Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
-        }
-        (None, _) => {
-            let host =
-                open_recovered_erasure_host(config, GatewayHostStoreV1::Standard, composition)?;
-            Gateway::new_with_erasure_host(host).map_err(Into::into)
-        }
+        (Some(owner_key), Some(path)) => open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: path.to_owned(),
+            },
+            GatewayHostStoreV1::OwnTracks,
+            composition,
+        )
+        .and_then(|host| local_gateway(host, Some(owner_key)))
+        .map_err(Into::into),
+        (None, _) => open_recovered_erasure_host(config, GatewayHostStoreV1::Standard, composition)
+            .and_then(|host| local_gateway(host, None))
+            .map_err(Into::into),
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
 }
@@ -760,6 +783,45 @@ mod tests {
     }
 
     #[test]
+    fn local_principal_provisioning_runs_only_under_its_systemd_unit(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir().test_ok()?;
+        let database = directory.path().join("gateway.db");
+        let run = |args: &[String], credentials: Option<&str>| {
+            run_with_args_and_shutdown_with_environment_and_credentials(
+                args,
+                Box::pin(async {}),
+                LedgerEnvironment::default(),
+                credentials.map(OsString::from),
+            )
+        };
+        let command = || {
+            vec![
+                "piglor-gateway".to_owned(),
+                "provision-local-principal".to_owned(),
+            ]
+        };
+        let missing_path = run(&command(), None).test_err()?;
+        assert!(missing_path.to_string().contains("requires an SQLite path"));
+
+        let mut extra = command();
+        extra.extend([database.display().to_string(), "extra".to_owned()]);
+        let extra = run(&extra, None).test_err()?;
+        assert!(extra.to_string().contains("exactly an SQLite path"));
+
+        let mut args = command();
+        args.push(database.display().to_string());
+        let direct = run(&args, None).test_err()?;
+        assert!(direct.to_string().contains("CREDENTIALS_DIRECTORY"));
+        let wrong_unit = run(&args, Some(PROVISION_CREDENTIAL_DIRECTORY)).test_err()?;
+        assert!(wrong_unit.to_string().contains("does not match"));
+        let unavailable = run(&args, Some(LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY)).test_err()?;
+        assert!(!unavailable.to_string().is_empty());
+        assert!(!database.exists());
+        Ok(())
+    }
+
+    #[test]
     fn managed_serve_requires_the_gateway_credential_directory(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let directory = tempfile::tempdir().test_ok()?;
@@ -803,6 +865,14 @@ mod tests {
         bind_ip: IpAddr,
         requests: &[&str],
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        serve_http_requests_on(bind_ip, None, requests).await
+    }
+
+    async fn serve_http_requests_on(
+        bind_ip: IpAddr,
+        sqlite_path: Option<String>,
+        requests: &[&str],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let listener = tokio::net::TcpListener::bind((bind_ip, 0))
             .await
             .test_ok()?;
@@ -812,7 +882,7 @@ mod tests {
         let server = tokio::spawn(async move {
             serve(
                 addr,
-                None,
+                sqlite_path.as_deref(),
                 async move {
                     match rx.await {
                         Ok(()) | Err(_) => {}
@@ -903,12 +973,57 @@ mod tests {
         );
     }
 
+    /// D1 on #302: an unprovisioned host serves the Timeline API fail closed.
     async fn loopback_server_retains_timeline_api_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let responses =
             serve_http_requests(IpAddr::V4(Ipv4Addr::LOCALHOST), &[CREATE_TIMELINE_REQUEST])
                 .await?;
+        assert!(responses[0].starts_with("HTTP/1.1 401 Unauthorized"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn the_provisioned_binary_admits_its_local_principal() {
+        let result = the_provisioned_binary_admits_its_local_principal_impl().await;
+        assert!(
+            result.is_ok(),
+            "the_provisioned_binary_admits_its_local_principal failed: {result:?}"
+        );
+    }
+
+    async fn the_provisioned_binary_admits_its_local_principal_impl(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use piglor_gateway::local_principal::{
+            provision_local_principal, LocalPrincipalProvisionV1,
+        };
+        let directory = tempfile::tempdir().test_ok()?;
+        let database = directory.path().join("gateway.db");
+        let path = database
+            .to_str()
+            .ok_or("temporary path is not UTF-8")?
+            .to_owned();
+        let actor = pos_core::EntityId::new();
+        provision_local_principal(
+            &mut pos_store::sqlite::SqliteStore::open(&path)?,
+            &LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([9; 16], "local")?,
+                [actor],
+                [piglor_gateway::GatewayOperationV1::CREATE_TIMELINE],
+            )?,
+        )?;
+        let admitted = format!(
+            "POST /v1/timelines HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nx-piglor-actor-entity: {actor}\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{{\"name\":\"local\"}}"
+        );
+        let responses = serve_http_requests_on(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(path),
+            &[admitted.as_str(), CREATE_TIMELINE_REQUEST],
+        )
+        .await?;
         assert!(responses[0].starts_with("HTTP/1.1 201 Created"));
+        assert!(responses[1].starts_with("HTTP/1.1 401 Unauthorized"));
         Ok(())
     }
 
@@ -1500,13 +1615,13 @@ mod erasure_gate_coverage_tests {
     #[tokio::test]
     async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // An unprovisioned host protects even its in-process reads (D1).
         let memory = gateway_for_startup(None, StoreConfig::Memory, None)?;
         let timeline = memory.create_timeline("host-owned-startup").await?;
         assert!(memory
             .read_events_page(&timeline.id().to_string(), 0, 1)
-            .await?
-            .events
-            .is_empty());
+            .await
+            .is_err());
         memory
             .purge_expired_ingress_identities(std::num::NonZeroUsize::MIN)
             .await?;
@@ -1528,9 +1643,8 @@ mod erasure_gate_coverage_tests {
         let timeline = sqlite.create_timeline("host-owned-owntracks").await?;
         assert!(sqlite
             .read_events_page(&timeline.id().to_string(), 0, 1)
-            .await?
-            .events
-            .is_empty());
+            .await
+            .is_err());
         sqlite.shutdown().await?;
         drop(sqlite);
 

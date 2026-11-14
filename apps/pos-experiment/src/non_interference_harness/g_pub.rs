@@ -765,7 +765,7 @@ fn public_transcript(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .ok()
-    .and_then(|host| piglor_gateway::Gateway::new_with_erasure_host(host).ok())
+    .and_then(|host| piglor_gateway::Gateway::unprotected_for_harness(host).ok())
     .and_then(|gateway| {
         let mut client = PublicClientV1 {
             runtime,
