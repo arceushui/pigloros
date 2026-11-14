@@ -1409,7 +1409,7 @@ fn graph_root_count_is_capped_before_any_root_is_read() -> TestResult {
     Ok(())
 }
 
-fn widest_factual_refs<'a>(owner: &'a str, count: u64) -> Vec<TypedRef<'a>> {
+fn widest_factual_refs(owner: &str, count: u64) -> Vec<TypedRef<'_>> {
     (0..count)
         .map(|index| TypedRef::Factual {
             timeline: timeline(4),
