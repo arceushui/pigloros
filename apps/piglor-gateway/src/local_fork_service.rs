@@ -2134,12 +2134,24 @@ mod tests {
         use pos_core::{
             GatewayModeBindingHostV1, GatewayModeBindingPortV1 as _, GatewayModeProfileRefV1,
         };
-        let world = unprovisioned_world()?;
-        let credentials = protected_credential_directory(world.runtime.path())?;
-        protected_credentials(&credentials, [7; 32], [8; 32])?;
-        bind_world(&world)?;
-        provision_local_fork_admission_authority(world.path()?, &credentials)?;
-        install_profile(&credentials, &profile_bytes(&[7])?)?;
+        let (world, _) = provisioned_world(&[])?;
+        let mode = crate::mode_profile::test_binding_of(
+            GatewayModeProfileIdV1::Local,
+            fork_composition(&world.socket),
+        );
+        let host = open_recovered_erasure_host(
+            StoreConfig::Sqlite {
+                path: world.path()?.to_owned(),
+            },
+            GatewayHostStoreV1::Standard,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let started = open_with_credentials(
+            crate::mode_profile::test_attach_host(host, &mode),
+            current_peer_managed()?,
+            None,
+            &mode,
+        )?;
         let path = world.path()?.to_owned();
         let socket = world.socket.clone();
         let client = async move {
@@ -2165,7 +2177,12 @@ mod tests {
                     .await??;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
         };
-        let serve = serve_for_test(&world, &credentials, std::future::pending());
+        let serve = serve_started(
+            started,
+            &mode,
+            std::future::pending(),
+            (LedgerView::default(), LedgerWriteMode::Disabled),
+        );
         tokio::pin!(serve);
         let response = tokio::select! {
             served = &mut serve => {
