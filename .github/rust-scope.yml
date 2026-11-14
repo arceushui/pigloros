@@ -25,6 +25,14 @@ owner_windows:
   - Cargo.lock
   - rust-toolchain.toml
   - .cargo/**
+  - .config/**
+  - clippy.toml
+  - .clippy.toml
+  - rustfmt.toml
+  - .rustfmt.toml
+  - covgate.toml
+  - .gitattributes
+  - fixtures/owner-bridge/**
   - .github/workflows/owner-bridge-windows.yml
   - .github/workflows/ci.yml
   - .github/rust-scope.yml

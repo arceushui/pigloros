@@ -61,9 +61,14 @@ the Linux coverage job intentionally does not evaluate them.
 
 That job runs on every push to `main` and on pull requests whose changes touch
 the paths in the `owner_windows` filter of `.github/rust-scope.yml` (the owner
-crates, `pos-crypto`, workspace manifests and toolchain, the workflows and the
+crates, `pos-crypto`, `fixtures/owner-bridge`, workspace manifests, toolchain
+and root Cargo, lint, format and coverage configuration, the workflows and the
 scripts the lane or its consumers run), read from the trusted base revision.
-Failed detection or a base revision without that filter runs it. When a pull
+Failed detection, a base revision without that filter, a pull request at the
+3000-file listing limit, any renamed file, or a failure to list renames runs
+it. Only `cargo-crap` and `ci-gate` depend on the lane directly (`standard-gate`,
+mutation and ASan follow it through `cargo-crap`), so a failed lane does not
+hide the other standard-stage findings. When a pull
 request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
 `crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
 `ci-gate` requires the lane's success whenever it is in scope.

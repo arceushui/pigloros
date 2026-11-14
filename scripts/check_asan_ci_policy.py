@@ -126,10 +126,10 @@ df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 }
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
-    "needs": ["ci_change_scope", "cargo-crap"],
+    "needs": ["ci_change_scope", "core-gate"],
     "if": (
         "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-        "needs.cargo-crap.result == 'success' && "
+        "needs.core-gate.result == 'success' && "
         "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
     ),
     "runs-on": "ubuntu-24.04",

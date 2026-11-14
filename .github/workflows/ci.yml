@@ -59,11 +59,13 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The core gates then run together, followed by at
-# most eight standard jobs. Mutation and the ASan shards are the final
-# expensive stage and run beside each other. The native Windows owner lane
-# starts after the ledger Windows runner and runs beside the core and standard
-# stages; cargo-crap (native LCOV) and ci-gate wait for its result directly.
+# any Cargo-heavy work. The core gates then run together; core-gate releases
+# at most eight heavy standard jobs plus the lightweight cargo-crap analysis.
+# Mutation and the ASan shards follow standard-gate as the final expensive
+# stage and run beside each other. The native Windows owner lane starts after
+# the ledger Windows runner and runs beside the core and standard stages. Only
+# cargo-crap (native LCOV) and ci-gate wait for it directly; standard-gate, and
+# so mutation and ASan, wait for it through cargo-crap.
 
 jobs:
 
@@ -107,16 +109,33 @@ jobs:
       # Windows owner lane. paths-filter emits nothing for a key the base
       # revision's filter file lacks, and failed detection, non-pull-request
       # events and a missing filter file all leave the value empty: run it.
+      # The pull-request files API lists at most 3000 files, and a rename may
+      # move a lane input out of a matched path, so either also runs it, as
+      # does any failure to list the renames.
       - name: Resolve the Windows-owner scope
         id: owner_windows
         env:
           DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          scope=true
           if [[ "${DETECTED}" = false ]]; then
-            printf 'owner_windows=false\n' >> "$GITHUB_OUTPUT"
-          else
-            printf 'owner_windows=true\n' >> "$GITHUB_OUTPUT"
+            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then
+              echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'
+            elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo '::warning::The pull request number is unavailable; running the Windows owner lane.'
+            elif ! renamed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+              --jq '.[] | select(.status == "renamed") | .filename')"; then
+              echo '::warning::Renamed files could not be listed; running the Windows owner lane.'
+            elif [[ -n "${renamed}" ]]; then
+              echo 'A renamed file may move a lane input; running the Windows owner lane.'
+            else
+              scope=false
+            fi
           fi
+          printf 'owner_windows=%s\n' "${scope}" >> "$GITHUB_OUTPUT"
 
   trunk-pr:
     # Keep this display name stable: the main-branch ruleset requires it.
@@ -204,10 +223,10 @@ jobs:
     name: rustdoc
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -397,10 +416,10 @@ jobs:
     name: reference-evaluator-release
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -513,11 +532,11 @@ jobs:
     needs:
       - ci_change_scope
       - conformance-fixtures
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.conformance-fixtures.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -693,9 +712,10 @@ jobs:
 
   # The owner lane reuses the completed ledger Windows runner and then runs
   # beside the core and standard stages instead of gating preflight. It is not
-  # a standard-stage runner: cargo-crap consumes its native LCOV and ci-gate
-  # requires its result, both through a direct dependency. Pull requests run it
-  # only for Windows-owner changes; every other event always runs it.
+  # a standard-stage runner: only cargo-crap (which consumes its native LCOV)
+  # and ci-gate depend on it, so a failed lane never hides standard-stage
+  # findings. Pull requests run it only for Windows-owner changes; every other
+  # event always runs it.
   owner-bridge-windows:
     name: owner-bridge-windows
     needs: [ci_change_scope, ledger-windows]
@@ -1141,10 +1161,10 @@ jobs:
     name: dependency-policy (audit / deny / shear)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1179,18 +1199,16 @@ jobs:
 
   # Always runs, including for documentation-only pull requests: the main
   # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
-  # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
-  # still wait for cargo-crap; documentation-only PRs (cargo-crap skipped) do not.
+  # and a skipped job uploads none, which leaves the PR unmergeable. It waits
+  # for core-gate, which succeeds for documentation-only PRs as well.
   codeql:
     name: CodeQL (Rust)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      (needs.cargo-crap.result == 'success' ||
-      (needs.ci_change_scope.outputs.rust == 'false' &&
-      needs.cargo-crap.result == 'skipped')) }}
+      needs.core-gate.result == 'success' }}
     permissions:
       actions: read
       contents: read
@@ -1225,10 +1243,10 @@ jobs:
     name: asan build (nextest archive)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1433,11 +1451,11 @@ jobs:
     name: docker-build
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
       - third-party-notices
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       needs.third-party-notices.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
@@ -1487,10 +1505,10 @@ jobs:
     name: world-client-wasm
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30

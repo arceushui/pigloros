@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import fnmatch
 import hashlib
 import os
 import pathlib
@@ -89,7 +88,7 @@ WORKSPACE_RUSTDOC_STEP = {
 }
 RUSTDOC_JOB_IF = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "needs.cargo-crap.result == 'success' && "
+    "needs.core-gate.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
@@ -126,6 +125,14 @@ REQUIRED_OWNER_WINDOWS_PATTERNS = (
     "Cargo.lock",
     "rust-toolchain.toml",
     ".cargo/**",
+    ".config/**",
+    "clippy.toml",
+    ".clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "covgate.toml",
+    ".gitattributes",
+    "fixtures/owner-bridge/**",
     ".github/workflows/owner-bridge-windows.yml",
     ".github/workflows/ci.yml",
     ".github/rust-scope.yml",
@@ -142,12 +149,28 @@ OWNER_WINDOWS_SCOPE_STEP = {
     "env": {
         "DETECTED": "${{ github.event_name == 'pull_request' && "
         "steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}",
+        "CHANGED_FILES": "${{ github.event.pull_request.changed_files }}",
+        "PULL_NUMBER": "${{ github.event.pull_request.number }}",
+        "GH_TOKEN": "${{ github.token }}",
     },
-    "run": "if [[ \"${DETECTED}\" = false ]]; then\n"
-    "  printf 'owner_windows=false\\n' >> \"$GITHUB_OUTPUT\"\n"
-    "else\n"
-    "  printf 'owner_windows=true\\n' >> \"$GITHUB_OUTPUT\"\n"
-    "fi\n",
+    "run": (
+        'scope=true\n'
+        'if [[ "${DETECTED}" = false ]]; then\n'
+        '  if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then\n'
+        "    echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'\n"
+        '  elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then\n'
+        "    echo '::warning::The pull request number is unavailable; running the Windows owner lane.'\n"
+        '  elif ! renamed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
+        '    --jq \'.[] | select(.status == "renamed") | .filename\')"; then\n'
+        "    echo '::warning::Renamed files could not be listed; running the Windows owner lane.'\n"
+        '  elif [[ -n "${renamed}" ]]; then\n'
+        "    echo 'A renamed file may move a lane input; running the Windows owner lane.'\n"
+        '  else\n'
+        '    scope=false\n'
+        '  fi\n'
+        'fi\n'
+        'printf \'owner_windows=%s\\n\' "${scope}" >> "$GITHUB_OUTPUT"\n'
+    ),
 }
 CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
 CORE_JOB_IF = (
@@ -197,13 +220,47 @@ def assert_owner_windows_filter(patterns: list[str]) -> None:
         raise AssertionError(f"owner_windows lost required lane inputs: {missing}")
 
 
+def picomatch_regex(pattern: str) -> re.Pattern[str]:
+    """Translate the picomatch subset paths-filter uses (with ``dot: true``).
+
+    ``*`` and ``?`` stay within one path segment; a whole ``**`` segment spans
+    zero or more segments. Brace, extglob and class syntax is rejected so a
+    filter cannot silently rely on a construct this model does not reproduce.
+    """
+    if any(character in pattern for character in "{}[]()+@") or pattern.startswith("!"):
+        raise AssertionError(f"unsupported scope pattern: {pattern}")
+    segments = pattern.split("/")
+    regex = ""
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            regex += ".*" if last else "(?:[^/]+/)*"
+            continue
+        if "**" in segment:
+            raise AssertionError(f"unsupported scope pattern: {pattern}")
+        regex += "".join(
+            "[^/]*" if character == "*" else "[^/]" if character == "?" else re.escape(character)
+            for character in segment
+        )
+        if not last:
+            regex += "/"
+    return re.compile(regex)
+
+
+def picomatch(path: str, pattern: str) -> bool:
+    return picomatch_regex(pattern).fullmatch(path) is not None
+
+
+def scope_matches(path: str, patterns: list[str]) -> bool:
+    """paths-filter's ``some-with-excludes``: any include and no exclude."""
+    includes = [pattern for pattern in patterns if not pattern.startswith("!")]
+    excludes = [pattern[1:] for pattern in patterns if pattern.startswith("!")]
+    return (any(picomatch(path, pattern) for pattern in includes)
+            and not any(picomatch(path, pattern) for pattern in excludes))
+
+
 def owner_windows_lane_required(paths: list[str], patterns: list[str]) -> bool:
-    """Approximate paths-filter's picomatch: `*` stays in one segment."""
-    def matches(path: str, pattern: str) -> bool:
-        if pattern.endswith("/**"):
-            return path.startswith(pattern[:-2])
-        return fnmatch.fnmatchcase(path, pattern) and path.count("/") == pattern.count("/")
-    return any(matches(path, pattern) for path in paths for pattern in patterns)
+    return any(scope_matches(path, patterns) for path in paths)
 
 
 def load_workflow(workflow_path: pathlib.Path) -> dict:
@@ -383,8 +440,11 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 
 
 STANDARD_STAGE_RUNNER_CAP = 8
-# Heavy jobs released by cargo-crap. Browser parity follows WASM packaging on
-# the same budget, and standard-gate is the lightweight fan-in.
+LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-crap"})
+# Heavy jobs released by core-gate. Browser parity follows WASM packaging on
+# the same budget. cargo-crap starts beside them but compiles nothing (pinned
+# binary, cargo metadata and LCOV parsing in a 10-minute budget), and
+# standard-gate and ci-gate are lightweight fan-ins.
 STANDARD_STAGE_JOBS = frozenset(
     {
         "rustdoc",
@@ -410,8 +470,13 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     started = {
         name
         for name, job in jobs.items()
-        if name != "standard-gate" and "cargo-crap" in job_needs(job)
+        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
+    crap = jobs.get("cargo-crap", {})
+    if "strategy" in crap or crap.get("timeout-minutes") != 10 or "core-gate" not in job_needs(crap):
+        raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
+    if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != ["standard-gate"]:
+        raise AssertionError("only standard-gate may wait for cargo-crap")
     if started != STANDARD_STAGE_JOBS:
         raise AssertionError("standard stage must start exactly the counted jobs")
     if len(started) > STANDARD_STAGE_RUNNER_CAP:
@@ -423,6 +488,25 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     missing = sorted(started - set(gate_needs))
     if missing:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
+
+
+# cargo-crap consumes the native LCOV; standard-gate requires cargo-crap, and
+# mutation and the ASan shards follow standard-gate. Nothing else may wait.
+OWNER_WINDOWS_DOWNSTREAM = sorted((
+    "cargo-crap", "standard-gate", "mutation-checks", "mutation-required",
+    "asan", "asan-gate", "ci-gate", "modules-structure", "depgraph",
+))
+
+
+def transitive_needs(jobs: dict, name: str) -> set[str]:
+    seen: set[str] = set()
+    pending = job_needs(jobs[name])
+    while pending:
+        dependency = pending.pop()
+        if dependency not in seen:
+            seen.add(dependency)
+            pending.extend(job_needs(jobs.get(dependency, {})))
+    return seen
 
 
 def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
@@ -452,6 +536,10 @@ def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
                        if "owner-bridge-windows" in job_needs(job))
     if consumers != ["cargo-crap", "ci-gate"]:
         raise AssertionError("only cargo-crap and ci-gate may wait for the owner Windows lane")
+    behind_lane = sorted(name for name in jobs
+                         if "owner-bridge-windows" in transitive_needs(jobs, name))
+    if behind_lane != OWNER_WINDOWS_DOWNSTREAM:
+        raise AssertionError(f"a failed owner Windows lane must not hide other findings: {behind_lane}")
     gate = jobs["ci-gate"]
     step = gate["steps"][0]
     if step["env"].get("OWNER_WINDOWS_RESULT") != "${{ needs.owner-bridge-windows.result }}":
@@ -471,15 +559,6 @@ def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
         native_policy.check(native)
     except native_policy.PolicyError as error:
         raise AssertionError(str(error)) from error
-
-
-def excluded(path: str, patterns: list[str]) -> bool:
-    return any(
-        fnmatch.fnmatchcase(path, pattern[1:])
-        or fnmatch.fnmatchcase(path, pattern[1:].removeprefix("**/"))
-        for pattern in patterns
-        if pattern.startswith("!")
-    )
 
 
 def assert_parallel_validation_contract(workflow: dict) -> None:
@@ -505,7 +584,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     rustdoc = jobs["rustdoc"]
-    if (rustdoc.get("needs") != ["ci_change_scope", "cargo-crap"]
+    if (rustdoc.get("needs") != ["ci_change_scope", "core-gate"]
             or rustdoc.get("if") != RUSTDOC_JOB_IF):
         raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
     if any(
@@ -530,7 +609,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
 
 
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
-    return any(not excluded(path, patterns) for path in paths)
+    return any(scope_matches(path, patterns) for path in paths)
 
 
 def assert_codeql_preparation_contract(workflow: dict) -> None:
@@ -661,6 +740,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                      "crates/pos-crypto/src/lib.rs",
                      "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
                      ".cargo/audit.toml",
+                     ".cargo/config.toml",
+                     ".config/nextest.toml",
+                     "clippy.toml", ".clippy.toml", "rustfmt.toml", ".rustfmt.toml",
+                     "covgate.toml", ".gitattributes",
+                     "fixtures/owner-bridge/webauthn-es256-v1.fixture",
                      ".github/workflows/ci.yml",
                      ".github/workflows/owner-bridge-windows.yml",
                      ".github/rust-scope.yml"):
@@ -668,24 +752,104 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 self.assertTrue(owner_windows_lane_required([path], patterns))
         for path in ("crates/pos-core/src/lib.rs", "crates/pos-store/Cargo.toml",
                      "scripts/check_asan_ci_policy.py", "crates/Cargo.toml",
-                     "docs/test-policy.md"):
+                     "scripts/asan/owner.sh", "crates/pos-core/Cargo.toml",
+                     "crates/pos-owner-bridge-windows-extra/src/lib.rs",
+                     "fixtures/other/owner-bridge.fixture", "docs/test-policy.md"):
             with self.subTest(path=path):
                 self.assertFalse(owner_windows_lane_required([path], patterns))
 
-    def test_owner_windows_scope_resolves_only_explicit_false_to_a_skip(self) -> None:
+    def resolve_owner_windows_scope(self, *, detected: str, changed: str = "12",
+                                    number: str = "848", gh_status: int = 0,
+                                    gh_output: str = "") -> tuple[str, list[str]]:
         step = OWNER_WINDOWS_SCOPE_STEP
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            calls = root / "gh-calls"
+            (tools / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\0\' "$@" >> "${GH_CALLS}"\n'
+                'printf \'%s\' "${GH_FAKE_OUTPUT}"\n'
+                'exit "${GH_FAKE_STATUS}"\n',
+                encoding="utf-8",
+            )
+            (tools / "gh").chmod(0o755)
+            output = root / "output"
+            subprocess.run(
+                ["bash", "-e", "-c", step["run"]], check=True, capture_output=True,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                         DETECTED=detected, CHANGED_FILES=changed, PULL_NUMBER=number,
+                         GITHUB_REPOSITORY="owner/repository", GITHUB_OUTPUT=str(output),
+                         GH_CALLS=str(calls), GH_FAKE_STATUS=str(gh_status),
+                         GH_FAKE_OUTPUT=gh_output),
+            )
+            arguments = calls.read_text(encoding="utf-8").split("\0")[:-1] if calls.exists() else []
+            return output.read_text(encoding="utf-8"), arguments
+
+    def test_owner_windows_scope_resolves_only_explicit_false_to_a_skip(self) -> None:
         # Absent filter key, failed or skipped detection and non-pull-request
         # events all reach the step as an empty value.
-        for detected, expected in (("false", "false"), ("true", "true"), ("", "true"),
-                                   ("False", "true"), ("0", "true"), ("unknown", "true")):
-            with self.subTest(detected=detected), tempfile.TemporaryDirectory() as directory:
-                output = pathlib.Path(directory) / "output"
-                subprocess.run(["bash", "-e", "-c", step["run"]], check=True,
-                               env=dict(os.environ, DETECTED=detected, GITHUB_OUTPUT=str(output)))
-                self.assertEqual(output.read_text(encoding="utf-8"), f"owner_windows={expected}\n")
-        detected = step["env"]["DETECTED"]
+        for detected in ("true", "", "False", "0", "unknown"):
+            with self.subTest(detected=detected):
+                output, calls = self.resolve_owner_windows_scope(detected=detected)
+                self.assertEqual(output, "owner_windows=true\n")
+                self.assertEqual(calls, [])
+        output, calls = self.resolve_owner_windows_scope(detected="false")
+        self.assertEqual(output, "owner_windows=false\n")
+        self.assertEqual(calls, [
+            "api", "--paginate", "repos/owner/repository/pulls/848/files",
+            "--jq", '.[] | select(.status == "renamed") | .filename',
+        ])
+        detected = OWNER_WINDOWS_SCOPE_STEP["env"]["DETECTED"]
         for guard in ("github.event_name == 'pull_request'", "steps.scope.outcome == 'success'"):
             self.assertIn(guard, detected)
+
+    def test_owner_windows_scope_runs_the_lane_when_the_file_list_is_uncertain(self) -> None:
+        for label, overrides in (
+            ("api limit", {"changed": "3000"}),
+            ("over api limit", {"changed": "3001"}),
+            ("unknown count", {"changed": ""}),
+            ("malformed count", {"changed": "12; true"}),
+            ("unknown pull request", {"number": ""}),
+            ("api failure", {"gh_status": 1}),
+            ("api failure with partial output", {"gh_status": 22, "gh_output": ""}),
+            ("renamed file", {"gh_output": "crates/pos-owner-bridge-windows/src/moved.rs\n"}),
+            ("renamed elsewhere", {"gh_output": "docs/moved.md"}),
+        ):
+            with self.subTest(label=label):
+                output, _ = self.resolve_owner_windows_scope(detected="false", **overrides)
+                self.assertEqual(output, "owner_windows=true\n")
+        output, calls = self.resolve_owner_windows_scope(detected="false", changed="2999")
+        self.assertEqual(output, "owner_windows=false\n")
+        self.assertTrue(calls)
+        output, calls = self.resolve_owner_windows_scope(detected="false", changed="3000")
+        self.assertEqual(calls, [])
+
+    def test_scope_matcher_follows_picomatch_segments(self) -> None:
+        for path, pattern, expected in (
+            ("scripts/owner_bridge_runtime.py", "scripts/*owner*", True),
+            ("scripts/asan/owner.sh", "scripts/*owner*", False),
+            ("README.md", "**/*.md", True),
+            ("a/b/c.md", "**/*.md", True),
+            (".agents/x.md", "**/*.md", True),
+            ("docs/a/b.txt", "docs/**", True),
+            ("docs", "docs/**", False),
+            ("crates/pos-owner-bridge-windows/src/a.rs", "crates/pos-owner-bridge-windows/**", True),
+            ("crates/pos-owner-bridge-windows-extra/a.rs", "crates/pos-owner-bridge-windows/**", False),
+            ("x/Cargo.toml", "Cargo.toml", False),
+            ("Cargo.toml", "Cargo.toml", True),
+            ("src/a.rs", "**", True),
+            ("ab", "a?", True),
+            ("a/b", "a?b", False),
+        ):
+            with self.subTest(path=path, pattern=pattern):
+                self.assertEqual(picomatch(path, pattern), expected)
+        for pattern in ("{a,b}", "a/[bc]", "!a", "a**b", "+(a)"):
+            with self.subTest(pattern=pattern), self.assertRaises(AssertionError):
+                picomatch_regex(pattern)
+        self.assertFalse(scope_matches("docs/a.rs", ["**", "!docs/**"]))
+        self.assertTrue(scope_matches("src/a.rs", ["**", "!docs/**"]))
 
     def test_owner_windows_scope_rejects_weakened_resolution(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -704,6 +868,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 '"${DETECTED}" = false', '"${DETECTED}" != true')),
             lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.owner_windows }}"),
             lambda w: step(w).update(**{"if": "steps.scope.outcome == 'success'"}),
+            lambda w: step(w).update(run=step(w)["run"].replace("CHANGED_FILES >= 3000", "CHANGED_FILES > 3000")),
+            lambda w: step(w).update(run=step(w)["run"].replace('select(.status == "renamed")', 'select(.status == "moved")')),
+            lambda w: step(w).update(run=step(w)["run"].replace("elif ! renamed=", "elif renamed=")),
+            lambda w: step(w)["env"].pop("GH_TOKEN"),
             lambda w: step(w).update(**{"continue-on-error": True}),
             lambda w: w["jobs"]["ci_change_scope"]["steps"].remove(step(w)),
         ):
@@ -895,8 +1063,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         jobs = workflow["jobs"]
         condition = " ".join(jobs["codeql"]["if"].split())
-        self.assertIn("needs.cargo-crap.result == 'skipped'", condition)
-        self.assertNotIn("outputs.rust == 'true'", condition)
+        self.assertEqual(jobs["codeql"]["needs"], ["ci_change_scope", "core-gate"])
+        self.assertIn("needs.core-gate.result == 'success'", condition)
+        self.assertNotIn("outputs.rust", condition)
+        self.assertNotIn("cargo-crap", condition)
         required = jobs["codeql-required"]
         self.assertEqual(required["name"], "CodeQL (Rust)")
         self.assertEqual(required["needs"], ["codeql"])
@@ -1051,6 +1221,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             lambda w: w["jobs"]["ci-gate"]["needs"].remove("owner-bridge-windows"),
             lambda w: w["jobs"]["cargo-crap"]["needs"].remove("owner-bridge-windows"),
             lambda w: w["jobs"]["standard-gate"]["needs"].append("owner-bridge-windows"),
+            lambda w: w["jobs"]["rustdoc"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["codeql"].update(needs=["ci_change_scope", "cargo-crap"]),
+            lambda w: w["jobs"]["asan-build"]["needs"].append("standard-gate"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_SCOPE="false"),
             lambda w: w["jobs"]["ci-gate"]["steps"][0].update(run="true"),
@@ -1602,7 +1775,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "start exactly the counted jobs": lambda w: w["jobs"].update(
                 {
                     "ninth-heavy-job": {
-                        "needs": ["ci_change_scope", "cargo-crap"],
+                        "needs": ["ci_change_scope", "core-gate"],
                         "runs-on": "ubuntu-24.04",
                         "steps": [{"run": "true"}],
                     }
@@ -1614,6 +1787,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "wait for every standard-stage job": lambda w: w["jobs"]["standard-gate"][
                 "needs"
             ].remove("asan-build"),
+            "only standard-gate may wait for cargo-crap": lambda w: w["jobs"]["audit"][
+                "needs"
+            ].append("cargo-crap"),
+            "one lightweight runner released by core-gate": lambda w: w["jobs"]["cargo-crap"].update(
+                {"timeout-minutes": 90}
+            ),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):
@@ -1657,7 +1836,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             materialization["if"],
             "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
             "needs.conformance-fixtures.result == 'success' && "
-            "needs.cargo-crap.result == 'success' && "
+            "needs.core-gate.result == 'success' && "
             "(needs.ci_change_scope.outputs.rust == 'true' || "
             "github.event_name != 'pull_request') }}",
         )

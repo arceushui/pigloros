@@ -108,19 +108,22 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
+# Standard-stage jobs start from core-gate, beside cargo-crap: none consumes
+# cargo-crap output, so the native Windows lane that cargo-crap waits for never
+# delays or hides their findings. standard-gate still requires cargo-crap.
 STAGED_MAIN_JOBS = {
-    "rustdoc": ["ci_change_scope", "cargo-crap"],
-    "reference-evaluator-release": ["ci_change_scope", "cargo-crap"],
+    "rustdoc": ["ci_change_scope", "core-gate"],
+    "reference-evaluator-release": ["ci_change_scope", "core-gate"],
     "materialize-conformance-bundles": [
         "ci_change_scope",
         "conformance-fixtures",
-        "cargo-crap",
+        "core-gate",
     ],
-    "audit": ["ci_change_scope", "cargo-crap"],
-    "docker-build": ["ci_change_scope", "cargo-crap", "third-party-notices"],
-    "world-client-wasm": ["ci_change_scope", "cargo-crap"],
+    "audit": ["ci_change_scope", "core-gate"],
+    "docker-build": ["ci_change_scope", "core-gate", "third-party-notices"],
+    "world-client-wasm": ["ci_change_scope", "core-gate"],
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
-    "asan-build": ["ci_change_scope", "cargo-crap"],
+    "asan-build": ["ci_change_scope", "core-gate"],
 }
 
 
@@ -167,14 +170,12 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
 # edit to that condition must be made in both places.
 CODEQL_CONDITION = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "(needs.cargo-crap.result == 'success' || "
-    "(needs.ci_change_scope.outputs.rust == 'false' && "
-    "needs.cargo-crap.result == 'skipped')) }}"
+    "needs.core-gate.result == 'success' }}"
 )
 
 
 def check_codeql_job(jobs: dict) -> None:
-    """CodeQL waits for cargo-crap but must still run for docs-only PRs.
+    """CodeQL waits for core-gate, which also succeeds for docs-only PRs.
 
     The main ruleset's code_scanning rule needs an uploaded analysis for every
     pull-request head, so a Rust-scope skip would make documentation-only pull
@@ -183,14 +184,14 @@ def check_codeql_job(jobs: dict) -> None:
     job = jobs.get("codeql")
     require(isinstance(job, dict), "missing codeql job")
     require(
-        job.get("needs") == ["ci_change_scope", "cargo-crap"],
+        job.get("needs") == ["ci_change_scope", "core-gate"],
         "codeql direct dependencies changed",
     )
     condition = job.get("if")
     require(isinstance(condition, str), "codeql must have a job condition")
     require(
         " ".join(condition.split()) == CODEQL_CONDITION,
-        "codeql must run for every pull request once cargo-crap succeeds or is skipped by a non-Rust scope",
+        "codeql must run for every pull request once core-gate succeeds",
     )
 
 
