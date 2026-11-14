@@ -46,11 +46,10 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::{select, Either};
 use futures_util::TryFutureExt as _;
-use pos_reference::sandbox_provider_protocol::termination::WATCHDOG_GRACE_NS;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
-    ReplayedNetworkExchange, SandboxExecutionMode,
+    ReplayedNetworkExchange, SandboxExecutionMode, WATCHDOG_GRACE_NS,
 };
 use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;

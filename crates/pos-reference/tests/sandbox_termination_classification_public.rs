@@ -2,26 +2,53 @@
 //! classifier.
 //!
 //! An independent oracle restates R9's candidate table, the D5 contradiction
-//! order and the literal `Completed` conditions with the closed numeric codes.
-//! The exhaustive tests enumerate every value of every coded field, each
-//! nullable field null and present, and every class of the counters, times,
-//! transfers and exit statuses, in dimension groups whose points are counted;
-//! a separate exhaustive test realizes every one of the 1024 candidate sets
-//! with and without a contradiction. The property tests draw concrete facts
-//! and require the classification to equal the oracle's and to be unchanged
-//! by every class-preserving change of the concrete values.
+//! order and the literal `Completed` conditions with the closed numeric codes,
+//! which a literal table pins to the R9 numbers.
+//!
+//! R9's "every point" is the full Cartesian product of the coded and null
+//! dimensions, about 2 x 10^9 points, so it is covered by decomposition. The
+//! code is `select(contradiction, candidates, completed)`; each candidate row
+//! reads a few fields, and selection reads only the candidate set, the
+//! contradiction and the `Completed` conditions. The tests therefore:
+//!
+//! * enumerate, in counted groups, the full product of the fields that
+//!   interact within one or more rows (including a cross group of service,
+//!   ending, cleanup, cancel and contradiction), checking every point against
+//!   the oracle and the exact fallback condition;
+//! * realize all 1024 candidate sets, with and without a contradiction, and
+//!   check the selected code;
+//! * draw seeded random concrete facts over every field at once, so any
+//!   interaction between groups is checked against the oracle, and require
+//!   every class-preserving change of the concrete values to keep the
+//!   classification.
 
-use pos_reference::sandbox_provider_protocol::termination::{
-    AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters, CgroupIdentity,
-    CgroupSnapshot, CleanupResult, Contradiction, EndingCode, KernelObservationFacts,
-    LaunchFailure, LocalNetworkTerminationCode, MainExitCode, OutputCaptureFacts,
-    RequestedConfigurationStatus, ServiceFacts, ServiceResultCode, StartJobResult,
-    TerminalClassification, TerminalCode, TerminationFacts, UnitIdentity, WorkMountFacts,
-    WorkStatfsFacts, SIGXFSZ, WATCHDOG_GRACE_NS,
+use std::num::NonZeroU64;
+
+use pos_reference::sandbox_provider_protocol::{
+    attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
+    CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,
+    KernelObservationFacts, LaunchFailure, LocalNetworkTerminationCode, MainExitCode,
+    OutputCaptureFacts, RequestedConfigurationStatus, SandboxTerminalOutcome, ServiceFacts,
+    ServiceResultCode, StartJobResult, TerminalClassification, TerminalCode, TerminationFacts,
+    UnitIdentity, WorkMountFacts, WorkStatfsFacts, WATCHDOG_GRACE_NS,
 };
-use pos_reference::sandbox_provider_protocol::SandboxTerminalOutcome;
 
 const GRACE: u64 = 1_000_000_000;
+/// `SIGXFSZ` on `x86_64` and `aarch64` (R9 code 7).
+const SIGXFSZ: u8 = 25;
+/// Every terminal code, in R9 precedence order.
+const CODES: [TerminalCode; 10] = [
+    TerminalCode::Cancelled,
+    TerminalCode::CleanupFailed,
+    TerminalCode::OomKilled,
+    TerminalCode::MemoryLimit,
+    TerminalCode::TaskLimit,
+    TerminalCode::Watchdog,
+    TerminalCode::FileOrOutputLimit,
+    TerminalCode::ProcessCrash,
+    TerminalCode::IpcFailure,
+    TerminalCode::ProtocolFailure,
+];
 const BASELINE_AT: u64 = 1_000_000_000_000;
 const TERMINAL_AT: u64 = 1_000_250_000_000;
 const DEADLINE: u64 = 1_005_000_000_000;
@@ -212,7 +239,7 @@ const fn completed() -> TerminationFacts {
             mount: WORK,
             available_bytes: 1_044_480,
         }),
-        watchdog_deadline: DEADLINE,
+        watchdog_deadline: NonZeroU64::new(DEADLINE),
         cancel_source: None,
         cleanup: CleanupResult::Proved,
         requested: RequestedConfigurationStatus::Verified,
@@ -333,13 +360,28 @@ const fn oracle_missing(facts: &TerminationFacts) -> bool {
             }
             _ => false,
         }
+        || oracle_unit_evidence_missing(facts)
+}
+
+/// R9 §4.6.3, read row by row: `baseline` is present only if `unit` is
+/// (else missing evidence); `terminal` is present iff `baseline` is; and an
+/// unreadable `ActiveEnterTimestampMonotonic` is missing evidence (§4.6.5)
+/// once a unit was started.
+const fn oracle_unit_evidence_missing(facts: &TerminationFacts) -> bool {
+    let started = !matches!(facts.progress, AttemptProgressCode::NotStarted);
+    (facts.baseline.is_some() && facts.unit.is_none())
+        || (facts.terminal.is_some() != facts.baseline.is_some())
+        || (started && facts.unit.is_some() && facts.watchdog_deadline.is_none())
 }
 
 /// `terminal.observed-at >= D - G`, in exact integer arithmetic.
 fn oracle_watchdog_reached(facts: &TerminationFacts) -> bool {
-    facts.terminal.is_some_and(|terminal| {
-        i128::from(terminal.observed_at) >= i128::from(facts.watchdog_deadline) - i128::from(GRACE)
-    })
+    facts
+        .terminal
+        .zip(facts.watchdog_deadline)
+        .is_some_and(|(terminal, deadline)| {
+            i128::from(terminal.observed_at) >= i128::from(deadline.get()) - i128::from(GRACE)
+        })
 }
 
 fn oracle_code_two(facts: &TerminationFacts, contradiction: Option<u8>) -> bool {
@@ -467,7 +509,7 @@ fn oracle(facts: &TerminationFacts) -> Expected {
 
 fn observed(classification: &TerminalClassification) -> Expected {
     let mut candidates = [false; 11];
-    for code in TerminalCode::ALL {
+    for code in CODES {
         candidates[usize::from(code.code())] = classification.candidates().contains(code);
     }
     let code = classification.code().map(TerminalCode::code);
@@ -659,14 +701,16 @@ fn every_unit_phase_value_and_watchdog_class_is_placed_exactly_once() {
             }),
             dimension(&services, |facts, value| facts.service = value),
             dimension(&ENDINGS, |facts, value| facts.ending = value),
-            // The watchdog agreement: at `D - G` exactly, or one below it.
-            dimension(&BOOLS, |facts, reached| {
-                facts.watchdog_deadline = TERMINAL_AT + GRACE + u64::from(!reached);
+            // The watchdog agreement: at `D - G` exactly, one below it, or
+            // `D` unreadable.
+            dimension(&[Some(true), Some(false), None], |facts, reached| {
+                facts.watchdog_deadline = reached
+                    .and_then(|reached| NonZeroU64::new(TERMINAL_AT + GRACE + u64::from(!reached)));
             }),
             dimension(&OBSERVATIONS[..2], |facts, value| facts.observed = value),
         ],
     );
-    assert_eq!(points, 3 * 2 * 2 * 2 * (1 + 11 * 4 * 3) * 9 * 2 * 2);
+    assert_eq!(points, 3 * 2 * 2 * 2 * (1 + 11 * 4 * 3) * 9 * 3 * 2);
     assert!(fallbacks > 0);
 }
 
@@ -825,7 +869,7 @@ fn witness(bits: u16, contradicted: bool) -> TerminationFacts {
         (false, true) => service(ServiceResultCode::ExitCode, MainExitCode::Exited, 1),
         (true, true) => service(ServiceResultCode::Timeout, MainExitCode::Exited, 1),
     });
-    facts.watchdog_deadline = TERMINAL_AT + GRACE;
+    facts.watchdog_deadline = NonZeroU64::new(TERMINAL_AT + GRACE);
     facts.output_capture = Some(capture(has(7), true));
     facts.local_network_termination =
         has(9).then_some(LocalNetworkTerminationCode::RemoteUnavailable);
@@ -845,14 +889,14 @@ fn every_candidate_set_selects_its_strictest_code_unless_contradicted() {
             if contradicted {
                 expected = (expected & !0b1_1100) | 0b10;
             }
-            for code in TerminalCode::ALL {
+            for code in CODES {
                 assert_eq!(
                     classification.candidates().contains(code),
                     expected & (1 << (code.code() - 1)) != 0,
                     "{bits:#b} {contradicted} {code:?}"
                 );
             }
-            let strictest = TerminalCode::ALL
+            let strictest = CODES
                 .into_iter()
                 .find(|code| expected & (1 << (code.code() - 1)) != 0);
             let selected = if contradicted {
@@ -974,7 +1018,11 @@ impl SplitMix {
                 mount: self.work(),
                 available_bytes: self.bits(),
             }),
-            watchdog_deadline: deadline_base + GRACE + self.below(3) - 1,
+            watchdog_deadline: if self.below(8) == 0 {
+                None
+            } else {
+                NonZeroU64::new(deadline_base + GRACE + self.below(3) - 1)
+            },
             cancel_source: self.pick(&CANCEL),
             cleanup: self.pick(&CLEANUP),
             requested: self.pick(&REQUESTED),
@@ -1012,7 +1060,9 @@ fn same_class(facts: &TerminationFacts, random: &mut SplitMix) -> TerminationFac
     });
     changed.baseline = facts.baseline.map(moved);
     changed.terminal = facts.terminal.map(moved);
-    changed.watchdog_deadline = facts.watchdog_deadline + shift;
+    changed.watchdog_deadline = facts
+        .watchdog_deadline
+        .and_then(|deadline| NonZeroU64::new(deadline.get() + shift));
     changed.work_after = facts.work_after.map(|after| WorkStatfsFacts {
         mount: work(after.mount),
         available_bytes: random.bits(),
@@ -1085,7 +1135,7 @@ fn tme1_a_is_completed() {
     assert_eq!(classification.contradiction(), None);
     assert!(!classification.quarantined());
     assert_eq!(classification.outcome(), SandboxTerminalOutcome::Completed);
-    for code in TerminalCode::ALL {
+    for code in CODES {
         assert!(!classification.candidates().contains(code));
     }
 }
@@ -1130,7 +1180,7 @@ fn tme1_c_cancel_outranks_a_failed_cleanup_and_still_quarantines() {
     facts.cleanup = CleanupResult::NotProved;
     check(&facts);
     let classification = facts.classify();
-    let candidates: Vec<u8> = TerminalCode::ALL
+    let candidates: Vec<u8> = CODES
         .into_iter()
         .filter(|code| classification.candidates().contains(*code))
         .map(TerminalCode::code)
@@ -1205,12 +1255,14 @@ fn previously_unplaced_examples_are_protocol_failures() {
     }
 }
 
+/// A unit systemd timed out, with both snapshots taken at `terminal_at`.
 const fn timed_out(ending: EndingCode, terminal_at: u64, deadline: u64) -> TerminationFacts {
     TerminationFacts {
+        baseline: Some(snapshot(terminal_at, COUNTERS)),
         terminal: Some(snapshot(terminal_at, COUNTERS)),
         service: Some(service(ServiceResultCode::Timeout, MainExitCode::Killed, 9)),
         ending: Some(ending),
-        watchdog_deadline: deadline,
+        watchdog_deadline: NonZeroU64::new(deadline),
         ..completed()
     }
 }
@@ -1233,10 +1285,7 @@ fn the_watchdog_needs_systemd_timeout_at_or_after_d_minus_g() {
         assert_eq!(below.classify().code(), Some(TerminalCode::CleanupFailed));
     }
     // `D < G`: the agreement holds for every terminal time.
-    let early = TerminationFacts {
-        baseline: Some(snapshot(0, COUNTERS)),
-        ..timed_out(EndingCode::CgroupEmpty, 0, GRACE / 2)
-    };
+    let early = timed_out(EndingCode::CgroupEmpty, 0, GRACE / 2);
     check(&early);
     assert_eq!(early.classify().code(), Some(TerminalCode::Watchdog));
 }
@@ -1342,12 +1391,204 @@ fn a_sigxfsz_crash_is_a_file_limit_and_cpu_throttling_is_never_terminal() {
 }
 
 #[test]
-fn terminal_codes_are_the_closed_sau1_codes_in_precedence_order() {
-    let codes: Vec<u8> = TerminalCode::ALL
-        .into_iter()
-        .map(TerminalCode::code)
-        .collect();
-    assert_eq!(codes, (1..=10).collect::<Vec<u8>>());
+fn every_coded_field_keeps_its_r9_number() {
+    let numbers: [(u8, u8); 65] = [
+        (AttemptProgressCode::NotStarted as u8, 0),
+        (AttemptProgressCode::StartedNotReleased as u8, 1),
+        (AttemptProgressCode::Released as u8, 2),
+        (LaunchFailure::RootNotActivated as u8, 0),
+        (LaunchFailure::PreStartRecheckFailed as u8, 1),
+        (LaunchFailure::UnitRefFailed as u8, 2),
+        (StartJobResult::Done as u8, 0),
+        (StartJobResult::Canceled as u8, 1),
+        (StartJobResult::Timeout as u8, 2),
+        (StartJobResult::Failed as u8, 3),
+        (StartJobResult::Dependency as u8, 4),
+        (StartJobResult::Skipped as u8, 5),
+        (Contradiction::IdentityChanged as u8, 0),
+        (Contradiction::TimeReversed as u8, 1),
+        (Contradiction::CounterDecreased as u8, 2),
+        (ServiceResultCode::Success as u8, 0),
+        (ServiceResultCode::Resources as u8, 1),
+        (ServiceResultCode::Protocol as u8, 2),
+        (ServiceResultCode::Timeout as u8, 3),
+        (ServiceResultCode::ExitCode as u8, 4),
+        (ServiceResultCode::Signal as u8, 5),
+        (ServiceResultCode::CoreDump as u8, 6),
+        (ServiceResultCode::Watchdog as u8, 7),
+        (ServiceResultCode::StartLimitHit as u8, 8),
+        (ServiceResultCode::OomKill as u8, 9),
+        (ServiceResultCode::ExecCondition as u8, 10),
+        (MainExitCode::NotExited as u8, 0),
+        (MainExitCode::Exited as u8, 1),
+        (MainExitCode::Killed as u8, 2),
+        (MainExitCode::Dumped as u8, 3),
+        (EndingCode::CgroupEmpty as u8, 0),
+        (EndingCode::WatchdogKilled as u8, 1),
+        (EndingCode::WatchdogKillFailed as u8, 2),
+        (EndingCode::ProtocolFailureKilled as u8, 3),
+        (EndingCode::ProtocolFailureKillFailed as u8, 4),
+        (EndingCode::Cancelled as u8, 5),
+        (EndingCode::CancelledWatchdogKilled as u8, 6),
+        (EndingCode::CancelledWatchdogKillFailed as u8, 7),
+        (BarrierFailure::ReadyUnavailable as u8, 0),
+        (BarrierFailure::ReadyFraming as u8, 1),
+        (BarrierFailure::ReadyPidMismatch as u8, 2),
+        (BarrierFailure::ReadyMalformed as u8, 3),
+        (BarrierFailure::ReadyMismatch as u8, 4),
+        (BarrierFailure::RecheckAuthority as u8, 5),
+        (BarrierFailure::RecheckObservationUnavailable as u8, 6),
+        (BarrierFailure::RecheckObservationChanged as u8, 7),
+        (BarrierFailure::RecheckIdentityUnreadable as u8, 8),
+        (BarrierFailure::RecheckExecutableUnreadable as u8, 9),
+        (BarrierFailure::RecheckExpired as u8, 10),
+        (BarrierFailure::RecheckUnitChanged as u8, 11),
+        (BarrierFailure::ReleaseSend as u8, 12),
+        (LocalNetworkTerminationCode::RemoteUnavailable as u8, 0),
+        (LocalNetworkTerminationCode::DigestMismatch as u8, 1),
+        (LocalNetworkTerminationCode::ProtocolFailure as u8, 2),
+        (LocalNetworkTerminationCode::CaptureFailure as u8, 3),
+        (LocalNetworkTerminationCode::ChannelFailure as u8, 4),
+        (CancelSource::CancelRequest as u8, 0),
+        (CancelSource::Revocation as u8, 1),
+        (CleanupResult::Proved as u8, 0),
+        (CleanupResult::NotProved as u8, 1),
+        (CleanupResult::NothingCommitted as u8, 2),
+        (RequestedConfigurationStatus::Verified as u8, 0),
+        (RequestedConfigurationStatus::NotRequested as u8, 1),
+        (RequestedConfigurationStatus::Mismatch as u8, 2),
+        (RequestedConfigurationStatus::ReadbackUnavailable as u8, 3),
+    ];
+    for (index, (found, literal)) in numbers.into_iter().enumerate() {
+        assert_eq!(found, literal, "entry {index}");
+    }
+    let codes: Vec<u8> = CODES.into_iter().map(TerminalCode::code).collect();
+    assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+}
+
+#[test]
+fn snapshots_without_a_unit_are_missing_evidence_even_when_cancelled() {
+    for (baseline, terminal) in [(true, true), (true, false), (false, true)] {
+        let unbound = TerminationFacts {
+            progress: AttemptProgressCode::StartedNotReleased,
+            unit: None,
+            baseline: baseline.then_some(snapshot(BASELINE_AT, COUNTERS)),
+            terminal: terminal.then_some(snapshot(TERMINAL_AT, COUNTERS)),
+            service: None,
+            ending: None,
+            work_after: None,
+            observed: KernelObservationFacts::NotReached,
+            ..completed()
+        };
+        let cancelled = TerminationFacts {
+            cancel_source: Some(CancelSource::CancelRequest),
+            ..unbound
+        };
+        check(&cancelled);
+        let classification = cancelled.classify();
+        assert_eq!(classification.code(), Some(TerminalCode::Cancelled));
+        assert!(classification
+            .candidates()
+            .contains(TerminalCode::CleanupFailed));
+        assert!(classification.quarantined());
+        let failed_start = TerminationFacts {
+            start_job: Some(StartJobResult::Failed),
+            ..unbound
+        };
+        check(&failed_start);
+        assert_eq!(
+            failed_start.classify().code(),
+            Some(TerminalCode::CleanupFailed)
+        );
+    }
+}
+
+#[test]
+fn the_watchdog_agreement_saturates_instead_of_overflowing() {
+    let cases = [
+        (u64::MAX, u64::MAX, TerminalCode::Watchdog),
+        (u64::MAX - GRACE, u64::MAX, TerminalCode::Watchdog),
+        (u64::MAX - GRACE - 1, u64::MAX, TerminalCode::CleanupFailed),
+        (u64::MAX - 1, GRACE / 2, TerminalCode::Watchdog),
+        (u64::MAX, 1, TerminalCode::Watchdog),
+    ];
+    for (terminal_at, deadline, code) in cases {
+        let facts = timed_out(EndingCode::CgroupEmpty, terminal_at, deadline);
+        check(&facts);
+        assert_eq!(facts.classify().code(), Some(code), "{facts:?}");
+    }
+}
+
+#[test]
+fn an_unreadable_activation_is_missing_evidence_once_a_unit_exists() {
+    assert_eq!(attempt_watchdog_deadline(0, 5_000), None);
+    assert_eq!(attempt_watchdog_deadline(0, 0), None);
+    assert_eq!(attempt_watchdog_deadline(u64::MAX, 1), None);
+    assert_eq!(attempt_watchdog_deadline(7, 5), NonZeroU64::new(12));
+    assert_eq!(attempt_watchdog_deadline(7, 0), NonZeroU64::new(7));
+    assert_eq!(
+        attempt_watchdog_deadline(u64::MAX, 0),
+        NonZeroU64::new(u64::MAX)
+    );
+    // A zero activation would otherwise read as `D = 0`: always reached.
+    let zero = TerminationFacts {
+        watchdog_deadline: attempt_watchdog_deadline(0, DEADLINE),
+        ..timed_out(EndingCode::CgroupEmpty, TERMINAL_AT, DEADLINE)
+    };
+    check(&zero);
+    let classification = zero.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(!classification.candidates().contains(TerminalCode::Watchdog));
+    let completed_otherwise = TerminationFacts {
+        watchdog_deadline: None,
+        ..completed()
+    };
+    check(&completed_otherwise);
+    let classification = completed_otherwise.classify();
+    assert_eq!(classification.code(), Some(TerminalCode::CleanupFailed));
+    assert!(classification
+        .candidates()
+        .contains(TerminalCode::CleanupFailed));
+    // Before any unit, `D` never selects a code.
+    let revoked = TerminationFacts {
+        watchdog_deadline: None,
+        cancel_source: Some(CancelSource::Revocation),
+        cleanup: CleanupResult::NothingCommitted,
+        ..unstarted()
+    };
+    check(&revoked);
+    assert!(!revoked.classify().quarantined());
+    assert_eq!(revoked.classify().code(), Some(TerminalCode::Cancelled));
+}
+
+/// Make the terminal snapshot contradict the baseline: 0 none, 1 identity,
+/// 2 time, 3 a telemetry counter going down.
+const fn contradict(facts: &mut TerminationFacts, kind: u8) {
+    if let Some(terminal) = facts.terminal.as_mut() {
+        match kind {
+            1 => terminal.cgroup = OTHER_CGROUP,
+            2 => terminal.observed_at = BASELINE_AT - 1,
+            3 => terminal.counters.throttled_usec -= 1,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn every_service_ending_cleanup_cancel_and_contradiction_is_placed_exactly_once() {
+    let services = services();
+    let (points, fallbacks) = exhaust(
+        &completed(),
+        &[
+            dimension(&services, |facts, value| facts.service = value),
+            dimension(&ENDINGS, |facts, value| facts.ending = value),
+            dimension(&CLEANUP, |facts, value| facts.cleanup = value),
+            dimension(&CANCEL, |facts, value| facts.cancel_source = value),
+            dimension(&[0_u8, 1, 2, 3], contradict),
+        ],
+    );
+    assert_eq!(points, (1 + 11 * 4 * 3) * 9 * 3 * 3 * 4);
+    assert!(fallbacks > 0);
 }
 
 #[cfg(target_os = "linux")]

@@ -14,7 +14,7 @@ mod operations;
 mod policy;
 mod revocation;
 mod revocation_update;
-pub mod termination;
+mod termination;
 mod trust;
 
 /// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
@@ -104,6 +104,14 @@ pub use operations::{
     SandboxDescribeRequest, SandboxDescribeResponse, SandboxLocalError, SandboxLocalErrorCode,
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
     SandboxReconcileResponse,
+};
+pub use termination::{
+    attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
+    CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,
+    KernelObservationFacts, LaunchFailure, LocalNetworkTerminationCode, MainExitCode,
+    OutputCaptureFacts, RequestedConfigurationStatus, ServiceFacts, ServiceResultCode,
+    StartJobResult, TerminalCandidates, TerminalClassification, TerminalCode, TerminationFacts,
+    UnitIdentity, WorkMountFacts, WorkStatfsFacts, WATCHDOG_GRACE_NS,
 };
 
 /// Closed failures produced before a provider operation is trusted.

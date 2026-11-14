@@ -1,10 +1,7 @@
 //! Every provider ending and unit result keeps its closed R9 code.
 
-use pos_reference::sandbox_provider_protocol::termination::{
-    EndingCode, MainExitCode, ServiceFacts, ServiceResultCode,
-};
+use pos_reference::sandbox_provider_protocol::{EndingCode, MainExitCode, ServiceResultCode};
 
-use super::service_facts;
 use crate::{AttemptEnding, SystemdMainExit, SystemdServiceResult};
 
 #[test]
@@ -76,40 +73,14 @@ fn every_service_result_keeps_its_tme1_code() {
 }
 
 #[test]
-fn every_main_exit_keeps_its_exec_main_code_and_status() {
+fn every_main_exit_keeps_its_exec_main_code() {
     let cases = [
-        (SystemdMainExit::NotRecorded, MainExitCode::NotExited, 0),
-        (
-            SystemdMainExit::Exited { status: 3 },
-            MainExitCode::Exited,
-            3,
-        ),
-        (
-            SystemdMainExit::Killed { signal: 25 },
-            MainExitCode::Killed,
-            25,
-        ),
-        (
-            SystemdMainExit::Dumped { signal: 11 },
-            MainExitCode::Dumped,
-            11,
-        ),
+        (SystemdMainExit::NotRecorded, MainExitCode::NotExited),
+        (SystemdMainExit::Exited { status: 3 }, MainExitCode::Exited),
+        (SystemdMainExit::Killed { signal: 25 }, MainExitCode::Killed),
+        (SystemdMainExit::Dumped { signal: 11 }, MainExitCode::Dumped),
     ];
-    for (main, exec_main_code, exec_main_status) in cases {
-        assert_eq!(
-            service_facts(SystemdServiceResult::Signal, main),
-            ServiceFacts {
-                result: ServiceResultCode::Signal,
-                exec_main_code,
-                exec_main_status,
-            }
-        );
+    for (main, code) in cases {
+        assert_eq!(MainExitCode::from(main), code);
     }
-    assert_eq!(
-        service_facts(
-            SystemdServiceResult::Success,
-            SystemdMainExit::Exited { status: 0 }
-        ),
-        ServiceFacts::CLEAN
-    );
 }

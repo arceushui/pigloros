@@ -17,6 +17,8 @@
 //! lifecycle. A live V1 provider never selects code 0 `BrokerDied` (R9 D6),
 //! so [`TerminalCode`] has no such variant.
 
+use std::num::NonZeroU64;
+
 use super::SandboxTerminalOutcome;
 
 /// The watchdog grace `G` in nanoseconds (R9 §4.6.5; owner, G = 1 s).
@@ -27,7 +29,23 @@ use super::SandboxTerminalOutcome;
 pub const WATCHDOG_GRACE_NS: u64 = 1_000_000_000;
 
 /// The `SIGXFSZ` signal number on `x86_64` and `aarch64` (R9 code 7).
-pub const SIGXFSZ: u8 = 25;
+const SIGXFSZ: u8 = 25;
+
+/// The watchdog deadline `D`: the unit's `ActiveEnterTimestampMonotonic` in
+/// nanoseconds plus ELM1 ID 4.
+///
+/// A zero (unset) activation or an unrepresentable sum is unreadable, which
+/// is `None`: missing evidence (R9 §4.6.5).
+#[must_use]
+pub const fn attempt_watchdog_deadline(
+    activated_monotonic_ns: u64,
+    watchdog_ns: u64,
+) -> Option<NonZeroU64> {
+    match activated_monotonic_ns.checked_add(watchdog_ns) {
+        Some(deadline) if activated_monotonic_ns != 0 => NonZeroU64::new(deadline),
+        _ => None,
+    }
+}
 
 /// One terminal observation code of SAU1 events `1..10` (ADR-069 §8).
 ///
@@ -62,7 +80,7 @@ pub enum TerminalCode {
 
 impl TerminalCode {
     /// Every code, in strict precedence order (lowest wins).
-    pub const ALL: [Self; 10] = [
+    const ALL: [Self; 10] = [
         Self::Cancelled,
         Self::CleanupFailed,
         Self::OomKilled,
@@ -88,93 +106,99 @@ impl TerminalCode {
 
 /// TME1 `progress`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum AttemptProgressCode {
     /// 0: `StartTransientUnit` was never called.
-    NotStarted,
+    NotStarted = 0,
     /// 1: the start was requested and no `ReleaseV1` was sent.
-    StartedNotReleased,
+    StartedNotReleased = 1,
     /// 2: `ReleaseV1` was sent.
-    Released,
+    Released = 2,
 }
 
 /// TME1 `launch-failure`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum LaunchFailure {
     /// 0: the root image was not activated.
-    RootNotActivated,
+    RootNotActivated = 0,
     /// 1: the recheck immediately before the unit start failed.
-    PreStartRecheckFailed,
+    PreStartRecheckFailed = 1,
     /// 2: `RefUnit` failed, so the unit's result could not be pinned.
-    UnitRefFailed,
+    UnitRefFailed = 2,
 }
 
 /// TME1 `start-job-result`: systemd's `JobRemoved` result of the start job.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum StartJobResult {
     /// 0: `done`.
-    Done,
+    Done = 0,
     /// 1: `canceled`.
-    Canceled,
+    Canceled = 1,
     /// 2: `timeout`.
-    Timeout,
+    Timeout = 2,
     /// 3: `failed`.
-    Failed,
+    Failed = 3,
     /// 4: `dependency`.
-    Dependency,
+    Dependency = 4,
     /// 5: `skipped`.
-    Skipped,
+    Skipped = 5,
 }
 
 /// TME1 `contradiction`: the first failing D5 check (R9 §4.6.4).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum Contradiction {
     /// 0: a cgroup, invocation or `/work` identity changed, or the release
     /// recheck saw changed kernel state or a changed unit.
-    IdentityChanged,
+    IdentityChanged = 0,
     /// 1: the terminal snapshot is older than the baseline.
-    TimeReversed,
+    TimeReversed = 1,
     /// 2: a required counter went down between the snapshots.
-    CounterDecreased,
+    CounterDecreased = 2,
 }
 
 /// TME1 `service.result`: the systemd unit `Result`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum ServiceResultCode {
     /// 0: `success`.
-    Success,
+    Success = 0,
     /// 1: `resources`.
-    Resources,
+    Resources = 1,
     /// 2: `protocol`.
-    Protocol,
+    Protocol = 2,
     /// 3: `timeout`.
-    Timeout,
+    Timeout = 3,
     /// 4: `exit-code`.
-    ExitCode,
+    ExitCode = 4,
     /// 5: `signal`.
-    Signal,
+    Signal = 5,
     /// 6: `core-dump`.
-    CoreDump,
+    CoreDump = 6,
     /// 7: `watchdog`.
-    Watchdog,
+    Watchdog = 7,
     /// 8: `start-limit-hit`.
-    StartLimitHit,
+    StartLimitHit = 8,
     /// 9: `oom-kill`.
-    OomKill,
+    OomKill = 9,
     /// 10: `exec-condition`.
-    ExecCondition,
+    ExecCondition = 10,
 }
 
 /// TME1 `service.exec-main-code`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum MainExitCode {
     /// 0: the main process has not exited.
-    NotExited,
+    NotExited = 0,
     /// 1: `CLD_EXITED`; the status is the exit status.
-    Exited,
+    Exited = 1,
     /// 2: `CLD_KILLED`; the status is the signal number.
-    Killed,
+    Killed = 2,
     /// 3: `CLD_DUMPED`; the status is the signal number.
-    Dumped,
+    Dumped = 3,
 }
 
 /// TME1 `service`: the unit's `Result`, `ExecMainCode` and `ExecMainStatus`.
@@ -229,23 +253,24 @@ impl ServiceFacts {
 
 /// TME1 `ending`: how the released attempt ended.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum EndingCode {
     /// 0: the cgroup was observed empty.
-    CgroupEmpty,
+    CgroupEmpty = 0,
     /// 1: the broker's watchdog killed the unit.
-    WatchdogKilled,
+    WatchdogKilled = 1,
     /// 2: the broker's watchdog could not kill the unit.
-    WatchdogKillFailed,
+    WatchdogKillFailed = 2,
     /// 3: a Local proxy protocol failure killed the unit.
-    ProtocolFailureKilled,
+    ProtocolFailureKilled = 3,
     /// 4: a Local proxy protocol failure could not kill the unit.
-    ProtocolFailureKillFailed,
+    ProtocolFailureKillFailed = 4,
     /// 5: the attempt was cancelled.
-    Cancelled,
+    Cancelled = 5,
     /// 6: cancelled, and the broker's watchdog killed the unit.
-    CancelledWatchdogKilled,
+    CancelledWatchdogKilled = 6,
     /// 7: cancelled, and the broker's watchdog could not kill the unit.
-    CancelledWatchdogKillFailed,
+    CancelledWatchdogKillFailed = 7,
 }
 
 impl EndingCode {
@@ -269,33 +294,34 @@ impl EndingCode {
 
 /// TME1 `barrier-failure`: why the launcher barrier did not release.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum BarrierFailure {
     /// 0: no `ReadyV1` arrived.
-    ReadyUnavailable,
+    ReadyUnavailable = 0,
     /// 1: the `ReadyV1` framing was invalid.
-    ReadyFraming,
+    ReadyFraming = 1,
     /// 2: the `ReadyV1` sender was not the unit's main process.
-    ReadyPidMismatch,
+    ReadyPidMismatch = 2,
     /// 3: the `ReadyV1` record was malformed.
-    ReadyMalformed,
+    ReadyMalformed = 3,
     /// 4: the `ReadyV1` record disagreed with the attempt.
-    ReadyMismatch,
+    ReadyMismatch = 4,
     /// 5: the root, authority or mount recheck failed.
-    RecheckAuthority,
+    RecheckAuthority = 5,
     /// 6: the kernel observation could not be made again.
-    RecheckObservationUnavailable,
+    RecheckObservationUnavailable = 6,
     /// 7: the kernel observation changed since `ReadyV1`.
-    RecheckObservationChanged,
+    RecheckObservationChanged = 7,
     /// 8: the manager's identity of the unit could not be read again.
-    RecheckIdentityUnreadable,
+    RecheckIdentityUnreadable = 8,
     /// 9: `/proc/<MainPID>/exe` could not be read again.
-    RecheckExecutableUnreadable,
+    RecheckExecutableUnreadable = 9,
     /// 10: the attempt deadline passed during the recheck.
-    RecheckExpired,
+    RecheckExpired = 10,
     /// 11: `MainPID`, `InvocationID` or the launcher identity changed.
-    RecheckUnitChanged,
+    RecheckUnitChanged = 11,
     /// 12: `ReleaseV1` could not be sent.
-    ReleaseSend,
+    ReleaseSend = 12,
 }
 
 impl BarrierFailure {
@@ -339,17 +365,18 @@ impl BarrierFailure {
 /// a null `local-network` and a clean close at a frame boundary; neither
 /// selects a code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum LocalNetworkTerminationCode {
     /// 0: an NXY1 `RemoteUnavailable` reply was written.
-    RemoteUnavailable,
+    RemoteUnavailable = 0,
     /// 1: an NXY1 `DigestMismatch` reply was written.
-    DigestMismatch,
+    DigestMismatch = 1,
     /// 2: the adapter broke the exchange protocol.
-    ProtocolFailure,
+    ProtocolFailure = 2,
     /// 3: a capture could not be retained.
-    CaptureFailure,
+    CaptureFailure = 3,
     /// 4: the host-service channel failed.
-    ChannelFailure,
+    ChannelFailure = 4,
 }
 
 impl LocalNetworkTerminationCode {
@@ -376,36 +403,39 @@ impl From<super::LocalNetworkTermination> for LocalNetworkTerminationCode {
 
 /// TME1 `cancel-source`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum CancelSource {
     /// 0: an authenticated SCQ1 was accepted.
-    CancelRequest,
+    CancelRequest = 0,
     /// 1: the attempt was in the required-cancelled set of a live RVS1
     /// update. It is `Cancelled` like a request (owner, 2026-11-13).
-    Revocation,
+    Revocation = 1,
 }
 
 /// TME1 `cleanup.result`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum CleanupResult {
     /// 0: the terminal cleanup completed.
-    Proved,
+    Proved = 0,
     /// 1: a cleanup error or deadline.
-    NotProved,
+    NotProved = 1,
     /// 2: withdrawn before any intent was committed.
-    NothingCommitted,
+    NothingCommitted = 2,
 }
 
 /// RQE1 `status`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
 pub enum RequestedConfigurationStatus {
     /// 0: the readback was verified.
-    Verified,
+    Verified = 0,
     /// 1: `StartTransientUnit` was never called.
-    NotRequested,
+    NotRequested = 1,
     /// 2: the verifier rejected the readback.
-    Mismatch,
+    Mismatch = 2,
     /// 3: the readback could not be obtained.
-    ReadbackUnavailable,
+    ReadbackUnavailable = 3,
 }
 
 /// A cgroup's `[major, minor]` device and inode.
@@ -429,7 +459,7 @@ pub struct UnitIdentity {
 }
 
 /// The six required counters of one cgroup snapshot (R9 §4.6.2).
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CgroupCounters {
     /// `memory.events.local` `oom_kill`.
     pub oom_kill: u64,
@@ -547,7 +577,10 @@ pub struct TerminationFacts {
     /// TME1 `work-after`.
     pub work_after: Option<WorkStatfsFacts>,
     /// TME1 `watchdog-deadline` (`D`), in `CLOCK_MONOTONIC` nanoseconds.
-    pub watchdog_deadline: u64,
+    ///
+    /// `None` when `ActiveEnterTimestampMonotonic` was unreadable or zero
+    /// ([`attempt_watchdog_deadline`]): missing evidence once a unit exists.
+    pub watchdog_deadline: Option<NonZeroU64>,
     /// TME1 `cancel-source`.
     pub cancel_source: Option<CancelSource>,
     /// TME1 `cleanup.result`.
@@ -660,9 +693,11 @@ impl TerminationFacts {
 
     /// The terminal snapshot was taken at or after `D - G`.
     fn watchdog_reached(&self) -> bool {
-        self.terminal.is_some_and(|terminal| {
-            terminal.observed_at.saturating_add(WATCHDOG_GRACE_NS) >= self.watchdog_deadline
-        })
+        self.terminal
+            .zip(self.watchdog_deadline)
+            .is_some_and(|(terminal, deadline)| {
+                terminal.observed_at.saturating_add(WATCHDOG_GRACE_NS) >= deadline.get()
+            })
     }
 
     /// The broker killed although systemd did not time out, or systemd timed
@@ -675,11 +710,12 @@ impl TerminationFacts {
 
     /// Required evidence is absent (R9 O6).
     ///
-    /// That is a unit without both snapshots, a field §4.6.3 requires at this
-    /// progress, or one of KOE1 `work` and `work-after` without the other.
+    /// That is unit evidence out of step with the unit, a field §4.6.3
+    /// requires at this progress, or one of KOE1 `work` and `work-after`
+    /// without the other.
     const fn missing_evidence(&self) -> bool {
         let released = matches!(self.progress, AttemptProgressCode::Released);
-        (self.unit.is_some() && (self.baseline.is_none() || self.terminal.is_none()))
+        self.unit_evidence_missing()
             || (released
                 && (self.unit.is_none()
                     || self.service.is_none()
@@ -690,6 +726,18 @@ impl TerminationFacts {
             || (self.unit.is_none()
                 && matches!(self.observed, KernelObservationFacts::Observed { .. }))
             || self.work_presence_differs()
+    }
+
+    /// The snapshots and the deadline follow the unit (R9 §4.6.3): a unit
+    /// needs both snapshots and a readable `D`, and a snapshot needs a unit.
+    const fn unit_evidence_missing(&self) -> bool {
+        let started = !matches!(self.progress, AttemptProgressCode::NotStarted);
+        let bound = self.unit.is_some();
+        (bound
+            && (self.baseline.is_none()
+                || self.terminal.is_none()
+                || (started && self.watchdog_deadline.is_none())))
+            || (!bound && (self.baseline.is_some() || self.terminal.is_some()))
     }
 
     /// KOE1 recorded `/work` and `work-after` did not, or the reverse: both

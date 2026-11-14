@@ -3,13 +3,12 @@
 //! The terminal classifier is [`TerminationFacts::classify`] in
 //! `pos-reference`, shared with every verifier that recomputes a TME1. These
 //! conversions give it the codes of the evidence the provider already holds:
-//! how a released attempt ended, and the unit's `Result` and main exit.
+//! how a released attempt ended, and the unit's `Result` and main exit code.
+//! The lifecycle assembles the facts when it emits the terminal records.
 //!
-//! [`TerminationFacts::classify`]: pos_reference::sandbox_provider_protocol::termination::TerminationFacts::classify
+//! [`TerminationFacts::classify`]: pos_reference::sandbox_provider_protocol::TerminationFacts::classify
 
-use pos_reference::sandbox_provider_protocol::termination::{
-    EndingCode, MainExitCode, ServiceFacts, ServiceResultCode,
-};
+use pos_reference::sandbox_provider_protocol::{EndingCode, MainExitCode, ServiceResultCode};
 
 use crate::{AttemptEnding, SystemdMainExit, SystemdServiceResult};
 
@@ -50,20 +49,16 @@ impl From<SystemdServiceResult> for ServiceResultCode {
     }
 }
 
-/// TME1 `service` for a unit's `Result` and the main exit systemd recorded:
-/// `ExecMainCode` 0 to 3 with the exit status or the signal number.
-#[must_use]
-pub fn service_facts(result: SystemdServiceResult, main: SystemdMainExit) -> ServiceFacts {
-    let (exec_main_code, exec_main_status) = match main {
-        SystemdMainExit::NotRecorded => (MainExitCode::NotExited, 0),
-        SystemdMainExit::Exited { status } => (MainExitCode::Exited, status),
-        SystemdMainExit::Killed { signal } => (MainExitCode::Killed, signal),
-        SystemdMainExit::Dumped { signal } => (MainExitCode::Dumped, signal),
-    };
-    ServiceFacts {
-        result: result.into(),
-        exec_main_code,
-        exec_main_status,
+/// TME1 `service.exec-main-code`; `exec-main-status` is the exit status or
+/// signal number the variant carries.
+impl From<SystemdMainExit> for MainExitCode {
+    fn from(main: SystemdMainExit) -> Self {
+        match main {
+            SystemdMainExit::NotRecorded => Self::NotExited,
+            SystemdMainExit::Exited { .. } => Self::Exited,
+            SystemdMainExit::Killed { .. } => Self::Killed,
+            SystemdMainExit::Dumped { .. } => Self::Dumped,
+        }
     }
 }
 
