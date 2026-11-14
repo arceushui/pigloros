@@ -1409,20 +1409,58 @@ fn graph_root_count_is_capped_before_any_root_is_read() -> TestResult {
     Ok(())
 }
 
+/// Roots in native order: every producer 1..=23 (0 is not a legal producer
+/// ordinal) with nodes 0..=23 as 54-byte roots, then `extra` 55-byte roots
+/// spread over the producers as nodes from 24.
+fn smallest_roots(extra: u32) -> Vec<NativeRef> {
+    (1..=23_u32)
+        .flat_map(|producer| {
+            let share = extra / 23 + u32::from(producer <= extra % 23);
+            (0..24 + share).map(move |node| native(u64::from(producer), node, 50))
+        })
+        .collect()
+}
+
 #[test]
-fn a_near_maximal_root_set_is_accepted_and_round_trips() -> TestResult {
-    // Producers 1..=23 with nodes 0..=23 are 54-byte roots and nodes
-    // 24..=51 are 55-byte roots: 552 + 644 = 1196 roots, 65,383 bytes.
-    let roots: Vec<NativeRef> = (1..=23)
-        .flat_map(|producer| (0..=51).map(move |node| native(producer, node, 50)))
-        .collect();
-    assert_eq!(roots.len(), 1196);
-    let root = Root::new(root_input(NativeRefs::from_references(&roots), counts()))?;
+fn the_byte_bound_admits_exactly_1199_roots() -> TestResult {
+    // With minimal counts and horizon the other fields take 139 bytes, so
+    // 552 roots of 54 bytes and 647 of 55 bytes are 65,532 bytes: the most
+    // roots the 65,536-byte bound can hold. The count guard (1213) is
+    // looser, so any cap from 1199 up is an equivalent, unreachable mutant;
+    // any cap below 1199 refuses this set.
+    let minimal = Counts {
+        registrations: 1199,
+        edges: 0,
+        keys: 0,
+        maximum_depth: 1,
+        registration_bytes: 0,
+        artifact_bytes: 0,
+    };
+    let roots = smallest_roots(647);
+    assert_eq!(roots.len(), 1199);
+    let input = RootInput {
+        evidence_not_after_micros: 1,
+        ..root_input(NativeRefs::from_references(&roots), minimal)
+    };
+    let root = Root::new(input)?;
     let bytes = root.to_canonical_cbor();
-    assert_eq!(bytes.len(), 65_383);
+    assert_eq!(bytes.len(), 65_532);
     let decoded = Root::from_canonical_cbor(&bytes)?;
-    assert_eq!(decoded.as_input().roots.len(), 1196);
+    assert_eq!(decoded.as_input().roots.len(), 1199);
     assert_eq!(&*decoded.to_canonical_cbor(), &*bytes);
+
+    let roots = smallest_roots(648);
+    let over = RootInput {
+        evidence_not_after_micros: 1,
+        ..root_input(
+            NativeRefs::from_references(&roots),
+            Counts {
+                registrations: 1200,
+                ..minimal
+            },
+        )
+    };
+    assert_eq!(error_of(Root::new(over)), Some(Error::BoundsExceeded));
     Ok(())
 }
 
