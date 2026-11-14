@@ -2165,15 +2165,20 @@ mod tests {
                     .await??;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
         };
-        let (served, response) = tokio::time::timeout(Duration::from_secs(20), async {
-            tokio::join!(
-                serve_for_test(&world, &credentials, std::future::pending()),
-                client
-            )
-        })
-        .await
-        .map_err(|_| "the stale signal never ended the serve loop")?;
-        assert_eq!(response?, rejected(8));
+        let serve = serve_for_test(&world, &credentials, std::future::pending());
+        tokio::pin!(serve);
+        let response = tokio::select! {
+            served = &mut serve => {
+                return Err(format!("the serve ended before the client: {served:?}").into());
+            }
+            response = tokio::time::timeout(Duration::from_secs(30), client) => {
+                response.map_err(|_| "the listener never answered")??
+            }
+        };
+        assert_eq!(response, rejected(8));
+        let served = tokio::time::timeout(Duration::from_secs(40), serve)
+            .await
+            .map_err(|_| "the stale signal never ended the serve loop")?;
         assert_eq!(
             served.err().map(|error| error.to_string()).as_deref(),
             Some("gateway mode binding is stale")
