@@ -562,9 +562,14 @@ mod tests {
             (LocalForkAdmissionCodeV1::InvalidRequest, 7),
             (LocalForkAdmissionCodeV1::ModeBindingStale, 8),
         ] {
+            let response = LocalForkAdmissionResponseV1::rejected(code);
             assert_eq!(
-                LocalForkAdmissionResponseV1::rejected(code).to_canonical_cbor(),
+                response.to_canonical_cbor(),
                 vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, wire, 0xf6]
+            );
+            assert_eq!(
+                response.refused_stale_binding(),
+                code == LocalForkAdmissionCodeV1::ModeBindingStale
             );
         }
     }
