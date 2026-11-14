@@ -857,7 +857,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         listing["parameters"].append(
             {"name": "fork", "in": "query", "required": False, "schema": {"type": "string"}}
         )
-        listing["responses"]["429"] = copy.deepcopy(
+        listing["responses"]["504"] = copy.deepcopy(
             document["paths"][TIMELINES]["post"]["responses"]["429"]
         )
         created = document["paths"][TIMELINES]["post"]["responses"]["201"]
@@ -872,7 +872,7 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assertIn("Digest", frozen["components"]["schemas"])
         frozen_listing = frozen["paths"][EVENTS]["get"]
         self.assertEqual(frozen_listing["parameters"][-1]["name"], "fork")
-        self.assertIn("429", frozen_listing["responses"])
+        self.assertIn("504", frozen_listing["responses"])
         self.assertIn("Location", frozen["paths"][TIMELINES]["post"]["responses"]["201"]["headers"])
         checker.check_appended(baseline, frozen)
         self.assertEqual(checker.freeze(current, frozen), frozen)

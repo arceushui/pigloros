@@ -546,12 +546,40 @@ fn basis_and_index_appear_exactly_for_their_errors() {
 fn the_other_conditional_errors_take_their_keys() {
     for (error, key, given) in [
         ("ArtifactTrustDenied", "basis", json!("Expired")),
+        ("InvalidBundleContent", "basis", json!("Malformed")),
         ("MissingFeature", "index", json!(3)),
     ] {
         let mut expect = json!({"kind": "refused", "error": error, "class": "c"});
         expect[key] = given;
         let result = changed(|value| *at(value, "/subcases/3/expect") = expect.clone());
         assert!(result.is_ok(), "{error}");
+    }
+}
+
+#[test]
+fn bundle_content_refusal_requires_a_closed_reason() {
+    for reason in [
+        "BoundsExceeded",
+        "UnsupportedFormat",
+        "Malformed",
+        "ReferenceMismatch",
+    ] {
+        let result = changed(|value| {
+            *at(value, "/subcases/3/expect") = json!({
+                "kind":"refused", "error":"InvalidBundleContent", "class":"PreExecutionRejection", "basis":reason
+            });
+        });
+        assert!(result.is_ok(), "{reason}");
+    }
+    for basis in [None, Some("other")] {
+        let result = changed(|value| {
+            let mut expect = json!({"kind":"refused", "error":"InvalidBundleContent", "class":"PreExecutionRejection"});
+            if let Some(reason) = basis {
+                expect["basis"] = json!(reason);
+            }
+            *at(value, "/subcases/3/expect") = expect;
+        });
+        assert_eq!(result, Err(InvalidCaseV1));
     }
 }
 

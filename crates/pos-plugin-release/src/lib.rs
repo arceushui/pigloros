@@ -86,14 +86,14 @@ pub use remote::{
 
 /// What the installer did and did not check about the release content.
 ///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): content
-/// validation (#574) replaces it in place in a coordinated breaking change,
-/// since the product is unreleased. It lives here, next to the transport that
+/// The enum is deliberately closed (no `#[non_exhaustive]`). It lives here, next to the transport that
 /// verifies the descriptor digests, so that the execution gate and the installer
 /// share one fact without a dependency between them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContentValidationV1 {
     /// Descriptor digests and bytes were verified; WIT, provenance, SBOM,
-    /// licence, and schema content were not validated (follow-up #574).
+    /// licence, and schema content were not validated.
     NotPerformed,
+    /// Every declared artifact passed the fixed offline basic package rule.
+    BasicPackageV1,
 }

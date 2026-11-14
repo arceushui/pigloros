@@ -564,6 +564,12 @@ fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
     let exhausted = Some(Availability::ResourceExhausted);
     vec![
         (Error::InvalidManifest, None),
+        (
+            Error::InvalidBundleContent {
+                reason: pos_runtime::community_plugin_host::BundleContentReasonV1::Malformed,
+            },
+            None,
+        ),
         (denied, None),
         (revoked, Some(Availability::Revoked)),
         (Error::IncompatibleAbi, None),

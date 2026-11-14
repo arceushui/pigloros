@@ -40,8 +40,8 @@ pub use contract::{
 pub use durable_initialization::CommunityInitializationStateReferenceV1;
 pub use durable_tuple::CommunityNegotiatedTupleV1;
 pub use error::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+    AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    HostFailureClassV1, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 pub use failure::{classify_pass_failure, quarantine_for, PassFailureV1};
 #[cfg(target_os = "linux")]

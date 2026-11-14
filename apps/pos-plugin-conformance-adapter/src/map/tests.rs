@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use pos_plugin_release::ContentValidationV1;
 use pos_runtime::community_plugin_host::{
-    AtomicCommitFailureV1, CommunityPluginModeV1, ComponentTrapClassV1, RevocationBasisV1,
-    TrapReproductionV1, TrustDenialBasisV1,
+    AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginModeV1, ComponentTrapClassV1,
+    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 
 use super::*;
@@ -18,6 +18,7 @@ type R = CommunityPluginSubjectResultV1;
 /// Every closed error with every basis, class and reproduction.
 fn every_error() -> Vec<E> {
     let mut all = vec![E::InvalidManifest];
+    all.extend(content_refusals());
     for basis in [
         TrustDenialBasisV1::Expired,
         TrustDenialBasisV1::NotActive,
@@ -69,6 +70,17 @@ fn every_error() -> Vec<E> {
         all.push(E::AtomicCommitFailed { failure });
     }
     all
+}
+
+fn content_refusals() -> impl Iterator<Item = E> {
+    [
+        BundleContentReasonV1::BoundsExceeded,
+        BundleContentReasonV1::UnsupportedFormat,
+        BundleContentReasonV1::Malformed,
+        BundleContentReasonV1::ReferenceMismatch,
+    ]
+    .into_iter()
+    .map(|reason| E::InvalidBundleContent { reason })
 }
 
 fn outcome(result: R) -> CommunityPluginSubjectOutcomeV1 {
@@ -135,11 +147,11 @@ const fn result_of_error(error: E) -> R {
 }
 
 #[test]
-fn the_known_names_are_exactly_the_twenty_closed_errors() {
+fn the_known_names_are_exactly_the_closed_errors() {
     let names: BTreeSet<&str> = every_error().iter().map(|error| error.name()).collect();
     let known: BTreeSet<&str> = KNOWN_ERRORS.into_iter().collect();
     assert_eq!(names, known);
-    assert_eq!(known.len(), 20);
+    assert_eq!(known.len(), 21);
 }
 
 #[test]

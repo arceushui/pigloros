@@ -11,10 +11,12 @@
 
 use pos_crypto::plugin_manifest::{PluginManifestErrorV1, PluginReleaseSignatureErrorV1 as Sig};
 use pos_crypto::plugin_trust::PluginTrustErrorV1 as Trust;
+use pos_plugin_content::{PluginBundleContentArtifactV1, PluginBundleContentErrorV1};
 use pos_plugin_publisher::PluginReleaseInstallErrorV1 as Installer;
 use pos_plugin_release::ReleaseSourceErrorV1 as S;
 use pos_runtime::community_plugin_host::{
-    host_error_for_install_v1, host_error_for_release_source_v1, CommunityInstallErrorV1 as Install,
+    host_error_for_install_v1, host_error_for_release_source_v1, BundleContentReasonV1,
+    CommunityInstallErrorV1 as Install,
 };
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1 as Reg;
 
@@ -25,8 +27,8 @@ use host_errors::{
     Error as Host, ARTIFACT, EXPIRED, INVALID, KEY, MISMATCH, NOT_ACTIVE, TSU, UNTRUSTED,
 };
 
-/// The number of arms `index` distinguishes: two outer ones and five wrapped ones.
-const ARMS: usize = 7;
+/// The number of arms `index` distinguishes: two outer ones and six wrapped ones.
+const ARMS: usize = 8;
 const MANIFEST: PluginManifestErrorV1 = PluginManifestErrorV1::InvalidEncoding { ordinal: 3 };
 /// Every variant of the source error, which the mapping sends to two answers.
 const SOURCES: [S; 13] = [
@@ -82,7 +84,8 @@ const fn installer_index(error: &Installer) -> usize {
         Installer::Manifest(_) => 1,
         Installer::Authorization(_) => 2,
         Installer::Signature(_) => 3,
-        Installer::Registry(_) => 4,
+        Installer::Content(_) => 4,
+        Installer::Registry(_) => 5,
     }
 }
 
@@ -102,6 +105,14 @@ fn every_variant_of_both_install_errors_has_a_row() {
         (wrapped(Installer::Manifest(MANIFEST)), INVALID),
         (auth(Trust::ManifestExpired), EXPIRED),
         (sig(Sig::InvalidSignature), UNTRUSTED),
+        (
+            wrapped(Installer::Content(PluginBundleContentErrorV1::Malformed {
+                artifact: PluginBundleContentArtifactV1::Sbom,
+            })),
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::Malformed,
+            },
+        ),
         (reg(Reg::ReleaseNotActive), NOT_ACTIVE),
     ];
     assert_rows(&rows);
@@ -156,6 +167,14 @@ fn installer_trust_failures_use_the_authorization_rows() {
 #[test]
 fn registry_failures_use_the_registry_rows() {
     let rows = [
+        (
+            wrapped(Installer::Content(PluginBundleContentErrorV1::Malformed {
+                artifact: PluginBundleContentArtifactV1::Sbom,
+            })),
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::Malformed,
+            },
+        ),
         (reg(Reg::ReleaseNotActive), NOT_ACTIVE),
         (reg(Reg::AnchorMismatch), MISMATCH),
         (reg(Reg::PolicyNotAdvanced), MISMATCH),
@@ -167,4 +186,36 @@ fn registry_failures_use_the_registry_rows() {
         (reg(Reg::Trust(Trust::ManifestExpired)), EXPIRED),
     ];
     assert_rows(&rows);
+}
+
+#[test]
+fn content_refusals_keep_their_closed_host_reason() {
+    let artifact = PluginBundleContentArtifactV1::Sbom;
+    let rows = [
+        (
+            PluginBundleContentErrorV1::BoundsExceeded { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::BoundsExceeded,
+            },
+        ),
+        (
+            PluginBundleContentErrorV1::UnsupportedFormat { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::UnsupportedFormat,
+            },
+        ),
+        (
+            PluginBundleContentErrorV1::ReferenceMismatch { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::ReferenceMismatch,
+            },
+        ),
+        (PluginBundleContentErrorV1::Manifest(MANIFEST), INVALID),
+    ];
+    for (error, expected) in rows {
+        assert_eq!(
+            host_error_for_install_v1(wrapped(Installer::Content(error))),
+            expected
+        );
+    }
 }

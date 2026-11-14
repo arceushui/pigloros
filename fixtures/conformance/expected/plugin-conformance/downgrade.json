@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "6812ae489babe8b330b6ef9d6d80a81550a7a153aca9a5ac17b7e75007c473d9",
+  "input_blake3_digest": "f425c1e0d8b0ff84951f1d724365b8f75fc78d0632faa4ba2efe427391c9f3c2",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

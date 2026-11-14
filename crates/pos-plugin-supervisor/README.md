@@ -13,7 +13,7 @@ caller passes no receipt when the entry has no `invocation_id`: `assemble` compa
 
 The record carries the exact closed strings of decisions 3 and 5 of ADR-061 (Sandboxed Community
 Plugin Runtime and Decentralized Artifact Trust) revision 7 (error, basis and class names), the
-content-validation fact (`NotPerformed` until #574) and the execution profile digest. It
+content-validation fact and the execution profile digest. It
 carries no claim of signature validity: a release that fails the gate is `Refused`, and
 nothing else says it was verified.
 

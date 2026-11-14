@@ -36,9 +36,12 @@ zeroize = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 pos-conformance = { path = "../pos-conformance" }
+pos-plugin-content = { path = "../pos-plugin-content" }
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
+pos-plugin-release = { path = "../pos-plugin-release" }
+sha2 = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 # Test-only PMF1 projection fixtures for the Plugin trust registry vectors.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
@@ -69,6 +72,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "owner_store_interlock_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "subject_data_consumer_public"
 required-features = ["test-support"]
 
 [lints]

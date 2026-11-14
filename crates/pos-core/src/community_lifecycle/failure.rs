@@ -3,10 +3,10 @@
 use super::{
     bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, is_valid_community_id_v1,
     read_hash, read_head, read_optional_hash, read_pass_key, record_cursor, record_prefix,
-    validate_horizon, AtomicCommitFailureV1, CommunityDigestListV1, CommunityGuestErrorCodeV1,
-    CommunityGuestErrorV1, CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1,
-    CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1, FieldRefV1, Result,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+    validate_horizon, AtomicCommitFailureV1, BundleContentReasonV1, CommunityDigestListV1,
+    CommunityGuestErrorCodeV1, CommunityGuestErrorV1, CommunityLifecycleErrorV1 as Error,
+    CommunityPassKeyV1, CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1, FieldRefV1,
+    Result, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash};
 use zeroize::Zeroizing;
@@ -304,37 +304,74 @@ fn encode_scalar_failure(out: &mut Vec<u8>, code: u8, value: u64) {
     encode_head(out, 0, value);
 }
 
-fn encode_host(out: &mut Vec<u8>, error: Host) {
+/// The closed ADR-129 host-failure code of every host error.
+const fn host_code(error: Host) -> u8 {
     match error {
-        Host::InvalidManifest => out.extend_from_slice(&[0x81, 0]),
+        Host::InvalidManifest => 0,
+        Host::ArtifactTrustDenied { .. } => 1,
+        Host::ArtifactRevoked { .. } => 2,
+        Host::IncompatibleAbi => 3,
+        Host::MissingFeature { .. } => 4,
+        Host::CapabilityDenied { .. } => 5,
+        Host::InvalidInvocation => 6,
+        Host::InvalidGuestOutput => 7,
+        Host::UnsupportedSchema => 8,
+        Host::StateMigrationFailed => 9,
+        Host::GuestDeclaredFailure => 10,
+        Host::ComponentTrap { .. } => 11,
+        Host::WorkerCrashed => 12,
+        Host::FuelExhausted => 13,
+        Host::MemoryLimitExceeded => 14,
+        Host::HostCallLimitExceeded => 15,
+        Host::OutputLimitExceeded => 16,
+        Host::DeterministicDeadlineExceeded => 17,
+        Host::OperationalWatchdogStop => 18,
+        Host::AtomicCommitFailed { .. } => 19,
+        Host::InvalidBundleContent { .. } => 20,
+    }
+}
+
+fn encode_host(out: &mut Vec<u8>, error: Host) {
+    let code = host_code(error);
+    match error {
         Host::ArtifactTrustDenied { basis } => {
-            encode_scalar_failure(out, 1, u64::from(denial_code(basis)));
+            encode_scalar_failure(out, code, u64::from(denial_code(basis)));
         }
         Host::ArtifactRevoked { basis } => {
-            encode_scalar_failure(out, 2, u64::from(revocation_code(basis)));
+            encode_scalar_failure(out, code, u64::from(revocation_code(basis)));
         }
-        Host::IncompatibleAbi => out.extend_from_slice(&[0x81, 3]),
-        Host::MissingFeature { index } => encode_scalar_failure(out, 4, index as u64),
-        Host::CapabilityDenied { index } => encode_scalar_failure(out, 5, index as u64),
-        Host::InvalidInvocation => out.extend_from_slice(&[0x81, 6]),
-        Host::InvalidGuestOutput => out.extend_from_slice(&[0x81, 7]),
-        Host::UnsupportedSchema => out.extend_from_slice(&[0x81, 8]),
-        Host::StateMigrationFailed => out.extend_from_slice(&[0x81, 9]),
-        Host::GuestDeclaredFailure => out.extend_from_slice(&[0x81, 10]),
+        Host::MissingFeature { index } | Host::CapabilityDenied { index } => {
+            encode_scalar_failure(out, code, index as u64);
+        }
         Host::ComponentTrap {
             class,
             reproduction,
-        } => out.extend_from_slice(&[0x83, 11, trap_code(class), reproduction_code(reproduction)]),
-        Host::WorkerCrashed => out.extend_from_slice(&[0x81, 12]),
-        Host::FuelExhausted => out.extend_from_slice(&[0x81, 13]),
-        Host::MemoryLimitExceeded => out.extend_from_slice(&[0x81, 14]),
-        Host::HostCallLimitExceeded => out.extend_from_slice(&[0x81, 15]),
-        Host::OutputLimitExceeded => out.extend_from_slice(&[0x81, 16]),
-        Host::DeterministicDeadlineExceeded => out.extend_from_slice(&[0x81, 17]),
-        Host::OperationalWatchdogStop => out.extend_from_slice(&[0x81, 18]),
+        } => out.extend_from_slice(&[
+            0x83,
+            code,
+            trap_code(class),
+            reproduction_code(reproduction),
+        ]),
         Host::AtomicCommitFailed { failure } => {
-            encode_scalar_failure(out, 19, u64::from(atomic_code(failure)));
+            encode_scalar_failure(out, code, u64::from(atomic_code(failure)));
         }
+        Host::InvalidBundleContent { reason } => {
+            encode_scalar_failure(out, code, u64::from(content_reason_code(reason)));
+        }
+        Host::InvalidManifest
+        | Host::IncompatibleAbi
+        | Host::InvalidInvocation
+        | Host::InvalidGuestOutput
+        | Host::UnsupportedSchema
+        | Host::StateMigrationFailed
+        | Host::GuestDeclaredFailure
+        | Host::WorkerCrashed
+        | Host::FuelExhausted
+        | Host::MemoryLimitExceeded
+        | Host::HostCallLimitExceeded
+        | Host::OutputLimitExceeded
+        | Host::DeterministicDeadlineExceeded
+        | Host::OperationalWatchdogStop => out.extend_from_slice(&[0x81, code]),
     }
 }
 
@@ -366,6 +403,9 @@ fn read_host(cursor: &mut CborCursor<'_>) -> Result<Host> {
             (1, 17) => Ok(Host::DeterministicDeadlineExceeded),
             (1, 18) => Ok(Host::OperationalWatchdogStop),
             (2, 19) => read_atomic(cursor).map(|failure| Host::AtomicCommitFailed { failure }),
+            (2, 20) => {
+                read_content_reason(cursor).map(|reason| Host::InvalidBundleContent { reason })
+            }
             _ => Err(Error::InvalidEncoding),
         })
     })
@@ -420,6 +460,14 @@ const fn atomic_code(value: AtomicCommitFailureV1) -> u8 {
         AtomicCommitFailureV1::Operational => 1,
     }
 }
+const fn content_reason_code(value: BundleContentReasonV1) -> u8 {
+    match value {
+        BundleContentReasonV1::BoundsExceeded => 0,
+        BundleContentReasonV1::UnsupportedFormat => 1,
+        BundleContentReasonV1::Malformed => 2,
+        BundleContentReasonV1::ReferenceMismatch => 3,
+    }
+}
 
 fn read_denial(cursor: &mut CborCursor<'_>) -> Result<TrustDenialBasisV1> {
     read_head(cursor, 0).and_then(|code| match code {
@@ -462,6 +510,15 @@ fn read_atomic(cursor: &mut CborCursor<'_>) -> Result<AtomicCommitFailureV1> {
     read_head(cursor, 0).and_then(|code| match code {
         0 => Ok(AtomicCommitFailureV1::DeterministicTypedResult),
         1 => Ok(AtomicCommitFailureV1::Operational),
+        _ => Err(Error::InvalidEncoding),
+    })
+}
+fn read_content_reason(cursor: &mut CborCursor<'_>) -> Result<BundleContentReasonV1> {
+    read_head(cursor, 0).and_then(|code| match code {
+        0 => Ok(BundleContentReasonV1::BoundsExceeded),
+        1 => Ok(BundleContentReasonV1::UnsupportedFormat),
+        2 => Ok(BundleContentReasonV1::Malformed),
+        3 => Ok(BundleContentReasonV1::ReferenceMismatch),
         _ => Err(Error::InvalidEncoding),
     })
 }

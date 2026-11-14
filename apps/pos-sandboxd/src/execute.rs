@@ -9,13 +9,17 @@
 //! 2. the verified root is rechecked and becomes the only `RootDirectory`;
 //! 3. the typed transient unit is started and its requested state verified,
 //!    including the exact `/work` mount and the descriptor layout;
-//! 4. the unit's cgroup is bound, the attempt is recorded as active, and a
+//! 4. the unit's cgroup is bound, its activation time and the cgroup's
+//!    pre-release evidence are read, the attempt is recorded as active, and a
 //!    Local admission is bound to it;
-//! 5. the launcher barrier releases the adapter, exactly once;
+//! 5. the launcher barrier releases the adapter, exactly once, before the
+//!    watchdog deadline `D`: the unit's `ActiveEnterTimestampMonotonic` plus
+//!    the watchdog (ADR-069 R9 §4.6.5);
 //! 6. a Local proxy serves FD 3 until the channel ends or the attempt
 //!    watchdog closes it, and the cgroup is observed until it is empty or the
-//!    watchdog expires, which kills the unit; a proxy protocol failure kills
-//!    the unit at once and keeps the evidence.
+//!    broker's escalation deadline `D + G` passes, which kills the unit;
+//!    systemd's `RuntimeMaxUSec` has stopped it at `D` already. A proxy
+//!    protocol failure kills the unit at once and keeps the evidence.
 //!
 //! Cancellation ([`AttemptCancel`]) is observed from step 5 on: before the
 //! release it kills the unit and fails with [`ExecuteError::Cancelled`]; after
@@ -36,6 +40,7 @@
 use std::error::Error;
 use std::future::Future;
 use std::io;
+use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,14 +51,15 @@ use pos_reference::sandbox_provider_protocol::{
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
     ReplayedNetworkExchange, SandboxExecutionMode,
 };
+use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;
 use zbus::OwnedFd;
 
 use crate::{
-    ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
-    ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
-    ServeError, ServedProxy, TransientServiceUnitName, TransientUnitLaunchInputs,
-    TransientUnitRequest,
+    ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal, CheckedRoot,
+    HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort,
+    LocalProxyBindError, ServeError, ServedProxy, TransientServiceUnitName,
+    TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -66,6 +72,11 @@ const MAX_TERMINATION_CALL: Duration = Duration::from_secs(10);
 
 /// How often the attempt cgroup is polled for emptiness.
 const EMPTY_POLL: Duration = Duration::from_millis(10);
+
+/// How long after the watchdog deadline `D` the broker escalates (ADR-069 R9
+/// §4.6.5, `G`): systemd's `RuntimeMaxUSec` stops the unit at `D`, so a kill
+/// at `D` itself would race the enforcer it backs up.
+const ESCALATION_GRACE: Duration = Duration::from_secs(1);
 
 /// The systemd operations the execute path needs, behind one port.
 ///
@@ -80,6 +91,9 @@ pub trait UnitHost {
     /// An owned, `'static` handle that can kill a unit after the execute
     /// future was dropped.
     type Killer: UnitKiller;
+    /// The resource evidence taken after the cgroup is bound and before the
+    /// release.
+    type Evidence: Send;
 
     /// A handle for `SubmissionGuard`'s best-effort kill.
     fn killer(&self) -> Self::Killer;
@@ -96,6 +110,17 @@ pub trait UnitHost {
         &self,
         started: &Self::Started,
     ) -> impl Future<Output = Result<Self::Cgroup, Self::Error>> + Send;
+
+    /// Read when the started unit became active and take the bound cgroup's
+    /// pre-release evidence.
+    ///
+    /// The first value is the unit's `ActiveEnterTimestampMonotonic` in
+    /// `CLOCK_MONOTONIC` nanoseconds: the anchor of the watchdog deadline.
+    fn release_evidence(
+        &self,
+        started: &Self::Started,
+        cgroup: &Self::Cgroup,
+    ) -> impl Future<Output = Result<(u64, Self::Evidence), Self::Error>> + Send;
 
     /// Stop the unit, replacing a queued start job.
     fn stop(
@@ -139,6 +164,10 @@ pub trait UnitCgroup {
     /// The prepared directory records it, so its terminal cleanup accepts
     /// stop evidence only for the cgroup this execution bound.
     fn identity(&self) -> (u64, u64);
+
+    /// The held cgroup directory, through which the kernel observation reads
+    /// `cgroup.procs`.
+    fn directory(&self) -> BorrowedFd<'_>;
 }
 
 /// The launcher barrier of ADR-069 section 6, behind one port.
@@ -148,6 +177,8 @@ pub trait UnitCgroup {
 pub trait LaunchBarrier {
     /// The barrier's failure type.
     type Error: Error + Send + Sync + 'static;
+    /// What the release established, whether it released or not.
+    type Evidence: Send;
 
     /// Validate the complete admitted context, then provide its exact LPV1
     /// invocation and hand over the unit's release descriptor once.
@@ -160,7 +191,8 @@ pub trait LaunchBarrier {
     ) -> Result<(LauncherInvocation, OwnedFd), Self::Error>;
 
     /// Await `ReadyV1`, recheck every binding, and send exactly one
-    /// `ReleaseV1`, all before the attempt's deadline.
+    /// `ReleaseV1`, all before the attempt's deadline. `cgroup` is the
+    /// attempt's bound cgroup, which the kernel observation reads.
     ///
     /// # Errors
     /// Fails, releasing nothing, if the launcher is not ready in time, any
@@ -168,7 +200,12 @@ pub trait LaunchBarrier {
     fn release(
         &mut self,
         attempt: &ActiveAttempt,
+        cgroup: CgroupView<'_>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Take what the release established: the accepted `ReadyV1`, the frozen
+    /// kernel observation and the `ReleaseV1` sent, as far as it got.
+    fn evidence(&mut self) -> Self::Evidence;
 }
 
 /// One exchange to resolve from the capture store for a Replay attempt.
@@ -322,6 +359,14 @@ pub enum ExecuteError {
     /// Cancellation was requested before the barrier released the adapter.
     #[error("the attempt was cancelled before its release")]
     Cancelled,
+    /// The unit's activation time or the bound cgroup's pre-release evidence
+    /// could not be read.
+    #[error("the pre-release resource evidence could not be read")]
+    Evidence(#[source] Box<dyn Error + Send + Sync>),
+    /// The unit's activation time plus the watchdog is no representable
+    /// deadline.
+    #[error("the watchdog deadline is not representable")]
+    Activation,
     /// The verified root could not be rechecked.
     #[error("the verified root could not be rechecked")]
     Recheck(#[source] ImageActivationError),
@@ -363,10 +408,11 @@ pub enum UnitState {
 /// A failed execution, the state of its unit and its retained cgroup.
 ///
 /// Like any error, it is `Send`, `Sync` or `'static` only when the cgroup
-/// handle `C` is; the production `BoundAttemptCgroup` is all three.
+/// handle `C`, the evidence `E` and the verified start `S` are; the
+/// production types are all three.
 #[derive(Debug, thiserror::Error)]
 #[error("execution failed with the unit {unit:?}")]
-pub struct ExecuteFailure<C> {
+pub struct ExecuteFailure<C, E = (), S = ()> {
     /// Why the execution failed.
     #[source]
     pub error: ExecuteError,
@@ -378,6 +424,11 @@ pub struct ExecuteFailure<C> {
     /// terminal cleanup. `None` means no cgroup was bound by this call, so
     /// only restart reconciliation can establish the unit's absence.
     pub cgroup: Option<C>,
+    /// The pre-release resource evidence, once it was taken.
+    pub evidence: Option<E>,
+    /// The verified start, once the unit's start completed: the exact unit
+    /// object whose result the terminal evidence reads.
+    pub started: Option<S>,
 }
 
 /// How a released attempt ended.
@@ -455,7 +506,7 @@ impl NetworkEvidence {
 
 /// A completed execution.
 #[derive(Debug)]
-pub struct AttemptExecution<S, C> {
+pub struct AttemptExecution<S, C, E = ()> {
     /// The attempt identity.
     pub attempt_id: [u8; 16],
     /// The verified start and its requested-state readback.
@@ -466,6 +517,8 @@ pub struct AttemptExecution<S, C> {
     pub ending: AttemptEnding,
     /// The network evidence.
     pub network: NetworkEvidence,
+    /// The pre-release resource evidence.
+    pub evidence: E,
 }
 
 /// The network behaviour prepared before the unit starts.
@@ -539,7 +592,7 @@ pub async fn execute<H, B, N>(
     network: &N,
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
+) -> Result<AttemptExecution<H::Started, H::Cgroup, H::Evidence>, Failure<H>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -552,6 +605,8 @@ where
                 error,
                 unit: UnitState::NotStarted,
                 cgroup: None,
+                evidence: None,
+                started: None,
             }),
     )
     .and_then(|()| async move {
@@ -562,6 +617,10 @@ where
     })
     .await
 }
+
+/// The failure of an execution over the host `H`.
+type Failure<H> =
+    ExecuteFailure<<H as UnitHost>::Cgroup, <H as UnitHost>::Evidence, <H as UnitHost>::Started>;
 
 /// The wall-clock bounds of one attempt: the unit's watchdog deadline for the
 /// steps before and during the run, and a fixed bound (the watchdog clamped to
@@ -589,7 +648,7 @@ async fn drive<H, B, N>(
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
     guard: &mut SubmissionGuard<H::Killer>,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
+) -> Result<AttemptExecution<H::Started, H::Cgroup, H::Evidence>, Failure<H>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -599,6 +658,8 @@ where
         error,
         unit: UnitState::NotStarted,
         cgroup: None,
+        evidence: None,
+        started: None,
     })?;
     let Prepared {
         attempt,
@@ -613,15 +674,20 @@ where
         deadline: Instant::now() + watchdog,
         call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
-    let deadline = bounds.deadline;
-    let (started, mut cgroup) = submit_claimed(host, &attempt, request, bounds, guard).await?;
+    let (started, mut cgroup, evidence, anchored) =
+        submit_anchored(host, &attempt, request, bounds, watchdog, guard).await?;
     let attempt_id = attempt.attempt_id();
-    let active = ActiveAttempt::record(attempt, deadline);
+    let active = ActiveAttempt::record(attempt, anchored.release);
     let bound = bind_planned(planned);
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does, and is abandoned once cancellation is requested.
-    let released = until(deadline, unless(cancel.clone(), barrier.release(&active))).await;
+    let release = barrier.release(
+        &active,
+        CgroupView::new(cgroup.directory(), cgroup.identity()),
+    );
+    let released = until(anchored.release, unless(cancel.clone(), release)).await;
     let refused = released.map_or(Some(ExecuteError::ReleaseTimeout), refusal);
+    let bounds = anchored.bounds;
     if let Some(error) = refused {
         let aborted = abort(
             host,
@@ -631,7 +697,7 @@ where
             Submission::Confirmed,
             bounds,
         );
-        return Err(aborted.await);
+        return Err(reached(aborted.await, started, Some(evidence)));
     }
     let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
     let (network, finish) = match supervised {
@@ -645,7 +711,7 @@ where
                 Submission::Confirmed,
                 bounds,
             );
-            return Err(aborted.await);
+            return Err(reached(aborted.await, started, Some(evidence)));
         }
     };
     let ending = finish.ending();
@@ -655,7 +721,97 @@ where
         cgroup,
         ending,
         network,
+        evidence,
     })
+}
+
+/// The deadlines of a released attempt, anchored on the unit's activation.
+#[derive(Clone, Copy)]
+struct Anchored {
+    /// `D`: the activation plus the watchdog, when systemd's `RuntimeMaxUSec`
+    /// stops the unit. The release must arrive before it.
+    release: Instant,
+    /// The supervision bounds, whose deadline is `D + G`: the broker kills
+    /// only after systemd's own timeout had its chance.
+    bounds: Bounds,
+}
+
+/// Submit the claimed attempt and bind its cgroup, then read the unit's
+/// activation and the cgroup's pre-release evidence. A failure of the read
+/// kills the unit.
+async fn submit_anchored<H>(
+    host: &H,
+    attempt: &AdmittedAttempt,
+    request: TransientUnitRequest,
+    bounds: Bounds,
+    watchdog: Duration,
+    guard: &mut SubmissionGuard<H::Killer>,
+) -> Result<(H::Started, H::Cgroup, H::Evidence, Anchored), Failure<H>>
+where
+    H: UnitHost + Sync,
+{
+    let (started, cgroup) = submit_claimed(host, attempt, request, bounds, guard).await?;
+    let read = until(bounds.deadline, host.release_evidence(&started, &cgroup)).await;
+    let anchored = read
+        .ok_or(ExecuteError::HostTimeout)
+        .and_then(|read| read.map_err(|error| ExecuteError::Evidence(Box::new(error))))
+        .and_then(|(activated, evidence)| {
+            anchor(activated, watchdog, bounds.call).map(|anchored| (evidence, anchored))
+        });
+    match anchored {
+        Ok((evidence, anchored)) => Ok((started, cgroup, evidence, anchored)),
+        Err(error) => {
+            let unit = attempt.unit_name();
+            let cgroup = Some(cgroup);
+            let aborted = abort(host, unit, cgroup, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
+        }
+    }
+}
+
+/// `D` and `D + G` for a unit activated at `activated_ns` with `watchdog`.
+fn anchor(activated_ns: u64, watchdog: Duration, call: Duration) -> Result<Anchored, ExecuteError> {
+    u64::try_from(watchdog.as_nanos())
+        .ok()
+        .and_then(|watchdog| activated_ns.checked_add(watchdog))
+        .and_then(instant_at_monotonic)
+        .and_then(|release| {
+            release
+                .checked_add(ESCALATION_GRACE)
+                .map(|deadline| Anchored {
+                    release,
+                    bounds: Bounds { deadline, call },
+                })
+        })
+        .ok_or(ExecuteError::Activation)
+}
+
+/// The [`Instant`] at `CLOCK_MONOTONIC` time `target_ns`, which may be past:
+/// the clock's origin as an [`Instant`], plus `target_ns`.
+fn instant_at_monotonic(target_ns: u64) -> Option<Instant> {
+    // Sample the absolute clock first, as the release window does.
+    let now = clock_gettime(ClockId::Monotonic);
+    let instant = Instant::now();
+    u64::try_from(now.tv_sec)
+        .ok()
+        .zip(u32::try_from(now.tv_nsec).ok())
+        .map(|(seconds, nanoseconds)| Duration::new(seconds, nanoseconds))
+        .and_then(|elapsed| instant.checked_sub(elapsed))
+        .and_then(|origin| origin.checked_add(Duration::from_nanos(target_ns)))
+}
+
+/// `failure` with the verified start and any pre-release evidence taken
+/// before it.
+fn reached<C, E, S>(
+    failure: ExecuteFailure<C, E, S>,
+    started: S,
+    evidence: Option<E>,
+) -> ExecuteFailure<C, E, S> {
+    ExecuteFailure {
+        evidence,
+        started: Some(started),
+        ..failure
+    }
 }
 
 /// Record the submission of the claimed attempt, then submit its unit and
@@ -667,7 +823,7 @@ async fn submit_claimed<H>(
     request: TransientUnitRequest,
     bounds: Bounds,
     guard: &mut SubmissionGuard<H::Killer>,
-) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
+) -> Result<(H::Started, H::Cgroup), Failure<H>>
 where
     H: UnitHost + Sync,
 {
@@ -676,6 +832,8 @@ where
             error,
             unit: UnitState::NotStarted,
             cgroup: None,
+            evidence: None,
+            started: None,
         });
     }
     let unit = attempt.unit_name();
@@ -694,7 +852,7 @@ async fn submit<H>(
     unit: &TransientServiceUnitName,
     request: TransientUnitRequest,
     bounds: Bounds,
-) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
+) -> Result<(H::Started, H::Cgroup), Failure<H>>
 where
     H: UnitHost + Sync,
 {
@@ -714,11 +872,13 @@ where
         Some(Ok(cgroup)) => Ok((started, cgroup)),
         Some(Err(error)) => {
             let error = ExecuteError::Cgroup(Box::new(error));
-            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+            let aborted = abort(host, unit, None, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
         }
         None => {
             let error = ExecuteError::HostTimeout;
-            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+            let aborted = abort(host, unit, None, error, Submission::Confirmed, bounds).await;
+            Err(reached(aborted, started, None))
         }
     }
 }
@@ -1144,7 +1304,7 @@ async fn abort<H>(
     error: ExecuteError,
     submission: Submission,
     bounds: Bounds,
-) -> ExecuteFailure<H::Cgroup>
+) -> Failure<H>
 where
     H: UnitHost + Sync,
 {
@@ -1157,6 +1317,8 @@ where
             (false, Submission::Unconfirmed) => UnitState::Unknown,
         },
         cgroup,
+        evidence: None,
+        started: None,
     }
 }
 

@@ -58,6 +58,25 @@ lookup answers `not-found-or-unavailable` and never reveals whether the resource
 `retryable: true` means an identical retry may succeed. The registry is open: a client handles a
 `code` it does not know by its HTTP status and `retryable` and never fails on it (rule 5).
 
+An authority decision precedes any protected lookup, so a caller without a read grant receives
+the same answer for an unknown Timeline as for an existing one. A missing Principal, or
+authentication evidence outside its validity window, is `401 unauthenticated`; a missing grant
+or capability is `403 unauthorized`; a grant, a delegation parent or consent that was revoked at
+the evaluation or commit fence, or expired, is `403 revoked`; absent or unbound consent is
+`403 consent-invalid`; a host that cannot vouch for its revocation state, or cannot durably
+record the denial, is `503 temporarily-unavailable` (retryable). Every answered denial is
+committed as a payload-free record in the host's authority store before it is answered. Denial
+records are bounded per Principal (`principal_denial_records_per_minute`; with the single Local
+Principal this is effectively host-wide) and per host (`denial_records_per_minute`) in a fixed
+one-minute window that resets on restart, so a burst across a window boundary can reach twice the
+bound. A denial over either bound is `429 resource-limit-exceeded` (retryable, with
+`Retry-After` until the window closes): it gets no record of its own and is not answered as a
+denial, but each bound's suppressed denials are counted in one durable marker per window. A
+marker's count is an upper bound: a count whose write had an unknown outcome is re-emitted, so
+it may be counted twice but never zero times. The
+store keeps at most `authority_denial_records` records and never prunes them; when it is full,
+a denial is `503 temporarily-unavailable` instead.
+
 ## Idempotency
 
 A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 visible ASCII

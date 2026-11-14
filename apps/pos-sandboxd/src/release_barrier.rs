@@ -102,10 +102,12 @@ pub struct ReleaseBinding {
 /// bindings. `Err` means do not release.
 pub trait ReleaseRecheck {
     /// Recheck everything and return the current bindings, or why not.
+    /// `ready1_digest` is the digest of the `ReadyV1` just accepted, which the
+    /// kernel observation is bound to.
     ///
     /// # Errors
     /// Returns [`ReleaseBarrierError::Recheck`] when any recheck fails.
-    fn recheck(&self) -> Result<ReleaseBinding, ReleaseBarrierError>;
+    fn recheck(&self, ready1_digest: [u8; 32]) -> Result<ReleaseBinding, ReleaseBarrierError>;
 }
 
 /// Closed failures of the provider half. None is retryable.
@@ -158,7 +160,7 @@ pub fn release_after_ready(
     if ready.fields != expected.fields() {
         return Err(ReleaseBarrierError::ReadyMismatch);
     }
-    let binding = recheck.recheck()?;
+    let binding = recheck.recheck(ready.digest)?;
     let release = issue_release(
         signer,
         ExecutionReleaseFields {

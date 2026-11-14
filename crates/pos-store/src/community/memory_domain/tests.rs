@@ -1,0 +1,1198 @@
+//! Retained-Memory domain bootstrap, retry, admission and tamper behavior.
+//!
+//! Oracles are built from the ADR-128/129 preimages with the `blake3` and
+//! `ciborium` crates directly, not from the implementation's helpers.
+
+use std::error::Error as StdError;
+
+use ciborium::Value;
+use pos_core::community_lifecycle::{
+    CommunityArtifactKindV1, CommunityArtifactOperationV1, CommunityArtifactPurposeV1,
+    CommunityCopyHolderV1, CommunityCopyInventoryInputV1, CommunityCopyInventoryV1,
+    CommunityCopyStateV1, CommunityGenerationIdsV1, CommunityKeyIntentInputV1,
+    CommunityLifecycleErrorV1 as Error, CommunityMemberSlotsV1, CommunityMetadataAnchorV1,
+    CommunityMetadataPolicyInputV1, CommunityMetadataPolicyV1, CommunityMetadataSchemaV1,
+    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityScopeMembersV1,
+    CommunitySelectionInputV1, CommunitySelectionV1, CommunityTimelineFloorV1,
+    CommunityTimelineFloorsV1,
+};
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+use pos_core::{
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
+    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, EntityId,
+    Hash, PrincipalRefV1, Seq, TimelineId, WallTime,
+};
+use ulid::Ulid;
+
+use super::super::metadata_authority::{
+    CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1,
+};
+use super::super::private_hash::{plaintext_commitment, private_digest, scope_set_digest};
+use super::super::vault::VaultKeyV1;
+use super::{
+    bootstrap_intent, key_copy_descriptor, BootstrapRecordIds, BootstrapRecordV1,
+    CommunityBootstrapRequestV1, CommunityDomainBindingV1, CommunityDomainOpenedV1,
+    MemoryCommunityDomainV1,
+};
+use crate::memory::MemoryStore;
+
+type Fallible<T> = Result<T, Box<dyn StdError>>;
+type TestResult = Fallible<()>;
+
+const INCARNATION: [u8; 16] = [0x5a; 16];
+const REGISTRY: Hash = Hash::from_bytes([31; 32]);
+const POLICY_REVISION: Hash = Hash::from_bytes([32; 32]);
+const CONSENT_REVISION: Hash = Hash::from_bytes([33; 32]);
+const LEAF: Hash = Hash::from_bytes([34; 32]);
+const OTHER_LEAF: Hash = Hash::from_bytes([35; 32]);
+const CATALOGUE: Hash = Hash::from_bytes([36; 32]);
+const NATIVE: Hash = Hash::from_bytes([37; 32]);
+const SCHEMAS: Hash = Hash::from_bytes([38; 32]);
+const HORIZON: u64 = 1_000_000_000;
+const AUDIENCE: &str = "community-owner";
+const CONTROL: [u8; 16] = [0xc1; 16];
+const ANCHOR_GENERATION: [u8; 16] = [0x9a; 16];
+
+const fn anchor_timeline() -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes([0x7e; 16]))
+}
+
+const fn authority_timeline() -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes([7; 16]))
+}
+
+const fn actor() -> EntityId {
+    EntityId::from_ulid(Ulid::from_bytes([8; 16]))
+}
+
+fn principal(byte: u8) -> Fallible<PrincipalRefV1> {
+    Ok(PrincipalRefV1::try_new([byte; 16], "local.test")?)
+}
+
+fn owner() -> Fallible<AuthenticatedPrincipalResultV1> {
+    owner_via("local-adapter")
+}
+
+fn owner_via(adapter: &str) -> Fallible<AuthenticatedPrincipalResultV1> {
+    Ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        AuthenticatedPrincipalDraftV1 {
+            principal: principal(2)?,
+            adapter_id: adapter.to_owned(),
+            assurance: AssuranceLevelV1::try_new(1)?,
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(1_000_000),
+            binding_digest: Hash::from_bytes([39; 32]),
+        },
+    )?)
+}
+
+fn resource(incarnation: [u8; 16]) -> String {
+    format!("community-metadata:{}", hex(&incarnation))
+}
+
+/// The metadata grant's scope: resource incarnation, actions and purpose.
+#[derive(Clone, Copy)]
+struct Scope {
+    incarnations: &'static [[u8; 16]],
+    actions: &'static [&'static str],
+    purpose: &'static str,
+}
+
+const FULL: Scope = Scope {
+    incarnations: &[INCARNATION],
+    actions: &["inspect", "write"],
+    purpose: "owner-enforcement",
+};
+
+fn grant(grant_id: Hash, seq: u64, scope: Scope) -> Fallible<CapabilityGrantV1> {
+    let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: scope.incarnations.iter().copied().map(resource).collect(),
+        actions: scope
+            .actions
+            .iter()
+            .map(|action| (*action).to_owned())
+            .collect(),
+        purposes: vec![scope.purpose.to_owned()],
+        audiences: vec![AUDIENCE.to_owned()],
+        actor_entity_ids: vec![actor()],
+        subject_ids: vec![],
+        participant_ids: vec![],
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 1,
+        budget: 1,
+        environment_constraints: vec![],
+    })?;
+    Ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id,
+        grantor: principal(1)?,
+        grantee: AuthorityGranteeV1::Principal(principal(2)?),
+        trust_domain: "local.test".to_owned(),
+        scope,
+        valid_from_position: Seq::from_u64(seq),
+        valid_until_position: Seq::from_u64(100),
+        parent_grant_id: None,
+        delegation_depth: 0,
+        max_delegation_depth: 0,
+        permitted_delegate_classes: vec![],
+        consent_references: vec![],
+        policy_revision: POLICY_REVISION,
+        issuance_timeline: authority_timeline(),
+        issuance_seq: Seq::from_u64(seq),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: REGISTRY,
+    })?)
+}
+
+fn policy(compiled: Hash) -> Fallible<CommunityMetadataPolicyV1> {
+    Ok(CommunityMetadataPolicyV1::new(
+        CommunityMetadataPolicyInputV1 {
+            metadata_owner_registry_binding: owner()?.registry_binding_digest(),
+            metadata_authority_leaf_grant: LEAF,
+            compiled_schema_catalogue_digest: compiled,
+            metadata_not_after_micros: HORIZON,
+        },
+    )?)
+}
+
+fn registry_for(grants: &[CapabilityGrantV1]) -> Fallible<AuthorityRegistrySnapshotV1> {
+    let mut bindings = grants
+        .iter()
+        .map(CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>()?;
+    bindings.sort_unstable();
+    let owner_binding = owner()?.registry_binding_digest();
+    Ok(AuthorityRegistrySnapshotV1::try_new(
+        REGISTRY,
+        vec![owner_binding],
+        bindings,
+        vec![],
+    )?)
+}
+
+/// Persist the grants before the store becomes a domain, as a trusted
+/// composition does.
+fn domain_with(
+    host: &AuthorityPersistenceHostV1,
+    grants: &[CapabilityGrantV1],
+) -> Fallible<MemoryCommunityDomainV1> {
+    let mut store = MemoryStore::new();
+    store
+        .bind_authority_persistence(host.persistence_binding())
+        .and_then(|()| {
+            grants.iter().try_for_each(|grant| {
+                host.authorize_grant(grant)
+                    .and_then(|permit| store.issue_capability_grant(permit, grant))
+                    .map(drop)
+            })
+        })?;
+    Ok(MemoryCommunityDomainV1::new(store, INCARNATION)?)
+}
+
+/// Install the metadata authority from explicit composition inputs.
+fn installed(
+    principal: AuthenticatedPrincipalResultV1,
+    registry: AuthorityRegistrySnapshotV1,
+    audience: &str,
+    samples: &[u64],
+) -> CommunityMetadataAuthorityV1 {
+    CommunityMetadataAuthorityV1::new(
+        CommunityMetadataAuthorityInputV1 {
+            registry,
+            principal,
+            actor_entity_id: actor(),
+            principal_role: AuthorityRoleV1::Actor,
+            audience: audience.to_owned(),
+            consent_policy_revision: CONSENT_REVISION,
+            capability_policy_revision: POLICY_REVISION,
+        },
+        ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
+    )
+}
+
+struct World {
+    domain: MemoryCommunityDomainV1,
+    policy: CommunityMetadataPolicyV1,
+    registry: AuthorityRegistrySnapshotV1,
+    owner: AuthenticatedPrincipalResultV1,
+    host: AuthorityPersistenceHostV1,
+    grants: Vec<CapabilityGrantV1>,
+}
+
+impl World {
+    fn new(grant_ids: &[Hash]) -> Fallible<Self> {
+        Self::scoped(grant_ids, FULL)
+    }
+
+    fn scoped(grant_ids: &[Hash], scope: Scope) -> Fallible<Self> {
+        let grants = grant_ids
+            .iter()
+            .zip(1..)
+            .map(|(id, seq)| grant(*id, seq, scope))
+            .collect::<Fallible<Vec<_>>>()?;
+        let registry = registry_for(&grants)?;
+        let host = AuthorityPersistenceHostV1::new(&registry);
+        let domain = domain_with(&host, &grants)?;
+        Self::assemble(domain, registry, host, grants)
+    }
+
+    fn assemble(
+        domain: MemoryCommunityDomainV1,
+        registry: AuthorityRegistrySnapshotV1,
+        host: AuthorityPersistenceHostV1,
+        grants: Vec<CapabilityGrantV1>,
+    ) -> Fallible<Self> {
+        Ok(Self {
+            domain,
+            policy: policy(SCHEMAS)?,
+            registry,
+            owner: owner()?,
+            host,
+            grants,
+        })
+    }
+
+    /// The installed authority, with trusted wall samples at 500 micros.
+    fn authority_with(&self, audience: &str, samples: &[u64]) -> CommunityMetadataAuthorityV1 {
+        installed(self.owner.clone(), self.registry.clone(), audience, samples)
+    }
+
+    fn authority(&self) -> CommunityMetadataAuthorityV1 {
+        self.authority_with(AUDIENCE, &[500])
+    }
+
+    /// The exact request the domain must build for `action`, written out
+    /// independently from ADR-129 §3 and the installed inputs.
+    fn expected_request(&self, action: &str) -> Fallible<AuthorizationRequestV1> {
+        self.expected_request_in(action, "community.owner-metadata")
+    }
+
+    fn expected_request_in(
+        &self,
+        action: &str,
+        category: &str,
+    ) -> Fallible<AuthorizationRequestV1> {
+        let persisted = self.domain.store.load_authority(LEAF)?;
+        Ok(AuthorizationRequestV1::try_from_draft(
+            AuthorizationRequestDraftV1 {
+                authenticated: self.owner.clone(),
+                actor_entity_id: actor(),
+                subject_id: None,
+                participant_id: None,
+                plugin_id: None,
+                installation_id: None,
+                principal_role: AuthorityRoleV1::Actor,
+                resource: resource(INCARNATION),
+                data_category: category.to_owned(),
+                action: action.to_owned(),
+                purpose: "owner-enforcement".to_owned(),
+                audience: AUDIENCE.to_owned(),
+                at_time: WallTime::from_micros(500),
+                authority_timeline: authority_timeline(),
+                at_position: persisted.head_position(),
+                consent_timeline: None,
+                consent_at_position: None,
+                use_count: 1,
+                budget: 1,
+                consent_policy_revision: CONSENT_REVISION,
+                capability_policy_revision: POLICY_REVISION,
+                revocation_epoch: persisted.revocation_epoch(),
+                revocation_state_current: true,
+                authority_registry_digest: REGISTRY,
+                consent: ConsentEvidenceV1::NotRequired,
+                environment_constraints: vec![],
+            },
+        )?)
+    }
+
+    fn open_as(
+        &mut self,
+        request: CommunityBootstrapRequestV1,
+        authority: &mut CommunityMetadataAuthorityV1,
+    ) -> Result<CommunityDomainOpenedV1, Error> {
+        let binding = CommunityDomainBindingV1 {
+            metadata_policy: &self.policy,
+            installed_catalogue_digest: CATALOGUE,
+            native_profile_digest: NATIVE,
+        };
+        self.domain.open(binding, authority, request)
+    }
+
+    fn open(
+        &mut self,
+        request: CommunityBootstrapRequestV1,
+    ) -> Result<CommunityDomainOpenedV1, Error> {
+        let mut authority = self.authority();
+        self.open_as(request, &mut authority)
+    }
+
+    fn record(&self) -> Fallible<&BootstrapRecordV1> {
+        self.domain
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| "bootstrap record expected".into())
+    }
+
+    fn record_mut(&mut self) -> Fallible<&mut BootstrapRecordV1> {
+        self.domain
+            .bootstrap
+            .as_mut()
+            .ok_or_else(|| "bootstrap record expected".into())
+    }
+
+    fn key(&self) -> Fallible<&VaultKeyV1> {
+        let id = self.record()?.protection_id;
+        self.domain
+            .keys
+            .get(&id)
+            .ok_or_else(|| "bootstrap key expected".into())
+    }
+
+    fn revoke(&mut self, index: usize, fence: u64, epoch: u64) -> TestResult {
+        let grant = &self.grants[index];
+        let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+            grant_id: grant.grant_id(),
+            authority_timeline: authority_timeline(),
+            fence_position: Seq::from_u64(fence),
+            revocation_epoch: epoch,
+            policy_revision: POLICY_REVISION,
+            authority_registry_digest: REGISTRY,
+        })?;
+        let permit = self.host.authorize_revocation(grant, &revocation)?;
+        self.domain
+            .store
+            .revoke_capability_grant(permit, &revocation)?;
+        Ok(())
+    }
+}
+
+fn request() -> Fallible<CommunityBootstrapRequestV1> {
+    Ok(CommunityBootstrapRequestV1::new(
+        CONTROL,
+        anchor_timeline(),
+        ANCHOR_GENERATION,
+    )?)
+}
+
+fn bootstrapped() -> Fallible<World> {
+    let mut world = World::new(&[LEAF])?;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::Bootstrapped
+    );
+    Ok(world)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ]
+        })
+        .map(char::from)
+        .collect()
+}
+
+fn oracle(domain: &[u8], preimage: &[u8]) -> Hash {
+    let mut input = domain.to_vec();
+    input.push(0);
+    input.extend_from_slice(preimage);
+    Hash::from_bytes(*blake3::hash(&input).as_bytes())
+}
+
+/// ADR-129 §2, written out independently: `H(M, bytes)` is BLAKE3 of ASCII
+/// `PiglorOS.Community.<M>.v1`, one zero byte, then the bytes.
+fn adr_h(m: &str, bytes: &[u8]) -> Hash {
+    let mut input = b"PiglorOS.Community.".to_vec();
+    input.extend_from_slice(m.as_bytes());
+    input.extend_from_slice(b".v1\0");
+    input.extend_from_slice(bytes);
+    Hash::from_bytes(*blake3::hash(&input).as_bytes())
+}
+
+fn array(bytes: &[u8]) -> Fallible<Vec<Value>> {
+    match ciborium::from_reader(bytes)? {
+        Value::Array(values) => Ok(values),
+        _ => Err("CBOR array expected".into()),
+    }
+}
+
+fn bytes_of(value: &Value) -> Fallible<&[u8]> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err("CBOR byte string expected".into()),
+    }
+}
+
+fn assert_unavailable(world: &mut World) -> TestResult {
+    assert_eq!(world.open(request()?), Err(Error::EvidenceUnavailable));
+    Ok(())
+}
+
+#[test]
+fn incarnation_and_request_identities_must_be_nonzero() -> TestResult {
+    assert_eq!(
+        MemoryCommunityDomainV1::new(MemoryStore::new(), [0; 16]).err(),
+        Some(Error::InvalidBinding)
+    );
+    let zero_timeline = TimelineId::from_ulid(Ulid::from_bytes([0; 16]));
+    for (control, timeline, generation) in [
+        ([0; 16], anchor_timeline(), ANCHOR_GENERATION),
+        (CONTROL, zero_timeline, ANCHOR_GENERATION),
+        (CONTROL, anchor_timeline(), [0; 16]),
+    ] {
+        assert_eq!(
+            CommunityBootstrapRequestV1::new(control, timeline, generation).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    let domain = MemoryCommunityDomainV1::new(MemoryStore::new(), INCARNATION)?;
+    assert_eq!(domain.store_incarnation(), INCARNATION);
+    assert!(!domain.is_bootstrapped());
+    Ok(())
+}
+
+#[test]
+fn empty_domain_bootstraps_exactly_one_intent_anchor_selection_and_copy() -> TestResult {
+    let world = bootstrapped()?;
+    assert!(world.domain.is_bootstrapped());
+    assert_eq!(world.domain.keys.len(), 1);
+    let record = world.record()?;
+    let key = world.key()?;
+    let intent = key.intent().as_input();
+    assert_eq!(intent.protection_operation_id, record.protection_id);
+    assert!(intent.parent_operation == CommunityArtifactOperationV1::Control(CONTROL));
+    assert_eq!(intent.timeline, anchor_timeline());
+    assert_eq!(intent.generation, ANCHOR_GENERATION);
+    assert!(intent.purpose == CommunityArtifactPurposeV1::LifecycleControl);
+    assert_eq!(intent.scope_set_digest, adr_h("ScopeSet", &[0x80]));
+    assert_eq!(intent.evidence_not_after_micros, HORIZON);
+    assert_eq!(
+        intent
+            .allowed_record_kinds
+            .iter()
+            .map(CommunityArtifactKindV1::code)
+            .collect::<Vec<_>>(),
+        vec![6]
+    );
+    assert_eq!(intent.member_slots.iter().count(), 0);
+    assert_ne!(intent.material_fingerprint, Hash::zero());
+    assert_ne!(
+        intent.material_fingerprint,
+        pos_crypto::key_roles::key_material_digest(&[0; 32])
+    );
+    assert_eq!(
+        intent.authority_request_digest,
+        world.expected_request("write")?.binding_digest()
+    );
+    assert_ne!(
+        intent.authority_request_digest,
+        world.expected_request("inspect")?.binding_digest()
+    );
+    assert_eq!(key.burned_credits(), 2);
+    assert_ne!(record.protection_id, record.copy_id);
+    assert_ne!(
+        bootstrapped()?.record()?.protection_id,
+        record.protection_id
+    );
+    assert_eq!(
+        key.intent().key_owner_text(),
+        format!(
+            "community:{}:{}:3:c:{}",
+            hex(&anchor_timeline().inner().to_bytes()),
+            hex(&ANCHOR_GENERATION),
+            hex(&record.protection_id)
+        )
+    );
+
+    let anchor = CommunityMetadataAnchorV1::from_canonical_cbor(&record.anchor, &world.policy)?;
+    assert_eq!(anchor.as_input().store_incarnation, INCARNATION);
+
+    let selection_plain = key.open(&record.selection)?;
+    let selection = CommunitySelectionV1::from_canonical_cbor(&selection_plain)?;
+    let selection = selection.as_input();
+    assert_eq!(selection.store_incarnation, INCARNATION);
+    assert_eq!(selection.installed_catalogue_digest, CATALOGUE);
+    assert_eq!(selection.native_profile_digest, NATIVE);
+    assert_eq!(selection.highest_native_producer_ordinal, 0);
+    assert!(selection.timeline_floors.is_empty());
+    assert_eq!(selection.metadata_not_after_micros, HORIZON);
+
+    let copy_plain = key.open(&record.key_copy)?;
+    let copy = CommunityCopyInventoryV1::from_canonical_cbor(&copy_plain)?;
+    let copy = copy.as_input();
+    assert_eq!(copy.copy_id, record.copy_id);
+    assert_eq!(copy.revision, 1);
+    assert_eq!(copy.holder, CommunityCopyHolderV1::KeyVault);
+    assert_eq!(copy.holder_digest, key.intent().digest());
+    assert_eq!(copy.state, CommunityCopyStateV1::Owned);
+    assert_eq!(copy.deadline_micros, HORIZON);
+    assert!(copy.parent_operation == CommunityArtifactOperationV1::Control(CONTROL));
+    Ok(())
+}
+
+#[test]
+fn owner_commitment_matches_the_independent_adr128_preimage() -> TestResult {
+    let world = bootstrapped()?;
+    let record = world.record()?;
+    let plaintext = world.key()?.open(&record.selection)?;
+    let mut preimage = vec![0, 6];
+    preimage.extend_from_slice(&(plaintext.len() as u64).to_be_bytes());
+    preimage.extend_from_slice(&plaintext);
+    let expected = oracle(b"PiglorOS.Community.OwnerPlaintext.v1", &preimage);
+    assert_eq!(record.selection.commitment, expected);
+    assert_eq!(
+        plaintext_commitment(CommunityArtifactKindV1::LifecycleControl, &plaintext),
+        expected
+    );
+    assert_ne!(
+        plaintext_commitment(CommunityArtifactKindV1::StateContent, &plaintext),
+        expected
+    );
+    assert_eq!(
+        private_digest(b"PiglorOS.Community.Test.v1", &[b"ab", b"c"]),
+        oracle(b"PiglorOS.Community.Test.v1", b"abc")
+    );
+    assert_eq!(scope_set_digest(&[0x80]), adr_h("ScopeSet", &[0x80]));
+    Ok(())
+}
+
+#[test]
+fn cne1_identity_and_framing_match_the_independent_wire_oracle() -> TestResult {
+    let world = bootstrapped()?;
+    let record = world.record()?;
+    let plaintext = world.key()?.open(&record.selection)?;
+    let sealed = &record.selection;
+    assert_eq!(
+        sealed.address,
+        oracle(
+            b"PiglorOS.Community.NativeEvidenceEnvelope.v1",
+            &sealed.envelope
+        )
+    );
+    let cne1 = array(&sealed.envelope)?;
+    assert_eq!(cne1.len(), 5);
+    assert_eq!(bytes_of(&cne1[0])?, b"CNE1".as_slice());
+    assert_eq!(cne1[1], Value::Integer(1.into()));
+    assert_eq!(bytes_of(&cne1[2])?, b"CSI1".as_slice());
+    let cover = bytes_of(&cne1[3])?;
+    let cover_fields = array(cover)?;
+    assert_eq!(bytes_of(&cover_fields[0])?, b"CSM1".as_slice());
+    assert_eq!(bytes_of(&cover_fields[2])?, INCARNATION.as_slice());
+    assert_eq!(
+        bytes_of(&cover_fields[3])?,
+        anchor_timeline().inner().to_bytes().as_slice()
+    );
+    assert_eq!(bytes_of(&cover_fields[4])?, ANCHOR_GENERATION.as_slice());
+    assert_eq!(bytes_of(&cover_fields[5])?, record.protection_id.as_slice());
+    assert_eq!(cover_fields[6], Value::Array(vec![]));
+    assert_eq!(cover_fields[7], Value::Integer(HORIZON.into()));
+
+    let envelope = array(bytes_of(&cne1[4])?)?;
+    assert_eq!(envelope.len(), 5);
+    assert_eq!(bytes_of(&envelope[0])?, b"COE1".as_slice());
+    assert_eq!(bytes_of(&envelope[3])?.len(), 12);
+    assert_eq!(bytes_of(&envelope[4])?.len(), plaintext.len() + 16);
+    let header = array(bytes_of(&envelope[2])?)?;
+    assert_eq!(header.len(), 13);
+    assert_eq!(bytes_of(&header[0])?, b"COH1".as_slice());
+    assert_eq!(header[4], Value::Integer(3.into()));
+    assert_eq!(header[5], Value::Integer(2.into()));
+    assert_eq!(bytes_of(&header[6])?, record.protection_id.as_slice());
+    assert_eq!(header[7], Value::Integer(6.into()));
+    assert_eq!(
+        header[8],
+        Value::Text(world.key()?.intent().key_owner_text().to_owned())
+    );
+    assert_eq!(header[9], Value::Integer(7.into()));
+    assert_eq!(header[10], Value::Integer(1.into()));
+    assert_eq!(
+        bytes_of(&header[11])?,
+        oracle(b"PiglorOS.Community.ScopeCover.v1", cover)
+            .as_bytes()
+            .as_slice()
+    );
+    assert_eq!(header[12], Value::Integer(HORIZON.into()));
+    assert_ne!(record.selection.address, record.key_copy.address);
+    Ok(())
+}
+
+#[test]
+fn retrying_the_original_control_resolves_without_new_material() -> TestResult {
+    let mut world = bootstrapped()?;
+    let intent = world.key()?.intent().digest();
+    let protection_id = world.record()?.protection_id;
+    let selection = world.record()?.selection.address;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    assert_eq!(world.domain.keys.len(), 1);
+    assert_eq!(world.record()?.protection_id, protection_id);
+    assert_eq!(world.key()?.intent().digest(), intent);
+    assert_eq!(world.key()?.burned_credits(), 2);
+    assert_eq!(world.record()?.selection.address, selection);
+
+    let other = CommunityBootstrapRequestV1::new([0xc2; 16], anchor_timeline(), ANCHOR_GENERATION)?;
+    assert_eq!(world.open(other)?, CommunityDomainOpenedV1::Existing);
+    let moved = CommunityBootstrapRequestV1::new(CONTROL, anchor_timeline(), [0x9b; 16])?;
+    assert_eq!(world.open(moved), Err(Error::Conflict));
+    assert_eq!(world.domain.keys.len(), 1);
+    assert_eq!(world.key()?.intent().digest(), intent);
+    Ok(())
+}
+
+fn assert_nothing_created(world: &World) {
+    assert!(!world.domain.is_bootstrapped());
+    assert!(world.domain.keys.is_empty());
+}
+
+#[test]
+fn missing_grant_is_unavailable_and_creates_nothing() -> TestResult {
+    let mut world = World::new(&[OTHER_LEAF])?;
+    assert_unavailable(&mut world)?;
+    assert_nothing_created(&world);
+    Ok(())
+}
+
+#[test]
+fn revoked_grant_is_unavailable_including_after_a_successful_use() -> TestResult {
+    let mut revoked = World::new(&[LEAF])?;
+    revoked.revoke(0, 2, 1)?;
+    assert_unavailable(&mut revoked)?;
+    assert_nothing_created(&revoked);
+
+    let mut world = bootstrapped()?;
+    world.revoke(0, 2, 1)?;
+    assert_unavailable(&mut world)?;
+    Ok(())
+}
+
+#[test]
+fn an_inspect_grant_cannot_create_and_a_write_grant_cannot_reopen() -> TestResult {
+    let inspect = Scope {
+        actions: &["inspect"],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], inspect)?;
+    assert_unavailable(&mut world)?;
+    assert_nothing_created(&world);
+
+    let write = Scope {
+        actions: &["write"],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], write)?;
+    assert_eq!(
+        world.open(request()?),
+        Ok(CommunityDomainOpenedV1::Bootstrapped)
+    );
+    assert_unavailable(&mut world)?;
+    Ok(())
+}
+
+#[test]
+fn a_grant_for_another_incarnation_or_purpose_is_refused() -> TestResult {
+    for scope in [
+        Scope {
+            incarnations: &[[0x5b; 16]],
+            ..FULL
+        },
+        Scope {
+            purpose: "owner-recovery",
+            ..FULL
+        },
+    ] {
+        let mut world = World::scoped(&[LEAF], scope)?;
+        assert_unavailable(&mut world)?;
+        assert_nothing_created(&world);
+    }
+    Ok(())
+}
+
+#[test]
+fn installed_principal_wall_audience_and_validity_are_required() -> TestResult {
+    let mut world = World::new(&[LEAF])?;
+    for (audience, samples) in [
+        (AUDIENCE, vec![]),
+        ("", vec![500]),
+        ("another-owner", vec![500]),
+        (AUDIENCE, vec![2_000_000]),
+    ] {
+        let mut authority = world.authority_with(audience, &samples);
+        assert_eq!(
+            world.open_as(request()?, &mut authority),
+            Err(Error::EvidenceUnavailable)
+        );
+    }
+    world.policy = CommunityMetadataPolicyV1::new(CommunityMetadataPolicyInputV1 {
+        metadata_owner_registry_binding: Hash::from_bytes([48; 32]),
+        ..*world.policy.as_input()
+    })?;
+    assert_unavailable(&mut world)?;
+    assert_nothing_created(&world);
+    Ok(())
+}
+
+#[test]
+fn missing_or_conflicting_key_intent_is_unavailable() -> TestResult {
+    let mut world = bootstrapped()?;
+    let id = world.record()?.protection_id;
+    let original = world
+        .domain
+        .keys
+        .remove(&id)
+        .ok_or("bootstrap key expected")?;
+    assert_unavailable(&mut world)?;
+
+    let ids = BootstrapRecordIds {
+        request: CommunityBootstrapRequestV1::new(
+            [0xc3; 16],
+            anchor_timeline(),
+            ANCHOR_GENERATION,
+        )?,
+        protection_id: id,
+        copy_id: [1; 16],
+    };
+    let conflicting = VaultKeyV1::provision(bootstrap_intent(&ids, HORIZON, LEAF))?;
+    world.domain.keys.insert(id, conflicting);
+    assert_unavailable(&mut world)?;
+
+    world.domain.keys.insert(id, original);
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_or_conflicting_anchor_is_unavailable() -> TestResult {
+    let mut world = bootstrapped()?;
+    let original = std::mem::take(&mut world.record_mut()?.anchor);
+    assert_unavailable(&mut world)?;
+
+    let foreign = policy(Hash::from_bytes([40; 32]))?;
+    let cases = [
+        (INCARNATION, anchor_timeline(), ANCHOR_GENERATION, &foreign),
+        (
+            [0x5b; 16],
+            anchor_timeline(),
+            ANCHOR_GENERATION,
+            &world.policy,
+        ),
+        (
+            INCARNATION,
+            TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16])),
+            ANCHOR_GENERATION,
+            &world.policy,
+        ),
+        (INCARNATION, anchor_timeline(), [0x9b; 16], &world.policy),
+    ]
+    .into_iter()
+    .map(|(incarnation, timeline, generation, policy)| {
+        CommunityMetadataAnchorV1::new(incarnation, timeline, generation, policy)
+            .map(|anchor| anchor.to_canonical_cbor())
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    for anchor in cases {
+        world.record_mut()?.anchor = anchor;
+        assert_unavailable(&mut world)?;
+    }
+    world.record_mut()?.anchor = original;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_or_conflicting_selection_is_unavailable() -> TestResult {
+    let mut world = bootstrapped()?;
+    let record = world.record_mut()?;
+    std::mem::swap(&mut record.selection, &mut record.key_copy);
+    assert_unavailable(&mut world)?;
+    let record = world.record_mut()?;
+    std::mem::swap(&mut record.selection, &mut record.key_copy);
+
+    let address = world.record()?.selection.address;
+    world.record_mut()?.selection.address = Hash::zero();
+    assert_unavailable(&mut world)?;
+    world.record_mut()?.selection.address = address;
+
+    let commitment = world.record()?.selection.commitment;
+    world.record_mut()?.selection.commitment = Hash::zero();
+    assert_unavailable(&mut world)?;
+    world.record_mut()?.selection.commitment = commitment;
+
+    let mut authority = world.authority();
+    let policy = policy(SCHEMAS)?;
+    for (catalogue, native) in [
+        (Hash::from_bytes([41; 32]), NATIVE),
+        (CATALOGUE, Hash::from_bytes([42; 32])),
+    ] {
+        let binding = CommunityDomainBindingV1 {
+            metadata_policy: &policy,
+            installed_catalogue_digest: catalogue,
+            native_profile_digest: native,
+        };
+        assert_eq!(
+            world.domain.open(binding, &mut authority, request()?),
+            Err(Error::EvidenceUnavailable)
+        );
+    }
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn selection_from_another_incarnation_is_unavailable() -> TestResult {
+    let foreign = [0x5b; 16];
+    let both = Scope {
+        incarnations: &[INCARNATION, [0x5b; 16]],
+        ..FULL
+    };
+    let mut world = World::scoped(&[LEAF], both)?;
+    assert_eq!(
+        world.open(request()?),
+        Ok(CommunityDomainOpenedV1::Bootstrapped)
+    );
+    world.domain.store_incarnation = foreign;
+    world.record_mut()?.anchor = CommunityMetadataAnchorV1::new(
+        foreign,
+        anchor_timeline(),
+        ANCHOR_GENERATION,
+        &world.policy,
+    )?
+    .to_canonical_cbor();
+    assert_unavailable(&mut world)
+}
+
+#[test]
+fn missing_or_conflicting_copy_record_is_unavailable() -> TestResult {
+    let mut world = bootstrapped()?;
+    let copy_id = world.record()?.copy_id;
+    world.record_mut()?.copy_id = [2; 16];
+    assert_unavailable(&mut world)?;
+    world.record_mut()?.copy_id = copy_id;
+
+    let selection = world.record()?.selection.envelope.clone();
+    let address = world.record()?.selection.address;
+    let commitment = world.record()?.selection.commitment;
+    let record = world.record_mut()?;
+    let original = std::mem::replace(
+        &mut record.key_copy,
+        super::SealedMetadataV1 {
+            envelope: selection,
+            address,
+            commitment,
+        },
+    );
+    assert_unavailable(&mut world)?;
+    world.record_mut()?.key_copy = original;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn bootstrap_key_is_decrypt_only_and_burns_a_credit_per_attempt() -> TestResult {
+    let mut world = bootstrapped()?;
+    let id = world.record()?.protection_id;
+    let scope_input = CommunityMetadataScopeInputV1 {
+        store_incarnation: INCARNATION,
+        metadata_anchor_timeline: anchor_timeline(),
+        metadata_anchor_generation: ANCHOR_GENERATION,
+        protection_operation_id: id,
+        scope_members: CommunityScopeMembersV1::from_members(&[]),
+        metadata_not_after_micros: HORIZON,
+    };
+    let scope = CommunityMetadataScopeV1::new(scope_input)?;
+    let key = world
+        .domain
+        .keys
+        .get_mut(&id)
+        .ok_or("bootstrap key expected")?;
+    assert_eq!(
+        key.seal(&scope, CommunityMetadataSchemaV1::Csi1, b"late")
+            .err(),
+        Some(Error::CapacityExhausted)
+    );
+    assert_eq!(key.burned_credits(), 3);
+    let other = VaultKeyV1::provision(bootstrap_intent(
+        &BootstrapRecordIds {
+            request: request()?,
+            protection_id: [3; 16],
+            copy_id: [4; 16],
+        },
+        HORIZON,
+        LEAF,
+    ))?;
+    assert_ne!(
+        other.intent().as_input().material_fingerprint,
+        world.key()?.intent().as_input().material_fingerprint
+    );
+    assert_eq!(other.burned_credits(), 0);
+    Ok(())
+}
+
+const FLOOR: [CommunityTimelineFloorV1<'static>; 1] = [CommunityTimelineFloorV1 {
+    timeline: anchor_timeline(),
+    highest_pass_ordinal: 0,
+    active_generation: None,
+    closed_generations: CommunityGenerationIdsV1::from_ids(&[]),
+    selected_head: None,
+    closed: false,
+}];
+
+type IntentEdit = fn(&mut CommunityKeyIntentInputV1);
+type SelectionEdit = fn(&mut CommunitySelectionInputV1<'static>);
+type CopyEdit = fn(&mut CommunityCopyInventoryInputV1);
+
+/// At most one field of the reinstalled key or records differs from
+/// bootstrap; every other binding stays consistent.
+#[derive(Clone, Copy, Default)]
+struct Tamper {
+    intent: Option<IntentEdit>,
+    selection: Option<SelectionEdit>,
+    copy: Option<CopyEdit>,
+}
+
+fn replacement_key(world: &World, edit: Option<IntentEdit>) -> Fallible<VaultKeyV1> {
+    let provisioned = VaultKeyV1::provision(*world.key()?.intent().as_input())?;
+    let mut intent = *provisioned.intent().as_input();
+    if let Some(edit) = edit {
+        edit(&mut intent);
+    }
+    Ok(provisioned.with_intent(intent)?)
+}
+
+fn bootstrap_scope(protection_id: [u8; 16]) -> Fallible<CommunityMetadataScopeV1<'static>> {
+    Ok(CommunityMetadataScopeV1::new(
+        CommunityMetadataScopeInputV1 {
+            store_incarnation: INCARNATION,
+            metadata_anchor_timeline: anchor_timeline(),
+            metadata_anchor_generation: ANCHOR_GENERATION,
+            protection_operation_id: protection_id,
+            scope_members: CommunityScopeMembersV1::from_members(&[]),
+            metadata_not_after_micros: HORIZON,
+        },
+    )?)
+}
+
+fn sealed_selection(
+    key: &mut VaultKeyV1,
+    protection_id: [u8; 16],
+    edit: Option<SelectionEdit>,
+) -> Fallible<super::SealedMetadataV1> {
+    let mut selection = CommunitySelectionInputV1 {
+        store_incarnation: INCARNATION,
+        installed_catalogue_digest: CATALOGUE,
+        native_profile_digest: NATIVE,
+        highest_native_producer_ordinal: 0,
+        timeline_floors: CommunityTimelineFloorsV1::from_floors(&[]),
+        metadata_not_after_micros: HORIZON,
+    };
+    if let Some(edit) = edit {
+        edit(&mut selection);
+    }
+    let bytes = CommunitySelectionV1::new(selection)?.to_canonical_cbor();
+    let scope = bootstrap_scope(protection_id)?;
+    Ok(key.seal(&scope, CommunityMetadataSchemaV1::Csi1, &bytes)?)
+}
+
+fn sealed_copy(
+    key: &mut VaultKeyV1,
+    ids: &BootstrapRecordIds,
+    edit: Option<CopyEdit>,
+) -> Fallible<super::SealedMetadataV1> {
+    let mut copy = key_copy_descriptor(ids, key, HORIZON);
+    if let Some(edit) = edit {
+        edit(&mut copy);
+    }
+    let bytes = CommunityCopyInventoryV1::new(copy)?.to_canonical_cbor();
+    let scope = bootstrap_scope(ids.protection_id)?;
+    Ok(key.seal(&scope, CommunityMetadataSchemaV1::Cci1, &bytes)?)
+}
+
+fn bootstrap_ids(world: &World) -> Fallible<BootstrapRecordIds> {
+    let record = world.record()?;
+    Ok(BootstrapRecordIds {
+        request: record.request,
+        protection_id: record.protection_id,
+        copy_id: record.copy_id,
+    })
+}
+
+type Replacement = (VaultKeyV1, super::SealedMetadataV1, super::SealedMetadataV1);
+
+/// A consistent key and both sealed records under fresh material, differing
+/// from bootstrap only in `tamper`, so every check other than the tampered
+/// one passes and AEAD opening still succeeds.
+fn replacement(world: &World, tamper: Tamper) -> Fallible<Replacement> {
+    let ids = bootstrap_ids(world)?;
+    let mut key = replacement_key(world, tamper.intent)?;
+    let selection = sealed_selection(&mut key, ids.protection_id, tamper.selection)?;
+    let copy = sealed_copy(&mut key, &ids, tamper.copy)?;
+    key.close();
+    Ok((key, selection, copy))
+}
+
+fn reinstall(world: &mut World, tamper: Tamper) -> TestResult {
+    let (key, selection, copy) = replacement(world, tamper)?;
+    let record = world.record_mut()?;
+    let protection_id = record.protection_id;
+    record.selection = selection;
+    record.key_copy = copy;
+    world.domain.keys.insert(protection_id, key);
+    Ok(())
+}
+
+#[test]
+fn reinstalled_consistent_key_and_records_still_resolve() -> TestResult {
+    let mut world = bootstrapped()?;
+    reinstall(&mut world, Tamper::default())?;
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    Ok(())
+}
+
+#[test]
+fn same_material_with_any_other_intent_or_record_binding_is_unavailable() -> TestResult {
+    let intents: [IntentEdit; 10] = [
+        |intent| intent.protection_operation_id = [0x99; 16],
+        |intent| intent.parent_operation = CommunityArtifactOperationV1::Control([0xc3; 16]),
+        |intent| intent.timeline = TimelineId::from_ulid(Ulid::from_bytes([0x7f; 16])),
+        |intent| intent.generation = [0x9b; 16],
+        |intent| {
+            intent.allowed_record_kinds = intent
+                .allowed_record_kinds
+                .with(CommunityArtifactKindV1::BoundedRecordBundle);
+        },
+        |intent| intent.evidence_not_after_micros = HORIZON - 1,
+        |intent| {
+            intent.member_slots = CommunityMemberSlotsV1::new(&[0])
+                .unwrap_or_else(|_| CommunityMemberSlotsV1::empty());
+        },
+        |intent| intent.authority_request_digest = Hash::from_bytes([47; 32]),
+        |intent| intent.scope_set_digest = Hash::from_bytes([43; 32]),
+        |intent| intent.material_fingerprint = Hash::from_bytes([44; 32]),
+    ];
+    let selections: [SelectionEdit; 3] = [
+        |selection| selection.highest_native_producer_ordinal = 1,
+        |selection| selection.timeline_floors = CommunityTimelineFloorsV1::from_floors(&FLOOR),
+        |selection| selection.metadata_not_after_micros = HORIZON - 1,
+    ];
+    let copies: [CopyEdit; 4] = [
+        |copy| copy.copy_id = [0x98; 16],
+        |copy| copy.holder = CommunityCopyHolderV1::Staging,
+        |copy| copy.holder_digest = Hash::from_bytes([45; 32]),
+        |copy| copy.scope_set_digest = Hash::from_bytes([46; 32]),
+    ];
+    let cases = intents
+        .into_iter()
+        .map(|edit| Tamper {
+            intent: Some(edit),
+            ..Tamper::default()
+        })
+        .chain(selections.into_iter().map(|edit| Tamper {
+            selection: Some(edit),
+            ..Tamper::default()
+        }))
+        .chain(copies.into_iter().map(|edit| Tamper {
+            copy: Some(edit),
+            ..Tamper::default()
+        }));
+    for (index, tamper) in cases.enumerate() {
+        let mut world = bootstrapped()?;
+        reinstall(&mut world, tamper)?;
+        assert_eq!(
+            world.open(request()?),
+            Err(Error::EvidenceUnavailable),
+            "tamper case {index}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bootstrap_request_binds_the_exact_owner_metadata_category() -> TestResult {
+    let world = bootstrapped()?;
+    let bound = world.key()?.intent().as_input().authority_request_digest;
+    assert_eq!(
+        bound,
+        world
+            .expected_request_in("write", "community.owner-metadata")?
+            .binding_digest()
+    );
+    for other in ["community.execution-state", "community.owner-metadata.v2"] {
+        assert_ne!(
+            bound,
+            world.expected_request_in("write", other)?.binding_digest()
+        );
+    }
+    Ok(())
+}
+
+/// The policy's owner registry binding covers the principal's adapter, and
+/// the persisted grant's own registry digest pins the registry revision, so
+/// an installed principal from another adapter or a registry snapshot of
+/// another revision is refused.
+#[test]
+fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
+    let mut world = World::new(&[LEAF])?;
+    let foreign_adapter = owner_via("other-adapter")?;
+    let bindings = world
+        .grants
+        .iter()
+        .map(CapabilityGrantV1::binding_digest)
+        .collect::<Result<Vec<_>, _>>()?;
+    let authenticated: Vec<Hash> = std::collections::BTreeSet::from([
+        world.owner.registry_binding_digest(),
+        foreign_adapter.registry_binding_digest(),
+    ])
+    .into_iter()
+    .collect();
+    // Same revision, but it also trusts the foreign adapter, so only the
+    // policy's owner registry binding can refuse that principal.
+    let trusts_foreign = AuthorityRegistrySnapshotV1::try_new(
+        REGISTRY,
+        authenticated.clone(),
+        bindings.clone(),
+        vec![],
+    )?;
+    let foreign_revision = AuthorityRegistrySnapshotV1::try_new(
+        Hash::from_bytes([49; 32]),
+        authenticated,
+        bindings,
+        vec![],
+    )?;
+    for (principal, registry) in [
+        (foreign_adapter, trusts_foreign),
+        (world.owner.clone(), foreign_revision),
+    ] {
+        let mut authority = installed(principal, registry, AUDIENCE, &[500]);
+        assert_eq!(
+            world.open_as(request()?, &mut authority),
+            Err(Error::EvidenceUnavailable)
+        );
+    }
+    assert_nothing_created(&world);
+    Ok(())
+}

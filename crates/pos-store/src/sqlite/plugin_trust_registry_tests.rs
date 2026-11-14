@@ -212,7 +212,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &three.projection()?,
-            &three.release_proof()?,
+            (&three.release_proof()?, &three.content_proof()?),
             TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
@@ -225,7 +225,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
@@ -262,7 +262,10 @@ fn a_store_that_is_not_in_wal_mode_is_refused() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            &release_one().release_proof()?,
+            (
+                &release_one().release_proof()?,
+                &release_one().content_proof()?
+            ),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(TimelineId::new(), 1)
         ),
@@ -368,7 +371,7 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
     );
     h.store.conn.commit_hook::<fn() -> bool>(None)?;
     assert!(h.store.conn.is_autocommit());
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest()?);
     h.admit(&genesis, &two, 2)??;
     Ok(())
 }
@@ -396,7 +399,7 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             Err(Error::StorePoisoned)
         );
         assert_eq!(
-            store.retained_release_decision("scope", one.pmf1_digest()),
+            store.retained_release_decision("scope", one.pmf1_digest()?),
             Err(Error::StorePoisoned)
         );
         assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorePoisoned));
@@ -422,7 +425,7 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            &one.release_proof()?,
+            (&one.release_proof()?, &one.content_proof()?),
             TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1),
         )?;
@@ -476,7 +479,7 @@ fn a_lost_acknowledgement_commits_and_the_retry_replays_the_original() -> TestRe
         Err(Error::StorageIndeterminate)
     );
     drop(lost);
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest()?);
     let events = h.events()?.len();
     let replay = h.rollback(&genesis, &one, 3)??;
     assert_eq!(
@@ -865,6 +868,14 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     holder.execute_batch("BEGIN IMMEDIATE")?;
     h.store.conn.busy_timeout(Duration::from_millis(1500))?;
     let timeline = h.timeline;
+    // Build every admission input before the clock starts: closure construction and content
+    // validation are fixture work outside the fence, and under a sanitizer they alone can
+    // outlast the 400 ms the competing writer waits.
+    let one = release_one();
+    let projection = one.projection()?;
+    let release_proof = one.release_proof()?;
+    let content_proof = one.content_proof()?;
+    let point = TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick);
     let start = Instant::now();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -879,7 +890,15 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
         });
     });
     assert_eq!(
-        h.admit(&genesis, &release_one(), 1)?,
+        h.store.admit(
+            &h.env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &projection,
+            (&release_proof, &content_proof),
+            point,
+            activation(timeline, 1),
+        ),
         Err(Error::StorageBusy)
     );
     let entered = receiver.recv_timeout(Duration::from_secs(10))?;
@@ -970,7 +989,7 @@ fn a_failing_read_statement_is_storage_failed() -> TestResult {
     );
     assert_eq!(
         h.store
-            .retained_release_decision("scope", one.pmf1_digest()),
+            .retained_release_decision("scope", one.pmf1_digest()?),
         Err(Error::StorageFailed)
     );
     assert_eq!(h.store.ledger("scope"), Err(Error::StorageFailed));
@@ -1293,7 +1312,7 @@ fn a_read_only_handle_evaluates_and_is_poisoned_by_a_stuck_rollback() -> TestRes
     let read_only = SqliteStore::open_read_only(&path_of(&h.guard)?)?;
     let entry = level(&read_only)?;
     let evaluation = evaluate_on(&read_only, &h, &genesis, &one)??;
-    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest()?);
     assert_eq!(level(&read_only)?, entry);
 
     let stale = h.same_policy(40, 5)?;
@@ -1342,6 +1361,7 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     let material = env.genesis()?;
     let projection = two.projection()?;
     let proof = two.release_proof()?;
+    let content = two.content_proof()?;
     let timeline = h.timeline;
     let committed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&committed);
@@ -1352,7 +1372,7 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
                 &material.tps1,
                 &material.evidence,
                 &projection,
-                &proof,
+                (&proof, &content),
                 TrustEvaluationPointV1::new(utc, material.tick),
                 activation(timeline, 2),
             );
@@ -1363,11 +1383,11 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     let evaluation = h.evaluate(&genesis, &one)??;
     drop(probe);
     assert!(committed.load(Ordering::SeqCst));
-    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest()?);
     // The commit is visible to the next call, which finds the predecessor no longer active.
     // Only registry calls follow: the first handle's Event reads would refuse after another
     // handle wrote (the erasure inventory version moved).
-    assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest());
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest()?);
     assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::ReleaseNotActive));
     assert!(h.evaluate(&genesis, &two)?.is_ok());
     Ok(())
@@ -1391,7 +1411,7 @@ fn an_evaluation_validates_the_schema_inside_its_snapshot() -> TestResult {
     let evaluation = h.evaluate(&genesis, &one)??;
     drop(probe);
     assert!(dropped.load(Ordering::SeqCst));
-    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest()?);
     // The next call sees the partial table set.
     assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::CorruptState));
     Ok(())
@@ -1485,7 +1505,7 @@ fn a_stuck_rollback_after_a_failed_evaluation_poisons_every_later_call() -> Test
         genesis.trusted()?,
         genesis.tick,
     )?;
-    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest()?);
     drop(guard);
     Ok(())
 }

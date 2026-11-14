@@ -21,7 +21,7 @@ use pos_crypto::plugin_trust::{
 use pos_plugin_publisher::{
     test_support::{
         encoding::{Material, Revocations, Spec, OWNER, SCOPE, TICK, UTC},
-        release::{make_draft, pmf1_digest, Shape, REAL_COMPONENT_BYTES},
+        release::{make_draft, pmf1_digest, FixtureContent, Shape, REAL_COMPONENT_BYTES},
         spy_registry::Call,
         world::{key_bytes, register, wall, Config, World},
         BoxResult,
@@ -339,7 +339,8 @@ fn projected(shape: Shape) -> BoxResult<PluginExecutionProjectionV1> {
 /// the setters called with those same values give the identical draft.
 #[test]
 fn the_default_shape_keeps_its_budget_and_abi_minors() -> TestResult {
-    let draft = make_draft(Shape::first())?;
+    let content = FixtureContent::new(Shape::first().component);
+    let draft = make_draft(Shape::first(), &content)?;
     assert_eq!(draft.budget, DEFAULT_BUDGET);
     let abi = &draft.abi;
     assert_eq!((abi.major, abi.min_minor, abi.max_minor), (0, 0, 1));
@@ -348,7 +349,10 @@ fn the_default_shape_keeps_its_budget_and_abi_minors() -> TestResult {
         .with_host_calls(256)
         .with_event_bytes(4_096)
         .with_abi_minors(0, 1);
-    assert_eq!(make_draft(restated)?, draft);
+    assert_eq!(
+        make_draft(restated, &FixtureContent::new(restated.component))?,
+        draft
+    );
     assert_eq!(projected(Shape::first())?.budget(), DEFAULT_BUDGET);
     Ok(())
 }

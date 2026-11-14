@@ -325,6 +325,8 @@ pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
     #[cfg(target_os = "linux")]
     admitted: crate::AdmittedAttempt,
+    #[cfg(target_os = "linux")]
+    root: crate::RootIdentity,
 }
 
 impl CheckedRoot {
@@ -332,11 +334,21 @@ impl CheckedRoot {
     pub(crate) const fn rechecked(
         root_directory: ActivatedRootDirectory,
         admitted: crate::AdmittedAttempt,
+        root: crate::RootIdentity,
     ) -> Self {
         Self {
             root_directory,
             admitted,
+            root,
         }
+    }
+
+    /// The attached root's mount, mapper and loop device, as the recheck
+    /// found them equal to the verified ones.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub const fn root_identity(&self) -> crate::RootIdentity {
+        self.root
     }
 
     #[cfg(target_os = "linux")]
@@ -365,6 +377,7 @@ impl CheckedRoot {
             .map(|admitted| Self {
                 root_directory,
                 admitted,
+                root: crate::RootIdentity::FIXTURE,
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -438,6 +451,39 @@ pub enum SystemdTransientUnitValue {
 }
 
 impl SystemdTransientUnitValue {
+    /// The value as RQE1 records it: its submitted shape, and for the
+    /// descriptor array only the names.
+    fn requested_configuration(&self) -> RequestedConfigurationValue {
+        let typed = match self {
+            Self::Static(value) => SystemdTransientUnitReadbackValue::Static((*value).into()),
+            Self::RootDirectory(path) => SystemdTransientUnitReadbackValue::String(path.clone()),
+            Self::BindReadOnlyPaths(paths) => {
+                SystemdTransientUnitReadbackValue::BindReadOnlyPaths(paths.clone())
+            }
+            Self::SystemCallFilter(names) | Self::RestrictAddressFamilies(names) => {
+                SystemdTransientUnitReadbackValue::BoolStringArray(names.clone())
+            }
+            Self::Numeric(SystemdTransientUnitNumericValue::OperatingLimit(value)) => {
+                SystemdTransientUnitReadbackValue::U64(*value)
+            }
+            Self::Numeric(SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value)) => {
+                SystemdTransientUnitReadbackValue::U32(*value)
+            }
+            Self::ExtraFileDescriptors(descriptors) => {
+                return RequestedConfigurationValue::DescriptorNames(
+                    descriptors.iter().map(|(_, name)| name.clone()).collect(),
+                )
+            }
+            Self::TemporaryFileSystem(mounts) => {
+                SystemdTransientUnitReadbackValue::TemporaryFileSystem(mounts.clone())
+            }
+            Self::ExecStart(commands) => {
+                SystemdTransientUnitReadbackValue::ExecStart(commands.clone())
+            }
+        };
+        RequestedConfigurationValue::Typed(typed)
+    }
+
     /// The same name-list kind carrying `value`.
     const fn with_names(&self, value: (bool, Vec<String>)) -> Self {
         if matches!(self, Self::SystemCallFilter(_)) {
@@ -650,6 +696,38 @@ impl SystemdTransientUnitPropertyAccess for SystemdTransientUnitProperty {
     fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
         (self.kind.name(), self.value)
     }
+}
+
+/// One requested property as RQE1 records it (ADR-069 R9 §4.3): the exact
+/// typed value passed to `StartTransientUnit`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestedConfigurationProperty {
+    name: &'static str,
+    value: RequestedConfigurationValue,
+}
+
+impl RequestedConfigurationProperty {
+    /// The exact systemd property name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The submitted value.
+    #[must_use]
+    pub const fn value(&self) -> &RequestedConfigurationValue {
+        &self.value
+    }
+}
+
+/// One submitted value as RQE1 records it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestedConfigurationValue {
+    /// A value in the shape, and with the D-Bus signature, it was submitted.
+    Typed(SystemdTransientUnitReadbackValue),
+    /// The `ExtraFileDescriptors` (`a(hs)`) names, in submission order.
+    /// Descriptor numbers are process-local and never recorded.
+    DescriptorNames(Vec<String>),
 }
 
 /// A typed observed transient-unit property used by the request verifier.
@@ -885,6 +963,18 @@ impl TransientUnitRequest {
     #[must_use]
     pub fn requested_properties(&self) -> &[SystemdTransientUnitProperty] {
         &self.properties
+    }
+
+    /// The requested properties as RQE1 records them, in request order.
+    #[must_use]
+    pub fn requested_configuration(&self) -> Vec<RequestedConfigurationProperty> {
+        self.properties
+            .iter()
+            .map(|property| RequestedConfigurationProperty {
+                name: property.name(),
+                value: property.value.requested_configuration(),
+            })
+            .collect()
     }
 
     pub(crate) fn requested_properties_for_submission(

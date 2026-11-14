@@ -6,8 +6,8 @@ use crate::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
         ProblemCodeV1, ProblemV1,
     },
-    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
-    GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
+    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayAuthorityDenial,
+    GatewayError, GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
@@ -590,7 +590,30 @@ async fn post_ledger_prediction(
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        ProblemV1::from(self).into_response()
+        let retry_after = retry_after_seconds(&self);
+        with_retry_after(ProblemV1::from(self).into_response(), retry_after)
+    }
+}
+
+/// Add `Retry-After` to a response when the failure states one.
+fn with_retry_after(mut response: Response, retry_after: Option<u64>) -> Response {
+    if let Some(seconds) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    response
+}
+
+/// The `Retry-After` seconds of a failure that states when a retry may succeed.
+const fn retry_after_seconds(error: &GatewayError) -> Option<u64> {
+    if let GatewayError::DenialRecordLimitReached {
+        retry_after_seconds,
+    } = error
+    {
+        Some(*retry_after_seconds)
+    } else {
+        None
     }
 }
 
@@ -679,8 +702,8 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
             (Code::ConsentInvalid, StatusCode::BAD_REQUEST, false)
         }
         GatewayError::Consent(_) => (Code::ConsentInvalid, StatusCode::FORBIDDEN, false),
-        GatewayError::LedgerWriteDisabled | GatewayError::AuthorizationDenied => {
-            (Code::Unauthorized, StatusCode::FORBIDDEN, false)
+        GatewayError::LedgerWriteDisabled | GatewayError::AuthorizationDenied(_) => {
+            refusal_problem(error)
         }
         GatewayError::ActionAuthorizationUnavailable | GatewayError::AuthorizationUnavailable => {
             (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
@@ -697,13 +720,42 @@ const fn request_problem(error: &GatewayError) -> ProblemShape {
         | GatewayError::StoreExecutorUnhealthy
         | GatewayError::LedgerUnavailable
         | GatewayError::OwnTracksOwnerKeyUnavailable
-        | GatewayError::ActionAdmissionUnavailable => UNAVAILABLE,
+        | GatewayError::ActionAdmissionUnavailable
+        | GatewayError::AuthorizationEvidenceUnavailable => UNAVAILABLE,
         GatewayError::EventReadTimeExceeded { .. } => (
             Code::TemporarilyUnavailable,
             StatusCode::GATEWAY_TIMEOUT,
             true,
         ),
         other => bound_problem(other),
+    }
+}
+
+/// The problem of a refused write or a recorded authority denial.
+const fn refusal_problem(error: &GatewayError) -> ProblemShape {
+    if let GatewayError::AuthorizationDenied(recorded) = error {
+        denial_problem(recorded.denial())
+    } else {
+        (ProblemCodeV1::Unauthorized, StatusCode::FORBIDDEN, false)
+    }
+}
+
+/// The public problem of one denied authority decision (#1359): expired
+/// authentication evidence is `unauthenticated`, a revoked or expired grant
+/// or consent is `revoked`, and a host that cannot vouch for its revocation
+/// state is temporarily unavailable rather than a denial of the caller.
+const fn denial_problem(denial: GatewayAuthorityDenial) -> ProblemShape {
+    use ProblemCodeV1 as Code;
+    match denial {
+        GatewayAuthorityDenial::Unauthenticated => {
+            (Code::Unauthenticated, StatusCode::UNAUTHORIZED, false)
+        }
+        GatewayAuthorityDenial::Unauthorized => (Code::Unauthorized, StatusCode::FORBIDDEN, false),
+        GatewayAuthorityDenial::Revoked => (Code::Revoked, StatusCode::FORBIDDEN, false),
+        GatewayAuthorityDenial::ConsentInvalid => {
+            (Code::ConsentInvalid, StatusCode::FORBIDDEN, false)
+        }
+        GatewayAuthorityDenial::RevocationStateStale => UNAVAILABLE,
     }
 }
 
@@ -716,7 +768,7 @@ const fn bound_problem(error: &GatewayError) -> ProblemShape {
             StatusCode::TOO_MANY_REQUESTS,
             false,
         ),
-        GatewayError::StoreExecutorSaturated => (
+        GatewayError::StoreExecutorSaturated | GatewayError::DenialRecordLimitReached { .. } => (
             Code::ResourceLimitExceeded,
             StatusCode::TOO_MANY_REQUESTS,
             true,
@@ -886,12 +938,27 @@ mod tests {
         )
     }
 
+    /// A test-only recorded denial for problem-mapping cases.
+    const fn recorded(denial: GatewayAuthorityDenial) -> crate::RecordedAuthorityDenial {
+        crate::RecordedAuthorityDenial::recorded_for_test(denial)
+    }
+
+    /// A host-backed Gateway, so a denial's ADN1 record has an authority store.
     fn authority_test_app(actor: EntityId) -> Router {
-        let gateway = Gateway::new_with_world_bodies_and_authorization(
-            open_store(StoreConfig::Memory).test_ok(),
-            [],
-            crate::authorization::test_authorization_for(actor),
-        );
+        authority_app(crate::authorization::test_authorization_for(actor))
+    }
+
+    fn authority_app(authorization: crate::GatewayAuthorization) -> Router {
+        let gateway = crate::gateway_with_erasure_host_and_authorization(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok(),
+            [test_world_body()],
+            authorization,
+        )
+        .test_ok();
         router(AppState {
             gateway,
             ledger_view: LedgerView::default(),
@@ -1699,7 +1766,7 @@ osf_link = \"https://osf.io/example\"\n";
 
     /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn problem_cases() -> [(GatewayError, &'static str, bool); 19] {
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 18] {
         [
             (
                 GatewayError::DependencySetExhausted,
@@ -1754,7 +1821,6 @@ osf_link = \"https://osf.io/example\"\n";
                 "unauthenticated",
                 false,
             ),
-            (GatewayError::AuthorizationDenied, "unauthorized", false),
             (
                 GatewayError::ConsentGrantSequenceMismatch,
                 "consent-invalid",
@@ -1783,10 +1849,58 @@ osf_link = \"https://osf.io/example\"\n";
         ]
     }
 
+    /// Authority denials and the denial-evidence failures (#1359).
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_problem_cases() -> [(GatewayError, &'static str, bool); 7] {
+        [
+            (
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthorized)),
+                "unauthorized",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(recorded(
+                    GatewayAuthorityDenial::Unauthenticated,
+                )),
+                "unauthenticated",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked)),
+                "revoked",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::ConsentInvalid)),
+                "consent-invalid",
+                false,
+            ),
+            (
+                GatewayError::AuthorizationDenied(recorded(
+                    GatewayAuthorityDenial::RevocationStateStale,
+                )),
+                "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::AuthorizationEvidenceUnavailable,
+                "temporarily-unavailable",
+                true,
+            ),
+            (
+                GatewayError::DenialRecordLimitReached {
+                    retry_after_seconds: 1,
+                },
+                "resource-limit-exceeded",
+                true,
+            ),
+        ]
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn gateway_failures_map_to_their_problem_families() {
-        let cases = problem_cases();
+        let cases = problem_cases().into_iter().chain(authority_problem_cases());
         let registry: serde_json::Value = serde_json::from_str(include_str!(
             "../../../contracts/gateway/v1/problem-types.json"
         ))
@@ -2321,6 +2435,50 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    /// The raw status and body bytes of one authorized Events read.
+    async fn read_as(app: Router, timeline: &str, actor: EntityId) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/timelines/{timeline}/events?limit=1"))
+            .header("x-piglor-actor-entity", actor.to_string())
+            .body(Body::empty())
+            .test_ok();
+        let response = app.oneshot(request).await.test_ok();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .test_ok();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn unknown_and_unauthorized_timelines_answer_identically_without_a_read_grant() {
+        let actor = test_action_actor();
+        let app = authority_app(crate::authorization::test_action_only_authorization_for(
+            actor,
+        ));
+        let (_status, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "non-enumerating-read"})),
+        )
+        .await;
+        let existing = created["id"].as_str().test_ok().to_owned();
+
+        let (existing_status, existing_body) = read_as(app.clone(), &existing, actor).await;
+        let (unknown_status, unknown_body) =
+            read_as(app, &TimelineId::new().to_string(), actor).await;
+
+        assert_eq!(existing_status, StatusCode::FORBIDDEN);
+        assert_eq!(unknown_status, existing_status);
+        assert_eq!(unknown_body, existing_body);
+        let problem: serde_json::Value = serde_json::from_slice(&existing_body).test_ok();
+        assert_eq!(problem["code"], "unauthorized");
+        assert!(!String::from_utf8_lossy(&existing_body).contains(&existing));
+    }
+
     #[tokio::test]
     async fn authority_bound_read_requires_actor_header_and_uses_stable_errors() {
         let actor = test_action_actor();
@@ -2507,6 +2665,30 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_failures_answer_their_status_and_retry_after() {
+        let r = GatewayError::DenialRecordLimitReached {
+            retry_after_seconds: 42,
+        }
+        .into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "42");
+        let r = GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Revoked))
+            .into_response();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(r.headers().get(header::RETRY_AFTER).is_none());
+        let r =
+            GatewayError::AuthorizationDenied(recorded(GatewayAuthorityDenial::Unauthenticated))
+                .into_response();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = GatewayError::AuthorizationDenied(recorded(
+            GatewayAuthorityDenial::RevocationStateStale,
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn into_response_status_mapping() {
@@ -2571,8 +2753,6 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::DependencySetExhausted.into_response();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        let r = GatewayError::AuthorizationDenied.into_response();
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
             "world.unknown".into(),
         ))

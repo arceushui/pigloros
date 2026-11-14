@@ -517,11 +517,51 @@ OWNER = "publisher"
 SCOPE = "plugin-conformance"
 EVENT_TYPE = "prototype.driven"
 
-EVENT_SCHEMA = b'{"$id":"pigloros.fixture.plugin-conformance.event","type":"object"}'
-STATE_SCHEMA = b'{"$id":"pigloros.fixture.plugin-conformance.state","type":"object"}'
-PROVENANCE = b'{"_type":"https://in-toto.io/Statement/v1","subject":"plugin-conformance-fixture"}'
-SBOM = b'{"spdxVersion":"SPDX-2.3","name":"plugin-conformance-fixture"}'
+EVENT_SCHEMA = b'{"$id":"https://pigloros.invalid/fixture/event","type":"object"}'
+STATE_SCHEMA = b'{"$id":"https://pigloros.invalid/fixture/state","type":"object"}'
 LICENCE = b"MIT"
+
+
+def content_metadata(component_bytes: bytes) -> tuple[bytes, bytes]:
+    """Offline fixture documents directly bound to this exact Component."""
+    digest = hashlib.sha256(component_bytes).hexdigest()
+    provenance = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [{"digest": {"sha256": digest}}],
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://pigloros.invalid/fixture-build",
+                "externalParameters": {},
+            },
+            "runDetails": {"builder": {"id": "https://pigloros.invalid/fixture-builder"}},
+        },
+    }
+    sbom = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": "plugin-conformance-fixture",
+        "documentNamespace": "https://pigloros.invalid/spdx/fixture",
+        "creationInfo": {
+            "creators": ["Tool: PiglorOS fixture generator"],
+            "created": "2026-11-01T00:00:00Z",
+        },
+        "documentDescribes": ["SPDXRef-component"],
+        "packages": [{
+            "SPDXID": "SPDXRef-component",
+            "name": "component",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "MIT",
+            "licenseDeclared": "MIT",
+            "copyrightText": "NOASSERTION",
+            "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+        }],
+    }
+    def encode(value: dict) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return encode(provenance), encode(sbom)
 
 # Seconds, Ticks and instants of the sub-cases.
 NOT_BEFORE = 40
@@ -582,6 +622,8 @@ def default_budget(
 
 def default_spec(**overrides) -> Pmf1Spec:
     """The release shape of the conformance world: the real worker's ABI 0.0, no feature."""
+    component_bytes = overrides.get("component", component("rust-guest.wasm"))
+    provenance, sbom = content_metadata(component_bytes)
     spec = Pmf1Spec(
         plugin_id=PLUGIN_ID,
         release_version="1.0.0",
@@ -589,7 +631,7 @@ def default_spec(**overrides) -> Pmf1Spec:
         abi_min_minor=0,
         abi_max_minor=0,
         features=(),
-        component=component("rust-guest.wasm"),
+        component=component_bytes,
         wit=wit_archive(),
         events=(SchemaDoc(1, 1, EVENT_SCHEMA, 65_536),),
         state=SchemaDoc(2, 1, STATE_SCHEMA, 65_536),
@@ -599,8 +641,8 @@ def default_spec(**overrides) -> Pmf1Spec:
         # The `dep` row is kept as the publisher test world declares it (proven on the real
         # worker); nothing in the gate or the conformance cases reads it.
         dependencies=(("dep", bytes([0x42]) * 32, golden.WORLD, 0, 0, 0, ["clock"], [], 0),),
-        provenance=PROVENANCE,
-        sbom=SBOM,
+        provenance=provenance,
+        sbom=sbom,
         licences=(LICENCE,),
         owner=OWNER,
         not_before=NOT_BEFORE,

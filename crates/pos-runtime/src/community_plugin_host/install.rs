@@ -33,7 +33,7 @@ use thiserror::Error;
 
 use super::error::CommunityPluginHostErrorV1;
 use super::gate::{
-    host_error_for_registry_v1, host_error_for_release_signature_v1,
+    host_error_for_content_v1, host_error_for_registry_v1, host_error_for_release_signature_v1,
     host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
 };
 use super::{cbor, PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1};
@@ -234,15 +234,7 @@ pub const fn host_error_for_install_v1(
 const fn host_error_for_installer_v1(
     error: &PluginReleaseInstallErrorV1,
 ) -> CommunityPluginHostErrorV1 {
-    match *error {
-        PluginReleaseInstallErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
-        PluginReleaseInstallErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
-        PluginReleaseInstallErrorV1::Authorization(inner) => {
-            host_error_for_trust_authorization_v1(inner)
-        }
-        PluginReleaseInstallErrorV1::Signature(inner) => host_error_for_release_signature_v1(inner),
-        PluginReleaseInstallErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
-    }
+    ReleaseRefusal::Install(error).host_error()
 }
 
 /// The host error of a failed community release rollback (ADR-103 revision 7 decision 4.3).
@@ -270,16 +262,43 @@ pub const fn host_error_for_rollback_v1(
 const fn host_error_for_rollback_entry_v1(
     error: &PluginReleaseRollbackErrorV1,
 ) -> CommunityPluginHostErrorV1 {
-    match *error {
-        PluginReleaseRollbackErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
-        PluginReleaseRollbackErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
-        PluginReleaseRollbackErrorV1::Authorization(inner) => {
-            host_error_for_trust_authorization_v1(inner)
+    ReleaseRefusal::Rollback(error).host_error()
+}
+
+/// Both publisher operations expose the same closed release-refusal categories.
+enum ReleaseRefusal<'a> {
+    Install(&'a PluginReleaseInstallErrorV1),
+    Rollback(&'a PluginReleaseRollbackErrorV1),
+}
+
+impl ReleaseRefusal<'_> {
+    const fn host_error(self) -> CommunityPluginHostErrorV1 {
+        match self {
+            Self::Install(PluginReleaseInstallErrorV1::Source(inner))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Source(inner)) => {
+                host_error_for_release_source_v1(*inner)
+            }
+            Self::Install(PluginReleaseInstallErrorV1::Manifest(_))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Manifest(_)) => {
+                CommunityPluginHostErrorV1::InvalidManifest
+            }
+            Self::Install(PluginReleaseInstallErrorV1::Authorization(inner))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Authorization(inner)) => {
+                host_error_for_trust_authorization_v1(*inner)
+            }
+            Self::Install(PluginReleaseInstallErrorV1::Signature(inner))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Signature(inner)) => {
+                host_error_for_release_signature_v1(*inner)
+            }
+            Self::Install(PluginReleaseInstallErrorV1::Content(inner))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Content(inner)) => {
+                host_error_for_content_v1(*inner)
+            }
+            Self::Install(PluginReleaseInstallErrorV1::Registry(inner))
+            | Self::Rollback(PluginReleaseRollbackErrorV1::Registry(inner)) => {
+                host_error_for_registry_v1(*inner)
+            }
         }
-        PluginReleaseRollbackErrorV1::Signature(inner) => {
-            host_error_for_release_signature_v1(inner)
-        }
-        PluginReleaseRollbackErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
     }
 }
 

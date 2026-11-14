@@ -66,6 +66,7 @@ fn binding() -> ReleaseBinding {
 struct Recheck {
     result: Result<ReleaseBinding, ()>,
     calls: Cell<u32>,
+    ready: Cell<Option<[u8; 32]>>,
 }
 
 impl Recheck {
@@ -73,13 +74,15 @@ impl Recheck {
         Self {
             result: Ok(binding()),
             calls: Cell::new(0),
+            ready: Cell::new(None),
         }
     }
 }
 
 impl ReleaseRecheck for Recheck {
-    fn recheck(&self) -> Result<ReleaseBinding, ReleaseBarrierError> {
+    fn recheck(&self, ready1_digest: [u8; 32]) -> Result<ReleaseBinding, ReleaseBarrierError> {
         self.calls.set(self.calls.get() + 1);
+        self.ready.set(Some(ready1_digest));
         self.result
             .clone()
             .map_err(|()| ReleaseBarrierError::Recheck)
@@ -187,6 +190,8 @@ fn a_matching_ready_is_released_once_with_the_rechecked_authority() -> TestResul
     assert_eq!(sent, release);
     sent.verify_signature(&signer.key.verifying_key())?;
     let ready = LauncherReady::new(expected.fields())?;
+    // The recheck is bound to the very ReadyV1 that was accepted.
+    assert_eq!(recheck.ready.get(), Some(ready.digest));
     let fields = &sent.fields;
     assert_eq!(fields.attempt_id, expected.attempt_id);
     assert_eq!(fields.nonce, expected.nonce);
@@ -351,6 +356,7 @@ fn a_failed_recheck_signing_failure_or_closed_launcher_sends_no_release() -> Tes
     let refusing = Recheck {
         result: Err(()),
         calls: Cell::new(0),
+        ready: Cell::new(None),
     };
     let error = release_after_ready(&provider, pid()?, &expected, &refusing, &Signer::new())
         .err()

@@ -2,13 +2,13 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
-    AtomicCommitFailureV1 as Atomic, CommunityDigestListV1 as Digests,
-    CommunityGuestErrorCodeV1 as GuestCode, CommunityGuestErrorV1 as Guest,
-    CommunityInvocationFailureInputV1 as Input, CommunityInvocationFailureV1 as Failure,
-    CommunityLifecycleErrorV1 as Error, CommunityPassFailureInputV1 as PassInput,
-    CommunityPassFailureV1 as PassFailure, CommunityPassKeyV1 as Pass,
-    CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1 as Trap, FieldRefV1,
-    GuestPluginErrorV1 as OwnedGuest, PluginErrorCodeV1 as OwnedCode,
+    AtomicCommitFailureV1 as Atomic, BundleContentReasonV1 as Content,
+    CommunityDigestListV1 as Digests, CommunityGuestErrorCodeV1 as GuestCode,
+    CommunityGuestErrorV1 as Guest, CommunityInvocationFailureInputV1 as Input,
+    CommunityInvocationFailureV1 as Failure, CommunityLifecycleErrorV1 as Error,
+    CommunityPassFailureInputV1 as PassInput, CommunityPassFailureV1 as PassFailure,
+    CommunityPassKeyV1 as Pass, CommunityPluginHostErrorV1 as Host, ComponentTrapClassV1 as Trap,
+    FieldRefV1, GuestPluginErrorV1 as OwnedGuest, PluginErrorCodeV1 as OwnedCode,
     RevocationBasisV1 as Revocation, TrapReproductionV1 as Reproduction,
     TrustDenialBasisV1 as Denial,
 };
@@ -160,7 +160,30 @@ fn host_cases() -> Vec<(Host, Value)> {
     ] {
         cases.push((Host::AtomicCommitFailed { failure }, array(&[19, code])));
     }
+    for (code, reason) in content_cases() {
+        cases.push((
+            Host::InvalidBundleContent { reason },
+            array(&[20, u64::from(code)]),
+        ));
+    }
     cases
+}
+const fn content_cases() -> [(u8, Content); 4] {
+    [
+        (0, Content::BoundsExceeded),
+        (1, Content::UnsupportedFormat),
+        (2, Content::Malformed),
+        (3, Content::ReferenceMismatch),
+    ]
+}
+const fn content_pass_input(reason: Content) -> PassInput<'static> {
+    PassInput {
+        pass_key: None,
+        invocation_evidence_digests: Digests::from_digests(&[]),
+        host_failure: Host::InvalidBundleContent { reason },
+        host_decision_provenance_digest: hash(7),
+        evidence_not_after_micros: 8,
+    }
 }
 fn owned_guest_cases() -> Vec<(OwnedCode, Value)> {
     let field = FieldRefV1 {
@@ -436,7 +459,21 @@ fn guest_presence_required_links_indices_and_schema_bounds_fail_closed() -> Test
 #[test]
 fn unknown_host_codes_payloads_and_wrong_tuple_shapes_are_rejected() -> TestResult {
     for (value, error) in [
+        (array(&[21]), Error::InvalidEncoding),
+        (array(&[21, 0]), Error::InvalidEncoding),
         (array(&[20]), Error::InvalidEncoding),
+        (array(&[20, 4]), Error::InvalidEncoding),
+        (array(&[20, u64::MAX]), Error::InvalidEncoding),
+        (array(&[20, 0, 0]), Error::InvalidEncoding),
+        (
+            Value::Array(vec![uint(20), Value::Text("0".into())]),
+            Error::InvalidEncoding,
+        ),
+        (
+            Value::Array(vec![uint(20), Value::Null]),
+            Error::InvalidEncoding,
+        ),
+        (uint(20), Error::InvalidEncoding),
         (array(&[]), Error::InvalidEncoding),
         (array(&[0, 0]), Error::InvalidEncoding),
         (array(&[1, 5]), Error::InvalidEncoding),
@@ -464,6 +501,96 @@ fn unknown_host_codes_payloads_and_wrong_tuple_shapes_are_rejected() -> TestResu
             Some(Error::BoundsExceeded)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn bundle_content_failures_are_the_exact_code_twenty_nested_bytes_in_both_records() -> TestResult {
+    for (code, reason) in content_cases() {
+        let nested = [0x82, 0x14, code];
+        assert_eq!(encode(&array(&[20, u64::from(code)]))?, nested);
+
+        // CFI1 ends with the nested failure, a null guest error, the 34-byte
+        // provenance digest and the one-byte horizon.
+        let input = failure_input(Host::InvalidBundleContent { reason })?;
+        assert!(input.guest_error.is_none());
+        let invocation = Failure::new(input)?.to_canonical_cbor();
+        let at = invocation.len() - 39;
+        assert_eq!(&invocation[at..at + 4], &[0x82, 0x14, code, 0xf6]);
+        assert!(*Failure::from_canonical_cbor(&invocation)?.as_input() == input);
+
+        // CFO1 ends with the nested failure, the provenance digest and the horizon.
+        let pass_input = content_pass_input(reason);
+        let outcome = PassFailure::new(pass_input)?.to_canonical_cbor();
+        let at = outcome.len() - 38;
+        assert_eq!(&outcome[at..at + 3], &nested);
+        assert!(*PassFailure::from_canonical_cbor(&outcome)?.as_input() == pass_input);
+    }
+    Ok(())
+}
+
+#[test]
+fn bundle_content_failures_refuse_guest_errors_and_noncanonical_or_unknown_reasons() -> TestResult {
+    let input = failure_input(Host::InvalidBundleContent {
+        reason: Content::Malformed,
+    })?;
+    assert_eq!(
+        Failure::new(Input {
+            guest_error: Some(guest_default()),
+            ..input
+        })
+        .err(),
+        Some(Error::InvalidBinding)
+    );
+    let attached = Value::Array(vec![array(&[4]), Value::Null, Value::Null]);
+    assert_eq!(
+        Failure::from_canonical_cbor(&encode(&fixture(array(&[20, 2]), attached)?)?).err(),
+        Some(Error::InvalidBinding)
+    );
+
+    let invocation = Failure::new(input)?.to_canonical_cbor();
+    let outcome = PassFailure::new(content_pass_input(Content::Malformed))?.to_canonical_cbor();
+    let invocation_at = invocation.len() - 39;
+    let outcome_at = outcome.len() - 38;
+    // A non-shortest host code, a non-shortest reason and an unknown reason.
+    for (offset, replacement) in [(1, vec![0x18, 0x14]), (2, vec![0x18, 2]), (2, vec![4])] {
+        let mut changed = invocation.to_vec();
+        changed.splice(
+            invocation_at + offset..=invocation_at + offset,
+            replacement.clone(),
+        );
+        assert_eq!(
+            Failure::from_canonical_cbor(&changed).err(),
+            Some(Error::InvalidEncoding)
+        );
+        let mut changed = outcome.to_vec();
+        changed.splice(outcome_at + offset..=outcome_at + offset, replacement);
+        assert_eq!(
+            PassFailure::from_canonical_cbor(&changed).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    // A wrong arity in the pass record, and trailing data after either record.
+    for nested in [vec![0x81, 0x14], vec![0x83, 0x14, 2, 0]] {
+        let mut changed = outcome.to_vec();
+        changed.splice(outcome_at..outcome_at + 3, nested);
+        assert_eq!(
+            PassFailure::from_canonical_cbor(&changed).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    let mut trailing = invocation.to_vec();
+    trailing.push(0);
+    assert_eq!(
+        Failure::from_canonical_cbor(&trailing).err(),
+        Some(Error::InvalidEncoding)
+    );
+    let mut trailing = outcome.to_vec();
+    trailing.push(0);
+    assert_eq!(
+        PassFailure::from_canonical_cbor(&trailing).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 

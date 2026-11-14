@@ -41,6 +41,8 @@ pub use unit_result::{
     SystemdUnitResultObservation,
 };
 #[cfg(target_os = "linux")]
+mod unit_pin;
+#[cfg(target_os = "linux")]
 mod unit_teardown;
 #[cfg(target_os = "linux")]
 pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
@@ -219,9 +221,18 @@ pub struct SystemdVerifiedStart {
     unit_path: OwnedObjectPath,
     requested_readback: Vec<SystemdTransientUnitReadback>,
     manager_readback: SystemdManagerReadback,
+    requested: Vec<crate::RequestedConfigurationProperty>,
 }
 
 impl SystemdVerifiedStart {
+    /// Return the requested properties as RQE1 records them, in request
+    /// order: RQE1 `requested`, whose readback is
+    /// [`Self::requested_readback`] and [`Self::manager_readback`].
+    #[must_use]
+    pub fn requested_configuration(&self) -> &[crate::RequestedConfigurationProperty] {
+        &self.requested
+    }
+
     /// Return the exact transient service-unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
@@ -250,6 +261,28 @@ impl SystemdVerifiedStart {
     #[must_use]
     pub const fn manager_readback(&self) -> &SystemdManagerReadback {
         &self.manager_readback
+    }
+
+    /// A start of `unit_name` loaded at `unit_path`, with nothing read back.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn for_test(
+        unit_name: TransientServiceUnitName,
+        unit_path: &str,
+    ) -> zbus::Result<Self> {
+        Ok(Self {
+            unit_name,
+            job: SystemdStartJob(OwnedObjectPath::try_from(
+                "/org/freedesktop/systemd1/job/1",
+            )?),
+            unit_path: OwnedObjectPath::try_from(unit_path)?,
+            requested_readback: Vec::new(),
+            manager_readback: SystemdManagerReadback::new(
+                SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+                "",
+            ),
+            requested: Vec::new(),
+        })
     }
 }
 
@@ -323,6 +356,19 @@ pub enum SystemdTransientUnitTransportError {
     /// The manager-bound cgroup could not be safely opened or observed.
     #[error(transparent)]
     CgroupKernel(#[from] AttemptCgroupError),
+    /// The bound cgroup's effective kernel limits could not be read.
+    #[error(transparent)]
+    EffectiveLimits(#[from] crate::EffectiveLimitError),
+    /// systemd rejected or failed the typed `RefUnit` call, so the unit's
+    /// result could be collected before it is read.
+    #[error("systemd rejected the attempt-unit reference")]
+    UnitRef(#[source] zbus::Error),
+    /// systemd rejected or failed the typed `UnrefUnit` call.
+    #[error("systemd rejected the release of the attempt-unit reference")]
+    UnitUnref(#[source] zbus::Error),
+    /// The unit's `ActiveEnterTimestampMonotonic` is zero or unrepresentable.
+    #[error("the systemd attempt unit has no activation time")]
+    ActivationUnset,
     /// The manager's `InvocationID` is not exactly 16 bytes.
     #[error("systemd returned a malformed InvocationID")]
     InvocationIdMalformed,
@@ -659,6 +705,7 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
     type Cgroup = BoundAttemptCgroup;
     type Error = SystemdTransientUnitTransportError;
     type Killer = Self;
+    type Evidence = crate::ReleaseResources;
 
     fn killer(&self) -> Self {
         self.clone()
@@ -678,7 +725,17 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
         started: &SystemdVerifiedStart,
     ) -> impl Future<Output = Result<BoundAttemptCgroup, SystemdTransientUnitTransportError>> + Send
     {
-        Self::bind_cgroup(self, started)
+        self.pinned(started.unit_name(), Self::bind_cgroup(self, started))
+    }
+
+    fn release_evidence(
+        &self,
+        started: &SystemdVerifiedStart,
+        cgroup: &BoundAttemptCgroup,
+    ) -> impl Future<
+        Output = Result<(u64, crate::ReleaseResources), SystemdTransientUnitTransportError>,
+    > + Send {
+        self.release_resources(started, cgroup)
     }
 
     async fn stop(
@@ -836,6 +893,7 @@ async fn verify_service(
             SystemdManagerReadbackOnlyProperty::RootImagePolicy,
             root_image_policy,
         ),
+        requested: request.requested_configuration(),
     })
 }
 
