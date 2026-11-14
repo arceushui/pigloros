@@ -17,13 +17,13 @@ use pos_core::{
     ids::TimelineId,
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
-    AuthorityErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit, ConsentGrantedV1,
-    ConsentRevocationReservation, ConsentRevokedV1, CoreError, ErasureHostErrorV1,
-    ErasureProtectedOperationV1, ErasureReferenceV1, ForkAdmissionHostCommandV1,
-    ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1, ForkAuthenticationPolicyV1,
-    ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
-    PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    AuthorityErrorV1, AuthorityPersistenceErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit,
+    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
+    ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
+    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PipelineOutcomeV1, PreparedOwnTracksIngressV1,
+    ProposedAction, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -1512,6 +1512,19 @@ impl StoreExecutor {
             }
         )))
     }
+    /// Load the chain the host store records under `leaf_grant_id`, so the
+    /// authorizer can compare it with its pinned chain before a decision.
+    pub(crate) async fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            LoadAuthorityCommand {
+                leaf_grant_id,
+                reply
+            }
+        )))
+    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -2269,6 +2282,44 @@ impl WorkerCommandV1 for DenialEvidenceCommand {
             }
         };
         drop(reply.send(Ok(receipt)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+/// Read one recorded authority chain from the host's authority store.
+///
+/// Only the test-only `Generic` and `Gateway` stores lack the authority
+/// ports; they answer unavailable, so an authorizer bound to them fails
+/// closed.
+struct LoadAuthorityCommand {
+    leaf_grant_id: Hash,
+    reply: oneshot::Sender<
+        Result<Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>, StoreExecutorError>,
+    >,
+}
+
+impl WorkerCommandV1 for LoadAuthorityCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            leaf_grant_id,
+            reply,
+        } = *self;
+        let loaded = match &mut state.store {
+            ExecutorStore::Host(host, _) => host
+                .command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| ports.load_authority(leaf_grant_id))
+                })
+                .unwrap_or(Err(AuthorityPersistenceErrorV1::Unavailable)),
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => {
+                Err(AuthorityPersistenceErrorV1::Unavailable)
+            }
+        };
+        drop(reply.send(Ok(loaded)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -4696,6 +4747,18 @@ mod tests {
             Command::Action(Box::new(super::DenialEvidenceCommand {
                 batch: authorization.admit_denial_record(pending).test_value(),
                 authorization,
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    #[test]
+    fn expired_authority_load_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::LoadAuthorityCommand {
+                leaf_grant_id: pos_core::Hash::from_bytes([1; 32]),
                 reply,
             })),
             receiver,

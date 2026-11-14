@@ -41,10 +41,10 @@ pub const CAPABILITY_IDS: [&str; 6] = [
     "world.action.v1.submit",
 ];
 
-/// The actor of the `authorized` composition's fixture authority.
+/// The actor of the `authorized` composition's fixture Local Principal.
 pub const ACTOR_ENTITY_ID: &str = "01JC0GATEWAYF1XTVREACT0R00";
 
-/// The World body of the `authorized` composition's fixture catalogue.
+/// The World body the fixture action payloads name.
 pub const BODY_ENTITY_ID: &str = "01JC0GATEWAYF1XTVREB0DY000";
 
 /// The code of the failure for a payload that violates the grammar. It equals no oracle.

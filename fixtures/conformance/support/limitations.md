@@ -70,10 +70,9 @@ not as a kernel-audited Air-Gapped execution under the Sandbox Provider.
 
 For the gateway-client-conformance layer: results are Local-relaxation
 engineering evidence, not hosted conformance. The subject is the in-process
-Gateway router of `apps/pos-gateway-conformance-adapter`, which exists only
-with the `test-support` feature because its `authorized` composition uses the
-nonproduction fixture registration of the Gateway action registry and a
-fixture authority; no production authority is sourced from it.
+Gateway router of `apps/pos-gateway-conformance-adapter`, whose `authorized`
+composition is the production serve composition with a fixture Local Principal
+document; no production authority is sourced from it.
 
 For the gateway-client-conformance layer: the normative surface is the
 documented ADR-014 route table only; there is no OpenAPI document, Golden Path
