@@ -78,6 +78,8 @@ enum AdapterScript {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     Start,
+    /// The verified start is no valid RQE1.
+    RequestedConfiguration,
     Bind,
     Evidence,
     HangEvidence,
@@ -292,6 +294,43 @@ impl UnitCgroup for FakeCgroup {
     }
 }
 
+/// The fake's start is its unit name; its RQE1 records that name as its
+/// one requested property, and an empty name is no valid RQE1.
+impl RequestedConfiguration for String {
+    fn requested_configuration_evidence(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+        pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+    > {
+        use pos_reference::sandbox_provider_protocol::{
+            DbusProperty, DbusValue, RequestedConfigurationEvidence,
+            RequestedConfigurationEvidenceFields, RequestedConfigurationStatus,
+            SandboxProviderProtocolError,
+        };
+        if self.is_empty() {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        let unit = DbusProperty {
+            name: "Description".to_owned(),
+            value: DbusValue::String(self.clone()),
+        };
+        let policy = DbusProperty {
+            name: "RootImagePolicy".to_owned(),
+            value: DbusValue::String(String::new()),
+        };
+        RequestedConfigurationEvidence::new(&RequestedConfigurationEvidenceFields {
+            attempt_id,
+            agr1_digest,
+            status: RequestedConfigurationStatus::Verified,
+            requested: Some(vec![unit.clone()]),
+            readback: Some(vec![unit, policy]),
+        })
+    }
+}
+
 /// The device and inode every fake cgroup reports.
 const FAKE_CGROUP: (u64, u64) = (0x63, 0x67);
 
@@ -321,7 +360,12 @@ impl UnitHost for FakeHost {
             if let Some(adapter_end) = adapter_end {
                 self.drive(adapter_end);
             }
-            Ok(unit_name.as_str().to_owned())
+            // An empty start is the fake's invalid RQE1.
+            Ok(if self.faulty(Fault::RequestedConfiguration) {
+                String::new()
+            } else {
+                unit_name.as_str().to_owned()
+            })
         };
         let hang = self.faulty(Fault::HangStart);
         async move {
@@ -481,6 +525,17 @@ impl LaunchBarrier for FakeBarrier {
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
         assert_eq!(cgroup.identity(), FAKE_CGROUP);
+        // The barrier is handed the RQE1 of the verified start.
+        let requested = attempt
+            .unit_name()
+            .as_str()
+            .to_owned()
+            .requested_configuration_evidence(
+                attempt.attempt_id(),
+                attempt.admitted().grant_digest(),
+            )
+            .map(|requested| requested.digest());
+        assert_eq!(Ok(attempt.requested_configuration_evidence()), requested);
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
@@ -519,7 +574,7 @@ async fn released(
         std::future::pending::<()>().await;
     }
     if let Some(cancel) = cancel {
-        cancel.cancel();
+        cancel.cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
     }
     outcome
 }
@@ -1829,6 +1884,21 @@ mod release_evidence {
         let (scenario, failed) = timed_out(&[Fault::HangEvidence], false).await?;
         assert!(matches!(failed.error, ExecuteError::HostTimeout));
         assert_eq!(failed.unit, UnitState::Killed);
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_start_that_is_no_valid_rqe1_releases_nothing() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::RequestedConfiguration);
+        let failed = scenario.fails().await?;
+        assert!(matches!(
+            failed.error,
+            ExecuteError::RequestedConfiguration(_)
+        ));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.started.is_some());
         assert!(!scenario.entries().iter().any(|entry| entry == "release"));
         Ok(())
     }

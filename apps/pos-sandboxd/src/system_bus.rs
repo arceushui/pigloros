@@ -286,6 +286,25 @@ impl SystemdVerifiedStart {
     }
 }
 
+impl crate::RequestedConfiguration for SystemdVerifiedStart {
+    fn requested_configuration_evidence(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+        pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+    > {
+        crate::verified_requested_configuration(
+            attempt_id,
+            agr1_digest,
+            &self.requested,
+            &self.requested_readback,
+            &self.manager_readback,
+        )
+    }
+}
+
 /// Fail-closed failures at the typed transient-unit command boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemdTransientUnitTransportError {

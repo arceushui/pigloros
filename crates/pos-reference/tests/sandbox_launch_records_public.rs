@@ -9,8 +9,8 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
-    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
-    SandboxExecutionMode, SandboxProviderProtocolError,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields, Rls1,
+    RuntimeSigned, SandboxExecutionMode, SandboxProviderProtocolError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -104,9 +104,10 @@ fn signing_key() -> SigningKey {
 
 fn release() -> Result<ExecutionRelease, Box<dyn Error>> {
     let key = signing_key();
-    Ok(ExecutionRelease::sign(release_fields()?, |message| {
-        key.sign(message).to_bytes()
-    })?)
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    let signature = key.sign(&record.signature_message()).to_bytes();
+    record.verify(&signature, &key.verifying_key())?;
+    Ok(ExecutionRelease::new(record, signature)?)
 }
 
 #[test]
@@ -272,9 +273,20 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
     for mutate in mutations {
         let mut fields = release_fields()?;
         mutate(&mut fields);
-        assert!(ExecutionRelease::sign(fields, |_| [1; 64]).is_err());
+        assert_eq!(
+            ExecutionRelease::self_digested(fields).map(|_| ()),
+            Err(SandboxProviderProtocolError::FieldOutOfBounds)
+        );
     }
-    assert!(ExecutionRelease::sign(release_fields()?, |_| [0; 64]).is_err());
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    assert_eq!(
+        ExecutionRelease::new(record.clone(), [0; 64]),
+        Err(SandboxProviderProtocolError::SignatureInvalid)
+    );
+    assert_eq!(
+        record.verify(&[1; 64], &signing_key().verifying_key()),
+        Err(SandboxProviderProtocolError::SignatureInvalid)
+    );
     Ok(())
 }
 
@@ -521,5 +533,17 @@ fn blake3_digest_of_matches_the_official_empty_and_one_byte_vectors() -> TestRes
         hex(&blake3_digest_of(&[0_u8][..])?),
         "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
     );
+    Ok(())
+}
+
+#[test]
+fn rls1_signature_message_is_the_r9_domain_and_its_self_digest() -> TestResult {
+    let record = ExecutionRelease::self_digested(release_fields()?)?;
+    let mut expected = b"PiglorOS.RLS1.Signature.v1\0".to_vec();
+    expected.extend(unhex(RLS1_DIGEST)?);
+    assert_eq!(record.signature_message(), expected);
+    assert_eq!(record.digest().to_vec(), unhex(RLS1_DIGEST)?);
+    assert_eq!(record.body(), &release_fields()?);
+    assert_eq!(<Rls1 as RuntimeSigned>::MAGIC, "RLS1");
     Ok(())
 }

@@ -591,7 +591,8 @@ fn release_fields(ready: &LauncherReady) -> ExecutionReleaseFields {
 }
 
 fn signed(fields: ExecutionReleaseFields) -> Result<Vec<u8>, Box<dyn Error>> {
-    Ok(ExecutionRelease::sign(fields, |_| [1; 64])?.to_canonical_cbor()?)
+    let record = ExecutionRelease::self_digested(fields)?;
+    Ok(ExecutionRelease::new(record, [1; 64])?.to_canonical_cbor()?)
 }
 
 fn release_with(

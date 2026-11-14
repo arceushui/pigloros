@@ -1068,3 +1068,114 @@ fn the_requested_configuration_is_the_submitted_values_with_descriptor_names_onl
     );
     Ok(())
 }
+
+/// The RQE1 of a verified start records the request as submitted and the
+/// readback the verifier compared, sorted, with `RootImagePolicy` (ADR-069
+/// R9 §4.3).
+#[test]
+fn a_verified_start_is_recorded_as_a_status_0_rqe1() -> Result<(), Box<dyn Error>> {
+    use pos_reference::sandbox_provider_protocol::{
+        DbusValue, RequestedConfigurationEvidence, RequestedConfigurationStatus,
+    };
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    for mode in [LaunchMode::AirGapped, LaunchMode::Local] {
+        let request = request(mode)?;
+        let readback = exact_readback(&request, &authority.expected_effective_names);
+        request.verify_readback(&readback)?;
+        let manager = SystemdManagerReadback::new(
+            SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+            "root=verity+signed+absent",
+        );
+        let evidence = crate::verified_requested_configuration(
+            [0x41; 16],
+            [0x53; 32],
+            &request.requested_configuration(),
+            &readback,
+            &manager,
+        )?;
+        let decoded =
+            RequestedConfigurationEvidence::from_canonical_cbor(evidence.canonical_bytes())?;
+        assert_eq!(decoded, evidence);
+        let fields = evidence.fields();
+        assert_eq!(
+            (fields.attempt_id, fields.agr1_digest),
+            ([0x41; 16], [0x53; 32])
+        );
+        assert_eq!(fields.status, RequestedConfigurationStatus::Verified);
+        let requested = fields.requested.as_ref().ok_or("requested")?;
+        let recorded = fields.readback.as_ref().ok_or("readback")?;
+        // Every requested property, by name, length first.
+        let mut names = request
+            .requested_properties()
+            .iter()
+            .map(|property| property.name().to_owned())
+            .collect::<Vec<_>>();
+        names.sort_by(|left, right| (left.len(), left).cmp(&(right.len(), right)));
+        assert_eq!(
+            requested
+                .iter()
+                .map(|property| property.name.clone())
+                .collect::<Vec<_>>(),
+            names
+        );
+        assert_eq!(recorded.len(), requested.len() + 1);
+        let value = |list: &[pos_reference::sandbox_provider_protocol::DbusProperty],
+                     name: &str| {
+            list.iter()
+                .find(|property| property.name == name)
+                .map(|property| property.value.clone())
+        };
+        assert_eq!(
+            value(recorded, "RootImagePolicy"),
+            Some(DbusValue::String("root=verity+signed+absent".to_owned()))
+        );
+        assert!(matches!(
+            value(requested, "ExtraFileDescriptors"),
+            Some(DbusValue::DescriptorNames(_))
+        ));
+        assert!(matches!(
+            value(recorded, "ExtraFileDescriptors"),
+            Some(DbusValue::StringArray(_))
+        ));
+        assert_eq!(
+            value(recorded, "SystemCallFilter"),
+            Some(DbusValue::FlaggedStrings(
+                true,
+                authority.expected_effective_names.clone()
+            ))
+        );
+        for (name, code) in [
+            ("RootDirectory", 1),
+            ("BindReadOnlyPaths", 6),
+            ("TasksMax", 2),
+            ("FileDescriptorStoreMax", 3),
+            ("TemporaryFileSystem", 7),
+            ("ExecStart", 8),
+            ("NoNewPrivileges", 0),
+            ("UMask", 3),
+        ] {
+            assert_eq!(
+                value(recorded, name).map(|value| value.code()),
+                Some(code),
+                "{name}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A start with no requested properties is no RQE1, so nothing can bind it.
+#[test]
+fn a_start_with_no_requested_properties_is_no_rqe1() -> Result<(), Box<dyn Error>> {
+    use crate::RequestedConfiguration;
+    let unit = crate::TransientServiceUnitName::from_attempt_id([0x41; 16])?;
+    let started =
+        crate::SystemdVerifiedStart::for_test(unit, "/org/freedesktop/systemd1/unit/attempt")?;
+    assert_eq!(
+        started
+            .requested_configuration_evidence([0x41; 16], [0x53; 32])
+            .map(|_| ()),
+        Err(pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}

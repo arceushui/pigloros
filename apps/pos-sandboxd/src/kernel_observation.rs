@@ -9,15 +9,21 @@
 //! evidence, so their final component is always followed. The release
 //! recheck runs the same procedure again and requires an equal observation.
 //!
-//! This module collects typed evidence only. KOE1 encoding and its
-//! self-digest belong to the record encoders.
+//! [`observation_evidence`] turns a frozen observation into the attempt's
+//! KOE1 through the `pos_reference` encoder; its self-digest is the
+//! `observed_state_digest` that `ReleaseV1` binds.
 
 use std::fs::File;
 use std::io::Read;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use pos_reference::sandbox_provider_protocol::FdIdentity;
+use pos_reference::sandbox_provider_protocol::{
+    BlockIdentity, CgroupIdentity, DeviceNumber as EvidenceDevice, FdIdentity,
+    KernelObservationEvidence, KernelObservationEvidenceFields, KernelObservationStatus,
+    NamespaceIdentity, ObservedKernelState, RootMount, SandboxProviderProtocolError,
+    WorkMountFacts,
+};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
     fstat, fstatfs, major, minor, open, openat, statx, AtFlags, Mode, OFlags, StatxFlags,
@@ -433,10 +439,30 @@ impl KernelObservation {
                 inode: 5678,
             },
             namespaces: NamespaceSet([identity; 6]),
-            provider_namespaces: NamespaceSet([identity; 6]),
+            provider_namespaces: NamespaceSet(
+                [KernelIdentity {
+                    inode: 4_026_531_835,
+                    ..identity
+                }; 6],
+            ),
             observed_fdl1_digest: [0x88; 32],
             work: None,
         }
+    }
+
+    /// The KOE1 of this observation for the test attempt.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn fixture_evidence(
+        &self,
+    ) -> Result<KernelObservationEvidence, SandboxProviderProtocolError> {
+        observation_evidence(
+            crate::test_fixtures::ATTEMPT,
+            crate::test_fixtures::GRANT_DIGEST,
+            [3; 32],
+            crate::test_fixtures::RQE1_DIGEST,
+            self,
+        )
     }
 
     /// The same observation of another `MainPID`.
@@ -582,6 +608,9 @@ pub enum KernelObservationError {
     /// The `/work` handle is not a tmpfs mount root of a known capacity.
     #[error("the /work mount is not a bounded tmpfs root")]
     WorkCapacity,
+    /// The observation is no valid KOE1.
+    #[error("the kernel observation is not a valid KOE1")]
+    Evidence(#[source] SandboxProviderProtocolError),
 }
 
 impl From<EffectiveLimitError> for KernelObservationError {
@@ -811,49 +840,110 @@ fn observe_unit_in(
     })
 }
 
-/// The KOE1 self-digest of a frozen kernel observation: the
-/// `observed_state_digest` that `ReleaseV1` binds (ADR-069 R9 §4.4).
+/// The attempt's KOE1 for a frozen `observation`, made once the `ReadyV1`
+/// whose digest is `ready1_digest` was accepted (ADR-069 R9 §4.4, status 0).
+/// It binds the attempt's RQE1 by its digest.
 ///
-/// The KOE1 record encoder implements it. Until one exists no
-/// [`KernelObservedReadback`] can be built, so nothing is released.
-pub trait ObservedStateDigest {
-    /// The KOE1 self-digest of `observation`, made once the `ReadyV1` whose
-    /// digest is `ready1_digest` was accepted.
-    fn observed_state_digest(
-        &self,
-        ready1_digest: [u8; 32],
-        observation: &KernelObservation,
-    ) -> [u8; 32];
+/// # Errors
+/// Any R9 rule the record fails.
+pub fn observation_evidence(
+    attempt_id: [u8; 16],
+    agr1_digest: [u8; 32],
+    ready1_digest: [u8; 32],
+    requested_configuration_evidence: [u8; 32],
+    observation: &KernelObservation,
+) -> Result<KernelObservationEvidence, SandboxProviderProtocolError> {
+    KernelObservationEvidence::new(&KernelObservationEvidenceFields {
+        attempt_id,
+        agr1_digest,
+        status: KernelObservationStatus::Observed {
+            ready1_digest,
+            observation: Box::new(observation.evidence_state()),
+        },
+        requested_configuration_evidence,
+    })
 }
 
-/// The production [`ObservedReadback`]: the R9 §4.4 procedure over procfs,
-/// against the provider's namespaces retained at startup, with the KOE1
-/// self-digest from `D`.
-pub struct KernelObservedReadback<D> {
-    provider: ProviderNamespaces,
-    digest: D,
-}
-
-impl<D> KernelObservedReadback<D> {
-    /// The readback for one runtime, whose namespaces are `provider`.
-    #[must_use]
-    pub const fn new(provider: ProviderNamespaces, digest: D) -> Self {
-        Self { provider, digest }
+impl DeviceNumber {
+    const fn evidence(self) -> EvidenceDevice {
+        EvidenceDevice {
+            major: self.major,
+            minor: self.minor,
+        }
     }
 }
 
-impl<D: ObservedStateDigest> ObservedReadback for KernelObservedReadback<D> {
+impl KernelIdentity {
+    const fn namespace(self) -> NamespaceIdentity {
+        NamespaceIdentity {
+            major: self.device.major,
+            minor: self.device.minor,
+            inode: self.inode,
+        }
+    }
+}
+
+impl BlockDevice {
+    const fn evidence(self) -> BlockIdentity {
+        BlockIdentity {
+            device: self.device.evidence(),
+            diskseq: self.diskseq.get(),
+        }
+    }
+}
+
+impl KernelObservation {
+    /// The KOE1 `kernel-observation` of this observation.
+    #[must_use]
+    pub fn evidence_state(&self) -> ObservedKernelState {
+        ObservedKernelState {
+            invocation_id: self.invocation_id,
+            main_pid: self.main_pid,
+            launcher: self.launcher,
+            adapter: self.adapter,
+            root_mount: RootMount {
+                mount_id: self.root.mount_id,
+                device: self.root.mapper.device.evidence(),
+            },
+            root_mapper: self.root.mapper.evidence(),
+            root_loop: self.root.loop_device.evidence(),
+            cgroup: CgroupIdentity {
+                major: self.cgroup.device.major,
+                minor: self.cgroup.device.minor,
+                inode: self.cgroup.inode,
+            },
+            namespaces: self.namespaces.0.map(KernelIdentity::namespace),
+            provider_namespaces: self.provider_namespaces.0.map(KernelIdentity::namespace),
+            observed_fdl1_digest: self.observed_fdl1_digest,
+            work: self.work.map(|work| WorkMountFacts {
+                mount_id: work.mount_id,
+                capacity_bytes: work.capacity_bytes,
+            }),
+        }
+    }
+}
+
+/// The production [`ObservedReadback`]: the R9 §4.4 procedure over procfs,
+/// against the provider's namespaces retained at startup.
+pub struct KernelObservedReadback {
+    provider: ProviderNamespaces,
+}
+
+impl KernelObservedReadback {
+    /// The readback for one runtime, whose namespaces are `provider`.
+    #[must_use]
+    pub const fn new(provider: ProviderNamespaces) -> Self {
+        Self { provider }
+    }
+}
+
+impl ObservedReadback for KernelObservedReadback {
     fn observe(
         &self,
         unit: &dyn Fn() -> Result<(u32, [u8; 16]), KernelObservationError>,
         context: &ObservationContext<'_>,
     ) -> Result<ObservedUnit, ObservedReadbackUnavailable> {
         observe_unit(unit, context, &self.provider).map_err(ObservedReadbackUnavailable::from)
-    }
-
-    fn digest(&self, ready1_digest: [u8; 32], observation: &KernelObservation) -> [u8; 32] {
-        self.digest
-            .observed_state_digest(ready1_digest, observation)
     }
 }
 

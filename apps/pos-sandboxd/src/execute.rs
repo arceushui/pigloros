@@ -47,9 +47,10 @@ use std::time::{Duration, Instant};
 use futures_util::future::{select, Either};
 use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
-    LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
-    NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
-    ReplayedNetworkExchange, SandboxExecutionMode, WATCHDOG_GRACE_NS,
+    CancelSource, LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore,
+    NetworkCaptureStoreError, NetworkEndpointConnector, NetworkExchangePlan,
+    NetworkExchangeTranscript, ReplayedNetworkExchange, SandboxExecutionMode,
+    SandboxProviderProtocolError, WATCHDOG_GRACE_NS,
 };
 use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;
@@ -58,7 +59,7 @@ use zbus::OwnedFd;
 use crate::{
     ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal, CheckedRoot,
     HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort,
-    LocalProxyBindError, ServeError, ServedProxy, TransientServiceUnitName,
+    LocalProxyBindError, RequestedConfiguration, ServeError, ServedProxy, TransientServiceUnitName,
     TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
@@ -83,8 +84,9 @@ const ESCALATION_GRACE: Duration = Duration::from_nanos(WATCHDOG_GRACE_NS);
 ///
 /// The production implementation is the typed D-Bus transport.
 pub trait UnitHost {
-    /// The verified start, with its requested-state readback.
-    type Started: Send + Sync;
+    /// The verified start, with its requested-state readback: the attempt's
+    /// RQE1.
+    type Started: RequestedConfiguration + Send + Sync;
     /// The retained handle on the attempt cgroup.
     type Cgroup: UnitCgroup + Send;
     /// The host's failure type.
@@ -257,25 +259,39 @@ impl ModePlan {
 ///
 /// A request is sticky: every [`CancelSignal`] subscribed from this handle
 /// observes it, whenever it subscribed. Dropping the handle without a request
-/// never cancels.
+/// never cancels. The first request's source is kept: it is TME1
+/// `cancel-source` (ADR-069 R9 §4.6.1).
 #[derive(Debug)]
-pub struct AttemptCancel(watch::Sender<bool>);
+pub struct AttemptCancel(watch::Sender<Option<CancelSource>>);
 
 impl AttemptCancel {
     /// A handle on which no cancellation was requested yet.
     #[must_use]
     pub fn new() -> Self {
-        Self(watch::Sender::new(false))
+        Self(watch::Sender::new(None))
     }
 
-    /// Request cancellation; repeating the request changes nothing.
-    pub fn cancel(&self) {
-        self.0.send_replace(true);
+    /// Request cancellation from `source`; a later request changes nothing,
+    /// so the first source is kept.
+    pub fn cancel(&self, source: CancelSource) {
+        self.0.send_if_modified(|requested| {
+            let first = requested.is_none();
+            if first {
+                *requested = Some(source);
+            }
+            first
+        });
     }
 
     /// Whether cancellation was requested.
     #[must_use]
     pub fn is_requested(&self) -> bool {
+        self.0.borrow().is_some()
+    }
+
+    /// The source of the first cancellation request, if one was made.
+    #[must_use]
+    pub fn source(&self) -> Option<CancelSource> {
         *self.0.borrow()
     }
 
@@ -294,18 +310,18 @@ impl Default for AttemptCancel {
 
 /// One execution's view of its attempt's cancellation.
 #[derive(Clone, Debug)]
-pub struct CancelSignal(watch::Receiver<bool>);
+pub struct CancelSignal(watch::Receiver<Option<CancelSource>>);
 
 impl CancelSignal {
     /// Whether cancellation was requested.
     pub(crate) fn is_requested(&self) -> bool {
-        *self.0.borrow()
+        self.0.borrow().is_some()
     }
 
     /// Finish once cancellation is requested; never, if its handle was
     /// dropped without a request.
     pub(crate) async fn requested(mut self) {
-        if self.0.wait_for(|requested| *requested).await.is_err() {
+        if self.0.wait_for(Option::is_some).await.is_err() {
             std::future::pending::<()>().await;
         }
     }
@@ -368,6 +384,9 @@ pub enum ExecuteError {
     /// deadline.
     #[error("the watchdog deadline is not representable")]
     Activation,
+    /// The verified start is no valid RQE1, so no KOE1 can bind it.
+    #[error("the verified start is not a valid RQE1")]
+    RequestedConfiguration(#[source] SandboxProviderProtocolError),
     /// The verified root could not be rechecked.
     #[error("the verified root could not be rechecked")]
     Recheck(#[source] ImageActivationError),
@@ -677,8 +696,26 @@ where
     };
     let (started, mut cgroup, evidence, anchored) =
         submit_anchored(host, &attempt, request, bounds, watchdog, guard).await?;
+    let requested = match started
+        .requested_configuration_evidence(attempt.attempt_id(), attempt.grant_digest())
+    {
+        Ok(requested) => requested.digest(),
+        Err(error) => {
+            let error = ExecuteError::RequestedConfiguration(error);
+            let aborted = abort(
+                host,
+                &unit,
+                Some(cgroup),
+                error,
+                Submission::Confirmed,
+                anchored.bounds,
+            )
+            .await;
+            return Err(reached(aborted, started, Some(evidence)));
+        }
+    };
     let attempt_id = attempt.attempt_id();
-    let active = ActiveAttempt::record(attempt, anchored.release);
+    let active = ActiveAttempt::record(attempt, anchored.release, requested);
     let bound = bind_planned(planned);
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does, and is abandoned once cancellation is requested.

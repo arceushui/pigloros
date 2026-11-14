@@ -93,6 +93,7 @@ struct ExecutionPolicyFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedAttempt {
     attempt_id: [u8; 16],
+    grant_digest: [u8; 32],
     unit_name: TransientServiceUnitName,
     sim1_digest: [u8; 32],
     authority: AdmittedAuthority,
@@ -132,6 +133,7 @@ impl AdmittedAttempt {
         let binary = admission.snapshot().provider_binary();
         Ok(Self {
             attempt_id: request.attempt_id,
+            grant_digest: entry.grant_digest(),
             unit_name: intent.unit_name().clone(),
             sim1_digest: request.authority.sim1_digest,
             authority: admission.authority(),
@@ -163,6 +165,12 @@ impl AdmittedAttempt {
             lease: Some(ExecutionLease(entry.retain())),
             execution: directory.execution_ownership(),
         })
+    }
+
+    /// The self-digest of the AGR1 the attempt was admitted under.
+    #[must_use]
+    pub const fn grant_digest(&self) -> [u8; 32] {
+        self.grant_digest
     }
 
     pub(crate) fn claim_execution(&self) -> Result<(), ExecuteError> {
@@ -301,6 +309,7 @@ impl AdmittedAttempt {
                 crate::test_fixtures::launcher_facts().and_then(|launcher| {
                     crate::test_fixtures::syscall_set().map(|syscall_set| Self {
                         attempt_id,
+                        grant_digest: crate::test_fixtures::GRANT_DIGEST,
                         unit_name,
                         sim1_digest: [0x51; 32],
                         authority,
@@ -404,14 +413,32 @@ impl AdmittedAttempt {
 pub struct ActiveAttempt {
     admitted: AdmittedAttempt,
     deadline: Instant,
+    requested_configuration_evidence: [u8; 32],
 }
 
 impl ActiveAttempt {
     pub(crate) const fn admitted(&self) -> &AdmittedAttempt {
         &self.admitted
     }
-    pub(crate) const fn record(admitted: AdmittedAttempt, deadline: Instant) -> Self {
-        Self { admitted, deadline }
+
+    /// The attempt as active once its verified start was recorded as RQE1,
+    /// whose self-digest is `requested_configuration_evidence`.
+    pub(crate) const fn record(
+        admitted: AdmittedAttempt,
+        deadline: Instant,
+        requested_configuration_evidence: [u8; 32],
+    ) -> Self {
+        Self {
+            admitted,
+            deadline,
+            requested_configuration_evidence,
+        }
+    }
+
+    /// The self-digest of the attempt's RQE1, which its KOE1 binds.
+    #[must_use]
+    pub const fn requested_configuration_evidence(&self) -> [u8; 32] {
+        self.requested_configuration_evidence
     }
 
     /// The attempt identity.

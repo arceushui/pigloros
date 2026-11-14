@@ -12,11 +12,10 @@ use ciborium::value::Value;
 
 use super::codec::{
     array, bytes_value, decode_document, decode_text_list, digest32, encode, fixed_bytes, id16,
-    key_id, normalized_absolute_path, record_digest, require_signature, self_digested,
-    signature_message, signed, text_value, uint, uint_value, valid_key_id, verify_digest,
-    verify_signature,
+    key_id, normalized_absolute_path, record_digest, require_signature, self_digested, signed,
+    text_value, uint, uint_value, valid_key_id, verify_digest, verify_signature,
 };
-use super::{SandboxExecutionMode, SandboxProviderProtocolError};
+use super::{Rls1, SandboxExecutionMode, SandboxProviderProtocolError, SelfDigested};
 
 /// LPV1 is limited to 64 KiB before the provider-private hexadecimal encoding.
 const MAX_LAUNCH_PARAMETER_BYTES: usize = 64 * 1024;
@@ -420,29 +419,38 @@ pub struct ExecutionRelease {
 }
 
 impl ExecutionRelease {
-    /// Compute the self-digest and sign it with a runtime-attestation signer.
-    ///
-    /// `sign` receives the exact domain-separated message
-    /// (`PiglorOS.RLS1.Signature.v1\0 || digest`) and returns the Ed25519
-    /// signature.
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an RLS1 (ADR-069 R9 §5).
     ///
     /// # Errors
-    /// Rejects zero identities, digests, deadline or an invalid key ID, and a
-    /// zero signature.
-    pub fn sign(
+    /// Rejects zero identities, digests, deadline or an invalid key ID.
+    pub fn self_digested(
         fields: ExecutionReleaseFields,
-        sign: impl FnOnce(&[u8]) -> [u8; 64],
-    ) -> Result<Self, SandboxProviderProtocolError> {
+    ) -> Result<SelfDigested<Rls1>, SandboxProviderProtocolError> {
         validate_release_fields(&fields)
             .and_then(|()| finish_self_digested("RLS1", &release_unsigned_value(&fields)))
-            .and_then(|(digest, _)| {
-                let signature = sign(&signature_message("RLS1", &digest));
-                require_signature(&signature).map(|()| Self {
-                    fields,
-                    digest,
-                    signature,
-                })
-            })
+            .map(|(digest, _)| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record: `record` and the signature over its message.
+    ///
+    /// The caller verifies the signature under the admitted runtime key
+    /// before the record leaves the provider.
+    ///
+    /// # Errors
+    /// Rejects a zero signature.
+    pub fn new(
+        record: SelfDigested<Rls1>,
+        signature: [u8; 64],
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        require_signature(&signature).map(|()| {
+            let digest = record.digest();
+            Self {
+                fields: record.into_body(),
+                digest,
+                signature,
+            }
+        })
     }
 
     /// Exact canonical `RLS1` bytes.
