@@ -29,7 +29,7 @@ const MAX_LIVE_ATTEMPTS: u64 = 256;
 const MAX_SIGNAL: u8 = 64;
 
 /// TME1 `cleanup.empty-basis`: how the cgroup was proved empty.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum CgroupEmptyBasis {
     /// 0: `cgroup.events` reported it empty.
@@ -40,7 +40,7 @@ pub enum CgroupEmptyBasis {
 
 /// TME1 `baseline` or `terminal`: one cgroup snapshot with its four raw
 /// sources (R9 §4.6.2).
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CgroupSources {
     /// The cgroup the sources were read from.
     pub cgroup: CgroupIdentity,
@@ -92,7 +92,7 @@ impl CgroupSources {
 }
 
 /// TME1 `input` or `output-transfer`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferRecord {
     /// When the transfer started (`CLOCK_MONOTONIC` nanoseconds).
     pub start: u64,
@@ -144,7 +144,7 @@ impl TransferRecord {
 }
 
 /// TME1 `output-capture`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputCaptureRecord {
     /// The output bytes accepted, at most 128 MiB.
     pub accepted_bytes: u64,
@@ -174,7 +174,7 @@ impl OutputCaptureRecord {
 }
 
 /// TME1 `local-network`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalNetworkRecord {
     /// Why the proxy session ended; `None` for a clean close at a frame
     /// boundary.
@@ -201,7 +201,7 @@ impl LocalNetworkRecord {
 }
 
 /// TME1 `admission`: the shared admission ledger at AGR1.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdmissionLedger {
     /// Live attempts after this attempt's acquire (ELM1 ID 13), `1..=256`.
     pub active_attempts: u64,
@@ -227,7 +227,7 @@ impl AdmissionLedger {
 }
 
 /// TME1 `cleanup`: what the terminal cleanup achieved.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CleanupRecord {
     /// The result.
     pub result: CleanupResult,
@@ -552,16 +552,19 @@ impl TerminationEvidence {
         }
     }
 
-    /// This TME1 is the one successor of `previous`, a first TME1: it copies
-    /// every field except a now incomplete `output-transfer`, the
-    /// predecessor's digest and the recomputed terminal code (R9 §4.7).
+    /// This TME1 is the one successor of `previous`, a verified first TME1
+    /// with no output transfer: it copies every field except the `output-transfer`
+    /// that is now present and incomplete, the predecessor's digest and the
+    /// recomputed terminal code (R9 §4.7).
     pub(super) fn succeeds(&self, previous: &Self) -> bool {
         let successor = &self.fields;
         let mut copied = previous.fields.clone();
         copied.output_transfer = successor.output_transfer;
         copied.previous_tme1_digest = successor.previous_tme1_digest;
         copied.terminal_code = successor.terminal_code;
-        previous.fields.previous_tme1_digest.is_none()
+        // A successor always has an output transfer, so requiring none of
+        // `previous` also refuses a successor of a successor.
+        previous.fields.output_transfer.is_none()
             && successor
                 .output_transfer
                 .is_some_and(|transfer| !transfer.complete)

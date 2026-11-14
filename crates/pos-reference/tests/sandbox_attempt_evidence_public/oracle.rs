@@ -200,3 +200,46 @@ pub(super) fn checks_envelope(
     assert_eq!(decode(&trailing), Err(ProtocolError::InvalidEncoding));
     Ok(())
 }
+
+/// Hand-built malformed encodings of the canonical record `bytes`, each
+/// rejected as `InvalidEncoding`: a non-preferred integer, a map, a tag, a
+/// float, an indefinite length, invalid UTF-8, and an unsigned-array length
+/// one too large and one too small.
+pub(super) fn rejects_malformed_encodings(
+    bytes: &[u8],
+    decode: impl Fn(&[u8]) -> Result<(), ProtocolError>,
+) -> TestResult {
+    // `[unsigned, digest]`: the unsigned header, then the magic, then the
+    // version 1.
+    let header = if bytes[1] == 0x98 { 2 } else { 1 };
+    let magic = 1 + header;
+    let version = magic + 5;
+    assert_eq!((bytes[0], bytes[magic], bytes[version]), (0x82, 0x64, 0x01));
+    let replace = |index: usize, with: &[u8]| {
+        let mut changed = bytes[..index].to_vec();
+        changed.extend_from_slice(with);
+        changed.extend_from_slice(&bytes[index + 1..]);
+        changed
+    };
+    let mut indefinite = replace(0, &[0x9f]);
+    indefinite.push(0xff);
+    let count = bytes[header];
+    let cases = [
+        ("non-preferred integer", replace(version, &[0x18, 0x01])),
+        ("map", replace(version, &[0xa0])),
+        ("tag", replace(version, &[0xc1, 0x01])),
+        ("float", replace(version, &[0xf9, 0x3c, 0x00])),
+        ("indefinite length", indefinite),
+        ("invalid UTF-8", replace(magic + 1, &[0xff])),
+        ("one field too many", replace(header, &[count + 1])),
+        ("one field too few", replace(header, &[count - 1])),
+    ];
+    for (case, changed) in cases {
+        assert_eq!(
+            decode(&changed),
+            Err(ProtocolError::InvalidEncoding),
+            "{case}"
+        );
+    }
+    Ok(())
+}

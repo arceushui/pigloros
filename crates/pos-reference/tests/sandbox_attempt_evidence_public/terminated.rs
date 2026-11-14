@@ -17,7 +17,7 @@ use pos_reference::sandbox_provider_protocol::{
 
 use super::oracle::{
     bounds_raw_size, checks_envelope, edit, encode, filled, integer, rejects_every_retyped_node,
-    set, unhex, unsigned, with, TestResult,
+    rejects_malformed_encodings, set, unhex, unsigned, with, TestResult,
 };
 use super::vectors::{
     KOE1_A, KOE1_A_DIGEST, RQE1_A, SAU1_EVENT_1_AUTHORITY, SAU1_EVENT_2_AUTHORITY, TME1_A,
@@ -316,6 +316,7 @@ fn tme1_facts_are_the_classification_view() -> TestResult {
 #[test]
 fn tme1_rule_1_envelope_size_and_types() -> TestResult {
     checks_envelope(&unhex(TME1_A)?, decode)?;
+    rejects_malformed_encodings(&unhex(TME1_A)?, decode)?;
     bounds_raw_size(64 * 1024, decode);
     for record in [
         unhex(TME1_A)?,

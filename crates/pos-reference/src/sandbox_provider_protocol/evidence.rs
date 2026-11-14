@@ -64,11 +64,12 @@ const WORK_BYTES_LIMIT: u8 = 9;
 const LIVE_ATTEMPTS_LIMIT: u8 = 13;
 const INCOMPLETE_INPUTS_LIMIT: u8 = 14;
 
-/// The smallest and largest tmpfs block size (`f_bsize`, the page size) of
-/// the supported architectures: `/work` capacity is ELM1 limit 9 rounded up
-/// to a multiple of one (R9 §4.4).
-const MIN_WORK_BLOCK_BYTES: u64 = 4096;
-const MAX_WORK_BLOCK_BYTES: u64 = 65_536;
+/// The tmpfs block sizes (`f_bsize`, the page size) of the supported
+/// architectures. `/work` capacity is ELM1 limit 9 rounded up to a multiple
+/// of the host's (R9 §4.4). No record names the page size, and `AArch64`
+/// kernels use all three, so a capacity is exact when it is the limit
+/// rounded up to one of them.
+const WORK_BLOCK_BYTES: [u64; 3] = [4096, 16_384, 65_536];
 
 /// Each closed code is its R9 number, and every other number is rejected.
 macro_rules! closed_codes {
@@ -233,14 +234,34 @@ pub struct AttemptEvidenceContext<'a> {
     pub agr1_digest: [u8; 32],
     /// AGR1 `elm1-digest`.
     pub elm1_digest: [u8; 32],
-    /// The ELM1 limits whose digest is `elm1_digest`.
-    pub limits: &'a [SandboxLimit],
+    /// The ELM1 record, which must digest to `elm1_digest`.
+    pub limits: EffectiveLimitRecord<'a>,
     /// The admitted execution mode.
     pub mode: SandboxExecutionMode,
     /// The accepted `ReadyV1`; `None` when none was accepted.
     pub ready: Option<&'a LauncherReady>,
     /// The provider's own namespaces, retained once for the runtime.
     pub provider_namespaces: &'a [NamespaceIdentity; 6],
+}
+
+/// The ELM1 a verifier holds: its limits and the other fields its
+/// self-digest commits to.
+#[derive(Clone, Copy, Debug)]
+pub struct EffectiveLimitRecord<'a> {
+    /// The effective limits.
+    pub limits: &'a [SandboxLimit],
+    /// The broker hard-caps digest.
+    pub broker_caps_digest: [u8; 32],
+    /// The APT1 digest.
+    pub apt1_digest: [u8; 32],
+    /// The LPS1 digest.
+    pub lps1_digest: [u8; 32],
+    /// The execution-profile digest.
+    pub execution_profile_digest: [u8; 32],
+    /// The fixture digest.
+    pub fixture_digest: [u8; 32],
+    /// The runtime-attestation key ID.
+    pub runtime_attestation_key_id: &'a str,
 }
 
 /// The RQE1, KOE1 and TME1 of one attempt, verified together (R9 §6).
@@ -253,8 +274,8 @@ pub struct AttemptEvidence {
 
 impl AttemptEvidence {
     /// Verify the three records of one attempt against what the verifier
-    /// holds. `previous` is the TME1 that `termination` succeeds, if it is a
-    /// successor (R9 §4.7).
+    /// holds. `previous` is the verified evidence whose TME1 `termination`
+    /// succeeds, if it is a successor (R9 §4.7).
     ///
     /// The rules are R9 §6 rules 4, 5 and 9 and the parts of rules 2, 6 and
     /// 7 that the records, the grant and ELM1 decide: the KOE1 bindings to
@@ -269,7 +290,7 @@ impl AttemptEvidence {
         requested: RequestedConfigurationEvidence,
         observed: KernelObservationEvidence,
         termination: TerminationEvidence,
-        previous: Option<&TerminationEvidence>,
+        previous: Option<&Self>,
         context: &AttemptEvidenceContext<'_>,
     ) -> Result<Self> {
         let evidence = Self {
@@ -277,7 +298,7 @@ impl AttemptEvidence {
             observed,
             termination,
         };
-        let limits = Limits::of(context.limits)?;
+        let limits = Limits::of(&context.limits, context.elm1_digest)?;
         consistent(
             evidence.bound(context)
                 && evidence.observation_bound(context, limits.work)
@@ -317,24 +338,6 @@ impl AttemptEvidence {
                 && receipt.release1_digest.is_some()
                     == (termination.progress == AttemptProgressCode::Released),
         )
-    }
-
-    /// The verified RQE1.
-    #[must_use]
-    pub const fn requested(&self) -> &RequestedConfigurationEvidence {
-        &self.requested
-    }
-
-    /// The verified KOE1.
-    #[must_use]
-    pub const fn observed(&self) -> &KernelObservationEvidence {
-        &self.observed
-    }
-
-    /// The verified TME1.
-    #[must_use]
-    pub const fn termination(&self) -> &TerminationEvidence {
-        &self.termination
     }
 
     /// Rule 5, and rule 6's RQE1 binding: one attempt and grant throughout,
@@ -436,12 +439,13 @@ impl AttemptEvidence {
     }
 
     /// Rule 7's chain: a first TME1 names no predecessor, and a successor
-    /// names the one first TME1 it copies (R9 §4.7).
-    fn chained(&self, previous: Option<&TerminationEvidence>) -> bool {
+    /// names the one verified first TME1 it copies (R9 §4.7).
+    fn chained(&self, previous: Option<&Self>) -> bool {
         match (self.termination.fields().previous_tme1_digest, previous) {
             (None, None) => true,
             (Some(digest), Some(previous)) => {
-                digest == previous.digest() && self.termination.succeeds(previous)
+                digest == previous.termination.digest()
+                    && self.termination.succeeds(&previous.termination)
             }
             _ => false,
         }
@@ -458,9 +462,21 @@ struct Limits {
 }
 
 impl Limits {
-    fn of(limits: &[SandboxLimit]) -> Result<Self> {
+    /// The limits of `record`, once it digests to `elm1_digest`.
+    fn of(record: &EffectiveLimitRecord<'_>, elm1_digest: [u8; 32]) -> Result<Self> {
+        let digest = super::admission::effective_limits_digest(
+            record.limits,
+            record.broker_caps_digest,
+            record.apt1_digest,
+            record.lps1_digest,
+            record.execution_profile_digest,
+            record.fixture_digest,
+            record.runtime_attestation_key_id,
+        )?;
+        consistent(digest == elm1_digest)?;
         let limit = |id| {
-            limits
+            record
+                .limits
                 .iter()
                 .find(|limit| limit.limit_id == id)
                 .map(|limit| limit.value)
@@ -476,15 +492,12 @@ impl Limits {
 }
 
 /// KOE1 `work` is null exactly when ELM1 limit 9 is zero, and otherwise its
-/// capacity is the limit rounded up to a tmpfs block: a multiple of the
-/// smallest block, less than the largest block above the limit.
+/// capacity is exactly the limit rounded up to a supported tmpfs block.
 fn work_capacity_matches(work: Option<super::WorkMountFacts>, limit: u64) -> bool {
     work.map_or(limit == 0, |work| {
         limit != 0
-            && work.capacity_bytes % MIN_WORK_BLOCK_BYTES == 0
-            && work
-                .capacity_bytes
-                .checked_sub(limit)
-                .is_some_and(|slack| slack < MAX_WORK_BLOCK_BYTES)
+            && WORK_BLOCK_BYTES.iter().any(|block| {
+                limit.div_ceil(*block).checked_mul(*block) == Some(work.capacity_bytes)
+            })
     })
 }

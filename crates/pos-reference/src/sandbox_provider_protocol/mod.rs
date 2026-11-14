@@ -93,11 +93,11 @@ pub use authority::{
 };
 pub use evidence::{
     AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, BlockIdentity, CgroupEmptyBasis,
-    CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber, KernelObservationEvidence,
-    KernelObservationEvidenceFields, KernelObservationStatus, LocalNetworkRecord,
-    NamespaceIdentity, ObservedKernelState, OutputCaptureRecord, RequestedConfigurationEvidence,
-    RequestedConfigurationEvidenceFields, RootMount, TerminationEvidence,
-    TerminationEvidenceFields, TransferRecord,
+    CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber, EffectiveLimitRecord,
+    KernelObservationEvidence, KernelObservationEvidenceFields, KernelObservationStatus,
+    LocalNetworkRecord, NamespaceIdentity, ObservedKernelState, OutputCaptureRecord,
+    RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields, RootMount,
+    TerminationEvidence, TerminationEvidenceFields, TransferRecord,
 };
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,

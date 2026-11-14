@@ -234,15 +234,18 @@ impl RequestedConfigurationEvidenceFields {
     fn validate(&self) -> Result<()> {
         use RequestedConfigurationStatus as Status;
         match (self.status, &self.requested, &self.readback) {
-            (Status::NotRequested, None, None) | (Status::ReadbackUnavailable, Some(_), None) => {
-                Ok(())
+            (Status::NotRequested, None, None) => Ok(()),
+            (Status::ReadbackUnavailable, Some(requested), None) => {
+                consistent(requested_codes_match(requested))
             }
             (Status::Verified, Some(requested), Some(readback)) => consistent(
-                readback_codes_match(requested, readback) && readback_complete(requested, readback),
+                requested_codes_match(requested)
+                    && readback_codes_match(requested, readback)
+                    && readback_complete(requested, readback),
             ),
-            (Status::Mismatch, Some(requested), Some(readback)) => {
-                consistent(readback_codes_match(requested, readback))
-            }
+            (Status::Mismatch, Some(requested), Some(readback)) => consistent(
+                requested_codes_match(requested) && readback_codes_match(requested, readback),
+            ),
             _ => Err(SandboxProviderProtocolError::InconsistentFields),
         }
     }
@@ -302,9 +305,37 @@ impl RequestedConfigurationEvidence {
     }
 }
 
+/// The submitted value code of each requested property the R9 §4.3 table
+/// fixes; the static hardening properties keep their own signatures.
+fn requested_code(name: &str) -> Option<u8> {
+    match name {
+        "RootDirectory" => Some(1),
+        "SystemCallFilter" | "RestrictAddressFamilies" => Some(5),
+        "BindReadOnlyPaths" => Some(6),
+        "MemoryMax" | "MemorySwapMax" | "TasksMax" | "CPUQuotaPerSecUSec" | "RuntimeMaxUSec"
+        | "LimitNOFILE" | "LimitFSIZE" => Some(2),
+        "FileDescriptorStoreMax" => Some(3),
+        "TemporaryFileSystem" => Some(7),
+        "ExecStart" => Some(8),
+        EXTRA_FILE_DESCRIPTORS => Some(9),
+        _ => None,
+    }
+}
+
+/// `RootImagePolicy` is never requested, and every requested property the
+/// table fixes has its submitted code.
+fn requested_codes_match(requested: &[DbusProperty]) -> bool {
+    requested.iter().all(|property| {
+        property.name != ROOT_IMAGE_POLICY
+            && requested_code(&property.name).is_none_or(|code| code == property.value.code())
+    })
+}
+
 /// Every readback entry has its R9 §4.3 value code: `RootImagePolicy` is
 /// `s`, `ExtraFileDescriptors` is read back as `as`, and every other
-/// property is read back with the code it was requested with.
+/// property is read back with the code it was requested with. A mismatch
+/// may read back `ExtraFileDescriptors` without having requested it, as
+/// the table allows.
 fn readback_codes_match(requested: &[DbusProperty], readback: &[DbusProperty]) -> bool {
     readback.iter().all(|property| {
         let expected = match property.name.as_str() {
