@@ -745,6 +745,81 @@ mod coverage_tests {
         drop(gateway);
     }
 
+    /// A private 32-byte owner key in `directory`, which is created with
+    /// `mode` when it does not exist yet.
+    #[cfg(unix)]
+    fn private_owner_key(directory: &Path, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        drop(std::fs::create_dir_all(directory));
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).test_ok();
+        let key = directory.join("owner.key");
+        std::fs::write(&key, [7_u8; 32]).test_ok();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).test_ok();
+        key
+    }
+
+    /// Every ancestor of the owner key is checked: each is a real
+    /// directory, the key's own directory is never group- or
+    /// other-writable, and a writable directory above it must be sticky.
+    #[cfg(unix)]
+    #[test]
+    fn owntracks_owner_key_ancestors_must_be_private_real_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().test_ok();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).test_ok();
+        let root = root.path();
+
+        // A clean 0700 chain loads; the temporary directory above it may
+        // be the system's sticky world-writable one.
+        let clean = private_owner_key(&root.join("clean"), 0o700);
+        assert!(OwnTracksOwnerKey::load(&clean).is_ok());
+        // Mode bits outside group and other write never refuse a parent.
+        let read_only = private_owner_key(&root.join("read-only"), 0o755);
+        assert!(OwnTracksOwnerKey::load(&read_only).is_ok());
+
+        // A sticky world-writable directory above the key's parent is
+        // accepted.
+        std::fs::create_dir(root.join("shared")).test_ok();
+        let below_sticky = private_owner_key(&root.join("shared").join("private"), 0o700);
+        std::fs::set_permissions(root.join("shared"), std::fs::Permissions::from_mode(0o1777))
+            .test_ok();
+        assert!(OwnTracksOwnerKey::load(&below_sticky).is_ok());
+
+        // The key's own directory, group- or other-writable, is refused
+        // even when sticky.
+        for mode in [0o1770, 0o1707, 0o770, 0o707] {
+            let parent = root.join(format!("parent-{mode:o}"));
+            let key = private_owner_key(&parent, 0o700);
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A writable directory above the parent that is not sticky is
+        // refused.
+        for mode in [0o770, 0o707] {
+            let open = root.join(format!("open-{mode:o}"));
+            std::fs::create_dir(&open).test_ok();
+            let key = private_owner_key(&open.join("private"), 0o700);
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(mode)).test_ok();
+            assert!(OwnTracksOwnerKey::load(&key).is_err(), "{mode:o}");
+        }
+
+        // A symlinked ancestor is refused although the key it reaches is
+        // private and complete.
+        std::fs::create_dir(root.join("real")).test_ok();
+        private_owner_key(&root.join("real").join("private"), 0o700);
+        symlink(root.join("real"), root.join("link")).test_ok();
+        let through_link = root.join("link").join("private").join("owner.key");
+        assert!(std::fs::read(&through_link).is_ok());
+        assert!(OwnTracksOwnerKey::load(&through_link).is_err());
+
+        // A non-directory ancestor is refused.
+        std::fs::write(root.join("file"), [1_u8]).test_ok();
+        assert!(OwnTracksOwnerKey::load(&root.join("file").join("owner.key")).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn owntracks_owner_key_load_requires_an_existing_private_32_byte_file() {
@@ -1757,10 +1832,9 @@ fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
             let mode = metadata.mode();
             let writable_by_group_or_other = mode & 0o022 != 0;
             let sticky = mode & 0o1000 != 0;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || (writable_by_group_or_other && (distance == 0 || !sticky))
-            {
+            // `symlink_metadata` never reports a symlink as a directory, so
+            // this also refuses every symlinked ancestor.
+            if !metadata.is_dir() || (writable_by_group_or_other && (distance == 0 || !sticky)) {
                 return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
             }
         }
