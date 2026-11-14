@@ -461,6 +461,41 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
         Binding::from_canonical_cbor(&encode(&long_rule)?).map(drop),
         Err(Error::BoundsExceeded)
     );
+    let mut bad_row = valid.clone();
+    fields(&mut bad_row)?[8] = Value::Array(vec![Value::Array(vec![bytes(&[40; 32])])]);
+    let mut bad_operation = valid.clone();
+    fields(&mut bad_operation)?[5] = uint(3);
+    let mut wide_horizon = valid.clone();
+    fields(&mut wide_horizon)?[12] = uint(u64::MAX);
+    for value in [bad_row, bad_operation] {
+        assert_eq!(
+            Binding::from_canonical_cbor(&encode(&value)?).map(drop),
+            Err(Error::InvalidEncoding)
+        );
+    }
+    assert_eq!(
+        Binding::from_canonical_cbor(&encode(&wide_horizon)?).map(drop),
+        Err(Error::BoundsExceeded)
+    );
+    let mut unordered = valid;
+    fields(&mut unordered)?[8] =
+        Value::Array(vec![coverage_value(&rows[1]), coverage_value(&rows[0])]);
+    assert_eq!(
+        Binding::from_canonical_cbor(&encode(&unordered)?).map(drop),
+        Err(Error::InvalidBinding)
+    );
+    assert_eq!(
+        Binding::from_canonical_cbor(&vec![0; ONE_MIB + 1]).map(drop),
+        Err(Error::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn scope_binding_decoder_classifies_foreign_rule_items() -> TestResult {
+    let rows = coverage();
+    let scope = members();
+    let valid = binding_value(&binding_input(&rows, &scope), &rows, &scope)?;
     // Well-formed items of the record grammar that are not the rule.
     let rule_text = || text("pos.community.actual-input-scope");
     let foreign = [
@@ -513,7 +548,7 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
             Err(Error::InvalidEncoding)
         );
     }
-    let mut null_rule = valid.clone();
+    let mut null_rule = valid;
     fields(&mut null_rule)?[10] = Value::Null;
     let null_rule = encode(&null_rule)?;
     let null = null_rule
@@ -528,33 +563,6 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
             Err(Error::InvalidEncoding)
         );
     }
-    let mut bad_row = valid.clone();
-    fields(&mut bad_row)?[8] = Value::Array(vec![Value::Array(vec![bytes(&[40; 32])])]);
-    let mut bad_operation = valid.clone();
-    fields(&mut bad_operation)?[5] = uint(3);
-    let mut wide_horizon = valid.clone();
-    fields(&mut wide_horizon)?[12] = uint(u64::MAX);
-    for value in [bad_row, bad_operation] {
-        assert_eq!(
-            Binding::from_canonical_cbor(&encode(&value)?).map(drop),
-            Err(Error::InvalidEncoding)
-        );
-    }
-    assert_eq!(
-        Binding::from_canonical_cbor(&encode(&wide_horizon)?).map(drop),
-        Err(Error::BoundsExceeded)
-    );
-    let mut unordered = valid;
-    fields(&mut unordered)?[8] =
-        Value::Array(vec![coverage_value(&rows[1]), coverage_value(&rows[0])]);
-    assert_eq!(
-        Binding::from_canonical_cbor(&encode(&unordered)?).map(drop),
-        Err(Error::InvalidBinding)
-    );
-    assert_eq!(
-        Binding::from_canonical_cbor(&vec![0; ONE_MIB + 1]).map(drop),
-        Err(Error::BoundsExceeded)
-    );
     Ok(())
 }
 
