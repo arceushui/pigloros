@@ -2,15 +2,17 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge_codec::{admit_loopback_http_request, LoopbackRequestDisposition};
 use sha2::{Digest, Sha256};
 
-use super::assets::{BAD_REQUEST_RESPONSE, NOT_FOUND_RESPONSE, OWNER_HTML, OWNER_RESPONSE_HEAD};
+use super::assets::{Response, BAD_REQUEST_RESPONSE, NOT_FOUND_RESPONSE};
 use super::ledger::ServedLedger;
 use super::ListenerTimeouts;
+use crate::{MonotonicClock, SystemClock};
 
 /// The stack buffer of every connection and the header block limit.
 pub(super) const REQUEST_BUFFER_BYTES: usize = 8_192;
@@ -24,6 +26,14 @@ pub(super) struct ServeContext {
     pub(super) timeouts: ListenerTimeouts,
     /// The digest every completed owner response must match.
     pub(super) expected_digest: [u8; 32],
+    /// One immutable compiled response; never supplied by network input.
+    pub(super) response: &'static Response,
+    /// Test-only count of connections that supplied at least one request byte.
+    #[cfg(feature = "test-support")]
+    pub(super) received: Arc<std::sync::atomic::AtomicU64>,
+    /// Aggregate test-only connection outcomes.
+    #[cfg(feature = "test-support")]
+    pub(super) observations: Arc<super::Observations>,
 }
 
 /// How reading one request ended.
@@ -37,13 +47,19 @@ pub(super) enum ReadOutcome {
     Silent,
 }
 
-/// The shortest read timeout a socket accepts; a passed deadline reads for this long and fails.
-pub(super) const MIN_TIMEOUT: Duration = Duration::from_millis(1);
+/// Closed diagnostic categories; all retain the same silent production outcome.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SilentReason {
+    Eof,
+    Timeout,
+    Other,
+}
 
 /// The remaining time until `deadline`, or `None` when it has passed.
-fn remaining(deadline: Instant) -> Option<Duration> {
+fn remaining(deadline: Instant, clock: &impl MonotonicClock) -> Option<Duration> {
     deadline
-        .checked_duration_since(Instant::now())
+        .checked_duration_since(clock.now())
         .filter(|left| !left.is_zero())
 }
 
@@ -64,28 +80,78 @@ impl TimedRead for TcpStream {
     }
 }
 
+/// One deadline-limited read. `None` is the silent outcome: end of stream
+/// or a failed read. A receipt is never empty, so the caller always advances.
+fn read_step<S: TimedRead>(
+    stream: &mut S,
+    room: &mut [u8],
+    left: Duration,
+    #[cfg(feature = "test-support")] silent: &mut impl FnMut(SilentReason),
+) -> Option<NonZeroUsize> {
+    let outcome = stream
+        .limit_next_read(left)
+        .and_then(|()| stream.read(room));
+    match outcome {
+        Ok(0) => {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Eof);
+            None
+        }
+        Err(error) => {
+            #[cfg(not(feature = "test-support"))]
+            drop(error);
+            #[cfg(feature = "test-support")]
+            silent(match error.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => SilentReason::Timeout,
+                _ => SilentReason::Other,
+            });
+            None
+        }
+        Ok(received) => NonZeroUsize::new(received),
+    }
+}
+
 /// Read one request head with the first-byte and header deadlines.
 pub(super) fn read_request<S: TimedRead>(
     stream: &mut S,
     buffer: &mut [u8; REQUEST_BUFFER_BYTES],
+    accepted_at: Instant,
     timeouts: ListenerTimeouts,
+    clock: &impl MonotonicClock,
+    mut first_byte: impl FnMut(),
+    #[cfg(feature = "test-support")] mut silent: impl FnMut(SilentReason),
 ) -> ReadOutcome {
-    let mut deadline = Instant::now() + timeouts.first_byte;
+    let mut deadline = accepted_at + timeouts.first_byte;
     let mut filled = 0;
     loop {
-        let left = remaining(deadline).unwrap_or(MIN_TIMEOUT);
-        let (_, room) = buffer.split_at_mut(filled.min(REQUEST_BUFFER_BYTES));
-        let outcome = stream
-            .limit_next_read(left)
-            .and_then(|()| stream.read(room));
-        let received = match outcome {
-            Ok(0) | Err(_) => return ReadOutcome::Silent,
-            Ok(received) => received,
+        let Some(left) = remaining(deadline, clock) else {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Timeout);
+            return ReadOutcome::Silent;
         };
+        let (_, room) = buffer.split_at_mut(filled.min(REQUEST_BUFFER_BYTES));
+        let Some(received) = read_step(
+            stream,
+            room,
+            left,
+            #[cfg(feature = "test-support")]
+            &mut silent,
+        ) else {
+            return ReadOutcome::Silent;
+        };
+        let observed_at = clock.now();
         if filled == 0 {
-            deadline = Instant::now() + timeouts.header;
+            first_byte();
         }
-        filled += received;
+        if observed_at >= deadline {
+            #[cfg(feature = "test-support")]
+            silent(SilentReason::Timeout);
+            return ReadOutcome::Silent;
+        }
+        if filled == 0 {
+            deadline = observed_at + timeouts.header;
+        }
+        filled += received.get();
         if buffer.get(..filled).is_some_and(header_end) {
             return ReadOutcome::Complete(filled);
         }
@@ -126,10 +192,11 @@ pub(super) enum OwnerWrite {
 pub(super) fn write_owner_response<W: Write>(
     writer: &mut W,
     expected_digest: &[u8; 32],
+    response: &Response,
 ) -> OwnerWrite {
     let mut hasher = Sha256::new();
-    let head_sent = write_hashed(writer, OWNER_RESPONSE_HEAD.as_bytes(), &mut hasher);
-    if !head_sent || !write_hashed(writer, OWNER_HTML, &mut hasher) {
+    let head_sent = write_hashed(writer, response.head.as_bytes(), &mut hasher);
+    if !head_sent || !write_hashed(writer, response.body, &mut hasher) {
         return OwnerWrite::Incomplete;
     }
     let digest: [u8; 32] = hasher.finalize().into();
@@ -156,7 +223,7 @@ pub(super) fn respond<W: Write>(
         }
         Some(LoopbackRequestDisposition::OwnerDocument) => {
             if let OwnerWrite::Complete { digest_ok } =
-                write_owner_response(writer, &context.expected_digest)
+                write_owner_response(writer, &context.expected_digest, context.response)
             {
                 context.ledger.complete(digest_ok);
             }
@@ -164,10 +231,55 @@ pub(super) fn respond<W: Write>(
     }
 }
 
+/// Count why one read ended without a complete header.
+#[cfg(feature = "test-support")]
+fn observe_silent(context: &ServeContext, reason: SilentReason) {
+    use std::sync::atomic::Ordering;
+    let observations = &context.observations;
+    let counter = match reason {
+        SilentReason::Eof => &observations.silent_eof,
+        SilentReason::Timeout => &observations.silent_timeout,
+        SilentReason::Other => &observations.silent_error,
+    };
+    counter.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Count how reading one request ended.
+#[cfg(feature = "test-support")]
+fn observe_outcome(context: &ServeContext, outcome: ReadOutcome) {
+    let counter = match outcome {
+        ReadOutcome::Silent => &context.observations.silent,
+        ReadOutcome::Complete(_) => &context.observations.complete,
+        ReadOutcome::TooLarge => &context.observations.too_large,
+    };
+    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Serve one accepted connection to completion, then close it.
-pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
+pub(super) fn serve_connection(
+    mut stream: TcpStream,
+    accepted_at: Instant,
+    context: &ServeContext,
+) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let admitted = match read_request(&mut stream, &mut buffer, context.timeouts) {
+    let outcome = read_request(
+        &mut stream,
+        &mut buffer,
+        accepted_at,
+        context.timeouts,
+        &SystemClock,
+        || {
+            #[cfg(feature = "test-support")]
+            context
+                .received
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+        #[cfg(feature = "test-support")]
+        |reason| observe_silent(context, reason),
+    );
+    #[cfg(feature = "test-support")]
+    observe_outcome(context, outcome);
+    let admitted = match outcome {
         ReadOutcome::Silent => return,
         ReadOutcome::TooLarge => None,
         ReadOutcome::Complete(length) => buffer

@@ -8,7 +8,9 @@ The expression uses POSIX ERE syntax: cargo-llvm-cov passes it to llvm-cov.
 
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import pathlib
 import sys
 from typing import Any
@@ -51,6 +53,14 @@ def path_pattern(path: str) -> str:
         return "".join("\\" + c if c in ERE_SPECIAL else c for c in component)
 
     return SEPARATOR.join(escape(component) for component in path.split("/"))
+
+
+def workspace_prefix(root: pathlib.PurePath) -> str:
+    root_pattern = path_pattern(root.as_posix().rstrip("/"))
+    if isinstance(root, pathlib.PureWindowsPath) and len(root.drive) == 2:
+        drive = root.drive[0]
+        root_pattern = f"[{drive.lower()}{drive.upper()}]" + root_pattern[1:]
+    return "^(" + root_pattern + SEPARATOR + ")?"
 
 
 def coverage_ignore_regex(metadata: Any) -> str:
@@ -101,23 +111,98 @@ def coverage_ignore_regex(metadata: Any) -> str:
     if not patterns:
         # Coverage filenames are nonempty; an empty alternation would hide all.
         return "^$"
-    root_pattern = path_pattern(root.as_posix().rstrip("/"))
-    if isinstance(root, pathlib.PureWindowsPath) and len(root.drive) == 2:
-        drive = root.drive[0]
-        root_pattern = f"[{drive.lower()}{drive.upper()}]" + root_pattern[1:]
-    # Anchor member directories at the workspace boundary. A shim source path
-    # containing e.g. src/fixtures/crates/pos-core must never match that member.
-    return "^(" + root_pattern + SEPARATOR + ")?(" + "|".join(sorted(set(patterns))) + ")"
+    # Anchor member directories at the workspace boundary; shim-nested names
+    # must never match an unrelated member's exclusion.
+    return workspace_prefix(root) + "(" + "|".join(sorted(set(patterns))) + ")"
+
+
+def report_paths(metadata: Any, report: Any) -> list[str]:
+    """Validate the original producer report and list only native src paths."""
+    coverage_ignore_regex(metadata)
+    value = path_value(metadata["workspace_root"])
+    root = (pathlib.PureWindowsPath(value) if pathlib.PureWindowsPath(value).is_absolute()
+            else pathlib.PurePosixPath(value))
+    require(isinstance(report, dict) and isinstance(report.get("data"), list) and bool(report["data"]),
+            "coverage report must contain data")
+    totals = {False: [0, 0], True: [0, 0]}
+    paths = []
+    for block in report["data"]:
+        require(isinstance(block, dict) and isinstance(block.get("files"), list), "coverage block must contain files")
+        for file in block["files"]:
+            require(isinstance(file, dict), "coverage files must be objects")
+            path = type(root)(path_value(file.get("filename")).replace("\\", "/"))
+            require(".." not in path.parts, "coverage path traverses parents")
+            try:
+                relative = path.relative_to(root) if path.is_absolute() else path
+            except ValueError as error:
+                raise MetadataError("coverage path is outside the workspace") from error
+            require(relative.is_relative_to(type(root)(SHIM_DIRECTORY) / "src") and relative.suffix == ".rs",
+                    "coverage report must contain only Windows shim src files")
+            parts = relative.parts
+            ffi = len(parts) > 3 and parts[3] == "ffi"
+            summary = file.get("summary", {})
+            require(isinstance(summary, dict), "coverage file must contain summary metrics")
+            for index, kind in enumerate(["lines", "regions"]):
+                metric = summary.get(kind, {})
+                require(isinstance(metric, dict) and type(metric.get("count")) is int and metric["count"] >= 0,
+                        "coverage metric count must be a nonnegative integer")
+                totals[ffi][index] += metric["count"]
+            paths.append(relative.as_posix())
+    require(all(all(count > 0 for count in pair) for pair in totals.values()),
+            "both safe and ffi scopes must contain measured line and region opportunities")
+    return sorted(set(paths))
+
+
+def coverage_scope_regex(metadata: Any, report: Any, scope: str) -> str:
+    """Generate full-file report scopes, then prove no original file is misclassified."""
+    require(scope in {"safe", "ffi"}, "unknown coverage scope")
+    base = coverage_ignore_regex(metadata)
+    paths = report_paths(metadata, report)
+    value = path_value(metadata["workspace_root"])
+    root = (pathlib.PureWindowsPath(value) if pathlib.PureWindowsPath(value).is_absolute()
+            else pathlib.PurePosixPath(value))
+    ffi_prefix = SHIM_DIRECTORY + "/src/ffi/"
+    if scope == "safe":
+        extra = workspace_prefix(root) + path_pattern(ffi_prefix.rstrip("/")) + SEPARATOR
+    else:
+        non_ffi = [path_pattern(path) + "$" for path in paths if not path.startswith(ffi_prefix)]
+        extra = workspace_prefix(root) + "(" + "|".join(non_ffi) + ")"
+    expression = "(" + base + ")|(" + extra + ")"
+    # A failure to normalize a drive, separator, filename or root is a hard
+    # error before either report can silently apply the wrong coverage floor.
+    for block in report["data"]:
+        for file in block["files"]:
+            filename = file["filename"]
+            path = type(root)(filename.replace("\\", "/"))
+            relative = path.relative_to(root) if path.is_absolute() else path
+            ffi = relative.as_posix().startswith(ffi_prefix)
+            expected = ffi if scope == "safe" else not ffi
+            require((re.search(expression, filename) is not None) == expected,
+                    "generated coverage scope misclassifies an original report path")
+    return expression
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scope", choices=["all", "safe", "ffi"], default="all")
+    parser.add_argument("--report", type=pathlib.Path)
+    parser.add_argument("--list-report", action="store_true")
+    args = parser.parse_args()
     try:
-        expression = coverage_ignore_regex(json.load(sys.stdin.buffer))
-    except (MetadataError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        metadata = json.load(sys.stdin.buffer)
+        expression = coverage_ignore_regex(metadata)
+        report = (json.loads(args.report.read_text(encoding="utf-8-sig")) if args.report else None)
+        if args.list_report:
+            output = "\n".join(report_paths(metadata, report))
+        elif args.scope != "all":
+            output = coverage_scope_regex(metadata, report, args.scope)
+        else:
+            output = expression
+    except (MetadataError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
         print(f"owner-bridge coverage metadata: {error}", file=sys.stderr)
         return 2
     # Cargo emits UTF-8; Windows redirected stdio may use a legacy code page.
-    sys.stdout.buffer.write(expression.encode("utf-8") + b"\n")
+    sys.stdout.buffer.write(output.encode("utf-8") + b"\n")
     return 0
 
 
