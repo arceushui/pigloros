@@ -19,10 +19,11 @@
 
 use super::SandboxTerminalOutcome;
 
-/// The grace `G` between the unit's watchdog deadline `D` and the broker's
-/// kill, in nanoseconds: the broker escalates only at `D + G`, and systemd's
-/// `timeout` agrees with the authorized watchdog iff the terminal snapshot
-/// was taken at or after `D - G` (R9 §4.6.5, owner decision G = 1 s).
+/// The watchdog grace `G` in nanoseconds (R9 §4.6.5; owner, G = 1 s).
+///
+/// The broker escalates only at `D + G`, and systemd's `timeout` agrees with
+/// the authorized watchdog iff the terminal snapshot was taken at or after
+/// `D - G`.
 pub const WATCHDOG_GRACE_NS: u64 = 1_000_000_000;
 
 /// The `SIGXFSZ` signal number on `x86_64` and `aarch64` (R9 code 7).
@@ -506,9 +507,10 @@ pub enum KernelObservationFacts {
     ObservationFailed,
 }
 
-/// Everything the terminal code depends on (R9 §4.6.5): the classification
-/// fields of one TME1, the RQE1 status and the KOE1 observation it binds,
-/// and the watchdog deadline `D`.
+/// Everything the terminal code depends on (R9 §4.6.5).
+///
+/// These are the classification fields of one TME1, the RQE1 status and the
+/// KOE1 observation it binds, and the watchdog deadline `D`.
 ///
 /// Every R9 field that is nullable is an `Option`. The facts are total: a
 /// verifier rejects inconsistent records separately (R9 §6 rule 2), and the
@@ -627,9 +629,10 @@ impl TerminationFacts {
             .is_some_and(|first| present.any(|other| other != first))
     }
 
-    /// The KOE1 observation disagrees with the unit, or its `/work` mount
-    /// or capacity with a present `work-after`. Free space is never
-    /// compared.
+    /// The KOE1 observation disagrees with the unit or `work-after`.
+    ///
+    /// The `/work` mount and capacity are compared only when `work-after` is
+    /// present. Free space is never compared.
     fn observation_disagrees(&self) -> bool {
         match self.observed {
             KernelObservationFacts::Observed {
@@ -670,9 +673,10 @@ impl TerminationFacts {
             || (timed_out && self.terminal.is_some() && !self.watchdog_reached())
     }
 
-    /// Required evidence is absent (R9 O6): a unit without both snapshots,
-    /// a field §4.6.3 requires at this progress, or one of KOE1 `work` and
-    /// `work-after` without the other.
+    /// Required evidence is absent (R9 O6).
+    ///
+    /// That is a unit without both snapshots, a field §4.6.3 requires at this
+    /// progress, or one of KOE1 `work` and `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
         let released = matches!(self.progress, AttemptProgressCode::Released);
         (self.unit.is_some() && (self.baseline.is_none() || self.terminal.is_none()))
@@ -795,10 +799,11 @@ impl TerminationFacts {
         ])
     }
 
-    /// The `Completed` conditions that an empty candidate set does not
-    /// already imply. With no candidate, a released attempt has a `done`
-    /// start job and an output capture on a complete frame, since anything
-    /// else is a candidate.
+    /// The `Completed` conditions an empty candidate set does not imply.
+    ///
+    /// With no candidate, a released attempt has a `done` start job and an
+    /// output capture on a complete frame, since anything else is a
+    /// candidate.
     fn completed(&self) -> bool {
         matches!(self.progress, AttemptProgressCode::Released)
             && self.service == Some(ServiceFacts::CLEAN)
@@ -862,9 +867,11 @@ impl TerminalClassification {
             || self.candidates.contains(TerminalCode::CleanupFailed)
     }
 
-    /// The SPY1 outcome: `Completed` iff no code, `Cancelled` iff code 1
-    /// (a cancel request or a revocation), otherwise
-    /// `UnavailableAfterAdmission` (R9 §6 rule 8).
+    /// The SPY1 outcome (R9 §6 rule 8).
+    ///
+    /// It is `Completed` iff there is no code, `Cancelled` iff code 1 (a
+    /// cancel request or a revocation), and otherwise
+    /// `UnavailableAfterAdmission`.
     #[must_use]
     pub const fn outcome(&self) -> SandboxTerminalOutcome {
         match self.code {
