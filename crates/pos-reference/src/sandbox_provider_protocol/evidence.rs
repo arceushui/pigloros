@@ -66,7 +66,7 @@ const INCOMPLETE_INPUTS_LIMIT: u8 = 14;
 
 /// The tmpfs block sizes (`f_bsize`, the page size) of the supported
 /// architectures. `/work` capacity is ELM1 limit 9 rounded up to a multiple
-/// of the host's (R9 §4.4). No record names the page size, and AArch64
+/// of the host's (R9 §4.4). No record names the page size, and `AArch64`
 /// kernels use all three, so a capacity is exact when it is the limit
 /// rounded up to one of them.
 const WORK_BLOCK_BYTES: [u64; 3] = [4096, 16_384, 65_536];

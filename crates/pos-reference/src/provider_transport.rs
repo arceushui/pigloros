@@ -102,9 +102,6 @@ struct ConnectedInstallationUpdate {
 pub(crate) struct AuthenticatedProviderExecution {
     frames: AuthenticatedProviderFrames,
     agr1_digest: [u8; 32],
-    /// The admitted HCP1's negative-probe evidence (ordinal 7), which SPR1
-    /// ordinal 21 copies (ADR-069 R9 §4.5).
-    negative_probe_evidence: [u8; 32],
     output: Option<StagedProviderOutput>,
 }
 
@@ -196,12 +193,6 @@ impl AuthenticatedProviderExecution {
     #[must_use]
     pub(crate) const fn agr1_digest(&self) -> [u8; 32] {
         self.agr1_digest
-    }
-
-    /// The admitted HCP1's negative-probe evidence, held by the selector.
-    #[must_use]
-    pub(crate) const fn negative_probe_evidence(&self) -> [u8; 32] {
-        self.negative_probe_evidence
     }
 
     /// Returns the exact authenticated AGR1 frame bytes for root SLY1 composition.
@@ -1276,7 +1267,6 @@ fn read_admitted_response(
                             audit_bytes,
                         ),
                         agr1_digest: grant.grant_digest,
-                        negative_probe_evidence: admitted.host_profile().negative_probe_evidence,
                         output,
                     })
                 })
