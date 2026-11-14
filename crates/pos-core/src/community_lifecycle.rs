@@ -6,6 +6,7 @@
 //! codecs cannot issue a guest permit or restore a live state cell.
 
 mod classification;
+mod copy_inventory;
 mod envelope;
 mod error;
 mod failure;
@@ -15,6 +16,7 @@ mod guest_error;
 mod host_error;
 mod initialization;
 mod invocation;
+mod key_intent;
 mod member;
 mod member_progress;
 mod metadata_envelope;
@@ -31,6 +33,7 @@ mod reservation;
 mod revision;
 mod seal;
 mod selected_head;
+mod selection;
 mod state;
 mod step;
 mod terminal;
@@ -38,6 +41,10 @@ mod terminal;
 pub use classification::{
     CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,
     CommunityClassificationProofV1,
+};
+pub use copy_inventory::{
+    CommunityCopyHolderV1, CommunityCopyInventoryInputV1, CommunityCopyInventoryV1,
+    CommunityCopyStateV1,
 };
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
@@ -73,6 +80,10 @@ pub use initialization::{
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
     MeteringV1,
+};
+pub use key_intent::{
+    CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityKeyUseV1, CommunityMemberSlotsV1,
+    CommunityRecordKindsV1, MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1,
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use member_progress::{
@@ -126,6 +137,11 @@ pub use seal::{CommunityDigestListV1, CommunitySealedResultInputV1, CommunitySea
 pub use selected_head::{
     CommunityMemberHeadV1, CommunityMemberHeadsV1, CommunityPassFrontierV1,
     CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
+};
+pub use selection::{
+    CommunityGenerationIdsV1, CommunitySelectionInputV1, CommunitySelectionV1,
+    CommunityTimelineFloorV1, CommunityTimelineFloorsV1, MAX_COMMUNITY_CLOSED_GENERATIONS_V1,
+    MAX_COMMUNITY_SELECTION_TIMELINES_V1,
 };
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
 pub use step::{CommunityInvocationStepInputV1, CommunityInvocationStepV1};
