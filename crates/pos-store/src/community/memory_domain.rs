@@ -198,7 +198,9 @@ impl MemoryCommunityDomainV1 {
     /// The domain evaluates its own metadata-service authority: it loads the
     /// policy's current grant chain and asks `authority` for the exact
     /// request this operation needs (write to bootstrap, inspect to reopen)
-    /// on this domain's resource. No decision is accepted from the caller:
+    /// on this domain's resource. No decision is accepted from the caller.
+    /// The former call shape, which took a caller-supplied decision, no
+    /// longer compiles:
     ///
     /// ```compile_fail,E0308
     /// use pos_store::community::{
@@ -210,7 +212,7 @@ impl MemoryCommunityDomainV1 {
     ///     request: CommunityBootstrapRequestV1,
     ///     decoded: &pos_core::AuthorizationDecisionV1,
     /// ) {
-    ///     let _ = domain.open(binding, decoded, request);
+    ///     let _ = domain.open(binding, request, decoded);
     /// }
     /// ```
     ///

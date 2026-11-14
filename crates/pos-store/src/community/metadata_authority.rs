@@ -119,6 +119,12 @@ impl CommunityMetadataAuthorityV1 {
             .ok_or(Error::EvidenceUnavailable)
     }
 
+    /// Build the exact request. The leaf lookup cannot miss: a resolved
+    /// `PersistedAuthorityV1` always holds a nonempty root-to-leaf chain (and
+    /// the evaluator itself fails closed on an empty one), so `and_then` adds
+    /// no branch. The draft fails on an invalid installed audience (an empty
+    /// one), and that refusal is tested; a valid audience outside the grant's
+    /// scope instead reaches the evaluator's denial.
     fn request(
         &self,
         persisted: &PersistedAuthorityV1,
