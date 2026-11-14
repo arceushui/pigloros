@@ -6,17 +6,5 @@
 //! record is re-encoded with ciborium and re-digested with BLAKE3 in the
 //! test, never with the codecs under test.
 
-#[path = "sandbox_attempt_evidence_public/bundle.rs"]
-mod bundle;
-#[path = "sandbox_attempt_evidence_public/codes.rs"]
-mod codes;
-#[path = "sandbox_attempt_evidence_public/observed.rs"]
-mod observed;
-#[path = "sandbox_attempt_evidence_public/oracle.rs"]
-mod oracle;
-#[path = "sandbox_attempt_evidence_public/requested.rs"]
-mod requested;
-#[path = "sandbox_attempt_evidence_public/terminated.rs"]
-mod terminated;
-#[path = "sandbox_attempt_evidence_public/vectors.rs"]
-mod vectors;
+#[path = "sandbox_attempt_evidence_public/mod.rs"]
+mod cases;

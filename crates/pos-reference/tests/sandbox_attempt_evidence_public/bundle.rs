@@ -521,6 +521,9 @@ fn rule_7_a_successor_copies_its_one_predecessor() -> TestResult {
     chained.rejects("a successor of a successor")
 }
 
+/// One named change to an SPR1 that must break its binding.
+type ReceiptChange = (&'static str, Box<dyn Fn(&mut SandboxProviderReceipt)>);
+
 fn receipt(fixture: &Fixture) -> TestResult<SandboxProviderReceipt> {
     let (requested, observed, termination, _) = fixture.records()?;
     Ok(SandboxProviderReceipt {
@@ -563,7 +566,7 @@ fn rules_5_and_6_spr1_binds_the_records() -> TestResult {
         let bound = receipt(&fixture)?;
         assert_eq!(evidence.verify_receipt(&bound), Ok(()));
         let released = bound.release1_digest.is_some();
-        let changes: Vec<(&str, Box<dyn Fn(&mut SandboxProviderReceipt)>)> = vec![
+        let changes: Vec<ReceiptChange> = vec![
             (
                 "attempt",
                 Box::new(|receipt| receipt.attempt_id = [0x12; 16]),
@@ -599,10 +602,10 @@ fn rules_5_and_6_spr1_binds_the_records() -> TestResult {
             ),
         ];
         for (case, mutate) in changes {
-            let mut changed = bound.clone();
-            mutate(&mut changed);
+            let mut altered = bound.clone();
+            mutate(&mut altered);
             assert_eq!(
-                evidence.verify_receipt(&changed),
+                evidence.verify_receipt(&altered),
                 Err(ProtocolError::InconsistentFields),
                 "{case}"
             );
