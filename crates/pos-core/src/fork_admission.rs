@@ -24,58 +24,80 @@ pub enum ForkAuthorityOriginV1 {
 pub enum ForkAdmissionErrorV1 {
     /// A request field or precondition is invalid.
     #[error("invalid Fork admission request")]
-    InvalidRequest,
+    InvalidRequest = 0,
     /// FAE1 provenance, policy membership, or first-use freshness failed.
     #[error("authentication evidence is not trusted")]
-    Unauthenticated,
+    Unauthenticated = 1,
     /// The immutable Principal-to-Owner mapping disagrees.
     #[error("Principal-to-Owner binding conflicts")]
-    PrincipalOwnerConflict,
+    PrincipalOwnerConflict = 2,
     /// The expected completed Fold Cursor is not the parent head.
     #[error("the completed fold boundary is stale")]
-    StaleFoldBoundary,
+    StaleFoldBoundary = 3,
     /// The parent Timeline is absent or its cut cannot be read.
     #[error("the parent Timeline changed")]
-    ParentChanged,
+    ParentChanged = 4,
     /// The same operation ID is committed with unequal intent.
     #[error("Fork admission conflicts with a committed operation")]
-    Conflict,
+    Conflict = 5,
     /// Durable authority is malformed, partial, orphaned, or unequal.
     #[error("Fork admission authority is corrupt")]
-    CorruptAuthority,
+    CorruptAuthority = 6,
     /// The storage outcome cannot be determined.
     #[error("Fork admission storage outcome is indeterminate")]
-    StorageIndeterminate,
+    StorageIndeterminate = 7,
     /// Host proof, policy, store, or session binding differs.
     #[error("Fork admission host authority does not match")]
-    HostAuthorityMismatch,
+    HostAuthorityMismatch = 8,
     /// The production authority wall source is unavailable.
     #[error("Fork admission authority clock is unavailable")]
-    AuthorityClockUnavailable,
+    AuthorityClockUnavailable = 9,
     /// The wall source is below the durable authority fence.
     #[error("Fork admission authority clock rolled back")]
-    ClockRollback,
+    ClockRollback = 10,
     /// Lookup-only recovery found no operation of that kind and ID.
     #[error("Fork admission operation is missing")]
-    OperationMissing,
+    OperationMissing = 11,
     /// No canonical FAH1 has been provisioned.
     #[error("Fork admission authority is uninitialized")]
-    AuthorityUninitialized,
+    AuthorityUninitialized = 12,
     /// Provisioning found an existing FAH1.
     #[error("Fork admission authority is already initialized")]
-    AuthorityAlreadyInitialized,
+    AuthorityAlreadyInitialized = 13,
     /// Operating-system entropy was unavailable.
     #[error("Fork admission entropy is unavailable")]
-    EntropyUnavailable,
+    EntropyUnavailable = 14,
     /// The visible parent is in a frozen erasure scope or is not positively
     /// proven unaffected by every active erasure request.
     #[error("the parent Timeline is contained by erasure")]
-    ParentErasureContained,
+    ParentErasureContained = 15,
     /// Erasure containment authority cannot admit this Fork: the gate or its
     /// verified inventory is unavailable, the parent is unclassified, or the
     /// topology permit or its context does not bind this exact FCC1.
     #[error("erasure containment is unavailable")]
-    ErasureContainmentUnavailable,
+    ErasureContainmentUnavailable = 16,
+    /// The adapter's attached Gateway mode-binding epoch is stale (ADR-134
+    /// §8); the FAC1 transaction committed nothing.
+    #[error("Fork admission found the Gateway mode binding stale")]
+    ModeBindingStale = 17,
+}
+
+impl ForkAdmissionErrorV1 {
+    /// The number of Fork-admission errors, the length of a table indexed by
+    /// the error's explicit, append-only discriminant.
+    pub const COUNT: usize = 18;
+}
+
+/// The Fork-admission error of a failed store mode check: a stale mode
+/// binding committed nothing and keeps its own error; any other failure
+/// leaves the outcome indeterminate.
+impl From<&crate::CoreError> for ForkAdmissionErrorV1 {
+    fn from(error: &crate::CoreError) -> Self {
+        match error {
+            crate::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::StorageIndeterminate,
+        }
+    }
 }
 
 /// One durable operation graph root.

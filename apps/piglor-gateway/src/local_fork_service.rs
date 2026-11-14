@@ -343,6 +343,7 @@ fn open_with_credentials(
         record,
         session_identity,
         Box::new(submitter),
+        mode.stale_signal(),
     );
     Ok((gateway, coordinator))
 }
@@ -2121,6 +2122,67 @@ mod tests {
         })
         .await?;
         assert!(!world.socket.exists());
+        Ok(())
+    }
+
+    /// ADR-134 §8 on the Fork listener: after another process migrates the
+    /// served store, a Bind through the socket commits nothing and answers
+    /// FARL1 code 8, which fires the stale signal; the serve loop then stops
+    /// on its own, unlinks the socket, and fails.
+    #[tokio::test]
+    async fn a_cross_process_migration_stops_the_fork_listener() -> TestResult {
+        use pos_core::{
+            GatewayModeBindingHostV1, GatewayModeBindingPortV1 as _, GatewayModeProfileRefV1,
+        };
+        let world = unprovisioned_world()?;
+        let credentials = protected_credential_directory(world.runtime.path())?;
+        protected_credentials(&credentials, [7; 32], [8; 32])?;
+        bind_world(&world)?;
+        provision_local_fork_admission_authority(world.path()?, &credentials)?;
+        install_profile(&credentials, &profile_bytes(&[7])?)?;
+        let path = world.path()?.to_owned();
+        let socket = world.socket.clone();
+        let client = async move {
+            for _ in 0..200 {
+                if socket.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let mut other_process = SqliteStore::open(&path)?;
+            let local = other_process
+                .load_mode_binding()?
+                .ok_or("the serve bound the store")?;
+            let air_gapped =
+                GatewayModeProfileRefV1::try_new("gateway-mode-air-gapped-v1", [0x45; 32])?;
+            other_process.migrate_mode(
+                GatewayModeBindingHostV1::new()
+                    .authorize_migration(local.profile().clone(), air_gapped)?,
+            )?;
+            drop(other_process);
+            let response =
+                tokio::task::spawn_blocking(move || request(&socket, &bind_payload(81), false))
+                    .await??;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+        };
+        let (served, response) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(
+                serve_for_test(&world, &credentials, std::future::pending()),
+                client
+            )
+        })
+        .await
+        .map_err(|_| "the stale signal never ended the serve loop")?;
+        assert_eq!(response?, rejected(8));
+        assert_eq!(
+            served.err().map(|error| error.to_string()).as_deref(),
+            Some("gateway mode binding is stale")
+        );
+        assert!(!world.socket.exists());
+        assert_eq!(
+            row_count(&world, "SELECT COUNT(*) FROM fork_admission_operations")?,
+            0
+        );
         Ok(())
     }
 
