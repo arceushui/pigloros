@@ -751,7 +751,7 @@ mod coverage_tests {
     fn private_owner_key(directory: &Path, mode: u32) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        drop(std::fs::create_dir_all(directory));
+        std::fs::create_dir_all(directory).test_ok();
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).test_ok();
         let key = directory.join("owner.key");
         std::fs::write(&key, [7_u8; 32]).test_ok();
@@ -815,9 +815,15 @@ mod coverage_tests {
         assert!(std::fs::read(&through_link).is_ok());
         assert!(OwnTracksOwnerKey::load(&through_link).is_err());
 
-        // A non-directory ancestor is refused.
+        // A non-directory ancestor is refused by the ancestor check itself:
+        // the file is not group- or other-writable, so only its type
+        // refuses it (through `load` the path would also fail later).
         std::fs::write(root.join("file"), [1_u8]).test_ok();
-        assert!(OwnTracksOwnerKey::load(&root.join("file").join("owner.key")).is_err());
+        std::fs::set_permissions(root.join("file"), std::fs::Permissions::from_mode(0o644))
+            .test_ok();
+        let under_file = root.join("file").join("owner.key");
+        assert!(crate::validate_owner_key_ancestors(&under_file).is_err());
+        assert!(OwnTracksOwnerKey::load(&under_file).is_err());
     }
 
     #[cfg(unix)]
