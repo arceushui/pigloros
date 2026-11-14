@@ -742,6 +742,59 @@ pub enum PipelineOutcomeV1 {
     ModeBindingStale,
 }
 
+/// The fieldless kind of a [`PipelineOutcomeV1`], numbered in declaration
+/// order so a host indexes one per-outcome table by `kind as usize`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineOutcomeKindV1 {
+    Rejected = 0,
+    InvalidObservation = 1,
+    AuthorityRevoked = 2,
+    AuthorityExpired = 3,
+    PolicyIndeterminate = 4,
+    ResourceExhausted = 5,
+    InvalidPluginResult = 6,
+    InvalidProviderResult = 7,
+    DomainConflict = 8,
+    AdmissionConflict = 9,
+    Committed = 10,
+    RecoveredDuplicate = 11,
+    InvalidDependencyDeclaration = 12,
+    DependencySetExhausted = 13,
+    ModeBindingStale = 14,
+}
+
+impl PipelineOutcomeKindV1 {
+    /// The number of outcome kinds, the length of a per-outcome table.
+    pub const COUNT: usize = 15;
+}
+
+impl PipelineOutcomeV1 {
+    /// This outcome's kind. The match has no wildcard, so a new outcome
+    /// fails to compile until it names its kind.
+    #[must_use]
+    pub const fn kind(&self) -> PipelineOutcomeKindV1 {
+        match self {
+            Self::Rejected => PipelineOutcomeKindV1::Rejected,
+            Self::InvalidObservation => PipelineOutcomeKindV1::InvalidObservation,
+            Self::AuthorityRevoked => PipelineOutcomeKindV1::AuthorityRevoked,
+            Self::AuthorityExpired => PipelineOutcomeKindV1::AuthorityExpired,
+            Self::PolicyIndeterminate => PipelineOutcomeKindV1::PolicyIndeterminate,
+            Self::ResourceExhausted => PipelineOutcomeKindV1::ResourceExhausted,
+            Self::InvalidPluginResult => PipelineOutcomeKindV1::InvalidPluginResult,
+            Self::InvalidProviderResult => PipelineOutcomeKindV1::InvalidProviderResult,
+            Self::DomainConflict => PipelineOutcomeKindV1::DomainConflict,
+            Self::AdmissionConflict => PipelineOutcomeKindV1::AdmissionConflict,
+            Self::Committed(_) => PipelineOutcomeKindV1::Committed,
+            Self::RecoveredDuplicate(_) => PipelineOutcomeKindV1::RecoveredDuplicate,
+            Self::InvalidDependencyDeclaration => {
+                PipelineOutcomeKindV1::InvalidDependencyDeclaration
+            }
+            Self::DependencySetExhausted => PipelineOutcomeKindV1::DependencySetExhausted,
+            Self::ModeBindingStale => PipelineOutcomeKindV1::ModeBindingStale,
+        }
+    }
+}
+
 fn invalid_draft(draft: &EventDraft) -> bool {
     draft.entity.inner() == Ulid::nil() || draft.event_type.as_str().is_empty()
 }

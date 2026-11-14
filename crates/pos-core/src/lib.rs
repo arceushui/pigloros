@@ -647,9 +647,10 @@ pub use pipeline::{
     pipeline_draft_vector_digest_v1, CommittedPipelineEventV1, PipelineAdmissionBasisDraftV1,
     PipelineAdmissionBasisV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, TentativePipelineResultV1,
-    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
+    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeKindV1, PipelineOutcomeV1,
+    PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    TentativePipelineResultV1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 pub use pipeline_admission::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,

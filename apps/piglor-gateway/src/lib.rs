@@ -1880,41 +1880,47 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
     }
 }
 
-/// The Gateway error family of a not-admitted store outcome.
+/// The Gateway error family of a not-admitted store outcome, numbered so
+/// [`NOT_ADMITTED_ERRORS`] is indexed by it.
 #[derive(Clone, Copy)]
 enum NotAdmitted {
-    PolicyUnavailable,
-    LimitReached,
-    HostFault,
-    SetExhausted,
-    Stale,
-    ModeBindingStale,
-    Rejected,
+    PolicyUnavailable = 0,
+    LimitReached = 1,
+    HostFault = 2,
+    SetExhausted = 3,
+    Stale = 4,
+    ModeBindingStale = 5,
+    Rejected = 6,
 }
 
-/// Classify every outcome; the match has no wildcard, so a new
-/// `PipelineOutcomeV1` variant fails to compile until it is routed here.
+/// The family of every outcome kind, indexed by
+/// [`pos_core::PipelineOutcomeKindV1`]; its length is the kind count, so a
+/// new outcome fails to compile until it is routed here.
+///
+/// The executor turns a store revocation or expiry into a pending denial
+/// that is answered only once recorded; one that arrives here unrecorded is
+/// a host fault, never an answered denial.
+const NOT_ADMITTED_FAMILIES: [NotAdmitted; pos_core::PipelineOutcomeKindV1::COUNT] = [
+    NotAdmitted::Rejected,          // Rejected
+    NotAdmitted::Stale,             // InvalidObservation
+    NotAdmitted::HostFault,         // AuthorityRevoked
+    NotAdmitted::HostFault,         // AuthorityExpired
+    NotAdmitted::PolicyUnavailable, // PolicyIndeterminate
+    NotAdmitted::LimitReached,      // ResourceExhausted
+    NotAdmitted::Rejected,          // InvalidPluginResult
+    NotAdmitted::Rejected,          // InvalidProviderResult
+    NotAdmitted::Stale,             // DomainConflict
+    NotAdmitted::Stale,             // AdmissionConflict
+    NotAdmitted::Rejected,          // Committed
+    NotAdmitted::Rejected,          // RecoveredDuplicate
+    NotAdmitted::HostFault,         // InvalidDependencyDeclaration
+    NotAdmitted::SetExhausted,      // DependencySetExhausted
+    NotAdmitted::ModeBindingStale,  // ModeBindingStale
+];
+
+/// Classify every outcome by its kind.
 const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
-    match outcome {
-        PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
-        PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
-        // The executor turns a store revocation or expiry into a pending
-        // denial that is answered only once recorded; one that arrives here
-        // unrecorded is a host fault, never an answered denial.
-        PipelineOutcomeV1::AuthorityRevoked
-        | PipelineOutcomeV1::AuthorityExpired
-        | PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
-        PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
-        PipelineOutcomeV1::ModeBindingStale => NotAdmitted::ModeBindingStale,
-        PipelineOutcomeV1::InvalidObservation
-        | PipelineOutcomeV1::AdmissionConflict
-        | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
-        PipelineOutcomeV1::Rejected
-        | PipelineOutcomeV1::InvalidPluginResult
-        | PipelineOutcomeV1::InvalidProviderResult
-        | PipelineOutcomeV1::Committed(_)
-        | PipelineOutcomeV1::RecoveredDuplicate(_) => NotAdmitted::Rejected,
-    }
+    NOT_ADMITTED_FAMILIES[outcome.kind() as usize]
 }
 
 /// A store outcome names no protected record: an unavailable policy reuses the
@@ -1925,19 +1931,24 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
     not_admitted_error(not_admitted_family(outcome), maximum)
 }
 
-/// The stable Gateway error of one family; the match has no wildcard.
+/// The stable Gateway error of each family, indexed by [`NotAdmitted`].
+const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; 7] = [
+    |_| GatewayError::AuthorizationUnavailable,
+    |maximum| GatewayError::EventLimitReached { maximum },
+    |_| GatewayError::ActionAdmissionUnavailable,
+    |_| GatewayError::DependencySetExhausted,
+    |_| GatewayError::ActionObservationStale,
+    |_| GatewayError::Store(CoreError::ModeBindingStale),
+    |_| {
+        GatewayError::ActionRejected(ActionRejected::DomainValidationFailed(
+            "action was not admitted".to_owned(),
+        ))
+    },
+];
+
+/// The stable Gateway error of one family.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
-    match family {
-        NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
-        NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
-        NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
-        NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
-        NotAdmitted::Stale => GatewayError::ActionObservationStale,
-        NotAdmitted::ModeBindingStale => GatewayError::Store(CoreError::ModeBindingStale),
-        NotAdmitted::Rejected => GatewayError::ActionRejected(
-            ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
-        ),
-    }
+    NOT_ADMITTED_ERRORS[family as usize](maximum)
 }
 
 impl From<ActionSubmissionError> for GatewayError {
