@@ -1267,14 +1267,6 @@ pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, Co
         .map(|store| Box::new(store) as Box<dyn EventStore>)
 }
 
-/// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
-///
-/// This deliberately returns only [`OwnTracksEnrollmentStore`], not generic
-/// [`EventStore`] or geographic-admission capabilities.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Storage`] when the database cannot be opened or its
 /// The persisted binding when it is exactly `expected`: the attach check of
 /// both adapters (ADR-134 §8), made on the one read the attach uses.
 pub(crate) fn expected_mode_binding(
@@ -1290,6 +1282,14 @@ pub(crate) fn expected_mode_binding(
         })
 }
 
+/// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
+///
+/// This deliberately returns only [`OwnTracksEnrollmentStore`], not generic
+/// [`EventStore`] or geographic-admission capabilities.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Storage`] when the database cannot be opened or its
 /// enrollment schema cannot be initialized.
 #[cfg(feature = "sqlite")]
 pub fn open_owntracks_enrollment_store(
