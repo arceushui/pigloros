@@ -751,7 +751,7 @@ fn the_handle_owns_the_verified_listeners_and_its_host() -> TestResult {
     let mut composition = loopback();
     composition.owntracks_owner_key = Some(PathBuf::from("/private/owner.key"));
     composition.fork_admission_socket = Some(PathBuf::from("/run/pigloros/fork.sock"));
-    composition.network_grants = [GatewayNetworkGrantV1::OwnTracks].into_iter().collect();
+    composition.network_grants = std::iter::once(GatewayNetworkGrantV1::OwnTracks).collect();
     let mut bound = memory_host()?;
     let mode = bind_gateway_mode_v1(GatewayModeProfileIdV1::Local, composition, &mut bound)?;
     assert_eq!(
