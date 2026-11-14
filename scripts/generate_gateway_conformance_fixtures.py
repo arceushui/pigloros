@@ -250,13 +250,17 @@ def ledger(router: str = "loopback") -> Exchange:
     return Exchange(router, "GET", "/v1/ledger", observed(200, json_body(view)))
 
 
-def create(name: str, capture: bool = True, expect: dict | None = None) -> Exchange:
+def create(
+    name: str, capture: bool = True, expect: dict | None = None, actor: bool = False
+) -> Exchange:
+    """Create a Timeline; on the `authorized` Gateway the fixture actor must send it (#1361)."""
     created = observed(201, json_body({"head": 0, "id": "<ulid>", "name": name}))
     return Exchange(
         "loopback",
         "POST",
         "/v1/timelines",
         created if expect is None else expect,
+        actor=actor,
         body={"name": name},
         has_body=True,
         capture=capture,
@@ -372,7 +376,7 @@ def denied_subcases() -> list[SubCase]:
             "an action the fixture authority does not grant is forbidden and commits nothing",
             "authorized",
             [
-                create("den-2"),
+                create("den-2", actor=True),
                 action(routed_problem(403, "unauthorized", ACTIONS_PATH)),
                 poll(EMPTY_PAGE, actor=True),
             ],
@@ -387,7 +391,7 @@ def denied_subcases() -> list[SubCase]:
             "den.4",
             "a read without the actor header on an authorized Gateway is unauthorized",
             "authorized",
-            [create("den-4"), poll(routed_problem(401, "unauthenticated", EVENTS_PATH))],
+            [create("den-4", actor=True), poll(routed_problem(401, "unauthenticated", EVENTS_PATH))],
         ),
     ]
 
@@ -430,7 +434,7 @@ def malformed_subcases() -> list[SubCase]:
             "integer action params are an invalid typed payload and commit nothing",
             "authorized",
             [
-                create("mal-4"),
+                create("mal-4", actor=True),
                 action(routed_problem(422, "admission-rejected", ACTIONS_PATH), params=[1, 2]),
                 poll(EMPTY_PAGE, actor=True),
             ],
@@ -486,7 +490,7 @@ def downgrade_subcases() -> list[SubCase]:
             "the legacy world.action event type is refused with no fallback",
             "authorized",
             [
-                create("dgr-1"),
+                create("dgr-1", actor=True),
                 action(
                     routed_problem(400, "unsupported-version", ACTIONS_PATH), event_type="world.action"
                 ),
@@ -498,7 +502,7 @@ def downgrade_subcases() -> list[SubCase]:
             "the legacy world.action.submit capability is refused with no fallback",
             "authorized",
             [
-                create("dgr-2"),
+                create("dgr-2", actor=True),
                 action(
                     routed_problem(403, "unauthorized", ACTIONS_PATH), capability="world.action.submit"
                 ),

@@ -1232,7 +1232,7 @@ async fn gateway_shutdown_drains_an_empty_executor(
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
+    let gateway = Gateway::unprotected_for_harness(host)?;
     gateway.shutdown().await.test_ok()?;
     drop(gateway);
     Ok(())

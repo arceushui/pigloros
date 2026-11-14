@@ -2,6 +2,10 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
+    operation::{
+        AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
+        OperationAuthority,
+    },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
         ProblemCodeV1, ProblemV1,
@@ -11,7 +15,7 @@ use crate::{
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, FromRequestParts, RawQuery, State},
+    extract::{DefaultBodyLimit, FromRequestParts, MatchedPath, RawQuery, Request, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
         request::Parts,
@@ -159,8 +163,39 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
         .fallback(not_routed)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_unprovisioned,
+        ))
         .layer(middleware::from_fn(problem_instance))
         .with_state(state)
+}
+
+/// The protected loopback routes, by method and route template.
+const PROTECTED_ROUTES: [(&str, &str); 5] = [
+    ("POST", "/v1/ledger/predictions"),
+    ("POST", "/v1/timelines"),
+    ("GET", "/v1/timelines/{timeline_id}/events"),
+    ("POST", "/v1/timelines/{timeline_id}/actions"),
+    ("POST", "/v1/timelines/{timeline_id}/signals"),
+];
+
+/// Answer every protected route of an unprovisioned host `401` before its
+/// body is read (D1 on #302): no malformed or oversized body reaches a
+/// handler the host could never authorize.
+async fn reject_unprovisioned(
+    State(state): State<AppState>,
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    let protected = request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|path| PROTECTED_ROUTES.contains(&(request.method().as_str(), path.as_str())));
+    if protected && state.gateway.is_unprovisioned() {
+        return GatewayError::AuthorizationUnavailable.into_response();
+    }
+    next.run(request).await
 }
 
 fn spectator_routes() -> Router<AppState> {
@@ -216,9 +251,15 @@ async fn get_ledger(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn create_timeline(
     State(state): State<AppState>,
+    authority: OperationAuthority<CreateTimelineOperation>,
     ContractJson(body): ContractJson<CreateTimelineRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let tl = state.gateway.create_timeline(&body.name).await?;
+    let name = body.name;
+    let tl = authority
+        .run(&state.gateway, None, move |gateway| async move {
+            gateway.create_timeline(&name).await
+        })
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -561,31 +602,52 @@ async fn post_action(
 async fn post_signal(
     State(state): State<AppState>,
     ContractPath(id): ContractPath<String>,
+    authority: OperationAuthority<AppendSignalOperation>,
     ContractJson(body): ContractJson<SignalRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let entity_id = body.entity_id.clone();
-    let event = state
-        .gateway
-        .append_signal(&id, &entity_id, &body.into_signal())
+    let signal = body.into_signal();
+    // A malformed Timeline ID binds no target and is refused by the append.
+    // The signal acts as its own entity, which must be the header actor.
+    let target = crate::parse_timeline_id(&id).ok();
+    let event = authority
+        .acting_as(crate::parse_entity_id(&entity_id).ok())
+        .run(&state.gateway, target, move |gateway| async move {
+            gateway.append_signal(&id, &entity_id, &signal).await
+        })
         .await?;
     EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
 async fn post_ledger_prediction(
     State(state): State<AppState>,
+    authority: OperationAuthority<CreatePredictionOperation>,
     ContractJson(body): ContractJson<NewPrediction>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let ledger = match &state.ledger_write {
+    let ledger_write = state.ledger_write.clone();
+    let prediction_id = authority
+        .run(&state.gateway, None, move |_gateway| async move {
+            register_prediction(&ledger_write, body).await
+        })
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "prediction_id": prediction_id })),
+    ))
+}
+
+/// Register one validated prediction when Ledger writes are enabled.
+async fn register_prediction(
+    ledger_write: &LedgerWriteMode,
+    body: NewPrediction,
+) -> Result<String, GatewayError> {
+    let ledger = match ledger_write {
         LedgerWriteMode::Disabled => return Err(GatewayError::LedgerWriteDisabled),
         LedgerWriteMode::Unconfigured => return Err(GatewayError::LedgerUnavailable),
         LedgerWriteMode::Ready(ledger) => ledger,
     };
     body.validate()?;
-    let prediction_id = ledger.register(body).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "prediction_id": prediction_id })),
-    ))
+    ledger.register(body).await
 }
 
 impl IntoResponse for GatewayError {
@@ -911,7 +973,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let timeline = gateway.create_timeline(name).await.test_ok();
         let app = router(AppState {
             gateway: gateway.clone(),
@@ -964,6 +1026,87 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
+    }
+
+    #[tokio::test]
+    async fn every_protected_route_refuses_an_unprovisioned_host_before_its_body() {
+        let gateway = Gateway::new_with_erasure_host(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok(),
+            None,
+        )
+        .test_ok();
+        let app = router(AppState {
+            gateway: gateway.clone(),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        let timeline = TimelineId::new().to_string();
+        for (method, route) in PROTECTED_ROUTES {
+            // Each request is one its handler would refuse first with `400`:
+            // a malformed body, or for the read a page limit of zero.
+            let query = if method == "GET" { "?limit=0" } else { "" };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!(
+                            "{}{query}",
+                            route.replace("{timeline_id}", &timeline)
+                        ))
+                        .header("content-type", "application/json")
+                        .header(
+                            crate::operation::ACTOR_ENTITY_HEADER,
+                            test_action_actor().to_string(),
+                        )
+                        .body(Body::from("{"))
+                        .test_ok(),
+                )
+                .await
+                .test_ok();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+        }
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[test]
+    fn the_protected_route_table_is_every_loopback_route() {
+        let source = include_str!("http.rs");
+        let body = source
+            .split("fn loopback_routes() -> Router<AppState> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        // Whitespace is removed first, so a `.route(` call split across
+        // lines is still found. Only routes registered in
+        // `loopback_routes` itself are seen; a route added through another
+        // helper would escape this check.
+        let compact = body
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let mut served = compact
+            .split(".route(\"")
+            .skip(1)
+            .filter_map(|rest| {
+                let route = rest.split('"').next()?;
+                let method = if rest.contains(",get(") {
+                    "GET"
+                } else {
+                    "POST"
+                };
+                Some((method, route))
+            })
+            .collect::<Vec<_>>();
+        served.sort_unstable();
+        let mut table = PROTECTED_ROUTES.to_vec();
+        table.sort_unstable();
+        assert_eq!(served, table);
     }
 
     fn world_action_payload(actor: &str, body: &str, marker: u8) -> serde_json::Value {
@@ -1127,7 +1270,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gw = Gateway::new_with_erasure_host(host).test_ok();
+        let gw = Gateway::unprotected_for_harness(host).test_ok();
         spectator_router(AppState {
             gateway: gw,
             ledger_view: LedgerView::default(),
@@ -1249,7 +1392,14 @@ mod tests {
     ) -> (StatusCode, serde_json::Value) {
         let mut builder = Request::builder().method(method).uri(uri);
         if method == "POST" {
-            builder = builder.header(IDEMPOTENCY_KEY_HEADER, next_idempotency_key());
+            // An authorized Gateway admits a mutation only for a granted
+            // actor (#1361); an unprotected one ignores the header.
+            builder = builder
+                .header(IDEMPOTENCY_KEY_HEADER, next_idempotency_key())
+                .header(
+                    crate::operation::ACTOR_ENTITY_HEADER,
+                    test_action_actor().to_string(),
+                );
         }
         let req = if let Some(b) = body {
             builder
@@ -1395,7 +1545,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         let (status, json) = json_request(
             router(AppState {
                 gateway,
@@ -1439,7 +1589,7 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let gateway = Gateway::unprotected_for_harness(host).test_ok();
         gateway.shutdown().await.test_ok();
         let (status, json) = json_request(
             router(AppState {
@@ -2610,6 +2760,7 @@ osf_link = \"https://osf.io/example\"\n";
                     pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
                     authorization: None,
+                    authorization_required: false,
                 },
                 ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,

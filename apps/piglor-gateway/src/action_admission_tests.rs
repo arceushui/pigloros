@@ -388,7 +388,7 @@ fn missing_plugin_gateway(host: ErasureExecutionHostV1, actor: EntityId) -> Test
             gate,
         )),
         consent_authority,
-        Some(Arc::new(test_authorization_for(actor))),
+        crate::GatewayProtection::Required(Some(Arc::new(test_authorization_for(actor)))),
     )?)
 }
 
