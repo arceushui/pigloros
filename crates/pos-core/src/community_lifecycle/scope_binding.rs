@@ -358,11 +358,7 @@ fn skip_rule_item(cursor: &mut CborCursor<'_>, depth: u8) -> Result<()> {
                 }
             }),
             4 => Err(Error::BoundsExceeded),
-            7 if (0xf4..=0xf6).contains(&initial) => consume_simple(cursor),
+            7 if (0xf4..=0xf6).contains(&initial) => cursor.byte().map(drop).map_err(Error::from),
             _ => Err(Error::InvalidEncoding),
         })
-}
-
-fn consume_simple(cursor: &mut CborCursor<'_>) -> Result<()> {
-    cursor.byte().map(drop).map_err(Error::from)
 }
