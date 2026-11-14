@@ -493,7 +493,9 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
             owntracks_owner_key: Some(owner_key_path),
             fork_admission_socket: None,
             ledger_source: None,
-            network_grants: std::collections::BTreeSet::new(),
+            network_grants: std::collections::BTreeSet::from([
+                piglor_gateway::mode_profile::GatewayNetworkGrantV1::OwnTracks,
+            ]),
         },
         &mut owntracks_host,
     )?;

@@ -943,6 +943,24 @@ pub(crate) fn test_binding_of(
     GatewayModeBindingV1::new(profile, composition)
 }
 
+/// Attach `host`'s adapter to the binding of `mode`, as `serve` does before
+/// it composes a Gateway over a store an earlier process bound.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_attach_host(
+    mut host: ErasureExecutionHostV1,
+    mode: &GatewayModeBindingV1,
+) -> ErasureExecutionHostV1 {
+    // A store this test left unbound stays unattached; the composition's
+    // own `verify_host` then refuses it.
+    drop(mode.profile.reference().and_then(|reference| {
+        host.gateway_mode_binding()
+            .attach_mode_binding(&reference)
+            .map_err(GatewayModeErrorV1::Store)
+    }));
+    host
+}
+
 /// Bind an empty unit-test host to the compiled `id` and return its handle,
 /// as the first `serve` does.
 #[cfg(test)]
