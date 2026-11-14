@@ -868,6 +868,14 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     holder.execute_batch("BEGIN IMMEDIATE")?;
     h.store.conn.busy_timeout(Duration::from_millis(1500))?;
     let timeline = h.timeline;
+    // Build every admission input before the clock starts: closure construction and content
+    // validation are fixture work outside the fence, and under a sanitizer they alone can
+    // outlast the 400 ms the competing writer waits.
+    let one = release_one();
+    let projection = one.projection()?;
+    let release_proof = one.release_proof()?;
+    let content_proof = one.content_proof()?;
+    let point = TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick);
     let start = Instant::now();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -882,7 +890,15 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
         });
     });
     assert_eq!(
-        h.admit(&genesis, &release_one(), 1)?,
+        h.store.admit(
+            &h.env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &projection,
+            (&release_proof, &content_proof),
+            point,
+            activation(timeline, 1),
+        ),
         Err(Error::StorageBusy)
     );
     let entered = receiver.recv_timeout(Duration::from_secs(10))?;
