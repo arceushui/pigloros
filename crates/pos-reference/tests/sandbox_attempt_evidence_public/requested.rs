@@ -63,16 +63,15 @@ fn entry(name: &str, value: Value) -> Value {
 }
 
 /// Sort properties by the canonical encoding of their names.
-fn sorted(mut entries: Vec<Value>) -> TestResult<Vec<Value>> {
-    let mut keyed = entries
-        .drain(..)
-        .map(|entry| {
-            let Value::Array(parts) = &entry else {
-                return Err("property is not an array".into());
-            };
-            encode(&parts[0]).map(|key| (key, entry.clone()))
-        })
-        .collect::<TestResult<Vec<_>>>()?;
+fn sorted(entries: Vec<Value>) -> TestResult<Vec<Value>> {
+    let mut keyed = Vec::new();
+    for entry in entries {
+        let key = match &entry {
+            Value::Array(parts) => encode(&parts[0])?,
+            _ => return Err("property is not an array".into()),
+        };
+        keyed.push((key, entry));
+    }
     keyed.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(keyed.into_iter().map(|(_, entry)| entry).collect())
 }
@@ -424,7 +423,7 @@ fn rqe1_records_above_one_mebibyte_are_rejected() -> TestResult {
 }
 
 /// Replace one readback entry's value, keeping the list sorted.
-fn readback_with(status: u64, name: &str, value: Value) -> TestResult<Vec<u8>> {
+fn readback_with(status: u64, name: &str, value: &Value) -> TestResult<Vec<u8>> {
     let (requested, mut readback) = every_code()?;
     for property in &mut readback {
         if let Value::Array(parts) = property {
@@ -449,14 +448,14 @@ fn rqe1_rule_3_readback_codes_follow_the_table() -> TestResult {
             ("Type", dbus(2, integer(1))),
         ] {
             assert_eq!(
-                decode(&readback_with(status, name, value)?),
+                decode(&readback_with(status, name, &value)?),
                 Err(ProtocolError::InconsistentFields),
                 "status {status} accepted {name}"
             );
         }
         // A changed value under the right code is a mismatch, not a code error.
         assert_eq!(
-            decode(&readback_with(status, "MemoryMax", dbus(2, integer(7)))?),
+            decode(&readback_with(status, "MemoryMax", &dbus(2, integer(7)))?),
             Ok(())
         );
     }

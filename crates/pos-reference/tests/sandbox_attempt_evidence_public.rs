@@ -7,16 +7,16 @@
 //! test, never with the codecs under test.
 
 #[path = "sandbox_attempt_evidence_public/bundle.rs"]
-pub mod bundle;
+mod bundle;
 #[path = "sandbox_attempt_evidence_public/codes.rs"]
-pub mod codes;
+mod codes;
 #[path = "sandbox_attempt_evidence_public/observed.rs"]
-pub mod observed;
+mod observed;
 #[path = "sandbox_attempt_evidence_public/oracle.rs"]
-pub mod oracle;
+mod oracle;
 #[path = "sandbox_attempt_evidence_public/requested.rs"]
-pub mod requested;
+mod requested;
 #[path = "sandbox_attempt_evidence_public/terminated.rs"]
-pub mod terminated;
+mod terminated;
 #[path = "sandbox_attempt_evidence_public/vectors.rs"]
-pub mod vectors;
+mod vectors;

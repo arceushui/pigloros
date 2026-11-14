@@ -24,7 +24,7 @@ use super::vectors::{
     TME1_A_DIGEST, TME1_B, TME1_B_DIGEST, TME1_C, TME1_C_DIGEST,
 };
 
-pub fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
     TerminationEvidence::from_canonical_cbor(bytes).map(|_| ())
 }
 
@@ -57,7 +57,7 @@ fn sources(observed_at: u64, pids: &[u8], cpu: &[u8]) -> CgroupSources {
 }
 
 /// The R9 §7.5 fields, written out from the R9 text.
-pub fn vector_a_fields() -> TestResult<TerminationEvidenceFields> {
+pub(super) fn vector_a_fields() -> TestResult<TerminationEvidenceFields> {
     Ok(TerminationEvidenceFields {
         attempt_id: [0x11; 16],
         agr1_digest: [0x22; 32],
@@ -166,7 +166,7 @@ fn vector_field(index: usize) -> TestResult<Value> {
 }
 
 /// A decodable TME1 at each progress, derived from TME1-A.
-pub fn at_progress(progress: u64) -> TestResult<Vec<u8>> {
+pub(super) fn at_progress(progress: u64) -> TestResult<Vec<u8>> {
     let vector = unhex(TME1_A)?;
     match progress {
         0 => edit(&vector, |fields| {
@@ -382,99 +382,18 @@ fn tme1_rule_2_zero_identities_and_closed_codes() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn tme1_rule_2_shape_follows_progress() -> TestResult {
-    let unit = vector_field(9)?;
-    let baseline = vector_field(10)?;
-    let service = vector_field(13)?;
-    let capture = vector_field(17)?;
-    let work = vector_field(21)?;
-    let ordered = transfer([1, 3, 2, 4, 4], true);
-    let network = Value::Array(vec![Value::Null, Value::Bool(false)]);
-    let null = Value::Null;
-    // Each case breaks exactly one shape rule; `[24, 1]` keeps the empty
-    // basis consistent with the unit.
-    let cases: Vec<(u64, Vec<(Vec<usize>, Value)>, bool)> = vec![
-        (0, vec![], true),
-        (0, vec![(vec![7], integer(0))], true),
-        (0, vec![(vec![7], integer(1))], true),
-        (0, vec![(vec![7], integer(2))], false),
-        (0, vec![(vec![8], integer(0))], false),
-        (
-            0,
-            vec![(vec![9], unit.clone()), (vec![24, 1], integer(0))],
-            false,
-        ),
-        (0, vec![(vec![10], baseline.clone())], false),
-        (0, vec![(vec![11], baseline.clone())], false),
-        (0, vec![(vec![13], service.clone())], false),
-        (0, vec![(vec![14], integer(0))], false),
-        (0, vec![(vec![15], integer(0))], false),
-        (0, vec![(vec![17], capture.clone())], false),
-        (0, vec![(vec![18], ordered.clone())], false),
-        (0, vec![(vec![19], network.clone())], false),
-        (0, vec![(vec![21], work.clone())], false),
-        (1, vec![], true),
-        (1, vec![(vec![7], integer(2))], true),
-        (
-            1,
-            vec![(vec![15], null.clone()), (vec![13], null.clone())],
-            true,
-        ),
-        (
-            1,
-            vec![
-                (vec![9], null.clone()),
-                (vec![10], null.clone()),
-                (vec![11], null.clone()),
-                (vec![21], null.clone()),
-                (vec![24, 1], null.clone()),
-            ],
-            true,
-        ),
-        (1, vec![(vec![7], integer(0))], false),
-        (1, vec![(vec![7], integer(1))], false),
-        (1, vec![(vec![8], null.clone())], false),
-        (1, vec![(vec![11], null.clone())], false),
-        (1, vec![(vec![10], null.clone())], false),
-        (
-            1,
-            vec![
-                (vec![9], null.clone()),
-                (vec![21], null.clone()),
-                (vec![24, 1], null.clone()),
-            ],
-            false,
-        ),
-        (
-            1,
-            vec![
-                (vec![9], null.clone()),
-                (vec![10], null.clone()),
-                (vec![11], null.clone()),
-                (vec![24, 1], null.clone()),
-            ],
-            false,
-        ),
-        (1, vec![(vec![14], integer(0))], false),
-        (1, vec![(vec![17], capture)], false),
-        (1, vec![(vec![18], ordered)], false),
-        (2, vec![(vec![13], null.clone())], true),
-        (2, vec![(vec![7], integer(0))], false),
-        (2, vec![(vec![8], null.clone())], false),
-        (2, vec![(vec![8], integer(1))], false),
-        (
-            2,
-            vec![(vec![9], null.clone()), (vec![24, 1], null.clone())],
-            false,
-        ),
-        (2, vec![(vec![10], null.clone())], false),
-        (2, vec![(vec![11], null.clone())], false),
-        (2, vec![(vec![14], null.clone())], false),
-        (2, vec![(vec![15], integer(0))], false),
-        (2, vec![(vec![17], null)], false),
-    ];
-    for (progress, changes, accepted) in cases {
+/// One shape case: the changes to the base record at a progress, and
+/// whether R9 §4.6.3 accepts the result.
+type ShapeCase = (Vec<(Vec<usize>, Value)>, bool);
+
+fn change(path: &[usize], value: Value) -> (Vec<usize>, Value) {
+    (path.to_vec(), value)
+}
+
+/// Each case breaks at most one shape rule; `[24, 1]` keeps the empty
+/// basis consistent with the unit.
+fn check_shapes(progress: u64, cases: Vec<ShapeCase>) -> TestResult {
+    for (changes, accepted) in cases {
         let description = format!("progress {progress}: {changes:?}");
         let record = edit(&at_progress(progress)?, |fields| {
             for (path, value) in changes {
@@ -490,6 +409,112 @@ fn tme1_rule_2_shape_follows_progress() -> TestResult {
         assert_eq!(decode(&record), expected, "{description}");
     }
     Ok(())
+}
+
+fn ordered_transfer() -> Value {
+    transfer([1, 3, 2, 4, 4], true)
+}
+
+#[test]
+fn tme1_rule_2_shape_at_progress_0() -> TestResult {
+    let baseline = vector_field(10)?;
+    check_shapes(
+        0,
+        vec![
+            (vec![], true),
+            (vec![change(&[7], integer(0))], true),
+            (vec![change(&[7], integer(1))], true),
+            (vec![change(&[7], integer(2))], false),
+            (vec![change(&[8], integer(0))], false),
+            (
+                vec![change(&[9], vector_field(9)?), change(&[24, 1], integer(0))],
+                false,
+            ),
+            (vec![change(&[10], baseline.clone())], false),
+            (vec![change(&[11], baseline)], false),
+            (vec![change(&[13], vector_field(13)?)], false),
+            (vec![change(&[14], integer(0))], false),
+            (vec![change(&[15], integer(0))], false),
+            (vec![change(&[17], vector_field(17)?)], false),
+            (vec![change(&[18], ordered_transfer())], false),
+            (
+                vec![change(
+                    &[19],
+                    Value::Array(vec![Value::Null, Value::Bool(false)]),
+                )],
+                false,
+            ),
+            (vec![change(&[21], vector_field(21)?)], false),
+        ],
+    )
+}
+
+#[test]
+fn tme1_rule_2_shape_at_progress_1() -> TestResult {
+    let null = || Value::Null;
+    check_shapes(
+        1,
+        vec![
+            (vec![], true),
+            (vec![change(&[7], integer(2))], true),
+            (vec![change(&[15], null()), change(&[13], null())], true),
+            (
+                vec![
+                    change(&[9], null()),
+                    change(&[10], null()),
+                    change(&[11], null()),
+                    change(&[21], null()),
+                    change(&[24, 1], null()),
+                ],
+                true,
+            ),
+            (vec![change(&[7], integer(0))], false),
+            (vec![change(&[7], integer(1))], false),
+            (vec![change(&[8], null())], false),
+            (vec![change(&[11], null())], false),
+            (vec![change(&[10], null())], false),
+            (
+                vec![
+                    change(&[9], null()),
+                    change(&[21], null()),
+                    change(&[24, 1], null()),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    change(&[9], null()),
+                    change(&[10], null()),
+                    change(&[11], null()),
+                    change(&[24, 1], null()),
+                ],
+                false,
+            ),
+            (vec![change(&[14], integer(0))], false),
+            (vec![change(&[17], vector_field(17)?)], false),
+            (vec![change(&[18], ordered_transfer())], false),
+        ],
+    )
+}
+
+#[test]
+fn tme1_rule_2_shape_at_progress_2() -> TestResult {
+    let null = || Value::Null;
+    check_shapes(
+        2,
+        vec![
+            (vec![change(&[13], null())], true),
+            (vec![change(&[7], integer(0))], false),
+            (vec![change(&[8], null())], false),
+            (vec![change(&[8], integer(1))], false),
+            (vec![change(&[9], null()), change(&[24, 1], null())], false),
+            (vec![change(&[10], null())], false),
+            (vec![change(&[11], null())], false),
+            (vec![change(&[14], null())], false),
+            (vec![change(&[15], integer(0))], false),
+            (vec![change(&[17], null())], false),
+        ],
+    )
 }
 
 #[test]
@@ -586,105 +611,11 @@ fn tme1_rule_9_transfers_and_cleanup_are_ordered() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn tme1_rule_7_sources_follow_the_normative_parser() -> TestResult {
+/// One source case: the baseline source index, its bytes and the result.
+type SourceCase = (usize, Vec<u8>, Result<(), ProtocolError>);
+
+fn check_sources(cases: Vec<SourceCase>) -> TestResult {
     let vector = unhex(TME1_A)?;
-    // 17 + 400 * 10 + 76 + 3 = 4096 bytes.
-    let filler = {
-        let mut source = b"oom_kill 0\nmax 0\n".to_vec();
-        for index in 0..400 {
-            source.extend(format!("k{index:06} 0\n").into_bytes());
-        }
-        source.extend(b"z".repeat(76));
-        source.extend(b" 0\n");
-        assert_eq!(source.len(), 4096);
-        source
-    };
-    let mut over = filler.clone();
-    over.insert(0, b' ');
-    let cases: Vec<(usize, Vec<u8>, Result<(), ProtocolError>)> = vec![
-        (0, Vec::new(), Err(ProtocolError::FieldOutOfBounds)),
-        (0, filler, Ok(())),
-        (0, over, Err(ProtocolError::FieldOutOfBounds)),
-        (0, b"oom_kill 0\r\nmax 0\r\n".to_vec(), Ok(())),
-        (
-            0,
-            b"\toom_kill\t0 \nmax\x0c0\nk\xc3\xa4y 5\n".to_vec(),
-            Ok(()),
-        ),
-        (0, b"oom_kill\r0\nmax 0\n".to_vec(), Ok(())),
-        (0, b"\xff\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-        (
-            0,
-            b"oom_kill 0\nmax 0".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 0\n\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 0\n \nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 0 1\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill +1\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 1a\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 18446744073709551616\nmax 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            0,
-            b"oom_kill 0\nmax 0\nmax 1\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (0, b"max 0\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-        (
-            0,
-            b"oom_kill 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (1, b"high 0\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-        (1, b"\xff\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-        (
-            2,
-            b"other 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (2, b"\xff\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-        (
-            3,
-            b"throttled_usec 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (
-            3,
-            b"nr_throttled 0\n".to_vec(),
-            Err(ProtocolError::InvalidEncoding),
-        ),
-        (3, b"\xff\n".to_vec(), Err(ProtocolError::InvalidEncoding)),
-    ];
     for (source, bytes, expected) in cases {
         let description = format!("source {source}: {:?}", String::from_utf8_lossy(&bytes));
         assert_eq!(
@@ -693,6 +624,34 @@ fn tme1_rule_7_sources_follow_the_normative_parser() -> TestResult {
             "{description}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn tme1_rule_7_parser_accepts_the_normative_forms() -> TestResult {
+    // 17 + 400 * 10 + 76 + 3 = 4096 bytes.
+    let mut largest = b"oom_kill 0\nmax 0\n".to_vec();
+    for index in 0..400 {
+        largest.extend(format!("k{index:06} 0\n").into_bytes());
+    }
+    largest.extend(b"z".repeat(76));
+    largest.extend(b" 0\n");
+    assert_eq!(largest.len(), 4096);
+    let mut over = largest.clone();
+    over.insert(0, b' ');
+    check_sources(vec![
+        (0, Vec::new(), Err(ProtocolError::FieldOutOfBounds)),
+        (0, largest, Ok(())),
+        (0, over, Err(ProtocolError::FieldOutOfBounds)),
+        (0, b"oom_kill 0\r\nmax 0\r\n".to_vec(), Ok(())),
+        (
+            0,
+            b"\toom_kill\t0 \nmax\x0c0\nk\xc3\xa4y 5\n".to_vec(),
+            Ok(()),
+        ),
+        (0, b"oom_kill\r0\nmax 0\n".to_vec(), Ok(())),
+    ])?;
+    let vector = unhex(TME1_A)?;
     assert_eq!(
         decode(&with(
             &vector,
@@ -710,6 +669,34 @@ fn tme1_rule_7_sources_follow_the_normative_parser() -> TestResult {
         Err(ProtocolError::InvalidEncoding)
     );
     Ok(())
+}
+
+#[test]
+fn tme1_rule_7_parser_rejects_every_other_form() -> TestResult {
+    let invalid = |source: usize, bytes: &[u8]| -> SourceCase {
+        (source, bytes.to_vec(), Err(ProtocolError::InvalidEncoding))
+    };
+    check_sources(vec![
+        invalid(0, b"\xff\n"),
+        invalid(0, b"oom_kill 0\nmax 0"),
+        invalid(0, b"oom_kill 0\n\nmax 0\n"),
+        invalid(0, b"oom_kill 0\n \nmax 0\n"),
+        invalid(0, b"oom_kill\nmax 0\n"),
+        invalid(0, b"oom_kill 0 1\nmax 0\n"),
+        invalid(0, b"oom_kill +1\nmax 0\n"),
+        invalid(0, b"oom_kill 1a\nmax 0\n"),
+        invalid(0, b"oom_kill 18446744073709551616\nmax 0\n"),
+        invalid(0, b"oom_kill 0\nmax 0\nmax 1\n"),
+        invalid(0, b"max 0\n"),
+        invalid(0, b"oom_kill 0\n"),
+        invalid(1, b"high 0\n"),
+        invalid(1, b"\xff\n"),
+        invalid(2, b"other 0\n"),
+        invalid(2, b"\xff\n"),
+        invalid(3, b"throttled_usec 0\n"),
+        invalid(3, b"nr_throttled 0\n"),
+        invalid(3, b"\xff\n"),
+    ])
 }
 
 #[test]

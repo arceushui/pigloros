@@ -17,7 +17,7 @@ use super::vectors::{KOE1_A, KOE1_B, RQE1_A, RQE1_B, TME1_A, TME1_B, TME1_C};
 
 const WORK_LIMIT: u64 = 1_048_576;
 
-fn ready_fields() -> LauncherReadyFields {
+const fn ready_fields() -> LauncherReadyFields {
     LauncherReadyFields {
         attempt_id: [0x11; 16],
         nonce: [0x01; 32],
@@ -45,6 +45,14 @@ fn limits(output: u64, work: u64, live: u64, incomplete: u64) -> Vec<SandboxLimi
         .map(|(limit_id, value)| SandboxLimit { limit_id, value })
         .collect()
 }
+
+/// The decoded RQE1, KOE1 and TME1, and the TME1 it succeeds.
+type Records = (
+    RequestedConfigurationEvidence,
+    KernelObservationEvidence,
+    TerminationEvidence,
+    Option<TerminationEvidence>,
+);
 
 /// One attempt's records and what a verifier holds, with the records'
 /// digest bindings kept intact as they are edited.
@@ -124,14 +132,7 @@ impl Fixture {
         Ok(self)
     }
 
-    fn records(
-        &self,
-    ) -> TestResult<(
-        RequestedConfigurationEvidence,
-        KernelObservationEvidence,
-        TerminationEvidence,
-        Option<TerminationEvidence>,
-    )> {
+    fn records(&self) -> TestResult<Records> {
         Ok((
             RequestedConfigurationEvidence::from_canonical_cbor(&self.rqe1)?,
             KernelObservationEvidence::from_canonical_cbor(&self.koe1)?,
@@ -597,9 +598,9 @@ fn rules_5_and_6_spr1_binds_the_records() -> TestResult {
                 }),
             ),
         ];
-        for (case, change) in changes {
+        for (case, mutate) in changes {
             let mut changed = bound.clone();
-            change(&mut changed);
+            mutate(&mut changed);
             assert_eq!(
                 evidence.verify_receipt(&changed),
                 Err(ProtocolError::InconsistentFields),

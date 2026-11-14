@@ -6,49 +6,49 @@ use std::error::Error;
 use ciborium::value::Value;
 use pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError as ProtocolError;
 
-pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+pub(super) type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-pub fn unhex(text: &str) -> TestResult<Vec<u8>> {
+pub(super) fn unhex(text: &str) -> TestResult<Vec<u8>> {
     (0..text.len())
         .step_by(2)
         .map(|index| Ok(u8::from_str_radix(&text[index..index + 2], 16)?))
         .collect()
 }
 
-pub fn integer(value: u64) -> Value {
+pub(super) fn integer(value: u64) -> Value {
     Value::Integer(value.into())
 }
 
-pub fn text(value: &str) -> Value {
+pub(super) fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 
-pub fn filled(byte: u8, length: usize) -> Value {
+pub(super) fn filled(byte: u8, length: usize) -> Value {
     Value::Bytes(vec![byte; length])
 }
 
-pub fn encode(value: &Value) -> TestResult<Vec<u8>> {
+pub(super) fn encode(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
 /// `BLAKE3-256("PiglorOS." || magic || ".v1\0" || cbor(unsigned))`.
-pub fn self_digest(magic: &str, unsigned: &Value) -> TestResult<[u8; 32]> {
+pub(super) fn self_digest(magic: &str, unsigned: &Value) -> TestResult<[u8; 32]> {
     let mut preimage = format!("PiglorOS.{magic}.v1\0").into_bytes();
     preimage.extend(encode(unsigned)?);
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
 /// The canonical wrapper `[unsigned, self_digest]`.
-pub fn seal(magic: &str, unsigned: Vec<Value>) -> TestResult<Vec<u8>> {
+pub(super) fn seal(magic: &str, unsigned: Vec<Value>) -> TestResult<Vec<u8>> {
     let unsigned = Value::Array(unsigned);
     let digest = self_digest(magic, &unsigned)?;
     encode(&Value::Array(vec![unsigned, Value::Bytes(digest.to_vec())]))
 }
 
 /// The unsigned fields of one self-digested record.
-pub fn unsigned(bytes: &[u8]) -> TestResult<Vec<Value>> {
+pub(super) fn unsigned(bytes: &[u8]) -> TestResult<Vec<Value>> {
     let wrapper: Value = ciborium::from_reader(bytes)?;
     match wrapper {
         Value::Array(mut parts) if parts.len() == 2 => match parts.swap_remove(0) {
@@ -60,7 +60,7 @@ pub fn unsigned(bytes: &[u8]) -> TestResult<Vec<Value>> {
 }
 
 /// The record's self-digest, read from its wrapper.
-pub fn wrapped_digest(bytes: &[u8]) -> TestResult<[u8; 32]> {
+pub(super) fn wrapped_digest(bytes: &[u8]) -> TestResult<[u8; 32]> {
     let fields = unsigned(bytes)?;
     let magic = match &fields[0] {
         Value::Text(magic) => magic.clone(),
@@ -70,7 +70,7 @@ pub fn wrapped_digest(bytes: &[u8]) -> TestResult<[u8; 32]> {
 }
 
 /// Change a record's unsigned fields and seal it again.
-pub fn edit(
+pub(super) fn edit(
     bytes: &[u8],
     change: impl FnOnce(&mut Vec<Value>) -> TestResult,
 ) -> TestResult<Vec<u8>> {
@@ -84,13 +84,13 @@ pub fn edit(
 }
 
 /// Replace the value at a nested array path.
-pub fn set(fields: &mut [Value], path: &[usize], value: Value) -> TestResult {
+pub(super) fn set(fields: &mut [Value], path: &[usize], value: Value) -> TestResult {
     *at(fields, path)? = value;
     Ok(())
 }
 
 /// The value at a nested array path.
-pub fn at<'a>(fields: &'a mut [Value], path: &[usize]) -> TestResult<&'a mut Value> {
+pub(super) fn at<'a>(fields: &'a mut [Value], path: &[usize]) -> TestResult<&'a mut Value> {
     let (first, rest) = path.split_first().ok_or("empty path")?;
     let mut value = fields.get_mut(*first).ok_or("path out of range")?;
     for index in rest {
@@ -103,12 +103,12 @@ pub fn at<'a>(fields: &'a mut [Value], path: &[usize]) -> TestResult<&'a mut Val
 }
 
 /// Set one field of a record and seal it again.
-pub fn with(bytes: &[u8], path: &[usize], value: Value) -> TestResult<Vec<u8>> {
+pub(super) fn with(bytes: &[u8], path: &[usize], value: Value) -> TestResult<Vec<u8>> {
     edit(bytes, |fields| set(fields, path, value))
 }
 
 /// Every path of the unsigned tree, and a value of another CBOR type for it.
-pub fn retyped_paths(fields: &[Value]) -> Vec<(Vec<usize>, Value)> {
+pub(super) fn retyped_paths(fields: &[Value]) -> Vec<(Vec<usize>, Value)> {
     fn walk(value: &Value, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, Value)>) {
         let replacement = match value {
             Value::Integer(_) | Value::Null => text("~"),
@@ -132,7 +132,7 @@ pub fn retyped_paths(fields: &[Value]) -> Vec<(Vec<usize>, Value)> {
 }
 
 /// Every node of `bytes`, retyped and resealed, is rejected by `decode`.
-pub fn rejects_every_retyped_node(
+pub(super) fn rejects_every_retyped_node(
     bytes: &[u8],
     decode: impl Fn(&[u8]) -> Result<(), ProtocolError>,
 ) -> TestResult {
@@ -148,12 +148,12 @@ pub fn rejects_every_retyped_node(
 
 /// A raw input of exactly `length` bytes: not CBOR, so only the size bound
 /// can make it `FieldOutOfBounds`.
-pub fn junk(length: usize) -> Vec<u8> {
+pub(super) fn junk(length: usize) -> Vec<u8> {
     vec![0; length]
 }
 
 /// The raw-size bound is inclusive at `maximum`.
-pub fn bounds_raw_size(maximum: usize, decode: impl Fn(&[u8]) -> Result<(), ProtocolError>) {
+pub(super) fn bounds_raw_size(maximum: usize, decode: impl Fn(&[u8]) -> Result<(), ProtocolError>) {
     assert_eq!(decode(&junk(maximum)), Err(ProtocolError::InvalidEncoding));
     assert_eq!(
         decode(&junk(maximum + 1)),
@@ -162,7 +162,7 @@ pub fn bounds_raw_size(maximum: usize, decode: impl Fn(&[u8]) -> Result<(), Prot
 }
 
 /// The shared envelope rules: magic, version, digest and canonical bytes.
-pub fn checks_envelope(
+pub(super) fn checks_envelope(
     bytes: &[u8],
     decode: impl Fn(&[u8]) -> Result<(), ProtocolError>,
 ) -> TestResult {

@@ -34,7 +34,7 @@ const fn namespace(inode: u64) -> NamespaceIdentity {
 }
 
 /// The R9 §7.3 observation, written out from the R9 text.
-pub fn vector_observation() -> ObservedKernelState {
+pub(super) fn vector_observation() -> ObservedKernelState {
     ObservedKernelState {
         invocation_id: [0x77; 16],
         main_pid: 4242,
@@ -80,7 +80,7 @@ pub fn vector_observation() -> ObservedKernelState {
 }
 
 /// The R9 §7.3 provider namespaces.
-pub fn provider_namespaces() -> [NamespaceIdentity; 6] {
+pub(super) fn provider_namespaces() -> [NamespaceIdentity; 6] {
     std::array::from_fn(|index| namespace(4_026_531_835 + index as u64))
 }
 
