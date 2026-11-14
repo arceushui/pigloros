@@ -367,11 +367,14 @@ const fn oracle_missing(facts: &TerminationFacts) -> bool {
 /// (else missing evidence); `terminal` is present iff `baseline` is; and an
 /// unreadable `ActiveEnterTimestampMonotonic` is missing evidence (§4.6.5:
 /// `D` is read once the start job is done).
-fn oracle_unit_evidence_missing(facts: &TerminationFacts) -> bool {
-    let done = facts.start_job == Some(StartJobResult::Done);
-    (facts.baseline.is_some() && facts.unit.is_none())
-        || (facts.terminal.is_some() != facts.baseline.is_some())
-        || (done && facts.unit.is_some() && facts.watchdog_deadline.is_none())
+const fn oracle_unit_evidence_missing(facts: &TerminationFacts) -> bool {
+    let done = matches!(facts.start_job, Some(StartJobResult::Done));
+    let has_unit = facts.unit.is_some();
+    let has_baseline = facts.baseline.is_some();
+    let has_deadline = facts.watchdog_deadline.is_some();
+    (has_baseline && !has_unit)
+        || (facts.terminal.is_some() != has_baseline)
+        || (done && has_unit && !has_deadline)
 }
 
 /// `terminal.observed-at >= D - G`, in exact integer arithmetic.
