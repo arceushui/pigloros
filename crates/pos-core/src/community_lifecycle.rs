@@ -20,11 +20,13 @@ mod input_group;
 mod input_reference;
 mod invocation;
 mod key_intent;
+mod materialization;
 mod member;
 mod member_progress;
 mod metadata_envelope;
 mod metadata_scope;
 mod native_node;
+mod original_provenance;
 mod owner_binding;
 mod prepared;
 mod profile;
@@ -35,6 +37,7 @@ mod quarantine_control;
 mod recording;
 mod reservation;
 mod revision;
+mod scope_binding;
 mod seal;
 mod selected_head;
 mod selection;
@@ -99,6 +102,10 @@ pub use key_intent::{
     CommunityKeyIntentInputV1, CommunityKeyIntentV1, CommunityKeyUseV1, CommunityMemberSlotsV1,
     CommunityRecordKindsV1, MAX_COMMUNITY_KEY_ENCRYPTION_ORDINAL_V1,
 };
+pub use materialization::{
+    CommunityMaterializationInputV1, CommunityMaterializationReferenceV1,
+    CommunityMaterializationV1, CommunityProducerBindingV1, MAX_COMMUNITY_LOGICAL_RECORD_BYTES_V1,
+};
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use member_progress::{
     CommunityCarriedEventV1, CommunityCarriedEventsIterV1, CommunityCarriedEventsV1,
@@ -115,6 +122,7 @@ pub use native_node::{
     CommunityNativeNodeKindV1, CommunityNativeNodeV1, MAX_COMMUNITY_DIRECT_INPUTS_V1,
     MAX_COMMUNITY_EXPANDED_INPUTS_V1,
 };
+pub use original_provenance::{CommunityOriginalProvenanceInputV1, CommunityOriginalProvenanceV1};
 pub use owner_binding::{
     CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
     CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
@@ -151,6 +159,10 @@ pub use reservation::{
 };
 pub use revision::{
     CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
+};
+pub use scope_binding::{
+    CommunityScopeBindingInputV1, CommunityScopeBindingV1, CommunityScopeCoverageRowV1,
+    CommunityScopeCoverageRowsV1, MAX_COMMUNITY_COVERAGE_ROWS_V1,
 };
 pub use seal::{CommunityDigestListV1, CommunitySealedResultInputV1, CommunitySealedResultV1};
 pub use selected_head::{
@@ -445,9 +457,46 @@ const fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
     }
 }
 
+/// Exact length of the preferred CBOR head [`encode_head`] writes for `value`.
+const fn head_len(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
 fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
     let mut hasher = Zeroizing::new(blake3::Hasher::new());
     hasher.update(domain);
     hasher.update(bytes);
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_head, head_len};
+
+    #[test]
+    fn head_len_matches_the_written_head_at_every_width_boundary() {
+        for (value, width) in [
+            (0, 1),
+            (23, 1),
+            (24, 2),
+            (255, 2),
+            (256, 3),
+            (65_535, 3),
+            (65_536, 5),
+            (u64::from(u32::MAX), 5),
+            (u64::from(u32::MAX) + 1, 9),
+            (u64::MAX, 9),
+        ] {
+            let mut head = Vec::new();
+            encode_head(&mut head, 0, value);
+            assert_eq!(head_len(value), width);
+            assert_eq!(head.len(), width);
+        }
+    }
 }
