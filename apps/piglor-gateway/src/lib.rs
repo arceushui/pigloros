@@ -4290,37 +4290,34 @@ mod tests {
                 binding,
             )
         };
-        let unbound = construct(
-            open(),
-            crate::authorization::test_sourced_authorization_for(EntityId::new()),
-            &test_binding(GatewayModeProfileIdV1::Local, []),
-        );
         assert!(matches!(
-            unbound,
+            construct(
+                open(),
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::Local, []),
+            ),
             Err(GatewayError::Store(CoreError::ModeBindingStale))
         ));
 
         let mut host = open();
         drop(test_bound_host(&mut host, GatewayModeProfileIdV1::Local));
-        let other_mode = construct(
-            host,
-            crate::authorization::test_sourced_authorization_for(EntityId::new()),
-            &test_binding(GatewayModeProfileIdV1::AirGapped, []),
-        );
         assert!(matches!(
-            other_mode,
+            construct(
+                host,
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::AirGapped, []),
+            ),
             Err(GatewayError::Store(CoreError::ModeBindingStale))
         ));
 
         let mut host = open();
         let air_gapped = test_bound_host(&mut host, GatewayModeProfileIdV1::AirGapped);
-        let storeless = construct(
-            host,
-            crate::authorization::test_authorization_for(EntityId::new()),
-            &air_gapped,
-        );
         assert!(matches!(
-            storeless,
+            construct(
+                host,
+                crate::authorization::test_authorization_for(EntityId::new()),
+                &air_gapped,
+            ),
             Err(GatewayError::AuthorizationUnavailable)
         ));
     }
