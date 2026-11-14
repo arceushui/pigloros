@@ -1719,60 +1719,70 @@ impl OwnTracksOwnerKey {
     }
 }
 
+/// Whether this platform has the owner-key file checks: they exist on Unix
+/// only, and every other platform refuses the owner key (fails closed).
 #[cfg(unix)]
-fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
-    }
-}
-
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> = Ok(());
 #[cfg(not(unix))]
-fn absolute_owner_key_path(_path: &Path) -> Result<PathBuf, GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
+const OWNER_KEY_PLATFORM: Result<(), GatewayError> =
+    Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+
+// One item per name with an internal `cfg` split: same-name `cfg` twins
+// would be paired by line in the cargo-crap baseline.
+fn absolute_owner_key_path(path: &Path) -> Result<PathBuf, GatewayError> {
+    OWNER_KEY_PLATFORM.and_then(|()| {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)
+        }
+    })
 }
 
-#[cfg(unix)]
 fn validate_owner_key_ancestors(path: &Path) -> Result<(), GatewayError> {
-    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
-    for (distance, ancestor) in parent.ancestors().enumerate() {
-        let metadata = std::fs::symlink_metadata(ancestor)
-            .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
-        let mode = metadata.mode();
-        let writable_by_group_or_other = mode & 0o022 != 0;
-        let sticky = mode & 0o1000 != 0;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || (writable_by_group_or_other && (distance == 0 || !sticky))
-        {
-            return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+        let parent = path
+            .parent()
+            .ok_or(GatewayError::OwnTracksOwnerKeyUnavailable)?;
+        for (distance, ancestor) in parent.ancestors().enumerate() {
+            let metadata = std::fs::symlink_metadata(ancestor)
+                .map_err(|_| GatewayError::OwnTracksOwnerKeyUnavailable)?;
+            let mode = metadata.mode();
+            let writable_by_group_or_other = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || (writable_by_group_or_other && (distance == 0 || !sticky))
+            {
+                return Err(GatewayError::OwnTracksOwnerKeyUnavailable);
+            }
         }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    OWNER_KEY_PLATFORM
 }
 
-#[cfg(not(unix))]
-fn validate_owner_key_ancestors(_path: &Path) -> Result<(), GatewayError> {
-    Err(GatewayError::OwnTracksOwnerKeyUnavailable)
-}
-
-#[cfg(unix)]
 fn owner_key_is_permissive(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    metadata.mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-const fn owner_key_is_permissive(_metadata: &std::fs::Metadata) -> bool {
-    true
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode()
+    };
+    // Without Unix permission bits every key is treated as permissive.
+    #[cfg(not(unix))]
+    let mode = {
+        let _ = metadata;
+        0o777
+    };
+    mode & 0o077 != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
