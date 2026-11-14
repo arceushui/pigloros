@@ -381,7 +381,30 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
         PipelineOutcomeV1::Committed(receipt.clone()),
         PipelineOutcomeV1::RecoveredDuplicate(receipt.clone())
     );
-    // Every outcome names its own kind, numbered in declaration order.
+    assert_outcome_kinds(receipt);
+
+    let mut changed = events.clone();
+    changed[1].payload = CanonicalBytes::from_static(b"changed");
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &changed),
+        Err(PipelineContractErrorV1::CommittedBatchMismatch)
+    );
+    let mut non_contiguous = events.clone();
+    non_contiguous[1].seq = Seq::from_u64(11);
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &non_contiguous),
+        Err(PipelineContractErrorV1::NonContiguousCommit)
+    );
+    let mut duplicate_id = events;
+    duplicate_id[1].id = duplicate_id[0].id;
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &duplicate_id),
+        Err(PipelineContractErrorV1::InvalidCommittedIdentity)
+    );
+}
+
+/// Every outcome names its own kind, numbered in declaration order.
+fn assert_outcome_kinds(receipt: PipelineCommitReceiptV1) {
     let outcomes = [
         (PipelineOutcomeV1::Rejected, PipelineOutcomeKindV1::Rejected),
         (
@@ -446,25 +469,6 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
         assert_eq!(outcome.kind(), *kind);
         assert_eq!(*kind as usize, index);
     }
-
-    let mut changed = events.clone();
-    changed[1].payload = CanonicalBytes::from_static(b"changed");
-    assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &changed),
-        Err(PipelineContractErrorV1::CommittedBatchMismatch)
-    );
-    let mut non_contiguous = events.clone();
-    non_contiguous[1].seq = Seq::from_u64(11);
-    assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &non_contiguous),
-        Err(PipelineContractErrorV1::NonContiguousCommit)
-    );
-    let mut duplicate_id = events;
-    duplicate_id[1].id = duplicate_id[0].id;
-    assert_eq!(
-        PipelineCommitReceiptV1::try_from_committed_events(&basis, timeline(1), &duplicate_id),
-        Err(PipelineContractErrorV1::InvalidCommittedIdentity)
-    );
 }
 
 #[test]
