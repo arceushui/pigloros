@@ -1,9 +1,9 @@
 //! Exact COH1/COE1 framing and local context bindings; never key-use authority.
 
 use super::{
-    bounded_bytes, canonical_end, digest, encode_coordinates, fixed_bytes, read_coordinates,
-    read_hash, read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
-    CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1, Result,
+    bounded_bytes, canonical_end, digest, encode_coordinates, fixed_bytes, head_len,
+    read_coordinates, read_hash, read_head, record_cursor, record_prefix, validate_coordinates,
+    validate_horizon, CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1, Result,
     MAX_COMMUNITY_PASS_KEY_BYTES_V1,
 };
 use crate::{
@@ -334,6 +334,18 @@ pub(super) fn encode_operation(out: &mut Vec<u8>, operation: CommunityArtifactOp
             out.push(2);
             encode_bytes(out, &id, 2);
         }
+    }
+}
+
+/// Exact length of [`encode_operation`]'s two fields for `operation`.
+pub(super) fn operation_len(operation: CommunityArtifactOperationV1) -> usize {
+    match operation {
+        CommunityArtifactOperationV1::Pass(key) => {
+            let key_len = Zeroizing::new(key.to_canonical_cbor()).len();
+            1 + head_len(key_len as u64) + key_len
+        }
+        CommunityArtifactOperationV1::Initialization(_)
+        | CommunityArtifactOperationV1::Control(_) => 18,
     }
 }
 
