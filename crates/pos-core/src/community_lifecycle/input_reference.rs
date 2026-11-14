@@ -5,7 +5,9 @@
 //! metadata record, derive its scope and check current authority. Decoding a
 //! reference establishes none of those facts.
 
-use super::member_progress::{encode_factual_node, read_factual_node, valid_factual_node};
+use super::member_progress::{
+    encode_factual_node, node_bytes, read_factual_node, valid_factual_node,
+};
 use super::{
     bounded_bytes, canonical_end, encode_coordinates, fixed_bytes, head_len, read_coordinates,
     read_hash, read_head, validate_coordinates, CommunityFactualNodeReferenceV1,
@@ -61,6 +63,12 @@ impl CommunityNativeNodeReferenceV1 {
     pub(super) const fn precedes(self, producer_ordinal: u64, node_ordinal: u32) -> bool {
         self.producer_ordinal < producer_ordinal
             || (self.producer_ordinal == producer_ordinal && self.node_ordinal < node_ordinal)
+    }
+
+    /// Exact length of [`Self::encode`]: array head, incarnation, the two
+    /// ordinals and the node digest.
+    fn encoded_len(self) -> usize {
+        1 + 17 + head_len(self.producer_ordinal) + head_len(u64::from(self.node_ordinal)) + 34
     }
 
     pub(super) fn encode(self, out: &mut Vec<u8>) {
@@ -216,6 +224,21 @@ impl CommunityMetadataLocatorV1 {
         })
     }
 
+    /// Exact length of [`Self::encode`]'s byte string: its head, then the
+    /// array head, T and G, the producer form, role and slot.
+    fn encoded_len(self) -> usize {
+        let producer = match self.producer {
+            CommunityLocatorProducerV1::Native(ordinal) => 1 + head_len(ordinal),
+            CommunityLocatorProducerV1::Control(_) => 1 + 17,
+        };
+        let inner = 1
+            + 34
+            + producer
+            + head_len(u64::from(self.record_role))
+            + head_len(u64::from(self.slot));
+        head_len(inner as u64) + inner
+    }
+
     fn encode(self, out: &mut Vec<u8>) {
         let mut inner = Zeroizing::new(Vec::with_capacity(MAX_LOCATOR_BYTES));
         inner.push(0x86);
@@ -346,6 +369,22 @@ impl CommunityTypedInputRefV1<'_> {
                     && private_record_digest != Hash::zero(),
             )
             .and_then(|()| locator.validate()),
+        }
+    }
+
+    /// Exact length of [`Self::encode`]: array head and tag (2), then the
+    /// variant's fields.
+    fn encoded_len(self) -> usize {
+        match self {
+            Self::Native(reference) => 2 + reference.encoded_len(),
+            Self::Factual { node, .. } => {
+                let node_len = node_bytes(node);
+                2 + 17 + head_len(node_len as u64) + node_len + 34
+            }
+            Self::Artifact { artifact_class, .. } => {
+                2 + 34 + head_len(artifact_class.code()) + 3 * 34
+            }
+            Self::Metadata { locator, .. } => 2 + 5 + locator.encoded_len() + 2 * 34,
         }
     }
 
@@ -541,19 +580,13 @@ impl<'a> CommunityTypedInputRefsV1<'a> {
         })
     }
 
-    /// Exact length of [`Self::encode`]'s array. A typed row is measured by
-    /// encoding it into wiped staging pre-sized above the widest reference
-    /// (a 244-byte factual reference with a 128-byte owner).
+    /// Exact length of [`Self::encode`]'s array, computed without encoding.
     pub(super) fn encoded_len(self) -> usize {
         head_len(self.len() as u64)
             + match self.0 {
                 RefRows::Typed(rows) => rows
                     .iter()
-                    .map(|reference| {
-                        let mut staging = Zeroizing::new(Vec::with_capacity(256));
-                        reference.encode(&mut staging);
-                        staging.len()
-                    })
+                    .map(CommunityTypedInputRefV1::encoded_len)
                     .sum::<usize>(),
                 RefRows::Canonical { bytes, .. } => bytes.len(),
             }

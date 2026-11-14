@@ -474,3 +474,29 @@ fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
     hasher.update(bytes);
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_head, head_len};
+
+    #[test]
+    fn head_len_matches_the_written_head_at_every_width_boundary() {
+        for (value, width) in [
+            (0, 1),
+            (23, 1),
+            (24, 2),
+            (255, 2),
+            (256, 3),
+            (65_535, 3),
+            (65_536, 5),
+            (u64::from(u32::MAX), 5),
+            (u64::from(u32::MAX) + 1, 9),
+            (u64::MAX, 9),
+        ] {
+            let mut head = Vec::new();
+            encode_head(&mut head, 0, value);
+            assert_eq!(head_len(value), width);
+            assert_eq!(head.len(), width);
+        }
+    }
+}
