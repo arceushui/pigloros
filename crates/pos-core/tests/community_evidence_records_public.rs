@@ -474,6 +474,8 @@ fn scope_binding_decoder_refuses_another_rule_and_malformed_fields() -> TestResu
         Value::Array(vec![rule_text(), uint(1), uint(1)]),
         Value::Array(vec![Value::Array(vec![uint(1)])]),
         Value::Array(vec![uint(1); 8]),
+        bytes(&[0; 128]),
+        text(&"r".repeat(128)),
     ];
     for rule in foreign {
         let mut value = valid.clone();
@@ -1271,6 +1273,29 @@ fn encoders_size_their_buffers_exactly() -> TestResult {
         assert_exact(&encoded, encoded.capacity());
         let again = Provenance::from_canonical_cbor(&encoded)?.to_canonical_cbor();
         assert_exact(&again, again.capacity());
+    }
+    // The locator's native producer ordinal at one-, three- and five-byte heads.
+    for ordinal in [9, 300, u64::from(u32::MAX)] {
+        let [.., TypedRef::Metadata {
+            schema,
+            locator,
+            envelope_address,
+            private_record_digest,
+        }, _] = every_ref_variant()
+        else {
+            return Err("metadata reference".into());
+        };
+        let reference = [TypedRef::Metadata {
+            schema,
+            locator: Locator {
+                producer: LocatorProducer::Native(ordinal),
+                ..locator
+            },
+            envelope_address,
+            private_record_digest,
+        }];
+        let encoded = Provenance::new(provenance_input(&reference))?.to_canonical_cbor();
+        assert_exact(&encoded, encoded.capacity());
     }
     let empty = Binding::new(binding_input(&[], &[]))?.to_canonical_cbor();
     assert_exact(&empty, empty.capacity());
