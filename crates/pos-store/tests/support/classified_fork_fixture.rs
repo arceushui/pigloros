@@ -324,6 +324,24 @@ impl Authority {
     pub fn admit_unregistered<S: Host>(&self, store: &mut S, seed: u8) -> Fallible<TimelineId> {
         let parent = store.create_timeline("classified-parent")?.id();
         store.append(parent, &[draft(1, "factual"), draft(2, "factual")])?;
+        let ForkAdmissionOperationResultV1::Fork(receipt) = self.fork(store, parent, seed)?? else {
+            return Err("FCC1 did not admit a Fork".into());
+        };
+        Ok(receipt.child_id)
+    }
+
+    /// Execute a fresh FCC1 of `parent`, a factual Timeline of two Events,
+    /// at its head under operation `[seed; 32]`. The outer error is a fixture
+    /// failure; the inner result is the store's.
+    ///
+    /// # Errors
+    /// Returns the signing error.
+    pub fn fork<S: Host>(
+        &self,
+        store: &mut S,
+        parent: TimelineId,
+        seed: u8,
+    ) -> Fallible<Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>> {
         let fork_fields = vec![
             Value::Bytes(parent.inner().to_bytes().to_vec()),
             Value::Integer(PARENT_CUT.into()),
@@ -334,12 +352,28 @@ impl Authority {
             Value::Text(format!("classified-{seed}")),
         ];
         let fcc1 = command(store, &self.session, "FCC1", seed, fork_fields)?;
-        let ForkAdmissionOperationResultV1::Fork(receipt) =
-            store.execute_fork_admission_command(&self.session, &policy()?, &fcc1)?
-        else {
-            return Err("FCC1 did not admit a Fork".into());
-        };
-        Ok(receipt.child_id)
+        Ok(store.execute_fork_admission_command(&self.session, &policy()?, &fcc1))
+    }
+
+    /// Execute a fresh Principal-to-Owner binding (POC1) of the fixture
+    /// Principal to [`OWNER`] under operation `[seed; 32]`. The outer error
+    /// is a fixture failure; the inner result is the store's.
+    ///
+    /// # Errors
+    /// Returns the signing error.
+    pub fn bind_owner<S: Host>(
+        &self,
+        store: &mut S,
+        seed: u8,
+    ) -> Fallible<Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>> {
+        let poc1 = command(
+            store,
+            &self.session,
+            "POC1",
+            seed,
+            vec![Value::Text(OWNER.to_owned())],
+        )?;
+        Ok(store.execute_fork_admission_command(&self.session, &policy()?, &poc1))
     }
 
     /// Issue a host-internal append permit for `fork`.

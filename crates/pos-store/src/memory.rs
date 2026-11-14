@@ -3178,12 +3178,20 @@ impl MemoryStore {
         // operation graph. A rejected FAC1 must not leave a durable fence
         // mutation behind.
         let mut authority = self.fork_admission_authority;
+        // ADR-134 §8: a stale or unattached writer of a bound store commits
+        // no FAC1, for a Fork and a Principal-to-Owner binding alike.
+        let mode = self.mode_binding.append_mode();
         advance_wall_fence(
             &mut authority,
             self.fork_admission_authority_enabled,
             session,
         )
-        .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        .map_err(pos_core::ForkAdmissionErrorV1::from)
+        .and_then(|()| {
+            mode.commit_epoch()
+                .map(drop)
+                .map_err(|error| pos_core::ForkAdmissionErrorV1::from(&error))
+        })?;
         let (issued_at, expires_at) = match &verified {
             VerifiedForkAdmissionCommandV1::PrincipalOwner {
                 issued_at,
@@ -17322,6 +17330,50 @@ mod admitted_fork_deletion {
 
     /// ADR-134 §8: a stale or unattached writer on a bound store appends no
     /// classified Event and changes no map.
+    /// ADR-134 §8: a stale or unattached writer of a bound store commits no
+    /// FAC1, neither a Principal-to-Owner binding nor a Fork, and answers
+    /// `ModeBindingStale`; the attached writer then admits the Fork.
+    #[test]
+    fn a_stale_or_unattached_writer_commits_no_fac1() -> Fallible<()> {
+        use std::num::NonZeroU64;
+
+        use pos_core::{
+            ForkAdmissionErrorV1, ForkAdmissionOperationResultV1, GatewayModeBindingHostV1,
+            GatewayModeBindingPortV1, GatewayModeProfileRefV1,
+        };
+
+        let mut store = open()?;
+        let profile = GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [1; 32])
+            .map_err(|error| format!("{error:?}"))?;
+        store
+            .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile))
+            .map_err(|error| format!("{error:?}"))?;
+        let authority = Authority::open(&mut store)?;
+        let parent = store.create_timeline("stale-parent")?.id();
+        store.append(parent, &[draft(1, "factual"), draft(2, "factual")])?;
+        let before = sizes(&store);
+        let fence = format!("{:?}", store.fork_admission_authority);
+        for attached in [None, NonZeroU64::new(2)] {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                authority.bind_owner(&mut store, 0xc1)?.err(),
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            );
+            assert_eq!(
+                authority.fork(&mut store, parent, 0xc2)?.err(),
+                Some(ForkAdmissionErrorV1::ModeBindingStale)
+            );
+            assert_eq!(sizes(&store), before);
+            assert_eq!(format!("{:?}", store.fork_admission_authority), fence);
+        }
+        store.mode_binding.attach_epoch_for_test(NonZeroU64::new(1));
+        assert!(matches!(
+            authority.fork(&mut store, parent, 0xc2)?,
+            Ok(ForkAdmissionOperationResultV1::Fork(_))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn a_stale_or_unattached_classified_append_commits_nothing() -> Fallible<()> {
         use std::num::NonZeroU64;

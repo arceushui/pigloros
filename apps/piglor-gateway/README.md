@@ -304,7 +304,10 @@ drains the executor. A new admitted Fork runs inside the host's erasure
 topology transition and returns code 0 only after the successor inventory is
 published; while the host is not Ready it fails closed with code 5. A saturated
 executor or a lost reply answers code 6, and an exact retry recovers a
-committed result through FRP1.
+committed result through FRP1. Code 8 (appended for ADR-134 §8) answers a
+Bind or Fork whose store binding another process changed: the FAC1 committed
+nothing, the Gateway stops serving and exits nonzero, and the client retries
+against the restarted Gateway.
 
 ### Fork classifier profile (FCP1)
 

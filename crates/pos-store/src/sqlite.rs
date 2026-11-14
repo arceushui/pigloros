@@ -12458,12 +12458,18 @@ impl SqliteStore {
             );
         }
         authority.session_identity = self.fork_admission_authority_runtime.session_identity;
+        // ADR-134 §8: a stale or unattached writer of a bound store commits
+        // no FAC1, for a Fork and a Principal-to-Owner binding alike.
         advance_wall_fence(
             &mut authority,
             self.fork_admission_authority_enabled,
             session,
         )
-        .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        .map_err(pos_core::ForkAdmissionErrorV1::from)
+        .and_then(|()| {
+            self.empty_commit_mode_check()
+                .map_err(|error| pos_core::ForkAdmissionErrorV1::from(&error))
+        })?;
         let now = authority.last_authority_wall_time;
         let (issued_at, expires_at) = match &command {
             VerifiedForkAdmissionCommandV1::PrincipalOwner {
