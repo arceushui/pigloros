@@ -244,7 +244,11 @@ impl GatewayModeMigrationPermitV1 {
 ///
 /// Constructing this value declares that the caller is the trusted
 /// composition root of the store it binds. The host must not expose this
-/// owner or its permits to Plugin code.
+/// owner or its permits to Plugin code. This follows the #1012 convention of
+/// [`crate::AuthorityPersistenceHostV1::new`]: pos-core cannot name its
+/// trusted callers, so the constructor is public and the composition roots
+/// (the Gateway's serve and `migrate-mode` paths) are its only production
+/// callers.
 #[derive(Debug)]
 pub struct GatewayModeBindingHostV1 {
     _composition_root: (),
@@ -324,14 +328,18 @@ pub trait GatewayModeBindingPortV1 {
         permit: GatewayModeBindPermitV1,
     ) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1>;
 
-    /// Attach the persisted binding's epoch to this adapter instance.
+    /// Attach the persisted binding's epoch to this adapter instance when,
+    /// in the same read, the persisted binding is exactly `expected`.
     ///
     /// # Errors
-    /// Returns [`GatewayModeBindingErrorV1::Unbound`] for an unbound store and a
-    /// closed invalid-record or unavailable error when the binding cannot be
-    /// trusted or read.
+    /// Returns [`GatewayModeBindingErrorV1::Unbound`] for an unbound store,
+    /// [`GatewayModeBindingErrorV1::Mismatch`] when the persisted binding is
+    /// not `expected` (it changed after the caller read it), and a closed
+    /// invalid-record or unavailable error when the binding cannot be trusted
+    /// or read.
     fn attach_mode_binding(
         &mut self,
+        expected: &GatewayModeProfileRefV1,
     ) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1>;
 
     /// Rotate the binding one hop: epoch + 1 and a history entry of kind

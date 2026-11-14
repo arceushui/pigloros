@@ -2387,3 +2387,50 @@ const fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
         busy_timeout: std::time::Duration::from_millis(100),
     }
 }
+
+/// ADR-134 §8: on a bound file, a handle attached to a pre-rotation epoch and
+/// a handle never attached admit no cell and consume no dedup slot.
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_a_stale_or_unattached_handle_admits_no_geo_cell() {
+    use pos_core::{
+        GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1, Seq,
+    };
+
+    let local = |byte| GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [byte; 32]);
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let open = || {
+        let mut store = SqliteStore::open(path).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+            .test_ok();
+        store
+    };
+    let mut binder = open();
+    binder
+        .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(local(1).test_ok()))
+        .test_ok();
+    let timeline = binder.create_timeline("bound-geo-cell").test_ok().id();
+    let entity = EntityId::new();
+    binder
+        .install_geo_cell_admission_fence(timeline, entity, admission_fence(timeline, entity, 13))
+        .test_ok();
+    let mut stale = open();
+    stale.attach_mode_binding(&local(1).test_ok()).test_ok();
+    let mut unattached = open();
+    let permit = GatewayModeBindingHostV1::new()
+        .authorize_rotation(local(1).test_ok(), local(2).test_ok())
+        .test_ok();
+    binder.rotate_mode(permit).test_ok();
+
+    for writer in [&mut stale, &mut unattached] {
+        assert!(matches!(
+            writer.admit(request(timeline, entity)),
+            Err(pos_core::CoreError::ModeBindingStale)
+        ));
+    }
+    let accepted = binder.admit(request(timeline, entity)).test_ok();
+    assert!(accepted.is_accepted());
+    assert_eq!(accepted.event_seq(), Some(Seq::from_u64(1)));
+}

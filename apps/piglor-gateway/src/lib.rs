@@ -1347,9 +1347,7 @@ pub(crate) fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        GatewayProtection::Required(Some(Arc::new(
-            authorization.with_mode_binding(&test_local_mode()),
-        ))),
+        GatewayProtection::Required(Some(Arc::new(test_local_authorization(authorization)))),
     )
 }
 
@@ -1357,6 +1355,16 @@ pub(crate) fn gateway_with_erasure_host_and_authorization(
 #[cfg(test)]
 fn test_local_mode() -> mode_profile::GatewayModeBindingV1 {
     mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, [])
+}
+
+/// `authorization` bound to the Local mode of [`test_local_mode`], which
+/// refuses no authorizer.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_local_authorization(authorization: GatewayAuthorization) -> GatewayAuthorization {
+    authorization
+        .with_mode_binding(&test_local_mode())
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
 }
 
 /// Bytes the Gateway configuration details spend before the bodies: the
@@ -2280,20 +2288,28 @@ impl Gateway {
     /// every admission (§6).
     ///
     /// # Errors
-    /// Returns a store or action-registry error if the recovered host or its
-    /// declared output policy cannot be bound.
+    /// Returns [`CoreError::ModeBindingStale`] when the host's store is not
+    /// bound to `mode`, [`GatewayError::AuthorizationUnavailable`] when `mode`
+    /// refuses `authorization`, or a store or action-registry error if the
+    /// recovered host or its declared output policy cannot be bound.
     pub fn new_with_erasure_host_and_authorization(
-        host: ErasureExecutionHostV1,
+        mut host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
         mode: &mode_profile::GatewayModeBindingV1,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
-        let store = executor::StoreExecutor::new_with_erasure_host(
-            host,
-            consent_authority.append_permit(),
-        )?;
+        let (store, authorization) = mode
+            .bind_host_authorization(&mut host, authorization)
+            .and_then(|authorization| {
+                executor::StoreExecutor::new_with_erasure_host(
+                    host,
+                    consent_authority.append_permit(),
+                )
+                .map(|store| (store, authorization))
+                .map_err(GatewayError::Store)
+            })?;
         Self::from_host_components(
             store,
             broadcast::channel(EVENT_BUS_CAPACITY).0,
@@ -2308,7 +2324,7 @@ impl Gateway {
                 gate,
             ),
             consent_authority,
-            GatewayProtection::Required(Some(Arc::new(authorization.with_mode_binding(mode)))),
+            GatewayProtection::Required(Some(Arc::new(authorization))),
         )
     }
 
@@ -2465,9 +2481,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(
-                authorization.with_mode_binding(&test_local_mode()),
-            )),
+            authorization: Some(Arc::new(test_local_authorization(authorization))),
             authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
@@ -4237,21 +4251,78 @@ mod tests {
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         ] {
-            let host = ErasureExecutionHostV1::open_verified_empty(
+            let mut host = ErasureExecutionHostV1::open_verified_empty(
                 StoreConfig::Memory,
                 pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
             )
             .test_ok();
+            let binding = crate::mode_profile::test_bound_host(&mut host, mode);
             assert!(matches!(
                 Gateway::new_with_erasure_host_and_authorization(
                     host,
                     [EntityId::new()],
-                    crate::authorization::test_authorization_for(EntityId::new()),
-                    &crate::mode_profile::test_binding(mode, []),
+                    crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                    &binding,
                 ),
                 Err(GatewayError::ActionRegistry(_))
             ));
         }
+    }
+
+    /// ADR-134 rev 5 M4 and D10: the handle must name the binding the host's
+    /// store records, and Air-Gapped refuses an authorizer that does not read
+    /// its authority from that one bound store.
+    #[test]
+    fn host_gateway_constructor_refuses_another_store_or_a_storeless_authorizer() {
+        use crate::mode_profile::{test_binding, test_bound_host, GatewayModeProfileIdV1};
+        let open = || {
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok()
+        };
+        let construct = |host, authorization, binding: &_| {
+            Gateway::new_with_erasure_host_and_authorization(
+                host,
+                [EntityId::new()],
+                authorization,
+                binding,
+            )
+        };
+        let unbound = construct(
+            open(),
+            crate::authorization::test_sourced_authorization_for(EntityId::new()),
+            &test_binding(GatewayModeProfileIdV1::Local, []),
+        );
+        assert!(matches!(
+            unbound,
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        drop(test_bound_host(&mut host, GatewayModeProfileIdV1::Local));
+        let other_mode = construct(
+            host,
+            crate::authorization::test_sourced_authorization_for(EntityId::new()),
+            &test_binding(GatewayModeProfileIdV1::AirGapped, []),
+        );
+        assert!(matches!(
+            other_mode,
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        let air_gapped = test_bound_host(&mut host, GatewayModeProfileIdV1::AirGapped);
+        let storeless = construct(
+            host,
+            crate::authorization::test_authorization_for(EntityId::new()),
+            &air_gapped,
+        );
+        assert!(matches!(
+            storeless,
+            Err(GatewayError::AuthorizationUnavailable)
+        ));
     }
 
     #[test]
@@ -4273,6 +4344,10 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
+        let binding = crate::mode_profile::test_bound_host(
+            &mut host,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        );
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
@@ -4280,10 +4355,7 @@ mod tests {
                 host,
                 std::iter::empty(),
                 crate::authorization::test_authorization_for(EntityId::new()),
-                &crate::mode_profile::test_binding(
-                    crate::mode_profile::GatewayModeProfileIdV1::Local,
-                    [],
-                ),
+                &binding,
             ),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));

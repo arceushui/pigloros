@@ -1275,6 +1275,21 @@ pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, Co
 /// # Errors
 ///
 /// Returns [`CoreError::Storage`] when the database cannot be opened or its
+/// The persisted binding when it is exactly `expected`: the attach check of
+/// both adapters (ADR-134 §8), made on the one read the attach uses.
+pub(crate) fn expected_mode_binding(
+    current: Option<pos_core::GatewayModeBindingRecordV1>,
+    expected: &pos_core::GatewayModeProfileRefV1,
+) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1> {
+    current
+        .ok_or(pos_core::GatewayModeBindingErrorV1::Unbound)
+        .and_then(|record| {
+            (record.profile() == expected)
+                .then_some(record)
+                .ok_or(pos_core::GatewayModeBindingErrorV1::Mismatch)
+        })
+}
+
 /// enrollment schema cannot be initialized.
 #[cfg(feature = "sqlite")]
 pub fn open_owntracks_enrollment_store(

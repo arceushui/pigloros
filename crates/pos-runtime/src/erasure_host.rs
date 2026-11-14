@@ -4711,20 +4711,9 @@ const fn map_world_replay_verification_error(
 const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
-        CoreError::ErasureContainmentUnavailable | CoreError::ModeBindingStale => {
-            unavailable_store_error(error)
-        }
+        CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
+        CoreError::ModeBindingStale => ErasureHostErrorV1::ModeBindingStale,
         _ => ErasureHostErrorV1::AdapterFailure,
-    }
-}
-
-/// A store that cannot serve this write: its erasure containment is
-/// unavailable, or the adapter's Gateway mode-binding epoch is stale.
-const fn unavailable_store_error(error: &CoreError) -> ErasureHostErrorV1 {
-    if matches!(error, CoreError::ModeBindingStale) {
-        ErasureHostErrorV1::ModeBindingStale
-    } else {
-        ErasureHostErrorV1::RecoveryUnavailable
     }
 }
 
@@ -6366,9 +6355,10 @@ mod tests {
 
         fn attach_mode_binding(
             &mut self,
+            expected: &pos_core::GatewayModeProfileRefV1,
         ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
         {
-            pos_core::GatewayModeBindingPortV1::attach_mode_binding(&mut self.inner)
+            pos_core::GatewayModeBindingPortV1::attach_mode_binding(&mut self.inner, expected)
         }
 
         fn rotate_mode(

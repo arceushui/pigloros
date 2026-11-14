@@ -15,11 +15,13 @@
 //! handle, which only [`bind_gateway_mode_v1`] returns. A downstream crate can
 //! neither construct a handle nor read bytes from it:
 //!
-//! ```compile_fail
-//! let _handle = piglor_gateway::mode_profile::GatewayModeBindingV1 {};
+//! ```compile_fail,E0451
+//! let _handle = piglor_gateway::mode_profile::GatewayModeBindingV1 {
+//!     stale: Default::default(),
+//! };
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0624
 //! fn digest(handle: &piglor_gateway::mode_profile::GatewayModeBindingV1) {
 //!     let _bytes = handle.revision_input();
 //! }
@@ -38,6 +40,7 @@ use std::{
     ffi::OsString,
     fmt,
     net::SocketAddr,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -58,6 +61,11 @@ mod compiled {
     include!(concat!(env!("OUT_DIR"), "/gateway_mode_profiles.rs"));
 }
 
+/// The Principal network capability (ADR-134 §4): a `DomainKey` that
+/// authorizes no operation in v1 and only selects the per-Principal Session
+/// `network` disclosure, which C4 (#1362) serves.
+pub const GATEWAY_NETWORK_CAPABILITY_V1: &str = "gateway.network.v1";
+
 /// Digest domain of one canonical GMP1 record, distinct from EPF1's.
 const GMP1_DIGEST_DOMAIN: &[u8] = b"PiglorOS.GatewayModeProfile.v1\0";
 /// Ingress tag of a loopback TCP HTTP listener.
@@ -75,7 +83,7 @@ const EPF1_EXPLICIT_ABSENT: u8 = 0x00;
 /// Closed failures of composing, binding and migrating a Gateway execution
 /// mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum GatewayModeBindingErrorV1 {
+pub enum GatewayModeErrorV1 {
     /// The `--profile` value names no compiled execution-mode profile.
     #[error("unknown gateway execution-mode profile")]
     UnknownProfile,
@@ -143,13 +151,13 @@ impl GatewayModeProfileIdV1 {
 }
 
 impl FromStr for GatewayModeProfileIdV1 {
-    type Err = GatewayModeBindingErrorV1;
+    type Err = GatewayModeErrorV1;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
             .find(|id| id.as_str() == value)
-            .ok_or(GatewayModeBindingErrorV1::UnknownProfile)
+            .ok_or(GatewayModeErrorV1::UnknownProfile)
     }
 }
 
@@ -173,13 +181,13 @@ impl GatewayNetworkGrantV1 {
 }
 
 impl FromStr for GatewayNetworkGrantV1 {
-    type Err = GatewayModeBindingErrorV1;
+    type Err = GatewayModeErrorV1;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "owntracks" => Ok(Self::OwnTracks),
             "public-read-only" => Ok(Self::PublicReadOnly),
-            _ => Err(GatewayModeBindingErrorV1::UnknownNetworkGrant),
+            _ => Err(GatewayModeErrorV1::UnknownNetworkGrant),
         }
     }
 }
@@ -190,10 +198,10 @@ impl FromStr for GatewayNetworkGrantV1 {
 pub struct GatewayServeCompositionV1 {
     /// The TCP HTTP bind.
     pub tcp_addr: SocketAddr,
-    /// Whether `--owntracks-owner-key` composes `OwnTracks` ingress.
-    pub owntracks_ingress: bool,
-    /// Whether `--require-local-fork-authority` composes the Unix socket.
-    pub fork_admission_socket: bool,
+    /// The `--owntracks-owner-key` path, when `OwnTracks` ingress is composed.
+    pub owntracks_owner_key: Option<PathBuf>,
+    /// The Unix-domain Fork-admission socket, when it is composed.
+    pub fork_admission_socket: Option<PathBuf>,
     /// The configured `LEDGER_SOURCE`, if any.
     pub ledger_source: Option<OsString>,
     /// The sorted, duplicate-free `--network-grant` set.
@@ -249,7 +257,7 @@ pub(crate) struct GatewayModeProfileV1 {
 
 impl GatewayModeProfileV1 {
     /// Decode compiled `bytes` as the profile of `id`.
-    fn decode(id: GatewayModeProfileIdV1, bytes: &[u8]) -> Result<Self, GatewayModeBindingErrorV1> {
+    fn decode(id: GatewayModeProfileIdV1, bytes: &[u8]) -> Result<Self, GatewayModeErrorV1> {
         decode_gmp1(bytes)
             .filter(|record| record.mode_profile_id == id.as_str())
             .map(|record| Self {
@@ -257,13 +265,13 @@ impl GatewayModeProfileV1 {
                 record,
                 digest: GatewayModeProfileDigestV1::of(bytes),
             })
-            .ok_or(GatewayModeBindingErrorV1::InvalidProfileRecord)
+            .ok_or(GatewayModeErrorV1::InvalidProfileRecord)
     }
 
     /// The neutral store reference of this profile.
-    fn reference(&self) -> Result<GatewayModeProfileRefV1, GatewayModeBindingErrorV1> {
+    fn reference(&self) -> Result<GatewayModeProfileRefV1, GatewayModeErrorV1> {
         GatewayModeProfileRefV1::try_new(self.id.as_str(), self.digest.store_bytes())
-            .map_err(GatewayModeBindingErrorV1::Store)
+            .map_err(GatewayModeErrorV1::Store)
     }
 
     fn allows_ingress(&self, tag: u8) -> bool {
@@ -340,14 +348,14 @@ fn optional_digest(value: Value) -> Result<Option<[u8; 32]>, ()> {
 /// every other platform fails closed.
 pub(crate) fn installed_gateway_mode_profile_v1(
     id: GatewayModeProfileIdV1,
-) -> Result<GatewayModeProfileV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeProfileV1, GatewayModeErrorV1> {
     let bytes = match id {
         GatewayModeProfileIdV1::Local => compiled::GATEWAY_MODE_LOCAL_V1,
         GatewayModeProfileIdV1::AirGapped => compiled::GATEWAY_MODE_AIR_GAPPED_V1,
     };
     refuse(
         !cfg!(target_os = "linux"),
-        GatewayModeBindingErrorV1::UnsupportedPlatform,
+        GatewayModeErrorV1::UnsupportedPlatform,
     )
     .and_then(|()| GatewayModeProfileV1::decode(id, bytes))
 }
@@ -360,7 +368,7 @@ pub(crate) fn installed_gateway_mode_profile_v1(
 pub fn verify_gateway_serve_composition_v1(
     id: GatewayModeProfileIdV1,
     composition: &GatewayServeCompositionV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+) -> Result<(), GatewayModeErrorV1> {
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| verify_predicates(&profile, composition))
 }
@@ -368,16 +376,13 @@ pub fn verify_gateway_serve_composition_v1(
 fn verify_predicates(
     profile: &GatewayModeProfileV1,
     composition: &GatewayServeCompositionV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+) -> Result<(), GatewayModeErrorV1> {
     listeners_within_ingress(profile, composition)
         .and_then(|()| network_features_granted(profile, composition))
         .and_then(|()| no_network_ledger_source(composition))
 }
 
-const fn refuse(
-    refused: bool,
-    error: GatewayModeBindingErrorV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+const fn refuse(refused: bool, error: GatewayModeErrorV1) -> Result<(), GatewayModeErrorV1> {
     if refused {
         Err(error)
     } else {
@@ -390,7 +395,7 @@ const fn refuse(
 fn listeners_within_ingress(
     profile: &GatewayModeProfileV1,
     composition: &GatewayServeCompositionV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+) -> Result<(), GatewayModeErrorV1> {
     let loopback = composition.tcp_addr.ip().is_loopback();
     let tcp = if loopback {
         INGRESS_LOOPBACK_HTTP
@@ -398,14 +403,14 @@ fn listeners_within_ingress(
         INGRESS_PUBLIC_READ_ONLY
     };
     let outside = !profile.allows_ingress(tcp)
-        || (composition.fork_admission_socket
+        || (composition.fork_admission_socket.is_some()
             && !profile.allows_ingress(INGRESS_FORK_ADMISSION_SOCKET));
     let ungranted = !loopback
         && !composition
             .network_grants
             .contains(&GatewayNetworkGrantV1::PublicReadOnly);
-    refuse(outside, GatewayModeBindingErrorV1::ListenerOutsideIngress)
-        .and_then(|()| refuse(ungranted, GatewayModeBindingErrorV1::NetworkGrantRequired))
+    refuse(outside, GatewayModeErrorV1::ListenerOutsideIngress)
+        .and_then(|()| refuse(ungranted, GatewayModeErrorV1::NetworkGrantRequired))
 }
 
 /// Predicate 3: a mode without network accepts no grant, and `OwnTracks`
@@ -413,11 +418,11 @@ fn listeners_within_ingress(
 fn network_features_granted(
     profile: &GatewayModeProfileV1,
     composition: &GatewayServeCompositionV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
-    let owntracks = composition.owntracks_ingress;
+) -> Result<(), GatewayModeErrorV1> {
+    let owntracks = composition.owntracks_owner_key.is_some();
     refuse(
         !profile.record.network_allowed && !composition.network_grants.is_empty(),
-        GatewayModeBindingErrorV1::NetworkGrantRefused,
+        GatewayModeErrorV1::NetworkGrantRefused,
     )
     .and_then(|()| {
         refuse(
@@ -425,13 +430,13 @@ fn network_features_granted(
                 && !composition
                     .network_grants
                     .contains(&GatewayNetworkGrantV1::OwnTracks),
-            GatewayModeBindingErrorV1::NetworkGrantRequired,
+            GatewayModeErrorV1::NetworkGrantRequired,
         )
     })
     .and_then(|()| {
         refuse(
             owntracks && !composition.tcp_addr.ip().is_loopback(),
-            GatewayModeBindingErrorV1::OwnTracksRequiresLoopback,
+            GatewayModeErrorV1::OwnTracksRequiresLoopback,
         )
     })
 }
@@ -439,13 +444,13 @@ fn network_features_granted(
 /// Predicate 4: the ledger source is absent or a local filesystem path.
 fn no_network_ledger_source(
     composition: &GatewayServeCompositionV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+) -> Result<(), GatewayModeErrorV1> {
     refuse(
         composition
             .ledger_source
             .as_ref()
             .is_some_and(|source| source.to_string_lossy().contains("://")),
-        GatewayModeBindingErrorV1::NetworkLedgerSource,
+        GatewayModeErrorV1::NetworkLedgerSource,
     )
 }
 
@@ -511,7 +516,7 @@ impl GatewayExecutionModeRevisionV1 {
 #[derive(Clone)]
 pub struct GatewayModeBindingV1 {
     profile: GatewayModeProfileV1,
-    network_grants: BTreeSet<GatewayNetworkGrantV1>,
+    composition: GatewayServeCompositionV1,
     stale: Arc<GatewayModeStaleSignalV1>,
 }
 
@@ -522,12 +527,75 @@ impl fmt::Debug for GatewayModeBindingV1 {
 }
 
 impl GatewayModeBindingV1 {
-    fn new(profile: GatewayModeProfileV1, network_grants: BTreeSet<GatewayNetworkGrantV1>) -> Self {
+    fn new(profile: GatewayModeProfileV1, composition: GatewayServeCompositionV1) -> Self {
         Self {
             profile,
-            network_grants,
+            composition,
             stale: Arc::default(),
         }
+    }
+
+    /// The TCP bind the startup predicates verified; the listener binds it.
+    #[must_use]
+    pub const fn tcp_addr(&self) -> SocketAddr {
+        self.composition.tcp_addr
+    }
+
+    /// The verified `OwnTracks` owner-key path, when ingress is composed.
+    #[must_use]
+    pub fn owntracks_owner_key(&self) -> Option<&Path> {
+        self.composition.owntracks_owner_key.as_deref()
+    }
+
+    /// The verified Fork-admission socket, when it is composed.
+    #[must_use]
+    pub fn fork_admission_socket(&self) -> Option<&Path> {
+        self.composition.fork_admission_socket.as_deref()
+    }
+
+    /// Check that `host`'s store holds exactly this binding, so a handle
+    /// never composes over a host it was not bound on.
+    ///
+    /// # Errors
+    /// Returns the store's read error, [`pos_core::GatewayModeBindingErrorV1::Unbound`]
+    /// for an unbound store, or [`GatewayModeErrorV1::ModeMismatch`].
+    pub(crate) fn verify_host(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+    ) -> Result<(), GatewayModeErrorV1> {
+        let stored = host
+            .gateway_mode_binding()
+            .load_mode_binding()
+            .map_err(GatewayModeErrorV1::Store)
+            .and_then(|stored| {
+                stored.ok_or(GatewayModeErrorV1::Store(
+                    pos_core::GatewayModeBindingErrorV1::Unbound,
+                ))
+            });
+        stored.and_then(|record| {
+            self.profile.reference().and_then(|expected| {
+                refuse(
+                    record.profile() != &expected,
+                    GatewayModeErrorV1::ModeMismatch,
+                )
+            })
+        })
+    }
+
+    /// `authorization` bound to this mode over `host`, whose store must
+    /// record this binding.
+    pub(crate) fn bind_host_authorization(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        authorization: crate::GatewayAuthorization,
+    ) -> Result<crate::GatewayAuthorization, crate::GatewayError> {
+        self.verify_host(host)
+            .map_err(|_| crate::GatewayError::Store(pos_core::CoreError::ModeBindingStale))
+            .and_then(|()| {
+                authorization
+                    .with_mode_binding(self)
+                    .map_err(|_| crate::GatewayError::AuthorizationUnavailable)
+            })
     }
 
     /// The §6 revision inputs of this binding.
@@ -535,6 +603,7 @@ impl GatewayModeBindingV1 {
         GatewayExecutionModeRevisionV1 {
             mode_profile: self.profile.digest.revision_bytes(),
             grants: self
+                .composition
                 .network_grants
                 .iter()
                 .map(|grant| grant.tag())
@@ -571,14 +640,14 @@ impl GatewayModeBindingV1 {
 /// Returns the first refused predicate or store binding failure.
 pub fn bind_gateway_mode_v1(
     id: GatewayModeProfileIdV1,
-    composition: &GatewayServeCompositionV1,
+    composition: GatewayServeCompositionV1,
     host: &mut ErasureExecutionHostV1,
-) -> Result<GatewayModeBindingV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeBindingV1, GatewayModeErrorV1> {
     installed_gateway_mode_profile_v1(id)
-        .and_then(|profile| verify_predicates(&profile, composition).map(|()| profile))
+        .and_then(|profile| verify_predicates(&profile, &composition).map(|()| profile))
         .and_then(|profile| {
             bind_store(host.gateway_mode_binding(), &profile)
-                .map(|_| GatewayModeBindingV1::new(profile, composition.network_grants.clone()))
+                .map(|_| GatewayModeBindingV1::new(profile, composition))
         })
 }
 
@@ -594,7 +663,7 @@ fn decide(
     stored: Option<GatewayModeBindingRecordV1>,
     current: &GatewayModeProfileRefV1,
     previous: Option<[u8; 32]>,
-) -> Result<BindingDecisionV1, GatewayModeBindingErrorV1> {
+) -> Result<BindingDecisionV1, GatewayModeErrorV1> {
     match stored {
         None => Ok(BindingDecisionV1::Bind),
         Some(record) if record.profile() == current => Ok(BindingDecisionV1::Attach),
@@ -604,17 +673,17 @@ fn decide(
         {
             Ok(BindingDecisionV1::Rotate(record.profile().clone()))
         }
-        Some(_) => Err(GatewayModeBindingErrorV1::ModeMismatch),
+        Some(_) => Err(GatewayModeErrorV1::ModeMismatch),
     }
 }
 
 fn bind_store(
     port: &mut dyn GatewayModeBindingPortV1,
     profile: &GatewayModeProfileV1,
-) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeBindingRecordV1, GatewayModeErrorV1> {
     profile.reference().and_then(|current| {
         port.load_mode_binding()
-            .map_err(GatewayModeBindingErrorV1::Store)
+            .map_err(GatewayModeErrorV1::Store)
             .and_then(|stored| {
                 decide(
                     stored,
@@ -630,16 +699,25 @@ fn apply_decision(
     port: &mut dyn GatewayModeBindingPortV1,
     current: GatewayModeProfileRefV1,
     decision: BindingDecisionV1,
-) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeBindingRecordV1, GatewayModeErrorV1> {
     let host = GatewayModeBindingHostV1::new();
     match decision {
         BindingDecisionV1::Bind => port.bind_empty_store_mode(host.authorize_bind(current)),
-        BindingDecisionV1::Attach => port.attach_mode_binding(),
+        BindingDecisionV1::Attach => port.attach_mode_binding(&current),
         BindingDecisionV1::Rotate(from) => host
             .authorize_rotation(from, current)
             .and_then(|permit| port.rotate_mode(permit)),
     }
-    .map_err(GatewayModeBindingErrorV1::Store)
+    .map_err(binding_change_error)
+}
+
+/// A binding that changed after predicate 5 read it is another mode.
+const fn binding_change_error(error: pos_core::GatewayModeBindingErrorV1) -> GatewayModeErrorV1 {
+    if matches!(error, pos_core::GatewayModeBindingErrorV1::Mismatch) {
+        GatewayModeErrorV1::ModeMismatch
+    } else {
+        GatewayModeErrorV1::Store(error)
+    }
 }
 
 /// Attach an offline writer's adapter to its store's binding and return the
@@ -648,36 +726,49 @@ fn apply_decision(
 /// compiled profile matches.
 ///
 /// # Errors
-/// Returns the store's refusal or [`GatewayModeBindingErrorV1::ModeMismatch`].
+/// Returns the store's refusal or [`GatewayModeErrorV1::ModeMismatch`].
 pub(crate) fn attach_offline_writer_v1(
     store: &mut dyn GatewayModeBindingPortV1,
-) -> Result<GatewayModeProfileIdV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeProfileIdV1, GatewayModeErrorV1> {
     store
-        .attach_mode_binding()
-        .map_err(GatewayModeBindingErrorV1::Store)
-        .and_then(|record| compiled_id_of(record.profile()))
+        .load_mode_binding()
+        .map_err(GatewayModeErrorV1::Store)
+        .and_then(|stored| {
+            stored.ok_or(GatewayModeErrorV1::Store(
+                pos_core::GatewayModeBindingErrorV1::Unbound,
+            ))
+        })
+        .and_then(|record| compiled_profile_of(record.profile()))
+        .and_then(|(id, reference)| {
+            store
+                .attach_mode_binding(&reference)
+                .map(|_| id)
+                .map_err(binding_change_error)
+        })
 }
 
-fn compiled_id_of(
+fn compiled_profile_of(
     profile: &GatewayModeProfileRefV1,
-) -> Result<GatewayModeProfileIdV1, GatewayModeBindingErrorV1> {
+) -> Result<(GatewayModeProfileIdV1, GatewayModeProfileRefV1), GatewayModeErrorV1> {
     GatewayModeProfileIdV1::ALL
         .into_iter()
-        .find(|id| {
-            installed_gateway_mode_profile_v1(*id)
+        .find_map(|id| {
+            installed_gateway_mode_profile_v1(id)
                 .and_then(|installed| installed.reference())
-                .is_ok_and(|installed| &installed == profile)
+                .ok()
+                .filter(|installed| installed == profile)
+                .map(|installed| (id, installed))
         })
-        .ok_or(GatewayModeBindingErrorV1::ModeMismatch)
+        .ok_or(GatewayModeErrorV1::ModeMismatch)
 }
 
 /// Refuse an operation the Air-Gapped mode never composes.
 pub(crate) const fn refuse_air_gapped(
     mode: GatewayModeProfileIdV1,
-) -> Result<(), GatewayModeBindingErrorV1> {
+) -> Result<(), GatewayModeErrorV1> {
     refuse(
         matches!(mode, GatewayModeProfileIdV1::AirGapped),
-        GatewayModeBindingErrorV1::RefusedInMode,
+        GatewayModeErrorV1::RefusedInMode,
     )
 }
 
@@ -693,39 +784,42 @@ impl GatewayModeStoreLockV1 {
     /// Take the shared lock of the store at `sqlite_path`.
     ///
     /// # Errors
-    /// Returns [`GatewayModeBindingErrorV1::StoreLockUnavailable`] while
+    /// Returns [`GatewayModeErrorV1::StoreLockUnavailable`] while
     /// `migrate-mode` holds it or when the lock file cannot be opened, and
-    /// [`GatewayModeBindingErrorV1::UnsupportedPlatform`] off Linux.
-    pub fn shared(sqlite_path: &str) -> Result<Self, GatewayModeBindingErrorV1> {
+    /// [`GatewayModeErrorV1::UnsupportedPlatform`] off Linux.
+    pub fn shared(sqlite_path: &str) -> Result<Self, GatewayModeErrorV1> {
         Self::acquire(sqlite_path, false)
     }
 
     /// Take the exclusive lock of the store at `sqlite_path`.
     ///
     /// # Errors
-    /// Returns [`GatewayModeBindingErrorV1::StoreLockUnavailable`] while any
+    /// Returns [`GatewayModeErrorV1::StoreLockUnavailable`] while any
     /// other holder exists or when the lock file cannot be opened, and
-    /// [`GatewayModeBindingErrorV1::UnsupportedPlatform`] off Linux.
-    pub fn exclusive(sqlite_path: &str) -> Result<Self, GatewayModeBindingErrorV1> {
+    /// [`GatewayModeErrorV1::UnsupportedPlatform`] off Linux.
+    pub fn exclusive(sqlite_path: &str) -> Result<Self, GatewayModeErrorV1> {
         Self::acquire(sqlite_path, true)
     }
 
     /// Open the lock file and take a non-blocking `flock` on it (the
     /// standard library's file lock is `flock(2)` on Linux). Other platforms
     /// fail closed.
-    fn acquire(sqlite_path: &str, exclusive: bool) -> Result<Self, GatewayModeBindingErrorV1> {
+    fn acquire(sqlite_path: &str, exclusive: bool) -> Result<Self, GatewayModeErrorV1> {
         refuse(
             !cfg!(target_os = "linux"),
-            GatewayModeBindingErrorV1::UnsupportedPlatform,
+            GatewayModeErrorV1::UnsupportedPlatform,
         )
         .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(format!("{sqlite_path}.gateway-mode.lock"))
-                .ok()
+            lock_path(sqlite_path)
+                .and_then(|lock| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(lock)
+                        .ok()
+                })
                 .and_then(|file| {
                     let locked = if exclusive {
                         file.try_lock()
@@ -734,9 +828,32 @@ impl GatewayModeStoreLockV1 {
                     };
                     locked.ok().map(|()| Self { _file: file })
                 })
-                .ok_or(GatewayModeBindingErrorV1::StoreLockUnavailable)
+                .ok_or(GatewayModeErrorV1::StoreLockUnavailable)
         })
     }
+}
+
+/// The lock file of the store at `sqlite_path`:
+/// `<canonical store path>.gateway-mode.lock`. The store path is resolved
+/// through every symlink (its parent directory when the file does not exist
+/// yet), so every alias of one store names the same lock.
+fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
+    let path = Path::new(".").join(sqlite_path);
+    path.canonicalize()
+        .ok()
+        .or_else(|| {
+            path.parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .zip(path.file_name())
+                .map(|(directory, name)| directory.join(name))
+        })
+        .and_then(|store| {
+            store.file_name().map(|name| {
+                let mut lock = name.to_os_string();
+                lock.push(".gateway-mode.lock");
+                store.with_file_name(lock)
+            })
+        })
 }
 
 /// Run `migrate-mode <sqlite-path> --from <id> --to <id>`.
@@ -751,42 +868,44 @@ pub fn migrate_gateway_mode_v1(
     sqlite_path: &str,
     from: GatewayModeProfileIdV1,
     to: GatewayModeProfileIdV1,
-) -> Result<String, GatewayModeBindingErrorV1> {
+) -> Result<String, GatewayModeErrorV1> {
     let lock = GatewayModeStoreLockV1::exclusive(sqlite_path)?;
-    let audit = installed_gateway_mode_profile_v1(from)
-        .and_then(|from| installed_gateway_mode_profile_v1(to).map(|to| (from, to)))
-        .and_then(|(from, to)| {
-            from.reference()
-                .and_then(|from_ref| to.reference().map(|to_ref| (from_ref, to_ref)))
-                .and_then(|(from_ref, to_ref)| {
-                    GatewayModeBindingHostV1::new()
-                        .authorize_migration(from_ref, to_ref)
-                        .map_err(GatewayModeBindingErrorV1::Store)
-                })
-                .and_then(|permit| {
-                    pos_store::sqlite::SqliteStore::open(sqlite_path)
-                        .map_err(|_| {
-                            GatewayModeBindingErrorV1::Store(
-                                pos_core::GatewayModeBindingErrorV1::Unavailable,
-                            )
-                        })
-                        .and_then(|mut store| {
-                            store
-                                .migrate_mode(permit)
-                                .map_err(GatewayModeBindingErrorV1::Store)
-                        })
-                })
-                .map(|record| {
-                    format!(
-                        "migrated gateway execution mode from {} ({}) to {} ({}) at binding epoch {}",
-                        from.id.as_str(),
-                        from.digest.to_hex(),
-                        to.id.as_str(),
-                        to.digest.to_hex(),
-                        record.binding_epoch()
-                    )
-                })
-        });
+    let audit = refuse(
+        !Path::new(sqlite_path).is_file(),
+        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unbound),
+    )
+    .and_then(|()| installed_gateway_mode_profile_v1(from))
+    .and_then(|from| installed_gateway_mode_profile_v1(to).map(|to| (from, to)))
+    .and_then(|(from, to)| {
+        from.reference()
+            .and_then(|from_ref| to.reference().map(|to_ref| (from_ref, to_ref)))
+            .and_then(|(from_ref, to_ref)| {
+                GatewayModeBindingHostV1::new()
+                    .authorize_migration(from_ref, to_ref)
+                    .map_err(GatewayModeErrorV1::Store)
+            })
+            .and_then(|permit| {
+                pos_store::sqlite::SqliteStore::open(sqlite_path)
+                    .map_err(|_| {
+                        GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unavailable)
+                    })
+                    .and_then(|mut store| {
+                        store
+                            .migrate_mode(permit)
+                            .map_err(GatewayModeErrorV1::Store)
+                    })
+            })
+            .map(|record| {
+                format!(
+                    "migrated gateway execution mode from {} ({}) to {} ({}) at binding epoch {}",
+                    from.id.as_str(),
+                    from.digest.to_hex(),
+                    to.id.as_str(),
+                    to.digest.to_hex(),
+                    record.binding_epoch()
+                )
+            })
+    });
     drop(lock);
     audit
 }
@@ -799,9 +918,42 @@ pub(crate) fn test_binding(
     id: GatewayModeProfileIdV1,
     grants: impl IntoIterator<Item = GatewayNetworkGrantV1>,
 ) -> GatewayModeBindingV1 {
+    test_binding_of(
+        id,
+        GatewayServeCompositionV1 {
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: grants.into_iter().collect(),
+        },
+    )
+}
+
+/// A unit-test binding of the compiled `id` over `composition`, whose
+/// predicates the caller vouches for.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_binding_of(
+    id: GatewayModeProfileIdV1,
+    composition: GatewayServeCompositionV1,
+) -> GatewayModeBindingV1 {
     let profile = installed_gateway_mode_profile_v1(id)
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
-    GatewayModeBindingV1::new(profile, grants.into_iter().collect())
+    GatewayModeBindingV1::new(profile, composition)
+}
+
+/// Bind an empty unit-test host to the compiled `id` and return its handle,
+/// as the first `serve` does.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn test_bound_host(
+    host: &mut ErasureExecutionHostV1,
+    id: GatewayModeProfileIdV1,
+) -> GatewayModeBindingV1 {
+    bind_test_store(host.gateway_mode_binding(), id)
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+    test_binding(id, [])
 }
 
 /// Bind an empty unit-test store to the compiled `id`, as the first `serve`
@@ -811,12 +963,12 @@ pub(crate) fn test_binding(
 pub(crate) fn bind_test_store(
     store: &mut dyn GatewayModeBindingPortV1,
     id: GatewayModeProfileIdV1,
-) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
+) -> Result<GatewayModeBindingRecordV1, GatewayModeErrorV1> {
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| profile.reference())
         .and_then(|reference| {
             store
                 .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(reference))
-                .map_err(GatewayModeBindingErrorV1::Store)
+                .map_err(GatewayModeErrorV1::Store)
         })
 }

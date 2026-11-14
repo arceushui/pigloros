@@ -169,12 +169,9 @@ impl GatewayModeBindingPortV1 for MemoryStore {
 
     fn attach_mode_binding(
         &mut self,
+        expected: &GatewayModeProfileRefV1,
     ) -> Result<GatewayModeBindingRecordV1, GatewayModeBindingErrorV1> {
-        let current = self
-            .mode_binding
-            .current()
-            .cloned()
-            .ok_or(GatewayModeBindingErrorV1::Unbound);
+        let current = crate::expected_mode_binding(self.mode_binding.current().cloned(), expected);
         current.inspect(|record| self.mode_binding.attached = Some(record.binding_epoch()))
     }
 
@@ -279,7 +276,9 @@ mod tests {
             "gateway-mode-local-v1",
             [1; 32],
         ));
-        ok(store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile)));
+        ok(store.bind_empty_store_mode(
+            GatewayModeBindingHostV1::new().authorize_bind(profile.clone()),
+        ));
         let timeline = ok(store.create_timeline("bound")).id();
         let events = committed_events();
         for attached in [None, NonZeroU64::new(2)] {
@@ -292,13 +291,18 @@ mod tests {
                 store.append_committed(timeline, &events),
                 Err(CoreError::ModeBindingStale)
             ));
+            assert!(matches!(
+                store.append_committed(timeline, &[]),
+                Err(CoreError::ModeBindingStale)
+            ));
             assert_eq!(event_count(&store, timeline), 0);
             assert_eq!(
                 ok(store.load_commit_epoch(timeline, Seq::from_u64(1))),
                 None
             );
         }
-        ok(store.attach_mode_binding());
+        ok(store.attach_mode_binding(&profile));
+        ok(store.append_committed(timeline, &[]));
         ok(store.append_committed(timeline, &events));
         ok(store.append(timeline, &[draft()]));
         for seq in 1..=3 {

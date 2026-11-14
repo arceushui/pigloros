@@ -134,10 +134,10 @@ fn bind_local_mode(
 ) -> piglor_gateway::mode_profile::GatewayModeBindingV1 {
     piglor_gateway::mode_profile::bind_gateway_mode_v1(
         piglor_gateway::mode_profile::GatewayModeProfileIdV1::Local,
-        &piglor_gateway::mode_profile::GatewayServeCompositionV1 {
+        piglor_gateway::mode_profile::GatewayServeCompositionV1 {
             tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
-            owntracks_ingress: false,
-            fork_admission_socket: false,
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
             ledger_source: None,
             network_grants: std::collections::BTreeSet::new(),
         },

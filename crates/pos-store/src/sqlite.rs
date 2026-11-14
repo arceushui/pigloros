@@ -4144,7 +4144,8 @@ impl SqliteStore {
             &self.conn,
             self.erasure_gate_bound,
             self.erasure_inventory_data_version,
-        )?;
+        )
+        .map_err(|refusal| self.stale_binding_refusal(refusal))?;
         if !self.erasure_gate_bound {
             return Ok(());
         }
@@ -6819,7 +6820,7 @@ impl EventStore for SqliteStore {
                 let _ = store
                     .get_timeline(timeline)?
                     .ok_or(CoreError::TimelineNotFound(timeline))?;
-                return Ok(());
+                return store.empty_commit_mode_check();
             }
             crate::ensure_non_geographic_events(events, timeline)
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))

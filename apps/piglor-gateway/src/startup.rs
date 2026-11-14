@@ -15,7 +15,7 @@ use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 
 use crate::{
-    mode_profile::{GatewayModeBindingErrorV1, GatewayModeBindingV1},
+    mode_profile::{GatewayModeBindingV1, GatewayModeErrorV1},
     Gateway,
 };
 
@@ -104,11 +104,11 @@ pub fn shutdown_or_stale<S: Future<Output = ()> + Send + 'static>(
 /// After the serve loop: a stale binding makes the process exit nonzero.
 ///
 /// # Errors
-/// Returns [`GatewayModeBindingErrorV1::Stale`] when a write found the
+/// Returns [`GatewayModeErrorV1::Stale`] when a write found the
 /// binding stale.
-pub fn stale_binding_exit(mode: &GatewayModeBindingV1) -> Result<(), GatewayModeBindingErrorV1> {
+pub fn stale_binding_exit(mode: &GatewayModeBindingV1) -> Result<(), GatewayModeErrorV1> {
     if mode.stale_signal().fired() {
-        Err(GatewayModeBindingErrorV1::Stale)
+        Err(GatewayModeErrorV1::Stale)
     } else {
         Ok(())
     }
@@ -142,10 +142,7 @@ mod tests {
         let waiting = shutdown_or_stale(std::future::pending(), &mode);
         mode.stale_signal().fire();
         waiting.await;
-        assert_eq!(
-            stale_binding_exit(&mode),
-            Err(GatewayModeBindingErrorV1::Stale)
-        );
+        assert_eq!(stale_binding_exit(&mode), Err(GatewayModeErrorV1::Stale));
     }
 
     #[test]

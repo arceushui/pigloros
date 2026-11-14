@@ -144,7 +144,7 @@ fn an_empty_store_binds_once_at_epoch_one() {
             "{name}"
         );
         assert_eq!(
-            ok(store.attach_mode_binding()),
+            ok(store.attach_mode_binding(&profile(LOCAL, 1))),
             record(LOCAL, 1, 1),
             "{name}"
         );
@@ -162,7 +162,7 @@ fn a_populated_unbound_store_can_never_be_bound() {
             "{name}"
         );
         assert_eq!(
-            store.attach_mode_binding(),
+            store.attach_mode_binding(&profile(LOCAL, 1)),
             Err(GatewayModeBindingErrorV1::Unbound),
             "{name}"
         );
@@ -215,7 +215,7 @@ fn rotation_and_migration_advance_one_epoch_from_the_current_binding() {
             "{name}"
         );
         assert_eq!(
-            ok(store.attach_mode_binding()),
+            ok(store.attach_mode_binding(&profile(AIR_GAPPED, 3))),
             record(AIR_GAPPED, 3, 3),
             "{name}"
         );
@@ -327,19 +327,43 @@ fn sqlite_an_unattached_instance_cannot_write_a_bound_store() {
     ));
     assert_eq!(event_count(&unattached, timeline), 0);
 
-    assert_eq!(ok(unattached.attach_mode_binding()), record(LOCAL, 1, 1));
+    assert_eq!(
+        ok(unattached.attach_mode_binding(&profile(LOCAL, 1))),
+        record(LOCAL, 1, 1)
+    );
     ok(append(&mut unattached, timeline, 2));
     assert_eq!(event_count(&unattached, timeline), 1);
     assert_eq!(commit_epoch(&unattached, timeline, 1), epoch(1));
     drop(unattached);
 
-    // A process holding a pre-rotation epoch is stale once the binding moves.
+    // A process holding a pre-rotation epoch, and an instance never
+    // attached, are stale once another process moves the binding: the
+    // refusal names the stale binding even though the store's data version
+    // moved too.
     let mut stale = open_file(&path);
-    ok(stale.attach_mode_binding());
+    ok(stale.attach_mode_binding(&profile(LOCAL, 1)));
+    let mut late_unattached = open_file(&path);
     let mut rotator = open_file(&path);
-    ok(rotator.attach_mode_binding());
+    ok(rotator.attach_mode_binding(&profile(LOCAL, 1)));
     ok(rotate(&mut rotator, 1, 2));
-    assert!(append(&mut stale, timeline, 3).is_err());
+    assert!(matches!(
+        append(&mut stale, timeline, 3),
+        Err(CoreError::ModeBindingStale)
+    ));
+    assert!(matches!(
+        append(&mut late_unattached, timeline, 3),
+        Err(CoreError::ModeBindingStale)
+    ));
+    assert_eq!(event_count(&rotator, timeline), 1);
+    // The attach of a stale expectation attaches nothing.
+    assert_eq!(
+        stale.attach_mode_binding(&profile(LOCAL, 1)),
+        Err(GatewayModeBindingErrorV1::Mismatch)
+    );
+    assert!(matches!(
+        append(&mut stale, timeline, 3),
+        Err(CoreError::ModeBindingStale)
+    ));
     assert_eq!(event_count(&rotator, timeline), 1);
     ok(append(&mut rotator, timeline, 4));
     assert_eq!(commit_epoch(&rotator, timeline, 2), epoch(2));
@@ -354,7 +378,7 @@ fn sqlite_an_unbound_file_accepts_unattached_instances() {
     ok(append(&mut writer, timeline, 1));
     assert_eq!(commit_epoch(&writer, timeline, 1), None);
     assert_eq!(
-        writer.attach_mode_binding(),
+        writer.attach_mode_binding(&profile(LOCAL, 1)),
         Err(GatewayModeBindingErrorV1::Unbound)
     );
 }
@@ -379,7 +403,7 @@ fn sqlite_an_untrustworthy_binding_is_an_invalid_record() {
         Err(GatewayModeBindingErrorV1::InvalidRecord)
     );
     assert_eq!(
-        store.attach_mode_binding(),
+        store.attach_mode_binding(&profile(LOCAL, 1)),
         Err(GatewayModeBindingErrorV1::InvalidRecord)
     );
     assert_eq!(
@@ -418,7 +442,7 @@ fn sqlite_an_unreadable_binding_is_unavailable() {
         Err(GatewayModeBindingErrorV1::Unavailable)
     );
     assert_eq!(
-        store.attach_mode_binding(),
+        store.attach_mode_binding(&profile(LOCAL, 1)),
         Err(GatewayModeBindingErrorV1::Unavailable)
     );
 }
@@ -437,7 +461,7 @@ fn sqlite_a_failed_commit_epoch_record_rolls_the_append_back() {
          BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
     );
     let mut store = open_file(&path);
-    ok(store.attach_mode_binding());
+    ok(store.attach_mode_binding(&profile(LOCAL, 1)));
     assert!(matches!(
         append(&mut store, timeline, 1),
         Err(CoreError::Storage(_))
@@ -472,5 +496,36 @@ fn sqlite_rejects_a_reshaped_mode_binding_table() {
             .unwrap_or_default();
         assert!(error.contains(&name), "{name}: {error}");
         assert!(error.contains("incompatible schema"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn an_attach_of_a_stale_expectation_attaches_nothing() {
+    for (name, mut store) in stores() {
+        ok(bind(store.as_mut(), LOCAL, 1));
+        let timeline = ok(store.create_timeline("expected")).id();
+        // The caller read epoch 1; the binding rotated before it attached.
+        ok(rotate(store.as_mut(), 1, 2));
+        assert_eq!(
+            store.attach_mode_binding(&profile(LOCAL, 1)),
+            Err(GatewayModeBindingErrorV1::Mismatch),
+            "{name}"
+        );
+        assert_eq!(
+            store.attach_mode_binding(&profile(AIR_GAPPED, 2)),
+            Err(GatewayModeBindingErrorV1::Mismatch),
+            "{name}"
+        );
+        assert_eq!(
+            ok(store.attach_mode_binding(&profile(LOCAL, 2))),
+            record(LOCAL, 2, 2),
+            "{name}"
+        );
+        ok(append(store.as_mut(), timeline, 1));
+        assert_eq!(
+            commit_epoch(store.as_ref(), timeline, 1),
+            epoch(2),
+            "{name}"
+        );
     }
 }

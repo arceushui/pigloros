@@ -1065,4 +1065,61 @@ mod tests {
             })
         );
     }
+
+    /// A published Fork on a store bound at epoch 1 (ADR-134 §8).
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bound_published_store() -> (MemoryStore, TimelineId) {
+        use pos_core::{GatewayModeBindingHostV1, GatewayModeBindingPortV1};
+
+        let mut store = MemoryStore::new();
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+        let profile = ok(pos_core::GatewayModeProfileRefV1::try_new(
+            "gateway-mode-local-v1",
+            [1; 32],
+        ));
+        ok(store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile)));
+        let root = ok(store.create_timeline("counterfactual-root")).id();
+        ok(store.append(root, &[draft(0)]));
+        let fork = ok(store.fork(root, Seq::from_u64(1), "counterfactual-fork")).id();
+        ok(store.publish_counterfactual_facts(fork, facts()));
+        (store, fork)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_stale_or_unattached_writer_installs_no_tick() {
+        let (mut store, fork) = bound_published_store();
+        let command = command(fork);
+        let off_epoch = [None, std::num::NonZeroU64::new(2)];
+        let before = snapshot(&store, fork);
+        for attached in off_epoch {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                store.commit_counterfactual_invalidation(&command),
+                Err(CounterfactualStoreErrorV1::StorageFailure)
+            );
+            assert_eq!(snapshot(&store, fork), before);
+        }
+
+        store
+            .mode_binding
+            .attach_epoch_for_test(std::num::NonZeroU64::new(1));
+        let receipt = match ok(store.commit_counterfactual_invalidation(&command)) {
+            CounterfactualInvalidationOutcomeV1::Committed(receipt) => receipt,
+            other @ CounterfactualInvalidationOutcomeV1::InvalidationConflict(_) => {
+                std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
+            }
+        };
+        let expected = receipt.tick_basis(receipt.first_tick_head());
+        let drafts = ok(PipelineDraftBatchV1::try_new(vec![draft(2)]));
+        let committed = snapshot(&store, fork);
+        for attached in off_epoch {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                store.append_counterfactual_tick(fork, &expected, &drafts),
+                Err(CounterfactualStoreErrorV1::StorageFailure)
+            );
+            assert_eq!(snapshot(&store, fork), committed);
+        }
+    }
 }

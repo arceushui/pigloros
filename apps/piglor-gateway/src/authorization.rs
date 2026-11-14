@@ -1155,14 +1155,28 @@ impl GatewayAuthorization {
     }
 
     /// Bind this authorizer to the composition's bound Gateway execution
-    /// mode (ADR-134 §6 and §10). An Air-Gapped binding makes revocation
-    /// state current by construction.
-    #[must_use]
-    pub fn with_mode_binding(mut self, mode: &crate::mode_profile::GatewayModeBindingV1) -> Self {
+    /// mode (ADR-134 §6 and §10).
+    ///
+    /// An Air-Gapped binding makes revocation state current by construction,
+    /// because Air-Gapped reads authority only from its one bound store: an
+    /// authorizer that is not recomposed from that store (it has no
+    /// [`GatewayAuthoritySourceV1`]) is refused.
+    ///
+    /// # Errors
+    /// Returns [`crate::mode_profile::GatewayModeErrorV1::RefusedInMode`] for
+    /// an Air-Gapped binding of an authorizer without a store source.
+    pub fn with_mode_binding(
+        mut self,
+        mode: &crate::mode_profile::GatewayModeBindingV1,
+    ) -> Result<Self, crate::mode_profile::GatewayModeErrorV1> {
         let revision = mode.revision_input();
-        self.revocation_state_current |= revision.revocation_current_by_construction();
+        let current = revision.revocation_current_by_construction();
+        if current && self.source.is_none() {
+            return Err(crate::mode_profile::GatewayModeErrorV1::RefusedInMode);
+        }
+        self.revocation_state_current |= current;
         self.execution_mode = Some(revision);
-        self
+        Ok(self)
     }
 
     /// The pinned authority registry digest, revocation-freshness claim and
@@ -1595,6 +1609,31 @@ fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
 #[cfg(test)]
 pub(crate) fn test_authorization_for(actor: EntityId) -> GatewayAuthorization {
     tests::fixture_authorization_with_actor(actor)
+}
+
+/// A store source that reproduces no recorded chain, for tests that need a
+/// store-backed authorizer.
+#[cfg(test)]
+struct TestUnreproducibleSourceV1;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl GatewayAuthoritySourceV1 for TestUnreproducibleSourceV1 {
+    fn leaf_grant_id(&self) -> Hash {
+        Hash::from_bytes([0; 32])
+    }
+
+    fn recompose(
+        &self,
+        _persisted: &PersistedAuthorityV1,
+    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)> {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_sourced_authorization_for(actor: EntityId) -> GatewayAuthorization {
+    test_authorization_for(actor).with_source(Arc::new(TestUnreproducibleSourceV1))
 }
 
 #[cfg(test)]
