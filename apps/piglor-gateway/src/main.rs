@@ -365,18 +365,15 @@ fn parse_serve_request(args: &[String]) -> Result<ServeRequest, RunError> {
 
 fn split_mode_flags(args: &[String]) -> Result<ModeFlags, RunError> {
     let mut flags = ModeFlags::default();
-    let mut index = 0;
-    while index < args.len() {
-        let flag = args[index].as_str();
-        if flag == "--profile" || flag == "--network-grant" {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--profile" || arg == "--network-grant" {
             let value = args
-                .get(index + 1)
-                .ok_or_else(|| format!("{flag} requires a value"))?;
-            mode_flag(&mut flags, flag, value)?;
-            index += 2;
+                .next()
+                .ok_or_else(|| format!("{arg} requires a value"))?;
+            mode_flag(&mut flags, arg, value)?;
         } else {
-            flags.rest.push(args[index].clone());
-            index += 1;
+            flags.rest.push(arg.clone());
         }
     }
     Ok(flags)
