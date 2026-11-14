@@ -232,28 +232,31 @@ impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
     }
 }
 
+/// The name of each outcome kind, indexed by
+/// [`pos_core::PipelineOutcomeKindV1`]; its length is the kind count, so a
+/// new outcome must add its name here.
+const OUTCOME_NAMES: [&str; pos_core::PipelineOutcomeKindV1::COUNT] = [
+    "Rejected",
+    "InvalidObservation",
+    "AuthorityRevoked",
+    "AuthorityExpired",
+    "PolicyIndeterminate",
+    "ResourceExhausted",
+    "InvalidPluginResult",
+    "InvalidProviderResult",
+    "DomainConflict",
+    "AdmissionConflict",
+    "Committed",
+    "RecoveredDuplicate",
+    "InvalidDependencyDeclaration",
+    "DependencySetExhausted",
+    "ModeBindingStale",
+];
+
 /// Name only the outcome discriminant so a rendered error never carries
-/// receipt data such as Event identities or digests. This is a flat name
-/// table: it has no wildcard, so every new outcome must add an arm here.
+/// receipt data such as Event identities or digests.
 const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
-    use pos_core::PipelineOutcomeV1 as Outcome;
-    match outcome {
-        Outcome::Rejected => "Rejected",
-        Outcome::InvalidObservation => "InvalidObservation",
-        Outcome::AuthorityRevoked => "AuthorityRevoked",
-        Outcome::AuthorityExpired => "AuthorityExpired",
-        Outcome::PolicyIndeterminate => "PolicyIndeterminate",
-        Outcome::ResourceExhausted => "ResourceExhausted",
-        Outcome::InvalidPluginResult => "InvalidPluginResult",
-        Outcome::InvalidProviderResult => "InvalidProviderResult",
-        Outcome::Committed(_) => "Committed",
-        Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
-        Outcome::DomainConflict => "DomainConflict",
-        Outcome::AdmissionConflict => "AdmissionConflict",
-        Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
-        Outcome::DependencySetExhausted => "DependencySetExhausted",
-        Outcome::ModeBindingStale => "ModeBindingStale",
-    }
+    OUTCOME_NAMES[outcome.kind() as usize]
 }
 
 #[cfg(test)]

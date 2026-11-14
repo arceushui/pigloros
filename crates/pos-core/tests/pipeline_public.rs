@@ -6,7 +6,7 @@ use pos_core::{
     FactualTickShapeV1, Hash, Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
     PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
     PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineObservationAnchorV1, PipelineOutcomeKindV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, SchemaVersion, Seq,
     TentativePipelineResultV1, TimelineId, WallTime, MAX_PIPELINE_DRAFTS_PER_BATCH,
     MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
@@ -379,8 +379,73 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
     );
     assert_ne!(
         PipelineOutcomeV1::Committed(receipt.clone()),
-        PipelineOutcomeV1::RecoveredDuplicate(receipt)
+        PipelineOutcomeV1::RecoveredDuplicate(receipt.clone())
     );
+    // Every outcome names its own kind, numbered in declaration order.
+    let outcomes = [
+        (PipelineOutcomeV1::Rejected, PipelineOutcomeKindV1::Rejected),
+        (
+            PipelineOutcomeV1::InvalidObservation,
+            PipelineOutcomeKindV1::InvalidObservation,
+        ),
+        (
+            PipelineOutcomeV1::AuthorityRevoked,
+            PipelineOutcomeKindV1::AuthorityRevoked,
+        ),
+        (
+            PipelineOutcomeV1::AuthorityExpired,
+            PipelineOutcomeKindV1::AuthorityExpired,
+        ),
+        (
+            PipelineOutcomeV1::PolicyIndeterminate,
+            PipelineOutcomeKindV1::PolicyIndeterminate,
+        ),
+        (
+            PipelineOutcomeV1::ResourceExhausted,
+            PipelineOutcomeKindV1::ResourceExhausted,
+        ),
+        (
+            PipelineOutcomeV1::InvalidPluginResult,
+            PipelineOutcomeKindV1::InvalidPluginResult,
+        ),
+        (
+            PipelineOutcomeV1::InvalidProviderResult,
+            PipelineOutcomeKindV1::InvalidProviderResult,
+        ),
+        (
+            PipelineOutcomeV1::DomainConflict,
+            PipelineOutcomeKindV1::DomainConflict,
+        ),
+        (
+            PipelineOutcomeV1::AdmissionConflict,
+            PipelineOutcomeKindV1::AdmissionConflict,
+        ),
+        (
+            PipelineOutcomeV1::Committed(receipt.clone()),
+            PipelineOutcomeKindV1::Committed,
+        ),
+        (
+            PipelineOutcomeV1::RecoveredDuplicate(receipt),
+            PipelineOutcomeKindV1::RecoveredDuplicate,
+        ),
+        (
+            PipelineOutcomeV1::InvalidDependencyDeclaration,
+            PipelineOutcomeKindV1::InvalidDependencyDeclaration,
+        ),
+        (
+            PipelineOutcomeV1::DependencySetExhausted,
+            PipelineOutcomeKindV1::DependencySetExhausted,
+        ),
+        (
+            PipelineOutcomeV1::ModeBindingStale,
+            PipelineOutcomeKindV1::ModeBindingStale,
+        ),
+    ];
+    assert_eq!(outcomes.len(), PipelineOutcomeKindV1::COUNT);
+    for (index, (outcome, kind)) in outcomes.iter().enumerate() {
+        assert_eq!(outcome.kind(), *kind);
+        assert_eq!(*kind as usize, index);
+    }
 
     let mut changed = events.clone();
     changed[1].payload = CanonicalBytes::from_static(b"changed");
