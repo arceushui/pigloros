@@ -215,15 +215,7 @@ impl<'a> CommunityMetadataScopeV1<'a> {
             input.metadata_anchor_generation,
         );
         encode_bytes(&mut out, &input.protection_operation_id, 2);
-        encode_head(&mut out, 4, input.scope_members.len() as u64);
-        match input.scope_members.0 {
-            ScopeRows::Typed(rows) => {
-                for member in rows {
-                    encode_member(&mut out, *member);
-                }
-            }
-            ScopeRows::Canonical { bytes, .. } => out.extend_from_slice(bytes),
-        }
+        encode_members(&mut out, input.scope_members);
         encode_head(&mut out, 0, input.metadata_not_after_micros);
         out
     }
@@ -284,7 +276,7 @@ fn validate_member(member: CommunityScopeMemberV1) -> Result<()> {
     validate_horizon(member.not_after_micros)
 }
 
-fn validate_members(members: CommunityScopeMembersV1<'_>) -> Result<()> {
+pub(super) fn validate_members(members: CommunityScopeMembersV1<'_>) -> Result<()> {
     let mut previous = None;
     members.iter().try_for_each(|member| {
         member.and_then(|member| {
@@ -299,6 +291,15 @@ fn validate_members(members: CommunityScopeMembersV1<'_>) -> Result<()> {
             })
         })
     })
+}
+
+/// Encode the definite scope-member array, reusing decoded rows verbatim.
+pub(super) fn encode_members(out: &mut Vec<u8>, members: CommunityScopeMembersV1<'_>) {
+    encode_head(out, 4, members.len() as u64);
+    match members.0 {
+        ScopeRows::Typed(rows) => rows.iter().for_each(|member| encode_member(out, *member)),
+        ScopeRows::Canonical { bytes, .. } => out.extend_from_slice(bytes),
+    }
 }
 
 fn encode_member(out: &mut Vec<u8>, member: CommunityScopeMemberV1) {
@@ -332,7 +333,7 @@ fn read_member(cursor: &mut CborCursor<'_>) -> Result<CommunityScopeMemberV1> {
     })
 }
 
-fn read_members<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityScopeMembersV1<'a>> {
+pub(super) fn read_members<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityScopeMembersV1<'a>> {
     read_head(cursor, 4).and_then(|count| {
         if count > MAX_COMMUNITY_SCOPE_MEMBERS_V1 as u64 {
             return Err(Error::BoundsExceeded);
