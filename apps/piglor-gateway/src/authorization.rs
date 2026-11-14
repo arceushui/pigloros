@@ -667,6 +667,9 @@ pub struct GatewayAuthorization {
     source: Option<Arc<dyn GatewayAuthoritySourceV1>>,
     persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
+    /// The bound Gateway execution mode of the composition (ADR-134 §6); an
+    /// unbound composition admits no action.
+    execution_mode: Option<crate::mode_profile::GatewayExecutionModeRevisionV1>,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
     denial_budget: Arc<Mutex<DenialRecordBudget>>,
@@ -686,9 +689,14 @@ impl GatewayAuthorization {
     /// Bind one adapter to host-pinned authority state with an explicit
     /// revocation-freshness claim.
     ///
-    /// Local hosts normally pass `true`. An Air-Gapped host must pass `false`
-    /// until its pinned revocation snapshot is current; authorization then
-    /// fails closed with [`GatewayAuthorityDenial::RevocationStateStale`].
+    /// The claim follows the bound execution mode's revocation freshness
+    /// (ADR-134 §2 field 8): a Local host observes its revocation state from
+    /// the persisted authority store and passes `true` once it has loaded it;
+    /// a host that passes `false` fails closed with
+    /// [`GatewayAuthorityDenial::RevocationStateStale`]. An Air-Gapped host
+    /// reads authority from its one bound store only, so its revocation state
+    /// is current by construction (D10): [`Self::with_mode_binding`] fixes the
+    /// claim to `true` for an Air-Gapped binding.
     #[must_use]
     pub fn new_with_revocation_state(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
@@ -706,6 +714,7 @@ impl GatewayAuthorization {
             }))),
             source: None,
             revocation_state_current,
+            execution_mode: None,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
             denial_budget: Arc::new(Mutex::new(DenialRecordBudget::default())),
@@ -1145,10 +1154,45 @@ impl GatewayAuthorization {
             .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
-    /// The pinned authority registry digest and revocation-freshness claim
-    /// that select this host's execution profile.
-    pub(crate) const fn execution_profile(&self) -> (Hash, bool) {
-        (self.registry_digest, self.revocation_state_current)
+    /// Bind this authorizer to the composition's bound Gateway execution
+    /// mode (ADR-134 §6 and §10).
+    ///
+    /// An Air-Gapped binding makes revocation state current by construction,
+    /// because Air-Gapped reads authority only from its one bound store: an
+    /// authorizer that is not recomposed from that store (it has no
+    /// [`GatewayAuthoritySourceV1`]) is refused.
+    ///
+    /// # Errors
+    /// Returns [`crate::mode_profile::GatewayModeErrorV1::RefusedInMode`] for
+    /// an Air-Gapped binding of an authorizer without a store source.
+    pub fn with_mode_binding(
+        mut self,
+        mode: &crate::mode_profile::GatewayModeBindingV1,
+    ) -> Result<Self, crate::mode_profile::GatewayModeErrorV1> {
+        let revision = mode.revision_input();
+        let current = revision.revocation_current_by_construction();
+        if current && self.source.is_none() {
+            return Err(crate::mode_profile::GatewayModeErrorV1::RefusedInMode);
+        }
+        self.revocation_state_current |= current;
+        self.execution_mode = Some(revision);
+        Ok(self)
+    }
+
+    /// The pinned authority registry digest, revocation-freshness claim and
+    /// bound execution mode that select this host's execution profile.
+    pub(crate) const fn execution_profile(
+        &self,
+    ) -> (
+        Hash,
+        bool,
+        Option<&crate::mode_profile::GatewayExecutionModeRevisionV1>,
+    ) {
+        (
+            self.registry_digest,
+            self.revocation_state_current,
+            self.execution_mode.as_ref(),
+        )
     }
 }
 
@@ -1565,6 +1609,31 @@ fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
 #[cfg(test)]
 pub(crate) fn test_authorization_for(actor: EntityId) -> GatewayAuthorization {
     tests::fixture_authorization_with_actor(actor)
+}
+
+/// A store source that reproduces no recorded chain, for tests that need a
+/// store-backed authorizer.
+#[cfg(test)]
+struct TestUnreproducibleSourceV1;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl GatewayAuthoritySourceV1 for TestUnreproducibleSourceV1 {
+    fn leaf_grant_id(&self) -> Hash {
+        Hash::from_bytes([0; 32])
+    }
+
+    fn recompose(
+        &self,
+        _persisted: &PersistedAuthorityV1,
+    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)> {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_sourced_authorization_for(actor: EntityId) -> GatewayAuthorization {
+    test_authorization_for(actor).with_source(Arc::new(TestUnreproducibleSourceV1))
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use pos_core::{
     FactualTickShapeV1, Hash, Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
     PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
     PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineObservationAnchorV1, PipelineOutcomeKindV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, SchemaVersion, Seq,
     TentativePipelineResultV1, TimelineId, WallTime, MAX_PIPELINE_DRAFTS_PER_BATCH,
     MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
@@ -379,8 +379,9 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
     );
     assert_ne!(
         PipelineOutcomeV1::Committed(receipt.clone()),
-        PipelineOutcomeV1::RecoveredDuplicate(receipt)
+        PipelineOutcomeV1::RecoveredDuplicate(receipt.clone())
     );
+    assert_outcome_kinds(receipt);
 
     let mut changed = events.clone();
     changed[1].payload = CanonicalBytes::from_static(b"changed");
@@ -402,6 +403,74 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
     );
 }
 
+/// Every outcome names its own kind, numbered in declaration order.
+fn assert_outcome_kinds(receipt: PipelineCommitReceiptV1) {
+    let outcomes = [
+        (PipelineOutcomeV1::Rejected, PipelineOutcomeKindV1::Rejected),
+        (
+            PipelineOutcomeV1::InvalidObservation,
+            PipelineOutcomeKindV1::InvalidObservation,
+        ),
+        (
+            PipelineOutcomeV1::AuthorityRevoked,
+            PipelineOutcomeKindV1::AuthorityRevoked,
+        ),
+        (
+            PipelineOutcomeV1::AuthorityExpired,
+            PipelineOutcomeKindV1::AuthorityExpired,
+        ),
+        (
+            PipelineOutcomeV1::PolicyIndeterminate,
+            PipelineOutcomeKindV1::PolicyIndeterminate,
+        ),
+        (
+            PipelineOutcomeV1::ResourceExhausted,
+            PipelineOutcomeKindV1::ResourceExhausted,
+        ),
+        (
+            PipelineOutcomeV1::InvalidPluginResult,
+            PipelineOutcomeKindV1::InvalidPluginResult,
+        ),
+        (
+            PipelineOutcomeV1::InvalidProviderResult,
+            PipelineOutcomeKindV1::InvalidProviderResult,
+        ),
+        (
+            PipelineOutcomeV1::DomainConflict,
+            PipelineOutcomeKindV1::DomainConflict,
+        ),
+        (
+            PipelineOutcomeV1::AdmissionConflict,
+            PipelineOutcomeKindV1::AdmissionConflict,
+        ),
+        (
+            PipelineOutcomeV1::Committed(receipt.clone()),
+            PipelineOutcomeKindV1::Committed,
+        ),
+        (
+            PipelineOutcomeV1::RecoveredDuplicate(receipt),
+            PipelineOutcomeKindV1::RecoveredDuplicate,
+        ),
+        (
+            PipelineOutcomeV1::InvalidDependencyDeclaration,
+            PipelineOutcomeKindV1::InvalidDependencyDeclaration,
+        ),
+        (
+            PipelineOutcomeV1::DependencySetExhausted,
+            PipelineOutcomeKindV1::DependencySetExhausted,
+        ),
+        (
+            PipelineOutcomeV1::ModeBindingStale,
+            PipelineOutcomeKindV1::ModeBindingStale,
+        ),
+    ];
+    assert_eq!(outcomes.len(), PipelineOutcomeKindV1::COUNT);
+    for (index, (outcome, kind)) in outcomes.iter().enumerate() {
+        assert_eq!(outcome.kind(), *kind);
+        assert_eq!(*kind as usize, index);
+    }
+}
+
 #[test]
 fn retained_receipt_rebuilds_the_original_receipt_without_the_basis() {
     let drafts = vec![draft(b"a"), draft(b"b")];
@@ -419,6 +488,12 @@ fn retained_receipt_rebuilds_the_original_receipt_without_the_basis() {
         timeline(1),
         &events,
     ));
+    assert_eq!(original.mode_binding_epoch(), None);
+    let epoch = std::num::NonZeroU64::new(3);
+    let bound = original.clone().with_mode_binding_epoch(epoch);
+    assert_eq!(bound.mode_binding_epoch(), epoch);
+    assert_ne!(bound, original);
+    assert_eq!(bound.with_mode_binding_epoch(None), original);
 
     assert_eq!(
         PipelineCommitReceiptV1::try_from_retained_events(

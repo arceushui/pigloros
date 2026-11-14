@@ -29,6 +29,7 @@ pub mod local_fork_listener;
 #[cfg(target_os = "linux")]
 pub mod local_fork_service;
 pub mod local_principal;
+pub mod mode_profile;
 pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
@@ -103,18 +104,19 @@ fn gateway_binding_error(
     }
 }
 
+/// Bind `plugin` to the installed EPF1 its test's bound Local mode selects
+/// (ADR-134 §7, field 9).
 #[cfg(test)]
 fn gateway_output_binding<P: Plugin>(
     plugin: &P,
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_source(
+    let mode = mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, []);
+    gateway_output_binding_with_profile(
         plugin,
-        pos_runtime::OutputPolicySourceV1::Gateway,
         configuration_details,
-        "deterministic-local-v1",
+        mode.registration_profile_id().unwrap_or_default(),
     )
-    .map_err(|error| gateway_binding_error(plugin.name(), error))
 }
 
 #[cfg(test)]
@@ -365,12 +367,14 @@ mod coverage_tests {
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
         let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
-        assert!(matches!(
-            super::gateway_action_registry_builder(std::iter::empty(), None),
-            Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
-            ))
-        ));
+        for selection in [Some("live-local-v1"), None] {
+            assert!(matches!(
+                super::gateway_action_registry_builder(std::iter::empty(), None, selection),
+                Err(RuntimeError::OutputAdmission(
+                    OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+                ))
+            ));
+        }
     }
 
     // Counts selected-factory invocations while delegating to the Gateway factory.
@@ -487,6 +491,7 @@ mod coverage_tests {
             registry.register_from_host_catalogue_entry(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                Some("live-local-v1"),
             ),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
@@ -505,6 +510,7 @@ mod coverage_tests {
             .register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
                 &configuration,
+                "deterministic-local-v1",
             )
             .test_ok();
         assert_eq!(configuration.builds.get(), 1);
@@ -541,8 +547,16 @@ mod coverage_tests {
         let schemas_before = registry.composition().schemas.len();
         let foreign = HostCatalogueEntryV1::<ForeignApproverConfiguration>::gateway();
         for result in [
-            registry.register_from_host_catalogue_entry(&foreign, &ForeignApproverConfiguration),
-            registry.register_host_catalogue_fixture(&foreign, &ForeignApproverConfiguration),
+            registry.register_from_host_catalogue_entry(
+                &foreign,
+                &ForeignApproverConfiguration,
+                Some("live-local-v1"),
+            ),
+            registry.register_host_catalogue_fixture(
+                &foreign,
+                &ForeignApproverConfiguration,
+                "deterministic-local-v1",
+            ),
         ] {
             assert!(matches!(
                 result,
@@ -555,6 +569,7 @@ mod coverage_tests {
             registry.register_host_catalogue_fixture(
                 &HostCatalogueEntryV1::<ExtraReducerConfiguration>::gateway(),
                 &ExtraReducerConfiguration,
+                "deterministic-local-v1",
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
@@ -598,6 +613,7 @@ mod coverage_tests {
                 .register_host_catalogue_fixture(
                     &HostCatalogueEntryV1::<GatewayActionPlugin>::gateway(),
                     frozen,
+                    "deterministic-local-v1",
                 )
                 .test_ok();
             registry.retained_closure_replay_identities()
@@ -1303,19 +1319,16 @@ impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
     }
 }
 
-/// Registration operation applied to the selected Gateway catalogue entry.
-type GatewayCatalogueRegistration = fn(
-    &mut PluginRegistry,
-    &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
-    &FrozenGatewayActionConfiguration,
-) -> Result<(), pos_runtime::RuntimeError>;
-
 // Resolve the frozen configuration and register the reviewed Gateway entry.
 // Production and nonproduction registries differ only in `register`.
 fn gateway_action_registry_with(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    register: GatewayCatalogueRegistration,
+    register: impl FnOnce(
+        &mut PluginRegistry,
+        &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
+        &FrozenGatewayActionConfiguration,
+    ) -> Result<(), pos_runtime::RuntimeError>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let frozen = FrozenGatewayActionConfiguration::resolve(bodies)?;
     let mut registry = PluginRegistry::new().without_erasure_gate();
@@ -1351,17 +1364,17 @@ fn gateway_action_registry_with_authority(
 }
 
 // The production registry selects the reviewed Gateway entry with installed
-// evidence. Wave 8 has no installed Gateway EPF1, so it fails closed; #461
-// owns positive activation.
+// evidence for the profile the bound execution mode selects (ADR-134 §7,
+// field 9: Local `live-local-v1`, Air-Gapped none). No installed Gateway EPF1
+// exists, so it fails closed; #461 owns positive activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
+    registration_profile_id: Option<&str>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_from_host_catalogue_entry::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_from_host_catalogue_entry(entry, frozen, registration_profile_id)
+    })
 }
 
 // Behavior fixtures have no installed profile, session pin, or production
@@ -1379,11 +1392,9 @@ fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_with(
-        bodies,
-        authority,
-        PluginRegistry::register_host_catalogue_fixture::<GatewayActionPlugin>,
-    )
+    gateway_action_registry_with(bodies, authority, |registry, entry, frozen| {
+        registry.register_host_catalogue_fixture(entry, frozen, "deterministic-local-v1")
+    })
 }
 
 /// Build a unit-test, action-capable Gateway around a verified erasure host.
@@ -1417,8 +1428,24 @@ pub(crate) fn gateway_with_erasure_host_and_authorization(
         false,
         action_registry,
         consent_authority,
-        GatewayProtection::Required(Some(Arc::new(authorization))),
+        GatewayProtection::Required(Some(Arc::new(test_local_authorization(authorization)))),
     )
+}
+
+/// The Local execution mode every unit-test action composition is bound to.
+#[cfg(test)]
+fn test_local_mode() -> mode_profile::GatewayModeBindingV1 {
+    mode_profile::test_binding(mode_profile::GatewayModeProfileIdV1::Local, [])
+}
+
+/// `authorization` bound to the Local mode of [`test_local_mode`], which
+/// refuses no authorizer.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_local_authorization(authorization: GatewayAuthorization) -> GatewayAuthorization {
+    authorization
+        .with_mode_binding(&test_local_mode())
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
 }
 
 /// Bytes the Gateway configuration details spend before the bodies: the
@@ -1947,39 +1974,47 @@ const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> Gatewa
     }
 }
 
-/// The Gateway error family of a not-admitted store outcome.
+/// The Gateway error family of a not-admitted store outcome, numbered so
+/// [`NOT_ADMITTED_ERRORS`] is indexed by it.
 #[derive(Clone, Copy)]
 enum NotAdmitted {
-    PolicyUnavailable,
-    LimitReached,
-    HostFault,
-    SetExhausted,
-    Stale,
-    Rejected,
+    PolicyUnavailable = 0,
+    LimitReached = 1,
+    HostFault = 2,
+    SetExhausted = 3,
+    Stale = 4,
+    ModeBindingStale = 5,
+    Rejected = 6,
 }
 
-/// Classify every outcome; the match has no wildcard, so a new
-/// `PipelineOutcomeV1` variant fails to compile until it is routed here.
+/// The family of every outcome kind, indexed by
+/// [`pos_core::PipelineOutcomeKindV1`]; its length is the kind count, so a
+/// new outcome fails to compile until it is routed here.
+///
+/// The executor turns a store revocation or expiry into a pending denial
+/// that is answered only once recorded; one that arrives here unrecorded is
+/// a host fault, never an answered denial.
+const NOT_ADMITTED_FAMILIES: [NotAdmitted; pos_core::PipelineOutcomeKindV1::COUNT] = [
+    NotAdmitted::Rejected,          // Rejected
+    NotAdmitted::Stale,             // InvalidObservation
+    NotAdmitted::HostFault,         // AuthorityRevoked
+    NotAdmitted::HostFault,         // AuthorityExpired
+    NotAdmitted::PolicyUnavailable, // PolicyIndeterminate
+    NotAdmitted::LimitReached,      // ResourceExhausted
+    NotAdmitted::Rejected,          // InvalidPluginResult
+    NotAdmitted::Rejected,          // InvalidProviderResult
+    NotAdmitted::Stale,             // DomainConflict
+    NotAdmitted::Stale,             // AdmissionConflict
+    NotAdmitted::Rejected,          // Committed
+    NotAdmitted::Rejected,          // RecoveredDuplicate
+    NotAdmitted::HostFault,         // InvalidDependencyDeclaration
+    NotAdmitted::SetExhausted,      // DependencySetExhausted
+    NotAdmitted::ModeBindingStale,  // ModeBindingStale
+];
+
+/// Classify every outcome by its kind.
 const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
-    match outcome {
-        PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
-        PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
-        // The executor turns a store revocation or expiry into a pending
-        // denial that is answered only once recorded; one that arrives here
-        // unrecorded is a host fault, never an answered denial.
-        PipelineOutcomeV1::AuthorityRevoked
-        | PipelineOutcomeV1::AuthorityExpired
-        | PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
-        PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
-        PipelineOutcomeV1::InvalidObservation
-        | PipelineOutcomeV1::AdmissionConflict
-        | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
-        PipelineOutcomeV1::Rejected
-        | PipelineOutcomeV1::InvalidPluginResult
-        | PipelineOutcomeV1::InvalidProviderResult
-        | PipelineOutcomeV1::Committed(_)
-        | PipelineOutcomeV1::RecoveredDuplicate(_) => NotAdmitted::Rejected,
-    }
+    NOT_ADMITTED_FAMILIES[outcome.kind() as usize]
 }
 
 /// A store outcome names no protected record: an unavailable policy reuses the
@@ -1990,18 +2025,24 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
     not_admitted_error(not_admitted_family(outcome), maximum)
 }
 
-/// The stable Gateway error of one family; the match has no wildcard.
+/// The stable Gateway error of each family, indexed by [`NotAdmitted`].
+const NOT_ADMITTED_ERRORS: [fn(u64) -> GatewayError; 7] = [
+    |_| GatewayError::AuthorizationUnavailable,
+    |maximum| GatewayError::EventLimitReached { maximum },
+    |_| GatewayError::ActionAdmissionUnavailable,
+    |_| GatewayError::DependencySetExhausted,
+    |_| GatewayError::ActionObservationStale,
+    |_| GatewayError::Store(CoreError::ModeBindingStale),
+    |_| {
+        GatewayError::ActionRejected(ActionRejected::DomainValidationFailed(
+            "action was not admitted".to_owned(),
+        ))
+    },
+];
+
+/// The stable Gateway error of one family.
 fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
-    match family {
-        NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
-        NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
-        NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
-        NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
-        NotAdmitted::Stale => GatewayError::ActionObservationStale,
-        NotAdmitted::Rejected => GatewayError::ActionRejected(
-            ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
-        ),
-    }
+    NOT_ADMITTED_ERRORS[family as usize](maximum)
 }
 
 impl From<ActionSubmissionError> for GatewayError {
@@ -2347,27 +2388,44 @@ impl Gateway {
     /// host command stream. Provider authentication and ADR-059 authorization
     /// therefore cannot enable a proposed action outside ADR-060 containment.
     ///
+    /// The bound execution mode `mode` selects the registration profile
+    /// (ADR-134 §7) and enters the execution-profile security revision of
+    /// every admission (§6).
+    ///
     /// # Errors
-    /// Returns a store or action-registry error if the recovered host or its
-    /// declared output policy cannot be bound.
+    /// Returns [`CoreError::ModeBindingStale`] when the host's store is not
+    /// bound to `mode`, [`GatewayError::AuthorizationUnavailable`] when `mode`
+    /// refuses `authorization`, or a store or action-registry error if the
+    /// recovered host or its declared output policy cannot be bound.
     pub fn new_with_erasure_host_and_authorization(
-        host: ErasureExecutionHostV1,
+        mut host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
+        mode: &mode_profile::GatewayModeBindingV1,
     ) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
-        let store = executor::StoreExecutor::new_with_erasure_host(
-            host,
-            consent_authority.append_permit(),
-        )?;
+        let (store, authorization) = mode
+            .bind_host_authorization(&mut host, authorization)
+            .and_then(|authorization| {
+                executor::StoreExecutor::new_with_erasure_host(
+                    host,
+                    consent_authority.append_permit(),
+                )
+                .map(|store| (store, authorization))
+                .map_err(GatewayError::Store)
+            })?;
         Self::from_host_components(
             store,
             broadcast::channel(EVENT_BUS_CAPACITY).0,
             GatewayLimits::LOCAL_DEFAULT,
             false,
             bind_action_registry_erasure_gate(
-                gateway_action_registry_builder(bodies, Some(consent_authority.clone())),
+                gateway_action_registry_builder(
+                    bodies,
+                    Some(consent_authority.clone()),
+                    mode.registration_profile_id(),
+                ),
                 gate,
             ),
             consent_authority,
@@ -2528,7 +2586,7 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(authorization)),
+            authorization: Some(Arc::new(test_local_authorization(authorization))),
             authorization_required: true,
         }
         .schedule_startup_consent_cleanup()
@@ -4290,20 +4348,82 @@ mod tests {
         drop(gateway);
     }
 
+    /// ADR-134 §7: registration follows the bound mode's selection and fails
+    /// closed in both modes until an EPF1 is installed (#461, #1372).
     #[tokio::test]
     async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
-        let host = ErasureExecutionHostV1::open_verified_empty(
-            StoreConfig::Memory,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .test_ok();
-        assert!(matches!(
+        for mode in [
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        ] {
+            let mut host = ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            let binding = crate::mode_profile::test_bound_host(&mut host, mode);
+            assert!(matches!(
+                Gateway::new_with_erasure_host_and_authorization(
+                    host,
+                    [EntityId::new()],
+                    crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                    &binding,
+                ),
+                Err(GatewayError::ActionRegistry(_))
+            ));
+        }
+    }
+
+    /// ADR-134 rev 5 M4 and D10: the handle must name the binding the host's
+    /// store records, and Air-Gapped refuses an authorizer that does not read
+    /// its authority from that one bound store.
+    #[test]
+    fn host_gateway_constructor_refuses_another_store_or_a_storeless_authorizer() {
+        use crate::mode_profile::{test_binding, test_bound_host, GatewayModeProfileIdV1};
+        let open = || {
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok()
+        };
+        let construct = |host, authorization, binding: &_| {
             Gateway::new_with_erasure_host_and_authorization(
                 host,
                 [EntityId::new()],
-                crate::authorization::test_authorization_for(EntityId::new()),
+                authorization,
+                binding,
+            )
+        };
+        assert!(matches!(
+            construct(
+                open(),
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::Local, []),
             ),
-            Err(GatewayError::ActionRegistry(_))
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        drop(test_bound_host(&mut host, GatewayModeProfileIdV1::Local));
+        assert!(matches!(
+            construct(
+                host,
+                crate::authorization::test_sourced_authorization_for(EntityId::new()),
+                &test_binding(GatewayModeProfileIdV1::AirGapped, []),
+            ),
+            Err(GatewayError::Store(CoreError::ModeBindingStale))
+        ));
+
+        let mut host = open();
+        let air_gapped = test_bound_host(&mut host, GatewayModeProfileIdV1::AirGapped);
+        assert!(matches!(
+            construct(
+                host,
+                crate::authorization::test_authorization_for(EntityId::new()),
+                &air_gapped,
+            ),
+            Err(GatewayError::AuthorizationUnavailable)
         ));
     }
 
@@ -4326,6 +4446,10 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
+        let binding = crate::mode_profile::test_bound_host(
+            &mut host,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        );
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
             .test_ok();
         assert!(matches!(
@@ -4333,6 +4457,7 @@ mod tests {
                 host,
                 std::iter::empty(),
                 crate::authorization::test_authorization_for(EntityId::new()),
+                &binding,
             ),
             Err(GatewayError::Store(CoreError::Storage(_)))
         ));
@@ -4487,7 +4612,7 @@ mod tests {
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
         let too_many_bodies =
-            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None);
+            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None, None);
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(

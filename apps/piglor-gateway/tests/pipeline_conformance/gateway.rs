@@ -127,6 +127,25 @@ fn authorization(
     )
 }
 
+/// Bind the host's store to the Local execution mode (ADR-134), as `serve`
+/// does before it composes a Gateway.
+fn bind_local_mode(
+    host: &mut ErasureExecutionHostV1,
+) -> piglor_gateway::mode_profile::GatewayModeBindingV1 {
+    piglor_gateway::mode_profile::bind_gateway_mode_v1(
+        piglor_gateway::mode_profile::GatewayModeProfileIdV1::Local,
+        piglor_gateway::mode_profile::GatewayServeCompositionV1 {
+            tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::new(),
+        },
+        host,
+    )
+    .test_ok()
+}
+
 fn decide(authorization: &GatewayAuthorization, actor: EntityId) -> String {
     authorization
         .authorize(GatewayAuthorizationRequest::action(
@@ -241,11 +260,16 @@ pub fn first_party_has_no_privileged_route() -> Capture {
             capture.record(
                 store,
                 "authorized-composition",
-                composition(Gateway::new_with_erasure_host_and_authorization(
-                    host(authorized_store),
-                    [body],
-                    authorization(&pinned, local, true),
-                )),
+                composition({
+                    let mut authorized = host(authorized_store);
+                    let mode = bind_local_mode(&mut authorized);
+                    Gateway::new_with_erasure_host_and_authorization(
+                        authorized,
+                        [body],
+                        authorization(&pinned, local, true),
+                        &mode,
+                    )
+                }),
             );
 
             let gateway = Gateway::unprotected_for_harness(host(unauthorized_store)).test_ok();

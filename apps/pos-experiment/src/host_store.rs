@@ -531,18 +531,29 @@ impl EventStore for HostedExperimentStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`).
+const HOST_ERRORS: [fn() -> CoreError; 7] = [
+    || CoreError::ErasureContainmentUnavailable,
+    || CoreError::ErasureAccessFrozen,
+    || CoreError::ErasureContainmentUnavailable,
+    experiment_operation_rejected,
+    experiment_operation_rejected,
+    experiment_operation_rejected,
+    || {
+        CoreError::Storage(
+            "the store is bound to a Gateway execution mode; only Gateway processes write it"
+                .to_owned(),
+        )
+    },
+];
+
 fn host_error(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
-            CoreError::ErasureContainmentUnavailable
-        }
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host rejected experiment operation".to_owned())
-        }
-    }
+    HOST_ERRORS[error as usize]()
+}
+
+fn experiment_operation_rejected() -> CoreError {
+    CoreError::Storage("erasure host rejected experiment operation".to_owned())
 }
 
 #[cfg(test)]
@@ -1199,6 +1210,9 @@ mod host_store_tests {
         ] {
             assert!(matches!(host_error(error), CoreError::Storage(_)));
         }
+        assert!(host_error(ErasureHostErrorV1::ModeBindingStale)
+            .to_string()
+            .contains("bound to a Gateway execution mode"));
         Ok(())
     }
 }

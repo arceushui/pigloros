@@ -172,6 +172,7 @@ impl ErasureVerifiedInventoryQueryV1 for SingleUseVerifiedInventoryQueryV1 {
 
 trait ErasureHostStore:
     crate::ScheduledAdmissionStoreV1
+    + pos_core::GatewayModeBindingPortV1
     + ErasureInventoryPersistencePortV1
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
@@ -193,6 +194,7 @@ trait ErasureHostStore:
 impl<T> ErasureHostStore for T
 where
     T: crate::ScheduledAdmissionStoreV1
+        + pos_core::GatewayModeBindingPortV1
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1
@@ -1493,6 +1495,16 @@ impl ErasureExecutionHostV1 {
         self.store.host_store()
     }
 
+    /// Borrow the owned store's ADR-134 Gateway mode-binding port.
+    ///
+    /// The Gateway composition root binds or attaches this host's one adapter
+    /// instance through it before the adapter's first write, so every append
+    /// the host makes carries the process epoch. The port cannot read or
+    /// change Timelines, Events, or erasure state.
+    pub fn gateway_mode_binding(&mut self) -> &mut dyn pos_core::GatewayModeBindingPortV1 {
+        self.store.host_store()
+    }
+
     /// Run the read-only ADR-099 revision 11 FCP1 preflight on the owned
     /// store: every durable FCS1 of the fixed registrar must be exactly one
     /// of `profile_sources` (ADR-109 revision 12, startup step 2a).
@@ -2432,9 +2444,9 @@ impl ErasureExecutionHostV1 {
                 return Err(UnaffectedTopologyTransitionError::UncertainPersistence);
             }
             Err(error) => {
-                return Err(UnaffectedTopologyTransitionError::Host(map_store_error(
-                    &error,
-                )));
+                return Err(UnaffectedTopologyTransitionError::Host(
+                    ErasureHostErrorV1::from(&error),
+                ));
             }
         };
         if transition.timeline.meta != candidate_timeline.meta {
@@ -4696,14 +4708,6 @@ const fn map_world_replay_verification_error(
     }
 }
 
-const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
-    match error {
-        CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
-        CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
-        _ => ErasureHostErrorV1::AdapterFailure,
-    }
-}
-
 trait ProtectedEffectSender {
     fn host(&mut self) -> &mut ErasureExecutionHostV1;
     fn generation(&self) -> ErasureReferenceV1;
@@ -4807,7 +4811,7 @@ trait MapStoreErrorV1<T> {
 
 impl<T> MapStoreErrorV1<T> for Result<T, CoreError> {
     fn map_store_error(self) -> Result<T, ErasureHostErrorV1> {
-        self.map_err(|error| map_store_error(&error))
+        self.map_err(|error| ErasureHostErrorV1::from(&error))
     }
 }
 
@@ -6316,6 +6320,76 @@ mod tests {
                 self.inner
                     .recover_fork_admission(operation, successor_inventory)
             }
+        }
+    }
+
+    #[test]
+    fn a_stale_mode_binding_keeps_its_own_host_error() {
+        assert_eq!(
+            ErasureHostErrorV1::from(&CoreError::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale
+        );
+        assert_eq!(
+            ErasureHostErrorV1::from(&CoreError::Storage(String::new())),
+            ErasureHostErrorV1::AdapterFailure
+        );
+    }
+
+    impl pos_core::GatewayModeBindingPortV1 for FaultStoreV1 {
+        fn bind_empty_store_mode(
+            &mut self,
+            permit: pos_core::GatewayModeBindPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::bind_empty_store_mode(&mut self.inner, permit)
+        }
+
+        fn attach_mode_binding(
+            &mut self,
+            expected: &pos_core::GatewayModeProfileRefV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::attach_mode_binding(&mut self.inner, expected)
+        }
+
+        fn rotate_mode(
+            &mut self,
+            permit: pos_core::GatewayModeRotationPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::rotate_mode(&mut self.inner, permit)
+        }
+
+        fn migrate_mode(
+            &mut self,
+            permit: pos_core::GatewayModeMigrationPermitV1,
+        ) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::migrate_mode(&mut self.inner, permit)
+        }
+
+        fn load_mode_binding(
+            &self,
+        ) -> Result<Option<pos_core::GatewayModeBindingRecordV1>, pos_core::GatewayModeBindingErrorV1>
+        {
+            pos_core::GatewayModeBindingPortV1::load_mode_binding(&self.inner)
+        }
+
+        fn load_mode_binding_history(
+            &self,
+        ) -> Result<
+            Vec<pos_core::GatewayModeBindingHistoryEntryV1>,
+            pos_core::GatewayModeBindingErrorV1,
+        > {
+            pos_core::GatewayModeBindingPortV1::load_mode_binding_history(&self.inner)
+        }
+
+        fn load_commit_epoch(
+            &self,
+            timeline: TimelineId,
+            local_seq: Seq,
+        ) -> Result<Option<std::num::NonZeroU64>, pos_core::GatewayModeBindingErrorV1> {
+            pos_core::GatewayModeBindingPortV1::load_commit_epoch(&self.inner, timeline, local_seq)
         }
     }
 
@@ -9437,15 +9511,15 @@ mod tests {
     #[test]
     fn host_error_mapping_is_payload_free() {
         assert_eq!(
-            map_store_error(&CoreError::ErasureAccessFrozen),
+            ErasureHostErrorV1::from(&CoreError::ErasureAccessFrozen),
             ErasureHostErrorV1::AccessFrozen
         );
         assert_eq!(
-            map_store_error(&CoreError::ErasureContainmentUnavailable),
+            ErasureHostErrorV1::from(&CoreError::ErasureContainmentUnavailable),
             ErasureHostErrorV1::RecoveryUnavailable
         );
         assert_eq!(
-            map_store_error(&CoreError::IdGenerationOverflow),
+            ErasureHostErrorV1::from(&CoreError::IdGenerationOverflow),
             ErasureHostErrorV1::AdapterFailure
         );
         assert_eq!(

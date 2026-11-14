@@ -196,6 +196,10 @@ mod lifecycle_coverage_tests {
                 std::mem::discriminant(&CoreError::Storage(String::new())),
             );
         }
+        assert_eq!(
+            std::mem::discriminant(&host_error_to_core(ErasureHostErrorV1::ModeBindingStale)),
+            std::mem::discriminant(&CoreError::ModeBindingStale),
+        );
 
         assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
         Ok(())
@@ -737,18 +741,24 @@ impl ExecutorStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`).
+const HOST_ERROR_TO_CORE: [fn() -> CoreError; 7] = [
+    || CoreError::ErasureContainmentUnavailable,
+    || CoreError::ErasureAccessFrozen,
+    || CoreError::ErasureContainmentUnavailable,
+    host_command_rejected,
+    host_command_rejected,
+    host_command_rejected,
+    || CoreError::ModeBindingStale,
+];
+
 fn host_error_to_core(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
-            CoreError::ErasureContainmentUnavailable
-        }
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host command rejected".to_owned())
-        }
-    }
+    HOST_ERROR_TO_CORE[error as usize]()
+}
+
+fn host_command_rejected() -> CoreError {
+    CoreError::Storage("erasure host command rejected".to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3444,7 +3454,8 @@ pub(crate) const fn commit_fence_authority(
         | PipelineOutcomeV1::Committed(_)
         | PipelineOutcomeV1::RecoveredDuplicate(_)
         | PipelineOutcomeV1::InvalidDependencyDeclaration
-        | PipelineOutcomeV1::DependencySetExhausted => None,
+        | PipelineOutcomeV1::DependencySetExhausted
+        | PipelineOutcomeV1::ModeBindingStale => None,
     }
 }
 

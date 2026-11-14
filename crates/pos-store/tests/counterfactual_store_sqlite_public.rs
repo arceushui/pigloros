@@ -2065,3 +2065,50 @@ fn a_drifted_purge_table_is_rejected_on_open() {
         );
     }
 }
+
+/// ADR-134 §8: on a bound file, a handle attached to a pre-rotation epoch and
+/// a handle never attached install no first or later Tick.
+#[test]
+fn a_stale_or_unattached_handle_installs_no_tick() {
+    use pos_core::{GatewayModeBindingHostV1, GatewayModeBindingPortV1, GatewayModeProfileRefV1};
+
+    let local = |byte| {
+        ok(GatewayModeProfileRefV1::try_new(
+            "gateway-mode-local-v1",
+            [byte; 32],
+        ))
+    };
+    let directory = ok(tempdir());
+    let path = directory.path().join("bound-counterfactual.db");
+    let mut binder = open(&path);
+    ok(binder.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(local(1))));
+    let root = ok(binder.create_timeline("factual")).id();
+    ok(binder.append(root, &[draft(1), draft(2)]));
+    let fork = ok(binder.fork(root, Seq::from_u64(2), "counterfactual")).id();
+    ok(binder.publish_counterfactual_facts(fork, facts()));
+    let mut stale = open(&path);
+    ok(stale.attach_mode_binding(&local(1)));
+    let mut unattached = open(&path);
+    let permit = ok(GatewayModeBindingHostV1::new().authorize_rotation(local(1), local(2)));
+    ok(binder.rotate_mode(permit));
+
+    let command = Spec::new(fork).command();
+    let before = written_rows(&path, fork);
+    for writer in [&mut stale, &mut unattached] {
+        assert_eq!(
+            writer.commit_counterfactual_invalidation(&command),
+            Err(StoreError::ModeBindingStale)
+        );
+        assert_eq!(written_rows(&path, fork), before);
+    }
+    let receipt = commit_default(&mut binder, fork);
+    let first = receipt.tick_basis(receipt.first_tick_head());
+    let committed = written_rows(&path, fork);
+    for writer in [&mut stale, &mut unattached] {
+        assert_eq!(
+            writer.append_counterfactual_tick(fork, &first, &tick_drafts(&[20, 21], None)),
+            Err(StoreError::ModeBindingStale)
+        );
+        assert_eq!(written_rows(&path, fork), committed);
+    }
+}

@@ -4,7 +4,7 @@
 //! while giving both paths one admission basis. They carry no append capability;
 //! only committed [`Event`] values can produce a [`PipelineCommitReceiptV1`].
 
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU64};
 
 use crate::{
     AppendIdentity, Event, EventDraft, EventId, FactualTickDependenciesV1, Hash, Seq, TimelineId,
@@ -580,6 +580,7 @@ pub struct PipelineCommitReceiptV1 {
     timeline_id: TimelineId,
     draft_batch_digest: Hash,
     committed_events: Vec<CommittedPipelineEventV1>,
+    mode_binding_epoch: Option<NonZeroU64>,
 }
 
 impl PipelineCommitReceiptV1 {
@@ -675,7 +676,25 @@ impl PipelineCommitReceiptV1 {
                     seq: event.seq,
                 })
                 .collect(),
+            mode_binding_epoch: None,
         })
+    }
+
+    /// Attach the Gateway mode-binding epoch the store recorded for this
+    /// commit (ADR-134 §8). The adapter resolves it from its permanent
+    /// commit-epoch evidence, so a recovered receipt carries the epoch of its
+    /// original commit; an unbound store records none.
+    #[must_use]
+    pub const fn with_mode_binding_epoch(mut self, epoch: Option<NonZeroU64>) -> Self {
+        self.mode_binding_epoch = epoch;
+        self
+    }
+
+    /// The Gateway mode-binding epoch recorded for this commit, if the store
+    /// was bound when it committed.
+    #[must_use]
+    pub const fn mode_binding_epoch(&self) -> Option<NonZeroU64> {
+        self.mode_binding_epoch
     }
 
     #[must_use]
@@ -718,6 +737,62 @@ pub enum PipelineOutcomeV1 {
     InvalidDependencyDeclaration,
     /// The Timeline's recorded dependency set accepts no further Tick.
     DependencySetExhausted,
+    /// The admitting adapter's attached Gateway mode-binding epoch is stale
+    /// (ADR-134 §8); nothing was committed.
+    ModeBindingStale,
+}
+
+/// The fieldless kind of a [`PipelineOutcomeV1`], numbered in declaration
+/// order so a host indexes one per-outcome table by `kind as usize`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineOutcomeKindV1 {
+    Rejected = 0,
+    InvalidObservation = 1,
+    AuthorityRevoked = 2,
+    AuthorityExpired = 3,
+    PolicyIndeterminate = 4,
+    ResourceExhausted = 5,
+    InvalidPluginResult = 6,
+    InvalidProviderResult = 7,
+    DomainConflict = 8,
+    AdmissionConflict = 9,
+    Committed = 10,
+    RecoveredDuplicate = 11,
+    InvalidDependencyDeclaration = 12,
+    DependencySetExhausted = 13,
+    ModeBindingStale = 14,
+}
+
+impl PipelineOutcomeKindV1 {
+    /// The number of outcome kinds, the length of a per-outcome table.
+    pub const COUNT: usize = 15;
+}
+
+impl PipelineOutcomeV1 {
+    /// This outcome's kind. The match has no wildcard, so a new outcome
+    /// fails to compile until it names its kind.
+    #[must_use]
+    pub const fn kind(&self) -> PipelineOutcomeKindV1 {
+        match self {
+            Self::Rejected => PipelineOutcomeKindV1::Rejected,
+            Self::InvalidObservation => PipelineOutcomeKindV1::InvalidObservation,
+            Self::AuthorityRevoked => PipelineOutcomeKindV1::AuthorityRevoked,
+            Self::AuthorityExpired => PipelineOutcomeKindV1::AuthorityExpired,
+            Self::PolicyIndeterminate => PipelineOutcomeKindV1::PolicyIndeterminate,
+            Self::ResourceExhausted => PipelineOutcomeKindV1::ResourceExhausted,
+            Self::InvalidPluginResult => PipelineOutcomeKindV1::InvalidPluginResult,
+            Self::InvalidProviderResult => PipelineOutcomeKindV1::InvalidProviderResult,
+            Self::DomainConflict => PipelineOutcomeKindV1::DomainConflict,
+            Self::AdmissionConflict => PipelineOutcomeKindV1::AdmissionConflict,
+            Self::Committed(_) => PipelineOutcomeKindV1::Committed,
+            Self::RecoveredDuplicate(_) => PipelineOutcomeKindV1::RecoveredDuplicate,
+            Self::InvalidDependencyDeclaration => {
+                PipelineOutcomeKindV1::InvalidDependencyDeclaration
+            }
+            Self::DependencySetExhausted => PipelineOutcomeKindV1::DependencySetExhausted,
+            Self::ModeBindingStale => PipelineOutcomeKindV1::ModeBindingStale,
+        }
+    }
 }
 
 fn invalid_draft(draft: &EventDraft) -> bool {

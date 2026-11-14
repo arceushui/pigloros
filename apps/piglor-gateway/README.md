@@ -22,11 +22,45 @@ contract that their owner tickets (#302 to #309) will serve. WebSocket streaming
 
 ```bash
 # Memory store (default loopback): unprovisioned, so protected routes answer 401
-cargo run -p piglor-gateway --locked -- serve
+cargo run -p piglor-gateway --locked -- serve --profile gateway-mode-local-v1
 
 # SQLite persistence, with the Local Principal provisioned in the database
-cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080 /tmp/piglor-gw.db
+cargo run -p piglor-gateway --locked -- \
+  serve --profile gateway-mode-local-v1 127.0.0.1:8080 /tmp/piglor-gw.db
 ```
+
+### Execution mode
+
+`serve` requires `--profile`, the Gateway execution-mode profile the process and its store serve
+under (ADR-134): `gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`. The binary is the same
+for both modes. The profiles are release-compiled from the public declaration
+[`execution-mode-profiles.json`](../../contracts/gateway/v1/execution-mode-profiles.json) and are
+composition-verified: they are not installed EPF1 profiles and claim no reproducibility.
+
+- **Network features need an operator grant.** Repeat `--network-grant <owntracks|public-read-only>`
+  for each one. A non-loopback (spectator) bind needs `public-read-only`; `--owntracks-owner-key`
+  needs `owntracks` and a loopback bind. Loopback ingress and the Fork-admission socket are not
+  network. Air-Gapped accepts no grant, so it refuses OwnTracks, a non-loopback bind and any
+  network `LEDGER_SOURCE`; `LEDGER_SOURCE` must always be a local path. Each refusal happens before
+  the store, the ledger or a listener opens.
+- **The store records its mode.** The first `serve` of an empty SQLite store binds it to the
+  profile. A later `serve` must name the same profile; a populated store that no `serve` bound is
+  refused (recreate development stores). Only `migrate-mode` changes the mode, while no other
+  process uses the store:
+
+  ```bash
+  piglor-gateway migrate-mode /tmp/piglor-gw.db \
+    --from gateway-mode-local-v1 --to gateway-mode-air-gapped-v1
+  ```
+
+- **One lock per store.** `serve` and the offline writers (`owntracks pair|rotate|revoke`,
+  `provision-local-fork-authority`, `provision-local-principal`) hold a shared non-blocking lock on
+  `<sqlite-path>.gateway-mode.lock`; `migrate-mode` holds it exclusively. Offline writers need a
+  store a first `serve` has bound, and never bind one. An Air-Gapped store refuses `owntracks pair`
+  and `rotate`. Only Gateway processes write a bound store; other hosts, such as `pos-experiment`,
+  are refused.
+- **A stale process stops.** A write by a process whose binding a migration replaced commits
+  nothing, answers `503` `temporarily-unavailable`, and the process exits nonzero.
 
 ## Local Principal
 
@@ -72,34 +106,14 @@ succeeds), or stop the Gateway, create a new database and provision the new docu
 
 ### Separate deterministic experiment host
 
-The Gateway remains an ingress/store façade; it does not run simulation drivers. For the
-ADR-019 two-process demonstration, start the Gateway with an explicit SQLite file, create a
-Timeline through `POST /v1/timelines`, then stop the Gateway before running `pos-experiment`
-against that exact file and returned ID. Restart the Gateway after the experiment exits:
+The Gateway remains an ingress/store façade; it does not run simulation drivers. A store a Gateway
+has served is bound to its execution mode (ADR-134), and only Gateway processes write a bound
+store, so `pos-experiment` cannot append to it. Run the ADR-019 two-process demonstration against
+a SQLite file no Gateway has served; see the
+[`pos-experiment` demo guide](../pos-experiment/README.md).
 
-```bash
-cargo run -p piglor-gateway --locked -- \
-  serve 127.0.0.1:8080 /tmp/piglor-126.db
-
-# Record the Timeline ID from POST /v1/timelines, then stop Gateway (Ctrl-C).
-cargo run -p pos-experiment --locked -- \
-  multi-rate-demo /tmp/piglor-126.db <timeline-id> \
-  --ticks 20 --quantum-ms 100 --pace-ms 100
-
-cargo run -p piglor-gateway --locked -- \
-  serve 127.0.0.1:8080 /tmp/piglor-126.db
-```
-
-Provision the Local Principal of that file first and send its actor in
-`x-piglor-actor-entity`. The experiment is finite and uses caller-supplied simulation time for
-deterministic driver cadence; wall-clock sleep only paces output. After the restart, the
-provisioned Gateway accepts the society signals its Principal is granted; the action route stays
-fail-closed until an installed World action catalogue exists (#461). See the
-[`pos-experiment` demo guide](../pos-experiment/README.md) for exact requests, overrides,
-restart guidance, and the same-file requirement. Arbitrary raw-SQL writers remain outside
-the supported multi-process boundary.
-
-Binding a non-loopback address serves only the public Prediction Ledger routes:
+Binding a non-loopback address (with `--network-grant public-read-only`) serves only the public
+Prediction Ledger routes:
 `/`, `/ledger`, `/health`, and `/v1/ledger`. Timeline polling and all mutation
 routes are absent from that public surface until #68 provides authentication.
 Bind `127.0.0.1` to use the complete local Gateway API. The Compose default
@@ -290,7 +304,10 @@ drains the executor. A new admitted Fork runs inside the host's erasure
 topology transition and returns code 0 only after the successor inventory is
 published; while the host is not Ready it fails closed with code 5. A saturated
 executor or a lost reply answers code 6, and an exact retry recovers a
-committed result through FRP1.
+committed result through FRP1. Code 8 (appended for ADR-134 §8) answers a
+Bind or Fork whose store binding another process changed: the FAC1 committed
+nothing, the Gateway stops serving and exits nonzero, and the client retries
+against the restarted Gateway.
 
 ### Fork classifier profile (FCP1)
 

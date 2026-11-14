@@ -2,8 +2,9 @@
 
 `pos-experiment` is a simulation host for a durable PiglorOS Timeline. Its
 `multi-rate-demo` command proves deterministic 100 ms / 200 ms agent cadence.
-Run standalone Gateway and experiment processes sequentially against the same
-SQLite file; live concurrent commands must share one erasure host.
+It writes only SQLite files no Gateway has served: a Gateway binds its store to
+an execution mode, and a bound store refuses non-Gateway writers (ADR-134).
+Live concurrent commands must share one erasure host.
 Human action submission additionally requires a host-bound Gateway authority adapter
 and World body catalogue.
 
@@ -182,26 +183,12 @@ of slice N3 (#1231, wiki `ADR-062_R8_NonInterference_Operations`) for
 
 ## Sequential SQLite multi-rate demo
 
-Provision the [Local Principal](../piglor-gateway/README.md#local-principal) of an explicit
-SQLite file with `timeline.create` and `timeline.signals.append`, then start the local-only
-Gateway on it:
-
-```bash
-cargo run -p piglor-gateway --locked -- \
-  serve 127.0.0.1:8080 /tmp/piglor-126.db
-```
-
-Create a Timeline and retain the returned `id`, then stop the Gateway before
-opening the experiment process:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/timelines \
-  -H 'content-type: application/json' \
-  -H 'x-piglor-actor-entity: <local-principal-actor-id>' \
-  -d '{"name":"multi-rate-demo"}'
-```
-
-Point the experiment process at the same SQLite path and Timeline ID:
+The demo appends to an existing Timeline of an explicit SQLite file. The file
+must not be one a Gateway has served: the first `piglor-gateway serve` binds a
+store to its execution mode, and a bound store refuses every non-Gateway writer
+(ADR-134 §8), so the earlier Gateway-then-experiment sequence on one file is no
+longer supported. Point the experiment process at the SQLite path and Timeline
+ID:
 
 ```bash
 cargo run -p pos-experiment --locked -- \
@@ -214,18 +201,6 @@ and 100 ms wall-clock pacing. `--ticks`, `--quantum-ms`, and `--pace-ms` overrid
 Ticks and quantum must be non-zero; `--pace-ms 0` runs without sleeping. Pacing only
 slows terminal output—driver eligibility comes exclusively from the printed monotonic
 simulation nanoseconds, so machine speed does not change deterministic cadence.
-
-After the demo exits, restart the Gateway against that SQLite file to inspect
-the committed Timeline. The restarted host verifies the complete inventory
-before serving routes. It can then commit Society Signals:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/timelines/<timeline-id>/signals \
-  -H 'content-type: application/json' \
-  -H 'x-piglor-actor-entity: <local-principal-actor-id>' \
-  -d '{"entity_id":"<society-entity-id>","dimension":"trust","value":0.75}'
-
-```
 
 Human actions use the [Gateway's versioned action contract](../piglor-gateway/README.md):
 `world.action.v1` with the exact `world.action.v1.submit` capability and typed WAC1 payload.

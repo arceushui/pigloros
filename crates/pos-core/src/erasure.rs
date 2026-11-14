@@ -326,31 +326,28 @@ impl std::error::Error for ErasureContainmentErrorV1 {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureHostErrorV1 {
     /// Complete durable recovery has not been installed or was invalidated.
-    RecoveryUnavailable,
+    RecoveryUnavailable = 0,
     /// The requested Timeline/Fork intersects a frozen-or-later scope.
-    AccessFrozen,
+    AccessFrozen = 1,
     /// The caller's inventory generation or durable predecessor is stale.
-    StaleGeneration,
+    StaleGeneration = 2,
     /// An independently injected verifier denied the operation.
-    AuthorizationDenied,
+    AuthorizationDenied = 3,
     /// A stable operation identity conflicts with different bound content.
-    Conflict,
+    Conflict = 4,
     /// The owned persistence adapter failed without exposing payload details.
-    AdapterFailure,
+    AdapterFailure = 5,
+    /// The owned adapter's attached Gateway mode-binding epoch is stale
+    /// (ADR-134 §8); the write committed nothing.
+    ModeBindingStale = 6,
 }
 
 impl ErasureHostErrorV1 {
-    /// Return the stable public error code.
+    /// Return the stable public error code: the variant's explicit
+    /// discriminant.
     #[must_use]
     pub const fn code(self) -> u64 {
-        match self {
-            Self::RecoveryUnavailable => 0,
-            Self::AccessFrozen => 1,
-            Self::StaleGeneration => 2,
-            Self::AuthorizationDenied => 3,
-            Self::Conflict => 4,
-            Self::AdapterFailure => 5,
-        }
+        self as u64
     }
 }
 
@@ -359,6 +356,20 @@ impl From<ErasureContainmentErrorV1> for ErasureHostErrorV1 {
         match error {
             ErasureContainmentErrorV1::AccessFrozen => Self::AccessFrozen,
             ErasureContainmentErrorV1::RecoveryUnavailable => Self::RecoveryUnavailable,
+        }
+    }
+}
+
+/// The payload-free host error of a store failure the host's owned adapter
+/// returned: containment and stale-binding refusals keep their own error,
+/// and every other store failure is an adapter failure.
+impl From<&crate::CoreError> for ErasureHostErrorV1 {
+    fn from(error: &crate::CoreError) -> Self {
+        match error {
+            crate::CoreError::ErasureAccessFrozen => Self::AccessFrozen,
+            crate::CoreError::ErasureContainmentUnavailable => Self::RecoveryUnavailable,
+            crate::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::AdapterFailure,
         }
     }
 }

@@ -253,12 +253,24 @@ pub fn provision_local_principal_from_credentials(
             .and_then(|text| LocalPrincipalProvisionV1::from_toml(text).map_err(io::Error::other))
     })
     .and_then(|provision| {
-        pos_store::sqlite::SqliteStore::open(sqlite_path)
+        // An offline writer (ADR-134 §8): under the shared mode lock, attach
+        // the store's binding before writing; it never binds.
+        crate::mode_profile::GatewayModeStoreLockV1::shared(sqlite_path)
             .map_err(io::Error::other)
-            .and_then(|mut store| {
-                provision_local_principal(&mut store, &provision)
-                    .map(|_| ())
+            .and_then(|lock| {
+                let provisioned = pos_store::sqlite::SqliteStore::open(sqlite_path)
                     .map_err(io::Error::other)
+                    .and_then(|mut store| {
+                        crate::mode_profile::attach_offline_writer_v1(&mut store)
+                            .map_err(io::Error::other)
+                            .and_then(|_| {
+                                provision_local_principal(&mut store, &provision)
+                                    .map(|_| ())
+                                    .map_err(io::Error::other)
+                            })
+                    });
+                drop(lock);
+                provisioned
             })
     })
 }
@@ -299,29 +311,42 @@ where
 /// unavailable.
 pub fn load_host_local_principal(
     host: &mut ErasureExecutionHostV1,
+    mode: &crate::mode_profile::GatewayModeBindingV1,
 ) -> io::Result<Option<GatewayAuthorization>> {
-    host.command_sender()
-        .and_then(|mut sender| {
-            sender.with_scheduled_admission(|ports| load_local_principal(&*ports))
+    mode.verify_host(host)
+        .map_err(io::Error::other)
+        .and_then(|()| {
+            host.command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| load_local_principal(&*ports))
+                })
+                .map_err(erasure_host_failure)
         })
-        .map_err(erasure_host_failure)
         .and_then(|loaded| loaded.map_err(io::Error::other))
+        .and_then(|authorization| {
+            authorization
+                .map(|authorization| authorization.with_mode_binding(mode))
+                .transpose()
+                .map_err(io::Error::other)
+        })
 }
 
-/// The production serve composition (D1) of the Gateway over `host`.
+/// The production serve composition (D1) of the Gateway over `host`, bound
+/// to the execution mode `mode` the host's store records.
 ///
 /// It accepts authenticated local `OwnTracks` ingress when
 /// `owntracks_owner_key` is given, and every protected operation requires
 /// the Local Principal recorded in the host's store.
 ///
 /// # Errors
-/// Returns an error when the authority records are unavailable or the
-/// Gateway cannot bind the host.
+/// Returns an error when the host's store is not bound to `mode`, the
+/// authority records are unavailable, or the Gateway cannot bind the host.
 pub fn local_gateway(
     mut host: ErasureExecutionHostV1,
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+    mode: &crate::mode_profile::GatewayModeBindingV1,
 ) -> io::Result<Gateway> {
-    load_host_local_principal(&mut host).and_then(|authorization| {
+    load_host_local_principal(&mut host, mode).and_then(|authorization| {
         match (owntracks_owner_key, host) {
             (Some(owner_key), host) => {
                 Gateway::new_with_owntracks_erasure_host(host, owner_key, authorization)
@@ -679,6 +704,20 @@ mod tests {
             .to_owned())
     }
 
+    /// Bind the empty store at `path` to `id`, as the first `serve` does, and
+    /// return the handle `serve` composes with.
+    fn bind_mode(
+        path: &str,
+        id: crate::mode_profile::GatewayModeProfileIdV1,
+    ) -> TestResult<crate::mode_profile::GatewayModeBindingV1> {
+        crate::mode_profile::bind_test_store(&mut SqliteStore::open(path)?, id)?;
+        Ok(crate::mode_profile::test_binding(id, []))
+    }
+
+    fn bind_local(path: &str) -> TestResult<crate::mode_profile::GatewayModeBindingV1> {
+        bind_mode(path, crate::mode_profile::GatewayModeProfileIdV1::Local)
+    }
+
     fn sqlite_host(path: &str) -> TestResult<ErasureExecutionHostV1> {
         Ok(open_recovered_erasure_host(
             StoreConfig::Sqlite {
@@ -711,8 +750,13 @@ mod tests {
     fn served_store(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         Ok(Served {
             _directory: directory,
             path,
@@ -1483,6 +1527,7 @@ mod tests {
         let provision = served_provision()?;
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         // A foreign grant revoked on the Local Principal's authority
         // Timeline before a Local Principal grant was recorded after it.
         let foreign = reissued(&provision.grant, Hash::from_bytes([9; 32]), 1, 0)?;
@@ -1507,9 +1552,13 @@ mod tests {
             Some(LocalPrincipalErrorV1::Corrupt)
         );
         drop(store);
-        let error = local_gateway(sqlite_host(&path)?, None)
-            .err()
-            .ok_or("a conflicting record never serves")?;
+        let error = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )
+        .err()
+        .ok_or("a conflicting record never serves")?;
         assert!(error.to_string().contains("restore the store"));
         Ok(())
     }
@@ -1528,14 +1577,67 @@ mod tests {
         }
     }
 
+    /// ADR-134 §6 and D10: every serve composition binds the authorizer to
+    /// the mode it serves, so its admissions carry that mode's revision and
+    /// Air-Gapped revocation state is current by construction.
+    #[tokio::test]
+    async fn every_serve_composition_binds_the_served_mode() -> TestResult {
+        use crate::mode_profile::GatewayModeProfileIdV1;
+        for id in [
+            GatewayModeProfileIdV1::Local,
+            GatewayModeProfileIdV1::AirGapped,
+        ] {
+            for owner_key in [None, Some(OwnTracksOwnerKey([7; 32]))] {
+                let directory = tempfile::tempdir()?;
+                let path = sqlite_path(&directory)?;
+                let mode = bind_mode(&path, id)?;
+                provision_local_principal(&mut SqliteStore::open(&path)?, &served_provision()?)?;
+                let store = owner_key
+                    .as_ref()
+                    .map_or(GatewayHostStoreV1::Standard, |_| {
+                        GatewayHostStoreV1::OwnTracks
+                    });
+                let host = open_recovered_erasure_host(
+                    StoreConfig::Sqlite { path: path.clone() },
+                    store,
+                    &ErasureCoordinatorCompositionV1::closed(),
+                )?;
+                let gateway = local_gateway(
+                    crate::mode_profile::test_attach_host(host, &mode),
+                    owner_key.as_ref(),
+                    &mode,
+                )?;
+                let authorization = gateway
+                    .authorization
+                    .clone()
+                    .ok_or("a provisioned host has an authorizer")?;
+                let (_, revocation_current, revision) = authorization.execution_profile();
+                assert_eq!(revision, Some(&mode.revision_input()));
+                assert_eq!(
+                    mode.revision_input().revocation_current_by_construction(),
+                    id == GatewayModeProfileIdV1::AirGapped
+                );
+                assert!(revocation_current);
+                gateway.shutdown().await?;
+                drop(gateway);
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_recorded_revocation_is_answered_revoked() -> TestResult {
         let provision = served_provision()?;
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
+        let mode = bind_local(&path)?;
         provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
         record_revocation(&path, &provision)?;
-        let gateway = local_gateway(sqlite_host(&path)?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(&path)?, &mode),
+            None,
+            &mode,
+        )?;
         let app = app_of(gateway.clone());
         let (status, problem) = create(&app, Some(actor()?)).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1563,7 +1665,12 @@ mod tests {
         };
 
         // Unprovisioned: protected routes fail closed and nothing is written.
-        let gateway = local_gateway(open_host()?, None)?;
+        let mode = bind_local(&path)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         assert!(gateway.has_authorization());
         gateway.shutdown().await?;
         drop(gateway);
@@ -1571,7 +1678,11 @@ mod tests {
 
         provision_local_principal(&mut SqliteStore::open(&path)?, &served_provision()?)?;
         let recorded = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
-        let gateway = local_gateway(open_host()?, None)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(open_host()?, &mode),
+            None,
+            &mode,
+        )?;
         let app = router(AppState {
             gateway: gateway.clone(),
             ledger_view: LedgerView::default(),
@@ -1613,6 +1724,17 @@ mod tests {
         install(b"principal_id = ")?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
         install(document(&actor, "\"timeline.create\"").as_bytes())?;
+        // ADR-134 §8: an offline writer refuses an unbound store and a store
+        // `migrate-mode` holds; the first `serve` binds it.
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(path)?,
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+        )?;
+        let migrating = crate::mode_profile::GatewayModeStoreLockV1::exclusive(path)?;
+        assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+        drop(migrating);
+        assert!(load_local_principal(&SqliteStore::open(path)?)?.is_none());
         assert!(provision_local_principal_from_credentials(
             directory
                 .path()

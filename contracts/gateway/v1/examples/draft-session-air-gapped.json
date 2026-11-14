@@ -15,11 +15,19 @@
         "digest": "0303030303030303030303030303030303030303030303030303030303030303",
         "origin": "host-derived"
       },
-      "execution_profile": {
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-air-gapped-v1",
         "mode": "air-gapped",
-        "profile_id": "deterministic-air-gapped-v1",
-        "profile_digest": "0202020202020202020202020202020202020202020202020202020202020202",
+        "mode_profile_digest": "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+        "binding_epoch": 1,
+        "network_grants": [],
         "network": "absent"
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
       },
       "availability": {
         "state": "available",

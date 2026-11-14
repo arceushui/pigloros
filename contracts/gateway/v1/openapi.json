@@ -3526,18 +3526,19 @@
         "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "The execution identity under which a resource was produced. `mode` is explicit: an Air-Gapped resource names an Air-Gapped or Replay profile and has no network path; Local never claims Air-Gapped.",
+        "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Until #461 installs an EPF1 every Gateway resource reports `state: unavailable` with `reason: not-installed`. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; the resource envelope constrains `profile_id` to the servable set of its mode.",
         "required": [
-          "mode",
-          "profile_id",
-          "profile_digest",
-          "network"
+          "profile_kind",
+          "state"
         ],
         "properties": {
-          "mode": {
+          "profile_kind": {
+            "const": "epf1"
+          },
+          "state": {
             "enum": [
-              "local",
-              "air-gapped"
+              "installed",
+              "unavailable"
             ]
           },
           "profile_id": {
@@ -3546,33 +3547,191 @@
           "profile_digest": {
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
           },
-          "network": {
-            "enum": [
-              "denied",
-              "capability-granted",
-              "absent"
-            ]
+          "reason": {
+            "const": "not-installed"
           }
         },
         "allOf": [
           {
             "if": {
               "properties": {
+                "state": {
+                  "const": "installed"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "required": [
+                "profile_id",
+                "profile_digest"
+              ],
+              "not": {
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "unavailable"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "required": [
+                "reason"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "profile_id"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "profile_digest"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "GatewayModeProfileId": {
+        "$id": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id",
+        "x-pigloros-maturity": "draft",
+        "enum": [
+          "gateway-mode-air-gapped-v1",
+          "gateway-mode-local-v1"
+        ],
+        "description": "A Gateway execution-mode profile (GMP1, ADR-134 §1). Its namespace is disjoint from the ADR-058 `ExecutionProfileId`: neither is ever accepted where the other is expected. The profiles are composition-verified, never installed, qualified or a reproducibility claim; their public declaration is `execution-mode-profiles.json`."
+      },
+      "ModeProfileIdentity": {
+        "$id": "urn:pigloros:gateway:v1:schema:mode-profile-identity",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The members that identify one GMP1 binding: its kind, profile, mode, digest and store binding epoch. `mode_profile_digest` is BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), recomputable from `execution-mode-profiles.json`. `mode` pairs with `mode_profile_id`. The schemas that compose it close themselves.",
+        "required": [
+          "profile_kind",
+          "mode_profile_id",
+          "mode",
+          "mode_profile_digest",
+          "binding_epoch"
+        ],
+        "properties": {
+          "profile_kind": {
+            "const": "gateway-mode-v1"
+          },
+          "mode_profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id"
+          },
+          "mode": {
+            "enum": [
+              "local",
+              "air-gapped"
+            ]
+          },
+          "mode_profile_digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "binding_epoch": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "The store binding epoch: 1 at bind, incremented on every rotation and migration (ADR-134 §8)."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode_profile_id": {
+                  "const": "gateway-mode-local-v1"
+                }
+              },
+              "required": [
+                "mode_profile_id"
+              ]
+            },
+            "then": {
+              "properties": {
+                "mode": {
+                  "const": "local"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode_profile_id": {
+                  "const": "gateway-mode-air-gapped-v1"
+                }
+              },
+              "required": [
+                "mode_profile_id"
+              ]
+            },
+            "then": {
+              "properties": {
                 "mode": {
                   "const": "air-gapped"
                 }
               }
+            }
+          }
+        ]
+      },
+      "ModeProfile": {
+        "$id": "urn:pigloros:gateway:v1:schema:mode-profile",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The GMP1 a resource was produced under (ADR-134 §5). A resource materialized from committed Events or stored revisions reports the binding epoch recorded in its producing commit's evidence; a resource computed per request reports the epoch current when it is computed. The history record of an epoch never changes, so the disclosure stays stable across later rotation or migration. Only Session reports the current mode.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:mode-profile-identity"
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "SessionModeProfile": {
+        "$id": "urn:pigloros:gateway:v1:schema:session-mode-profile",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "description": "The current GMP1 binding of the serving store, with the operator's network grants and this Principal's network posture (ADR-134 §5). `network` is `absent` in Air-Gapped mode; in Local mode it is `capability-granted` only when the GMP1 allows network and the Principal holds the capability `gateway.network.v1`, otherwise `denied`. `gateway.network.v1` authorizes no operation in v1. Clients should show `network_grants` next to `network`, so an operator-exposed spectator or OwnTracks ingress stays visible when the Principal's own network is `denied`.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:mode-profile-identity"
+          },
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "air-gapped"
+                }
+              },
+              "required": [
+                "mode"
+              ]
             },
             "then": {
               "properties": {
-                "profile_id": {
-                  "enum": [
-                    "replay-v1",
-                    "deterministic-air-gapped-v1"
-                  ]
-                },
                 "network": {
                   "const": "absent"
+                },
+                "network_grants": {
+                  "maxItems": 0
                 }
               }
             }
@@ -3583,17 +3742,13 @@
                 "mode": {
                   "const": "local"
                 }
-              }
+              },
+              "required": [
+                "mode"
+              ]
             },
             "then": {
               "properties": {
-                "profile_id": {
-                  "enum": [
-                    "replay-v1",
-                    "deterministic-local-v1",
-                    "live-local-v1"
-                  ]
-                },
                 "network": {
                   "enum": [
                     "denied",
@@ -3603,7 +3758,59 @@
               }
             }
           }
-        ]
+        ],
+        "required": [
+          "network_grants",
+          "network"
+        ],
+        "properties": {
+          "network_grants": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 2,
+            "items": {
+              "enum": [
+                "owntracks",
+                "public-read-only"
+              ]
+            },
+            "description": "The operator's `--network-grant` values, sorted. Air-Gapped accepts none."
+          },
+          "network": {
+            "enum": [
+              "absent",
+              "denied",
+              "capability-granted"
+            ]
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ProducedUnderModeProfile": {
+        "$id": "urn:pigloros:gateway:v1:schema:produced-under-mode-profile",
+        "x-pigloros-maturity": "draft",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One GMP1 binding epoch that covers an exported commit.",
+        "required": [
+          "mode_profile_id",
+          "mode_profile_digest",
+          "binding_epoch"
+        ],
+        "properties": {
+          "mode_profile_id": {
+            "$ref": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id"
+          },
+          "mode_profile_digest": {
+            "$ref": "urn:pigloros:gateway:v1:schema:digest"
+          },
+          "binding_epoch": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "The store binding epoch: 1 at bind, incremented on every rotation and migration (ADR-134 §8)."
+          }
+        }
       },
       "ProvenanceReference": {
         "$id": "urn:pigloros:gateway:v1:schema:provenance-reference",
@@ -3700,11 +3907,12 @@
         "$id": "urn:pigloros:gateway:v1:schema:resource-envelope",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "The members every Draft resource carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the execution profile and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
+        "description": "The members every Draft resource carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the GMP1 `mode_profile` it was produced under (Session: the current binding), the EPF1-only `execution_profile` and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
         "required": [
           "schema_id",
           "id",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability"
         ],
@@ -3732,6 +3940,10 @@
           "provenance": {
             "$ref": "urn:pigloros:gateway:v1:schema:provenance-reference"
           },
+          "mode_profile": {
+            "type": "object",
+            "description": "Session reports `session-mode-profile` (the current binding); every other resource reports `mode-profile` (the binding it was produced under)."
+          },
           "execution_profile": {
             "$ref": "urn:pigloros:gateway:v1:schema:execution-profile"
           },
@@ -3749,6 +3961,101 @@
             "required": [
               "generation"
             ]
+          }
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "schema_id": {
+                  "const": "urn:pigloros:gateway:v1:schema:session"
+                }
+              },
+              "required": [
+                "schema_id"
+              ]
+            },
+            "then": {
+              "properties": {
+                "mode_profile": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:session-mode-profile"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "mode_profile": {
+                  "$ref": "urn:pigloros:gateway:v1:schema:mode-profile"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode_profile": {
+                  "properties": {
+                    "mode": {
+                      "const": "local"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                }
+              },
+              "required": [
+                "mode_profile"
+              ]
+            },
+            "then": {
+              "properties": {
+                "execution_profile": {
+                  "properties": {
+                    "profile_id": {
+                      "enum": [
+                        "replay-v1",
+                        "deterministic-local-v1",
+                        "live-local-v1"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode_profile": {
+                  "properties": {
+                    "mode": {
+                      "const": "air-gapped"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                }
+              },
+              "required": [
+                "mode_profile"
+              ]
+            },
+            "then": {
+              "properties": {
+                "execution_profile": {
+                  "properties": {
+                    "profile_id": {
+                      "enum": [
+                        "replay-v1",
+                        "deterministic-air-gapped-v1"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         ]
       },
@@ -3832,7 +4139,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:session",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "The authenticated Principal's own session: effective grants, consent, execution mode and profile. `generation` is the authority generation; it advances on every grant, consent or revocation change.",
+        "description": "The authenticated Principal's own session: effective grants, consent, the current execution mode (`mode_profile`, with the operator network grants and this Principal's network posture) and the EPF1 execution profile. `generation` is the authority generation; it advances on every grant, consent or revocation change.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -3843,6 +4150,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "principal",
@@ -3882,7 +4190,7 @@
             "items": {
               "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
             },
-            "description": "The effective capabilities derived by the Gateway; a client never supplies a trusted capability."
+            "description": "The effective capabilities derived by the Gateway; a client never supplies a trusted capability. The DomainKey `gateway.network.v1` is the Principal network capability (ADR-134 §4): it authorizes no operation in v1 and only decides the `mode_profile.network` disclosure; it is granted only through explicit-grant provisioning, never an operator flag."
           },
           "consents": {
             "type": "array",
@@ -4321,6 +4629,7 @@
           "id",
           "revision",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "descriptor",
@@ -4402,6 +4711,7 @@
           "id",
           "revision",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "subject_entity_id",
@@ -4541,6 +4851,7 @@
           "id",
           "revision",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "options",
@@ -4665,6 +4976,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "state",
@@ -4907,6 +5219,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "timeline_id",
@@ -5161,6 +5474,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "preview_id",
@@ -5445,6 +5759,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "state",
@@ -5634,6 +5949,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "preview_id",
@@ -5926,7 +6242,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:export",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "A minimized, content-addressed, subject-authorized export and its ReproManifest closure, paged by `next_cursor`. An `exported` export names its ReproManifest. Later erasure redacts managed records and weakens the ReplayClaim (a `degraded` export never claims `exact`); it does not claim that external copies vanished.",
+        "description": "A minimized, content-addressed, subject-authorized export and its ReproManifest closure, paged by `next_cursor`. An `exported` export names its ReproManifest. Later erasure redacts managed records and weakens the ReplayClaim (a `degraded` export never claims `exact`); it does not claim that external copies vanished. `produced_under_mode_profiles` lists the GMP1 binding epochs its commits were produced under.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -5971,6 +6287,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "preview_id",
@@ -5980,7 +6297,8 @@
           "members",
           "next_cursor",
           "replay_claim",
-          "external_copy_disclosure"
+          "external_copy_disclosure",
+          "produced_under_mode_profiles"
         ],
         "properties": {
           "schema_id": {
@@ -6105,6 +6423,15 @@
           },
           "external_copy_disclosure": {
             "const": "copies-outside-pigloros-cannot-be-recalled"
+          },
+          "produced_under_mode_profiles": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 64,
+            "items": {
+              "$ref": "urn:pigloros:gateway:v1:schema:produced-under-mode-profile"
+            },
+            "description": "Every GMP1 binding epoch that covers an exported commit, sorted by `binding_epoch` (ADR-134 §5). The source deployment's produced-under modes travel here; an importing store records them under its own importing epoch and does not re-assert them."
           }
         },
         "unevaluatedProperties": false
@@ -6138,6 +6465,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "consent_ref",
@@ -6206,6 +6534,7 @@
           "id",
           "generation",
           "provenance",
+          "mode_profile",
           "execution_profile",
           "availability",
           "state",
@@ -7015,6 +7344,20 @@
           "code": "temporarily-unavailable",
           "status": 503
         }
+      }
+    },
+    "export_mode_profiles": {
+      "value": 64,
+      "unit": "items",
+      "scope": "operation-wide",
+      "origin": "new",
+      "source": "ADR-134 §5 produced_under_mode_profiles",
+      "surface": "draft",
+      "direction": "response",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/Export/properties/produced_under_mode_profiles/maxItems"
+        ]
       }
     }
   }

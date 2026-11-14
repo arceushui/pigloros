@@ -31,30 +31,26 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CHILD_NAME_BYTES_V1: usize = 128;
 const FAL1_DOMAIN: &[u8] = b"pigloros/fal1/request/v1";
 
+/// One FARL1 response code. The explicit discriminant is the append-only
+/// wire value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LocalForkAdmissionCodeV1 {
-    Ok,
-    Unauthenticated,
-    Conflict,
-    StaleFoldBoundary,
-    ParentChanged,
-    AuthorityUnavailable,
-    Indeterminate,
-    InvalidRequest,
+    Ok = 0,
+    Unauthenticated = 1,
+    Conflict = 2,
+    StaleFoldBoundary = 3,
+    ParentChanged = 4,
+    AuthorityUnavailable = 5,
+    Indeterminate = 6,
+    InvalidRequest = 7,
+    /// This Gateway's mode binding is stale (ADR-134 §8): nothing was
+    /// committed and the process is stopping; retry against its successor.
+    ModeBindingStale = 8,
 }
 
 impl LocalForkAdmissionCodeV1 {
     const fn wire(self) -> u8 {
-        match self {
-            Self::Ok => 0,
-            Self::Unauthenticated => 1,
-            Self::Conflict => 2,
-            Self::StaleFoldBoundary => 3,
-            Self::ParentChanged => 4,
-            Self::AuthorityUnavailable => 5,
-            Self::Indeterminate => 6,
-            Self::InvalidRequest => 7,
-        }
+        self as u8
     }
 }
 
@@ -125,13 +121,18 @@ impl LocalForkAdmissionResponseV1 {
         }
     }
 
+    /// Whether this answer refused a write of a stale mode binding.
+    pub(super) fn refused_stale_binding(&self) -> bool {
+        self.code == LocalForkAdmissionCodeV1::ModeBindingStale
+    }
+
     /// Encode the fixed-shape canonical FARL1 array.
     ///
     /// Every field is a definite-length head with a fixed width, so the
     /// shortest-form bytes are written directly and encoding cannot fail.
     #[must_use]
     pub(super) fn to_canonical_cbor(&self) -> Vec<u8> {
-        // array(4), text(5) "FARL1", uint 1, uint code (0..=7).
+        // array(4), text(5) "FARL1", uint 1, uint code (0..=8).
         let mut bytes = vec![
             0x84,
             0x65,
@@ -559,6 +560,7 @@ mod tests {
             (LocalForkAdmissionCodeV1::AuthorityUnavailable, 5),
             (LocalForkAdmissionCodeV1::Indeterminate, 6),
             (LocalForkAdmissionCodeV1::InvalidRequest, 7),
+            (LocalForkAdmissionCodeV1::ModeBindingStale, 8),
         ] {
             assert_eq!(
                 LocalForkAdmissionResponseV1::rejected(code).to_canonical_cbor(),

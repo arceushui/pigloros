@@ -229,48 +229,6 @@ fn ensure_plaintext_preference_allowed(
     }
 }
 
-/// Map a backend failure onto the closed counterfactual port errors.
-///
-/// A missing Timeline is `ForkNotFound`, a write whose commit may or may not
-/// have landed is `OutcomeUnknown`, and every other backend failure is
-/// `StorageFailure`, which committed nothing.
-const fn counterfactual_port_error(error: &CoreError) -> pos_core::CounterfactualStoreErrorV1 {
-    match error {
-        CoreError::TimelineNotFound(_) => pos_core::CounterfactualStoreErrorV1::ForkNotFound,
-        CoreError::StorageOutcomeUnknown(_) => pos_core::CounterfactualStoreErrorV1::OutcomeUnknown,
-        _ => pos_core::CounterfactualStoreErrorV1::StorageFailure,
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod counterfactual_port_error_tests {
-    use pos_core::{CoreError, CounterfactualStoreErrorV1, TimelineId};
-
-    use super::counterfactual_port_error;
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn backend_failures_map_onto_the_closed_port_errors() {
-        assert_eq!(
-            counterfactual_port_error(&CoreError::TimelineNotFound(TimelineId::new())),
-            CounterfactualStoreErrorV1::ForkNotFound
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::StorageOutcomeUnknown(String::new())),
-            CounterfactualStoreErrorV1::OutcomeUnknown
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::Storage(String::new())),
-            CounterfactualStoreErrorV1::StorageFailure
-        );
-        assert_eq!(
-            counterfactual_port_error(&CoreError::ErasureContainmentUnavailable),
-            CounterfactualStoreErrorV1::StorageFailure
-        );
-    }
-}
-
 /// A committed or indeterminate topology write invalidates a cached inventory.
 pub(crate) const fn inventory_generation_may_have_changed<T>(
     result: &Result<T, CoreError>,
@@ -1068,13 +1026,16 @@ pub(crate) fn install_or_reject(
     }
 }
 
-/// Bind a just-committed admitted batch to its authoritative receipt.
+/// Bind a just-committed admitted batch to its authoritative receipt and the
+/// Gateway mode-binding epoch recorded for its commit (ADR-134 §8).
 pub(crate) fn committed_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineCommitReceiptV1, CoreError> {
     PipelineCommitReceiptV1::try_from_committed_events(basis, timeline, events)
+        .map(|receipt| receipt.with_mode_binding_epoch(mode_binding_epoch))
         .map_err(pipeline_receipt_error)
 }
 
@@ -1083,8 +1044,22 @@ pub(crate) fn recovered_pipeline_receipt(
     basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineOutcomeV1, CoreError> {
-    committed_pipeline_receipt(basis, timeline, events).map(PipelineOutcomeV1::RecoveredDuplicate)
+    committed_pipeline_receipt(basis, timeline, events, mode_binding_epoch)
+        .map(PipelineOutcomeV1::RecoveredDuplicate)
+}
+
+/// Answer a pipeline admission whose append met a stale Gateway mode-binding
+/// epoch with [`PipelineOutcomeV1::ModeBindingStale`]; every other error
+/// stays an error. The adapter has already rolled the attempt back.
+pub(crate) fn pipeline_mode_binding_stale_outcome(
+    error: CoreError,
+) -> Result<PipelineOutcomeV1, CoreError> {
+    match error {
+        CoreError::ModeBindingStale => Ok(PipelineOutcomeV1::ModeBindingStale),
+        error => Err(error),
+    }
 }
 
 /// Rebuild the receipt of a retained attempt found by a basis-free lookup.
@@ -1093,6 +1068,7 @@ pub(crate) fn retained_pipeline_receipt(
     timeline: TimelineId,
     draft_batch_digest: Hash,
     events: &[Event],
+    mode_binding_epoch: Option<std::num::NonZeroU64>,
 ) -> Result<PipelineReceiptLookupV1, CoreError> {
     PipelineCommitReceiptV1::try_from_retained_events(
         attempt_id,
@@ -1100,7 +1076,9 @@ pub(crate) fn retained_pipeline_receipt(
         draft_batch_digest,
         events,
     )
-    .map(PipelineReceiptLookupV1::Retained)
+    .map(|receipt| {
+        PipelineReceiptLookupV1::Retained(receipt.with_mode_binding_epoch(mode_binding_epoch))
+    })
     .map_err(pipeline_receipt_error)
 }
 
@@ -1245,6 +1223,21 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
 pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, CoreError> {
     sqlite::SqliteStore::open_read_only(sqlite_path)
         .map(|store| Box::new(store) as Box<dyn EventStore>)
+}
+
+/// The persisted binding when it is exactly `expected`: the attach check of
+/// both adapters (ADR-134 §8), made on the one read the attach uses.
+pub(crate) fn expected_mode_binding(
+    current: Option<pos_core::GatewayModeBindingRecordV1>,
+    expected: &pos_core::GatewayModeProfileRefV1,
+) -> Result<pos_core::GatewayModeBindingRecordV1, pos_core::GatewayModeBindingErrorV1> {
+    current
+        .ok_or(pos_core::GatewayModeBindingErrorV1::Unbound)
+        .and_then(|record| {
+            (record.profile() == expected)
+                .then_some(record)
+                .ok_or(pos_core::GatewayModeBindingErrorV1::Mismatch)
+        })
 }
 
 /// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
@@ -1520,6 +1513,19 @@ mod tests {
             ),
             public_key,
         )]
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn only_a_stale_mode_binding_becomes_the_stale_pipeline_outcome() {
+        assert_eq!(
+            pipeline_mode_binding_stale_outcome(CoreError::ModeBindingStale).test_ok(),
+            PipelineOutcomeV1::ModeBindingStale
+        );
+        assert!(matches!(
+            pipeline_mode_binding_stale_outcome(CoreError::ArtifactUnavailable),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]

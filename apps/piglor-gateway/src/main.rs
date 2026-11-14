@@ -22,13 +22,20 @@ macro_rules! output_stderr {
 
 #[cfg(target_os = "linux")]
 use piglor_gateway::local_fork_service::{
-    provision_local_fork_admission_authority, serve_local_fork_admission, LocalForkAdmissionPathsV1,
+    provision_local_fork_admission_authority, serve_managed_local_fork_admission,
+    ManagedLocalForkAdmissionV1,
 };
 use piglor_gateway::local_principal::local_gateway;
 #[cfg(target_os = "linux")]
 use piglor_gateway::local_principal::provision_local_principal_from_credentials;
+use piglor_gateway::mode_profile::{
+    bind_gateway_mode_v1, migrate_gateway_mode_v1, verify_gateway_serve_composition_v1,
+    GatewayModeBindingV1, GatewayModeProfileIdV1, GatewayModeStoreLockV1, GatewayNetworkGrantV1,
+    GatewayServeCompositionV1,
+};
 use piglor_gateway::startup::{
-    announce_listening, open_recovered_erasure_host, stop_after_bind_failure, GatewayHostStoreV1,
+    announce_listening, bound_router, open_recovered_erasure_host, shutdown_or_stale,
+    stale_binding_exit, stop_after_bind_failure, GatewayHostStoreV1,
 };
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
@@ -37,6 +44,7 @@ use piglor_ledger::LedgerView;
 use pos_runtime::ErasureCoordinatorCompositionV1;
 use pos_store::StoreConfig;
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     future::Future,
     net::SocketAddr,
@@ -45,6 +53,7 @@ use std::{
 };
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type RunError = Box<dyn std::error::Error + Send + Sync>;
 
 const GATEWAY_CREDENTIAL_DIRECTORY: &str = "/run/credentials/piglor-gateway.service";
 const PROVISION_CREDENTIAL_DIRECTORY: &str =
@@ -52,6 +61,8 @@ const PROVISION_CREDENTIAL_DIRECTORY: &str =
 const LOCAL_PRINCIPAL_CREDENTIAL_DIRECTORY: &str =
     "/run/credentials/piglor-gateway-local-principal-provision.service";
 const FORK_ADMISSION_SOCKET: &str = "/run/pigloros/fork-admission.sock";
+const MIGRATE_MODE_USAGE: &str =
+    "Usage: piglor-gateway migrate-mode <sqlite-path> --from <profile> --to <profile>";
 
 fn handle_run_error(e: &dyn std::error::Error) {
     output_stderr!("Error: {e}");
@@ -71,11 +82,11 @@ fn main_with_args(args: &[String]) -> std::process::ExitCode {
     }
 }
 
-fn run_main(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_main(args: &[String]) -> Result<(), RunError> {
     run_with_args(args)
 }
 
-fn run_with_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_with_args(args: &[String]) -> Result<(), RunError> {
     run_with_args_and_shutdown(
         args,
         Box::pin(shutdown_signal_from(tokio::signal::ctrl_c())),
@@ -97,10 +108,7 @@ impl LedgerEnvironment {
     }
 }
 
-fn run_with_args_and_shutdown(
-    args: &[String],
-    shutdown: ShutdownFuture,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_with_args_and_shutdown(args: &[String], shutdown: ShutdownFuture) -> Result<(), RunError> {
     run_with_args_and_shutdown_with_environment(args, shutdown, LedgerEnvironment::from_process())
 }
 
@@ -108,13 +116,15 @@ fn run_with_args_and_shutdown_with_environment(
     args: &[String],
     shutdown: ShutdownFuture,
     environment: LedgerEnvironment,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    run_with_args_and_shutdown_with_environment_and_credentials(
-        args,
-        shutdown,
-        environment,
-        std::env::var_os("CREDENTIALS_DIRECTORY"),
-    )
+) -> Result<(), RunError> {
+    migrate_mode_command(args).unwrap_or_else(|| {
+        run_with_args_and_shutdown_with_environment_and_credentials(
+            args,
+            shutdown,
+            environment,
+            std::env::var_os("CREDENTIALS_DIRECTORY"),
+        )
+    })
 }
 
 fn run_with_args_and_shutdown_with_environment_and_credentials(
@@ -122,7 +132,7 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
     shutdown: ShutdownFuture,
     environment: LedgerEnvironment,
     credential_directory: Option<OsString>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RunError> {
     match args.get(1).map(String::as_str) {
         Some("owntracks") => {
             let output = owntracks::execute(&args[2..])?;
@@ -130,34 +140,25 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             Ok(())
         }
         Some("serve") => {
-            let serve_args = parse_serve_args(&args[2..])?;
-            let (ledger_view, ledger_write) = match load_ledger_with_environment(environment) {
-                Ok(ledger) => ledger,
-                Err(error) => return Err(Box::new(error)),
-            };
+            let request = parse_serve_request(&args[2..])?;
+            let fork_credentials = request
+                .args
+                .require_local_fork_authority
+                .then(|| {
+                    credential_directory_from(
+                        credential_directory.clone(),
+                        GATEWAY_CREDENTIAL_DIRECTORY,
+                    )
+                })
+                .transpose()?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(serve_with_owntracks_and_fork_admission(
-                serve_args.addr,
-                serve_args.sqlite_path.as_deref(),
-                serve_args.owntracks_owner_key.as_deref(),
-                serve_args
-                    .require_local_fork_authority
-                    .then_some(Path::new(FORK_ADMISSION_SOCKET)),
-                serve_args
-                    .require_local_fork_authority
-                    .then(|| {
-                        credential_directory_from(
-                            credential_directory.clone(),
-                            GATEWAY_CREDENTIAL_DIRECTORY,
-                        )
-                    })
-                    .transpose()?
-                    .as_deref(),
+            rt.block_on(serve_request(
+                &request,
+                fork_credentials.as_deref(),
                 shutdown,
-                ledger_view,
-                ledger_write,
+                environment,
             ))
         }
         Some(command @ ("provision-local-fork-authority" | "provision-local-principal")) => {
@@ -172,13 +173,14 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
             Ok(())
         }
         _ => {
-            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>] [--require-local-fork-authority]|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|version>");
+            output_stderr!("Usage: piglor-gateway <owntracks|serve --profile <profile> [addr] [sqlite-path] [--network-grant <owntracks|public-read-only>]... [--owntracks-owner-key <path>] [--require-local-fork-authority]|migrate-mode <sqlite-path> --from <profile> --to <profile>|provision-local-fork-authority <sqlite-path>|provision-local-principal <sqlite-path>|version>");
+            output_stderr!("  profiles: gateway-mode-local-v1, gateway-mode-air-gapped-v1");
             output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             output_stderr!("  owntracks status <sqlite-path>");
             output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
             output_stderr!("  owntracks revoke <sqlite-path>");
-            output_stderr!("  serve 127.0.0.1:8080           # Memory store");
-            output_stderr!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
+            output_stderr!("  serve --profile gateway-mode-local-v1 127.0.0.1:8080           # Memory store");
+            output_stderr!("  serve --profile gateway-mode-local-v1 127.0.0.1:8080 /tmp/g.db # SQLite store");
             output_stderr!(
                 "  provision-local-fork-authority is available only to its installed systemd unit"
             );
@@ -190,13 +192,32 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
     }
 }
 
+/// `migrate-mode <sqlite-path> --from <profile> --to <profile>` (ADR-134 §8),
+/// or `None` for every other command.
+fn migrate_mode_command(args: &[String]) -> Option<Result<(), RunError>> {
+    (args.get(1).map(String::as_str) == Some("migrate-mode")).then(|| migrate_mode(&args[2..]))
+}
+
+fn migrate_mode(args: &[String]) -> Result<(), RunError> {
+    match args {
+        [sqlite_path, from_flag, from, to_flag, to]
+            if from_flag == "--from" && to_flag == "--to" =>
+        {
+            let audit = migrate_gateway_mode_v1(sqlite_path, from.parse()?, to.parse()?)?;
+            output_stdout!("{audit}");
+            Ok(())
+        }
+        _ => Err(MIGRATE_MODE_USAGE.into()),
+    }
+}
+
 /// `provision-local-fork-authority <sqlite-path>` and `provision-local-principal
 /// <sqlite-path>`: one-shot provisioning, only under each command's systemd unit.
 fn provision_command(
     command: &str,
     args: &[String],
     credential_directory: Option<OsString>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RunError> {
     #[cfg(target_os = "linux")]
     {
         let Some(sqlite_path) = args.get(2) else {
@@ -243,9 +264,7 @@ struct ServeFlags {
     require_local_fork_authority: bool,
 }
 
-fn parse_serve_flags(
-    args: &[String],
-) -> Result<ServeFlags, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_serve_flags(args: &[String]) -> Result<ServeFlags, RunError> {
     let mut flags = ServeFlags {
         positional: Vec::new(),
         owner_key: None,
@@ -276,9 +295,7 @@ fn parse_serve_flags(
     Ok(flags)
 }
 
-fn parse_serve_args(
-    args: &[String],
-) -> Result<ServeArgs, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_serve_args(args: &[String]) -> Result<ServeArgs, RunError> {
     let flags = parse_serve_flags(args)?;
     if flags.positional.len() > 2 {
         return Err("serve accepts at most an address and SQLite path".into());
@@ -302,26 +319,92 @@ fn parse_serve_args(
     })
 }
 
+/// One `serve` invocation: its flags plus the required `--profile` and the
+/// repeatable `--network-grant` (ADR-134 §4).
+#[derive(Debug)]
+struct ServeRequest {
+    args: ServeArgs,
+    profile: GatewayModeProfileIdV1,
+    network_grants: BTreeSet<GatewayNetworkGrantV1>,
+}
+
+impl ServeRequest {
+    /// The host-owned facts the startup predicates check.
+    fn composition(&self, environment: &LedgerEnvironment) -> GatewayServeCompositionV1 {
+        GatewayServeCompositionV1 {
+            tcp_addr: self.args.addr,
+            owntracks_owner_key: self.args.owntracks_owner_key.clone(),
+            fork_admission_socket: self
+                .args
+                .require_local_fork_authority
+                .then(|| PathBuf::from(FORK_ADMISSION_SOCKET)),
+            ledger_source: environment.source.clone(),
+            network_grants: self.network_grants.clone(),
+        }
+    }
+}
+
+/// The execution-mode flags of `serve`, split from the other arguments.
+#[derive(Default)]
+struct ModeFlags {
+    profile: Option<GatewayModeProfileIdV1>,
+    network_grants: BTreeSet<GatewayNetworkGrantV1>,
+    rest: Vec<String>,
+}
+
+fn parse_serve_request(args: &[String]) -> Result<ServeRequest, RunError> {
+    split_mode_flags(args).and_then(|flags| {
+        let profile = flags
+            .profile
+            .ok_or("serve requires --profile <gateway-mode-local-v1|gateway-mode-air-gapped-v1>")?;
+        parse_serve_args(&flags.rest).map(|args| ServeRequest {
+            args,
+            profile,
+            network_grants: flags.network_grants,
+        })
+    })
+}
+
+fn split_mode_flags(args: &[String]) -> Result<ModeFlags, RunError> {
+    let mut flags = ModeFlags::default();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--profile" || arg == "--network-grant" {
+            let value = args
+                .next()
+                .ok_or_else(|| format!("{arg} requires a value"))?;
+            mode_flag(&mut flags, arg, value)?;
+        } else {
+            flags.rest.push(arg.clone());
+        }
+    }
+    Ok(flags)
+}
+
+fn mode_flag(flags: &mut ModeFlags, flag: &str, value: &str) -> Result<(), RunError> {
+    if flag == "--profile" {
+        if flags.profile.replace(value.parse()?).is_some() {
+            return Err("--profile may be specified once".into());
+        }
+    } else if !flags.network_grants.insert(value.parse()?) {
+        return Err("each --network-grant may be specified once".into());
+    }
+    Ok(())
+}
+
 fn credential_directory_from(
     directory: Option<OsString>,
     expected: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PathBuf, RunError> {
     let directory = directory.ok_or("systemd credentials require CREDENTIALS_DIRECTORY")?;
     let directory = PathBuf::from(directory);
     validate_credential_directory(directory, expected)
 }
 
-fn validate_credential_directory(
-    directory: PathBuf,
-    expected: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+fn validate_credential_directory(directory: PathBuf, expected: &str) -> Result<PathBuf, RunError> {
     (directory == *expected)
         .then_some(directory)
         .ok_or_else(|| "credential directory does not match its systemd unit".into())
-}
-
-const fn is_spectator_deployment(addr: SocketAddr) -> bool {
-    !addr.ip().is_loopback()
 }
 
 fn load_ledger_with_environment(
@@ -341,130 +424,163 @@ where
     drop(signal.await);
 }
 
-fn gateway_for_startup(
-    sqlite_path: Option<&str>,
-    config: StoreConfig,
-    owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
-    let composition = ErasureCoordinatorCompositionV1::closed();
-    gateway_for_startup_with_recovery(sqlite_path, config, owntracks_owner_key, &composition)
+/// ADR-134 §4 composition order: predicates 1 to 4 (pure configuration),
+/// then the store's shared mode lock, then the store and its binding
+/// (predicate 5), then the ledger, then the listeners. Each step must succeed
+/// before the next; the lock is held for the whole serve. The listeners and
+/// the `OwnTracks` owner key come from the verified composition only.
+async fn serve_request(
+    request: &ServeRequest,
+    fork_credentials: Option<&Path>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    environment: LedgerEnvironment,
+) -> Result<(), RunError> {
+    let composition = request.composition(&environment);
+    verify_gateway_serve_composition_v1(request.profile, &composition)?;
+    let lock = request
+        .args
+        .sqlite_path
+        .as_deref()
+        .map(GatewayModeStoreLockV1::shared)
+        .transpose()?;
+    let owner_key = composition
+        .owntracks_owner_key
+        .as_deref()
+        .map(OwnTracksOwnerKey::load)
+        .transpose()?;
+    let served = serve_locked(
+        request,
+        composition,
+        fork_credentials,
+        owner_key.as_ref(),
+        shutdown,
+        environment,
+    )
+    .await;
+    drop(lock);
+    served
 }
 
-fn gateway_for_startup_with_recovery(
-    sqlite_path: Option<&str>,
-    config: StoreConfig,
-    owntracks_owner_key: Option<&OwnTracksOwnerKey>,
-    composition: &ErasureCoordinatorCompositionV1,
-) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
-    // D1 on #302: every protected route requires the Local Principal the
-    // store records; an unprovisioned store answers them `401`.
-    match (owntracks_owner_key, sqlite_path) {
-        (Some(owner_key), Some(path)) => open_recovered_erasure_host(
-            StoreConfig::Sqlite {
-                path: path.to_owned(),
-            },
-            GatewayHostStoreV1::OwnTracks,
-            composition,
-        )
-        .and_then(|host| local_gateway(host, Some(owner_key)))
-        .map_err(Into::into),
-        (None, _) => open_recovered_erasure_host(config, GatewayHostStoreV1::Standard, composition)
-            .and_then(|host| local_gateway(host, None))
-            .map_err(Into::into),
-        (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
+/// Serve the Fork-admission deployment when it has credentials (parsing
+/// already required its `SQLite` store), else the HTTP Gateway alone.
+async fn serve_locked(
+    request: &ServeRequest,
+    composition: GatewayServeCompositionV1,
+    fork_credentials: Option<&Path>,
+    owner_key: Option<&OwnTracksOwnerKey>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    environment: LedgerEnvironment,
+) -> Result<(), RunError> {
+    match request.args.sqlite_path.as_deref().zip(fork_credentials) {
+        #[cfg(target_os = "linux")]
+        Some(deployment) => {
+            serve_fork_admission(
+                request,
+                composition,
+                deployment,
+                owner_key,
+                shutdown,
+                environment,
+            )
+            .await
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some(_) => Err("fork admission requires Linux Unix peer credentials".into()),
+        None => serve_http(request, composition, owner_key, shutdown, environment).await,
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-async fn serve(
-    addr: SocketAddr,
-    sqlite_path: Option<&str>,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    ledger_view: LedgerView,
-    ledger_write: LedgerWriteMode,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_with_owntracks(addr, sqlite_path, None, shutdown, ledger_view, ledger_write).await
+fn store_config(sqlite_path: Option<&str>) -> StoreConfig {
+    sqlite_path.map_or(StoreConfig::Memory, |path| StoreConfig::Sqlite {
+        path: path.to_owned(),
+    })
 }
 
-async fn serve_with_owntracks(
-    addr: SocketAddr,
-    sqlite_path: Option<&str>,
-    owntracks_owner_key_path: Option<&std::path::Path>,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    ledger_view: LedgerView,
-    ledger_write: LedgerWriteMode,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_with_owntracks_and_fork_admission(
-        addr,
-        sqlite_path,
-        owntracks_owner_key_path,
-        None,
-        None,
+const fn host_store(owner_key: Option<&OwnTracksOwnerKey>) -> GatewayHostStoreV1 {
+    if owner_key.is_some() {
+        GatewayHostStoreV1::OwnTracks
+    } else {
+        GatewayHostStoreV1::Standard
+    }
+}
+
+/// Open the one erasure host of the store with the closed composition and
+/// bind it to the requested execution mode (predicate 5).
+fn open_bound_host(
+    request: &ServeRequest,
+    composition: GatewayServeCompositionV1,
+    owner_key: Option<&OwnTracksOwnerKey>,
+) -> Result<(pos_runtime::ErasureExecutionHostV1, GatewayModeBindingV1), RunError> {
+    let mut host = open_recovered_erasure_host(
+        store_config(request.args.sqlite_path.as_deref()),
+        host_store(owner_key),
+        &ErasureCoordinatorCompositionV1::closed(),
+    )?;
+    let mode = bind_gateway_mode_v1(request.profile, composition, &mut host)?;
+    Ok((host, mode))
+}
+
+async fn serve_http(
+    request: &ServeRequest,
+    composition: GatewayServeCompositionV1,
+    owner_key: Option<&OwnTracksOwnerKey>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    environment: LedgerEnvironment,
+) -> Result<(), RunError> {
+    let (host, mode) = open_bound_host(request, composition, owner_key)?;
+    let (ledger_view, ledger_write) = load_ledger_with_environment(environment)?;
+    // D1 on #302: every protected route requires the Local Principal the
+    // store records; an unprovisioned store answers them `401`.
+    let gateway = local_gateway(host, owner_key, &mode)?;
+    serve_gateway(gateway, &mode, shutdown, (ledger_view, ledger_write)).await
+}
+
+/// ADR-109 r9: one erasure host serves HTTP and the Fork listener, and the
+/// binary composes only the closed erasure authority. The managed
+/// credentials are decoded before the database opens.
+#[cfg(target_os = "linux")]
+async fn serve_fork_admission(
+    request: &ServeRequest,
+    composition: GatewayServeCompositionV1,
+    (sqlite_path, credential_directory): (&str, &Path),
+    owner_key: Option<&OwnTracksOwnerKey>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    environment: LedgerEnvironment,
+) -> Result<(), RunError> {
+    serve_managed_local_fork_admission(
+        ManagedLocalForkAdmissionV1 {
+            sqlite_path,
+            credential_directory,
+            profile: request.profile,
+            composition,
+            owntracks_owner_key: owner_key,
+            ledger: LedgerConfig::new(
+                environment.source.map(PathBuf::from),
+                environment.write_enabled,
+            ),
+        },
         shutdown,
-        ledger_view,
-        ledger_write,
     )
     .await
 }
 
-async fn serve_with_owntracks_and_fork_admission(
-    addr: SocketAddr,
-    sqlite_path: Option<&str>,
-    owntracks_owner_key_path: Option<&Path>,
-    fork_admission_socket: Option<&Path>,
-    fork_admission_credentials: Option<&Path>,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    ledger_view: LedgerView,
-    ledger_write: LedgerWriteMode,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = sqlite_path.map_or(StoreConfig::Memory, |path| StoreConfig::Sqlite {
-        path: path.to_owned(),
-    });
-    let owntracks_owner_key = if is_spectator_deployment(addr) {
-        None
-    } else {
-        owntracks_owner_key_path
-            .map(OwnTracksOwnerKey::load)
-            .transpose()?
-    };
-    #[cfg(target_os = "linux")]
-    match (
-        sqlite_path,
-        fork_admission_socket,
-        fork_admission_credentials,
-    ) {
-        // ADR-109 r9: one erasure host serves HTTP and the Fork listener, and
-        // the binary composes only the closed erasure authority.
-        (Some(sqlite_path), Some(socket_path), Some(credential_directory)) => {
-            return serve_local_fork_admission(
-                addr,
-                LocalForkAdmissionPathsV1 {
-                    sqlite_path,
-                    socket_path,
-                    credential_directory,
-                },
-                owntracks_owner_key.as_ref(),
-                &ErasureCoordinatorCompositionV1::closed(),
-                shutdown,
-                (ledger_view, ledger_write),
-            )
-            .await;
-        }
-        (_, None, None) => {}
-        _ => return Err("Fork admission requires SQLite, socket, and credential directory".into()),
-    }
-    #[cfg(not(target_os = "linux"))]
-    if fork_admission_socket.is_some() || fork_admission_credentials.is_some() {
-        return Err("fork admission requires Linux Unix peer credentials".into());
-    }
-    let gateway = gateway_for_startup(sqlite_path, config, owntracks_owner_key.as_ref())?;
-    let app = router_for_addr(
-        addr,
-        AppState {
-            gateway: gateway.clone(),
-            ledger_view,
-            ledger_write,
-        },
+async fn serve_gateway(
+    gateway: Gateway,
+    mode: &GatewayModeBindingV1,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    (ledger_view, ledger_write): (LedgerView, LedgerWriteMode),
+) -> Result<(), RunError> {
+    let addr = mode.tcp_addr();
+    let app = bound_router(
+        router_for_addr(
+            addr,
+            AppState {
+                gateway: gateway.clone(),
+                ledger_view,
+                ledger_write,
+            },
+        ),
+        mode,
     );
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
@@ -472,17 +588,18 @@ async fn serve_with_owntracks_and_fork_admission(
     };
     announce_listening(addr);
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(shutdown_or_stale(shutdown, mode))
         .await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
     finish_run(serve_result, shutdown_result)
+        .and_then(|()| stale_binding_exit(mode).map_err(Into::into))
 }
 
 fn finish_run<E>(
     serve_result: Result<(), std::io::Error>,
     shutdown_result: Result<(), E>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<(), RunError>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
@@ -545,6 +662,8 @@ mod coverage_tests {
         let _exit_code = super::main_with_args(&[
             "piglor-gateway".to_owned(),
             "serve".to_owned(),
+            "--profile".to_owned(),
+            "gateway-mode-local-v1".to_owned(),
             "not-an-address".to_owned(),
         ]);
     }
@@ -562,6 +681,8 @@ mod coverage_tests {
         let parse_error = super::run_with_args(&[
             "piglor-gateway".to_owned(),
             "serve".to_owned(),
+            "--profile".to_owned(),
+            "gateway-mode-local-v1".to_owned(),
             "not-an-address".to_owned(),
         ])
         .test_err()?;
@@ -578,6 +699,8 @@ mod coverage_tests {
             &[
                 "piglor-gateway".to_owned(),
                 "serve".to_owned(),
+                "--profile".to_owned(),
+                "gateway-mode-local-v1".to_owned(),
                 "127.0.0.1:0".to_owned(),
             ],
             Box::pin(async {}),
@@ -628,6 +751,112 @@ mod tests {
         fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
             self.ok_or_else(|| "expected a value".into())
         }
+    }
+
+    #[test]
+    fn serve_requires_one_profile_and_unique_network_grants(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let parse = |args: &[&str]| {
+            parse_serve_request(&args.iter().map(ToString::to_string).collect::<Vec<_>>())
+        };
+        let missing = parse(&["127.0.0.1:0"]).test_err()?;
+        assert!(missing.to_string().contains("requires --profile"));
+        let request = parse(&[
+            "--profile",
+            "gateway-mode-local-v1",
+            "0.0.0.0:0",
+            "--network-grant",
+            "public-read-only",
+            "/private/store.db",
+            "--network-grant",
+            "owntracks",
+        ])
+        .test_ok()?;
+        assert_eq!(request.profile, GatewayModeProfileIdV1::Local);
+        assert_eq!(
+            request.network_grants.iter().copied().collect::<Vec<_>>(),
+            [
+                GatewayNetworkGrantV1::OwnTracks,
+                GatewayNetworkGrantV1::PublicReadOnly
+            ]
+        );
+        assert_eq!(
+            request.args.sqlite_path.as_deref(),
+            Some("/private/store.db")
+        );
+        let air_gapped = parse(&["--profile", "gateway-mode-air-gapped-v1"]).test_ok()?;
+        assert_eq!(air_gapped.profile, GatewayModeProfileIdV1::AirGapped);
+        assert!(air_gapped.network_grants.is_empty());
+        for (args, expected) in [
+            (&["--profile"][..], "requires a value"),
+            (&["--network-grant"][..], "requires a value"),
+            (&["--profile", "deterministic-local-v1"][..], "unknown"),
+            (
+                &[
+                    "--profile",
+                    "gateway-mode-local-v1",
+                    "--network-grant",
+                    "ledger",
+                ][..],
+                "unknown network grant",
+            ),
+            (
+                &[
+                    "--profile",
+                    "gateway-mode-local-v1",
+                    "--profile",
+                    "gateway-mode-local-v1",
+                ][..],
+                "once",
+            ),
+            (
+                &[
+                    "--profile",
+                    "gateway-mode-local-v1",
+                    "--network-grant",
+                    "owntracks",
+                    "--network-grant",
+                    "owntracks",
+                ][..],
+                "once",
+            ),
+            (
+                &["--profile", "gateway-mode-local-v1", "a", "b", "c"][..],
+                "at most",
+            ),
+        ] {
+            let error = parse(args).test_err()?;
+            assert!(error.to_string().contains(expected), "{args:?}: {error}");
+        }
+        let composition = request.composition(&LedgerEnvironment {
+            source: Some(OsString::from("/srv/ledger")),
+            write_enabled: false,
+        });
+        assert_eq!(composition.tcp_addr, request.args.addr);
+        assert_eq!(composition.owntracks_owner_key, None);
+        assert_eq!(composition.fork_admission_socket, None);
+        assert_eq!(
+            composition.ledger_source,
+            Some(OsString::from("/srv/ledger"))
+        );
+        assert_eq!(composition.network_grants, request.network_grants);
+        // The listeners bind only what the composition names (ADR-134 §4).
+        let mut fork = super::local_request(
+            "127.0.0.1:0".parse()?,
+            Some("/srv/gateway.db"),
+            Some(Path::new("/srv/owner.key")),
+        );
+        fork.args.require_local_fork_authority = true;
+        let composition = fork.composition(&LedgerEnvironment::default());
+        assert_eq!(
+            composition.owntracks_owner_key.as_deref(),
+            Some(Path::new("/srv/owner.key"))
+        );
+        assert_eq!(
+            composition.fork_admission_socket.as_deref(),
+            Some(Path::new(FORK_ADMISSION_SOCKET))
+        );
+        Ok(())
     }
 
     #[test]
@@ -830,6 +1059,8 @@ mod tests {
             &[
                 "piglor-gateway".to_owned(),
                 "serve".to_owned(),
+                "--profile".to_owned(),
+                "gateway-mode-local-v1".to_owned(),
                 "127.0.0.1:0".to_owned(),
                 database.display().to_string(),
                 "--require-local-fork-authority".to_owned(),
@@ -880,17 +1111,11 @@ mod tests {
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
-            serve(
-                addr,
-                sqlite_path.as_deref(),
-                async move {
-                    match rx.await {
-                        Ok(()) | Err(_) => {}
-                    }
-                },
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
-            )
+            serve(addr, sqlite_path.as_deref(), async move {
+                match rx.await {
+                    Ok(()) | Err(_) => {}
+                }
+            })
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1005,6 +1230,9 @@ mod tests {
             .ok_or("temporary path is not UTF-8")?
             .to_owned();
         let actor = pos_core::EntityId::new();
+        // ADR-134 §8: the first `serve` binds the empty store; offline
+        // provisioning follows.
+        serve_http_requests_on(IpAddr::V4(Ipv4Addr::LOCALHOST), Some(path.clone()), &[]).await?;
         provision_local_principal(
             &mut pos_store::sqlite::SqliteStore::open(&path)?,
             &LocalPrincipalProvisionV1::try_new(
@@ -1089,10 +1317,14 @@ mod tests {
             &[
                 String::from("piglor-gateway"),
                 String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
                 addr.to_string(),
                 database.display().to_string(),
                 String::from("--owntracks-owner-key"),
                 owner_key.display().to_string(),
+                String::from("--network-grant"),
+                String::from("owntracks"),
             ],
             Box::pin(async {
                 tokio::task::yield_now().await;
@@ -1103,25 +1335,12 @@ mod tests {
             .enable_all()
             .build()
             .test_ok()?;
-        let missing_sqlite = runtime
-            .block_on(serve_with_owntracks(
-                addr,
-                None,
-                Some(&owner_key),
-                async {},
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
-            ))
-            .test_err()?;
-        assert!(missing_sqlite.to_string().contains("SQLite"));
         let missing_owner = runtime
             .block_on(serve_with_owntracks(
                 addr,
                 Some(database.to_str().test_ok()?),
                 Some(&directory.join("missing.key")),
                 async {},
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
             ))
             .test_err()?;
         assert!(!missing_owner.to_string().is_empty());
@@ -1131,8 +1350,6 @@ mod tests {
                 Some(directory.as_path().to_str().test_ok()?),
                 Some(&owner_key),
                 async {},
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
             ))
             .test_err()?;
         assert!(!invalid_sqlite.to_string().is_empty());
@@ -1147,6 +1364,8 @@ mod tests {
         drop(run_main(&[
             String::from("piglor-gateway"),
             String::from("serve"),
+            String::from("--profile"),
+            String::from("gateway-mode-local-v1"),
             String::from("not-an-addr"),
         ]));
     }
@@ -1161,6 +1380,8 @@ mod tests {
             &[
                 String::from("piglor-gateway"),
                 String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
                 addr.to_string(),
             ],
             Box::pin(async {
@@ -1183,6 +1404,8 @@ mod tests {
             &[
                 String::from("piglor-gateway"),
                 String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
                 addr.to_string(),
                 path.to_str().test_ok()?.to_owned(),
             ],
@@ -1222,17 +1445,11 @@ mod tests {
         drop(listener);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let serve_mem = tokio::spawn(async move {
-            serve(
-                addr,
-                None,
-                async move {
-                    match rx.await {
-                        Ok(()) | Err(_) => {}
-                    }
-                },
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
-            )
+            serve(addr, None, async move {
+                match rx.await {
+                    Ok(()) | Err(_) => {}
+                }
+            })
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1252,17 +1469,11 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let path_clone = path.clone();
         let serve_sql = tokio::spawn(async move {
-            serve(
-                addr,
-                Some(path_clone.as_str()),
-                async move {
-                    match rx.await {
-                        Ok(()) | Err(_) => {}
-                    }
-                },
-                LedgerView::default(),
-                LedgerWriteMode::Disabled,
-            )
+            serve(addr, Some(path_clone.as_str()), async move {
+                match rx.await {
+                    Ok(()) | Err(_) => {}
+                }
+            })
             .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1285,6 +1496,8 @@ mod tests {
         let err = run_with_args(&[
             String::from("piglor-gateway"),
             String::from("serve"),
+            String::from("--profile"),
+            String::from("gateway-mode-local-v1"),
             addr.to_string(),
             dir.to_str().test_ok()?.to_owned(),
         ])
@@ -1303,6 +1516,8 @@ mod tests {
         let err = run_with_args(&[
             String::from("piglor-gateway"),
             String::from("serve"),
+            String::from("--profile"),
+            String::from("gateway-mode-local-v1"),
             addr.to_string(),
         ])
         .test_err()?;
@@ -1321,6 +1536,8 @@ mod tests {
             &[
                 String::from("piglor-gateway"),
                 String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
                 String::from("127.0.0.1:0"),
             ],
             Box::pin(async {}),
@@ -1349,15 +1566,7 @@ mod tests {
             .await
             .test_ok()?;
         let addr = occupied.local_addr().test_ok()?;
-        let err = serve(
-            addr,
-            None,
-            async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
-        )
-        .await
-        .test_err()?;
+        let err = serve(addr, None, async {}).await.test_err()?;
         assert!(!err.to_string().is_empty());
         drop(occupied);
         Ok(())
@@ -1382,15 +1591,9 @@ mod tests {
         drop(listener);
         let dir = std::env::temp_dir().join(format!("piglor-gw-sql-{}", std::process::id()));
         std::fs::create_dir_all(&dir).test_ok()?;
-        let err = serve(
-            addr,
-            Some(dir.to_str().test_ok()?),
-            async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
-        )
-        .await
-        .test_err()?;
+        let err = serve(addr, Some(dir.to_str().test_ok()?), async {})
+            .await
+            .test_err()?;
         assert!(!err.to_string().is_empty());
         drop(std::fs::remove_dir_all(&dir));
         Ok(())
@@ -1495,6 +1698,8 @@ mod tests {
             &[
                 String::from("piglor-gateway"),
                 String::from("serve"),
+                String::from("--profile"),
+                String::from("gateway-mode-local-v1"),
                 String::from("127.0.0.1:0"),
             ],
             Box::pin(async {}),
@@ -1545,16 +1750,12 @@ mod coverage_entrypoints {
             })?),
             Some(&owner_key),
             async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
         ))?;
         runtime.block_on(serve_with_owntracks(
             "127.0.0.1:0".parse()?,
             None,
             None,
             async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
         ))?;
         Ok(())
     }
@@ -1567,150 +1768,420 @@ mod erasure_gate_coverage_tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn fork_admission_startup_rejects_incomplete_private_configuration(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let error = serve_with_owntracks_and_fork_admission(
-            "127.0.0.1:0".parse()?,
-            Some("/private/gateway.db"),
-            None,
-            Some(std::path::Path::new("/private/fork.sock")),
-            None,
-            async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
-        )
-        .await
-        .err()
-        .ok_or_else(|| std::io::Error::other("incomplete configuration was accepted"))?;
-        assert!(error
-            .to_string()
-            .contains("requires SQLite, socket, and credential"));
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn fork_admission_startup_fails_before_binding_without_credentials(
+    async fn fork_admission_startup_fails_before_the_database_without_credentials(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("gateway.db");
-        let socket = directory.path().join("fork.sock");
         let sqlite_path = database.to_string_lossy();
-        let started = serve_with_owntracks_and_fork_admission(
-            "127.0.0.1:0".parse()?,
-            Some(sqlite_path.as_ref()),
-            None,
-            Some(&socket),
+        let mut request = local_request("127.0.0.1:0".parse()?, Some(sqlite_path.as_ref()), None);
+        request.args.require_local_fork_authority = true;
+        let started = serve_request(
+            &request,
             Some(&directory.path().join("missing-credentials")),
             async {},
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
+            LedgerEnvironment::default(),
         )
         .await;
         assert!(started.is_err());
-        assert!(!socket.exists());
+        assert!(!database.exists());
         Ok(())
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
-    async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(
+    async fn fork_admission_fails_closed_off_linux(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // An unprovisioned host protects even its in-process reads (D1).
-        let memory = gateway_for_startup(None, StoreConfig::Memory, None)?;
-        let timeline = memory.create_timeline("host-owned-startup").await?;
-        assert!(memory
-            .read_events_page(&timeline.id().to_string(), 0, 1)
-            .await
-            .is_err());
-        memory
-            .purge_expired_ingress_identities(std::num::NonZeroUsize::MIN)
-            .await?;
-        memory.shutdown().await?;
-        drop(memory);
-
-        let directory = tempfile::tempdir()?;
-        let database = directory.path().join("gateway.db");
-        let owner_key_path = directory.path().join("owner.key");
-        owntracks::create_or_load_owner_key(&owner_key_path)?;
-        let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
-        let sqlite = gateway_for_startup(
-            database.to_str(),
-            StoreConfig::Sqlite {
-                path: database.to_string_lossy().into_owned(),
-            },
-            Some(&owner_key),
-        )?;
-        let timeline = sqlite.create_timeline("host-owned-owntracks").await?;
-        assert!(sqlite
-            .read_events_page(&timeline.id().to_string(), 0, 1)
-            .await
-            .is_err());
-        sqlite.shutdown().await?;
-        drop(sqlite);
-
-        let invalid_path = directory.path().to_str().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "directory path is not UTF-8",
-            )
-        })?;
-        assert!(gateway_for_startup(
-            Some(invalid_path),
-            StoreConfig::Sqlite {
-                path: invalid_path.to_owned(),
-            },
-            Some(&owner_key),
-        )
-        .is_err());
-        assert!(gateway_for_startup(
-            Some(invalid_path),
-            StoreConfig::Sqlite {
-                path: invalid_path.to_owned(),
-            },
+        let request = local_request("127.0.0.1:0".parse()?, None, None);
+        let request = local_request("127.0.0.1:0".parse()?, Some("/srv/gateway.db"), None);
+        assert!(serve_locked(
+            &request,
+            request.composition(&LedgerEnvironment::default()),
+            Some(Path::new("/run/credentials")),
             None,
+            async {},
+            LedgerEnvironment::default(),
         )
+        .await
         .is_err());
         Ok(())
+    }
+
+    /// ADR-134 §4: every refused predicate fails before the lock, store,
+    /// ledger or listener.
+    #[tokio::test]
+    async fn d6_violations_fail_before_store_ledger_or_listener(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let sqlite_path = database.to_string_lossy().into_owned();
+        let owner_key = directory.path().join("owner.key");
+        let spectator: SocketAddr = "0.0.0.0:0".parse()?;
+        let loopback: SocketAddr = "127.0.0.1:0".parse()?;
+        let mut air_gapped_spectator = local_request(spectator, Some(sqlite_path.as_str()), None);
+        air_gapped_spectator.profile = GatewayModeProfileIdV1::AirGapped;
+        let mut air_gapped_owntracks =
+            local_request(loopback, Some(sqlite_path.as_str()), Some(&owner_key));
+        air_gapped_owntracks.profile = GatewayModeProfileIdV1::AirGapped;
+        let mut ungranted_spectator = local_request(spectator, Some(sqlite_path.as_str()), None);
+        ungranted_spectator.network_grants.clear();
+        let mut ungranted_owntracks =
+            local_request(loopback, Some(sqlite_path.as_str()), Some(&owner_key));
+        ungranted_owntracks.network_grants.clear();
+        let spectator_owntracks =
+            local_request(spectator, Some(sqlite_path.as_str()), Some(&owner_key));
+        for request in [
+            air_gapped_spectator,
+            air_gapped_owntracks,
+            ungranted_spectator,
+            ungranted_owntracks,
+            spectator_owntracks,
+        ] {
+            let refused = serve_request(
+                &request,
+                None,
+                std::future::pending(),
+                LedgerEnvironment {
+                    source: Some(OsString::from("/missing/ledger")),
+                    write_enabled: false,
+                },
+            )
+            .await
+            .err()
+            .ok_or("a D6 violation was served")?;
+            assert!(!refused.to_string().contains("ledger"), "{refused}");
+            assert!(!database.exists(), "{request:?}");
+            assert!(!directory
+                .path()
+                .join("gateway.db.gateway-mode.lock")
+                .exists());
+            assert!(!owner_key.exists());
+        }
+        let network_ledger = serve_request(
+            &local_request(loopback, Some(sqlite_path.as_str()), None),
+            None,
+            std::future::pending(),
+            LedgerEnvironment {
+                source: Some(OsString::from("https://ledger.example/")),
+                write_enabled: false,
+            },
+        )
+        .await
+        .err()
+        .ok_or("a network ledger source was served")?;
+        assert!(network_ledger.to_string().contains("LEDGER_SOURCE"));
+        assert!(!database.exists());
+        Ok(())
+    }
+
+    /// ADR-134 §8: the first `serve` binds an empty store; a restart in
+    /// another mode and a served store locked by `migrate-mode` are refused,
+    /// and `migrate-mode` switches the mode.
+    #[test]
+    fn the_store_binding_survives_restarts_and_changes_only_by_migration(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let path = database.to_string_lossy().into_owned();
+        let serve_as = |profile: &str| {
+            run_with_args_and_shutdown_with_environment(
+                &[
+                    "piglor-gateway".to_owned(),
+                    "serve".to_owned(),
+                    "--profile".to_owned(),
+                    profile.to_owned(),
+                    "127.0.0.1:0".to_owned(),
+                    path.clone(),
+                ],
+                Box::pin(async {}),
+                LedgerEnvironment::default(),
+            )
+        };
+        serve_as("gateway-mode-local-v1")?;
+        serve_as("gateway-mode-local-v1")?;
+        let switched = serve_as("gateway-mode-air-gapped-v1")
+            .err()
+            .ok_or("a mode switch was served")?;
+        assert!(switched.to_string().contains("migrate-mode"), "{switched}");
+        let migrate = |from: &str, to: &str| {
+            run_with_args_and_shutdown_with_environment(
+                &[
+                    "piglor-gateway".to_owned(),
+                    "migrate-mode".to_owned(),
+                    path.clone(),
+                    "--from".to_owned(),
+                    from.to_owned(),
+                    "--to".to_owned(),
+                    to.to_owned(),
+                ],
+                Box::pin(async {}),
+                LedgerEnvironment::default(),
+            )
+        };
+        let serving = GatewayModeStoreLockV1::shared(&path)?;
+        assert!(migrate("gateway-mode-local-v1", "gateway-mode-air-gapped-v1").is_err());
+        drop(serving);
+        migrate("gateway-mode-local-v1", "gateway-mode-air-gapped-v1")?;
+        serve_as("gateway-mode-air-gapped-v1")?;
+        assert!(serve_as("gateway-mode-local-v1").is_err());
+        assert!(migrate("gateway-mode-unknown-v1", "gateway-mode-local-v1").is_err());
+        assert!(migrate("gateway-mode-air-gapped-v1", "gateway-mode-unknown-v1").is_err());
+        let usage = migrate_mode(&["only-a-path".to_owned()])
+            .err()
+            .ok_or("migrate-mode accepted a malformed command")?;
+        assert_eq!(usage.to_string(), MIGRATE_MODE_USAGE);
+        for flags in [("--to", "--from"), ("--from", "--into")] {
+            let misnamed = migrate_mode(&[
+                path.clone(),
+                flags.0.to_owned(),
+                "gateway-mode-air-gapped-v1".to_owned(),
+                flags.1.to_owned(),
+                "gateway-mode-local-v1".to_owned(),
+            ])
+            .err()
+            .ok_or("migrate-mode accepted misnamed flags")?;
+            assert_eq!(misnamed.to_string(), MIGRATE_MODE_USAGE);
+        }
+        assert!(
+            migrate_mode_command(&["piglor-gateway".to_owned(), "version".to_owned()]).is_none()
+        );
+        Ok(())
+    }
+
+    /// A populated store that no `serve` bound is refused (development
+    /// stores are recreated).
+    #[test]
+    fn a_populated_unbound_store_is_refused() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        use piglor_gateway::local_principal::{
+            provision_local_principal, LocalPrincipalProvisionV1,
+        };
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let path = database.to_string_lossy().into_owned();
+        provision_local_principal(
+            &mut pos_store::sqlite::SqliteStore::open(&path)?,
+            &LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([9; 16], "local")?,
+                [pos_core::EntityId::new()],
+                [piglor_gateway::GatewayOperationV1::CREATE_TIMELINE],
+            )?,
+        )?;
+        let refused = run_with_args_and_shutdown_with_environment(
+            &[
+                "piglor-gateway".to_owned(),
+                "serve".to_owned(),
+                "--profile".to_owned(),
+                "gateway-mode-local-v1".to_owned(),
+                "127.0.0.1:0".to_owned(),
+                path,
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+        )
+        .err()
+        .ok_or("a populated unbound store was served")?;
+        assert!(refused.to_string().contains("populated"), "{refused}");
+        Ok(())
+    }
+
+    /// One HTTP/1.1 exchange with the served Gateway at `addr`.
+    fn exchange(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        actor: pos_core::EntityId,
+        body: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(addr)?;
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\
+             {header}: {actor}\r\nIdempotency-Key: {key}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len(),
+            header = piglor_gateway::operation::ACTOR_ENTITY_HEADER,
+            key = path.replace('/', "-"),
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    /// ADR-134 §8 and H1 on #1021: a writer that migrates the store under a
+    /// serving Gateway (bypassing the mode lock, as another process would)
+    /// makes the Gateway's next write `503`, fires the stale signal that
+    /// ends the serve loop, and the serve exits nonzero.
+    #[tokio::test]
+    async fn a_cross_process_migration_stops_the_serving_gateway(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use pos_core::GatewayModeBindingPortV1 as _;
+        use std::time::Duration;
+        const AIR_GAPPED_DIGEST: &str =
+            "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5";
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join("gateway.db")
+            .to_string_lossy()
+            .into_owned();
+        // The first serve binds the empty store to Local; then the operator
+        // provisions the Local Principal.
+        serve_request(
+            &local_request("127.0.0.1:0".parse()?, Some(path.as_str()), None),
+            None,
+            async {},
+            LedgerEnvironment::default(),
+        )
+        .await?;
+        let actor = pos_core::EntityId::new();
+        piglor_gateway::local_principal::provision_local_principal(
+            &mut pos_store::sqlite::SqliteStore::open(&path)?,
+            &piglor_gateway::local_principal::LocalPrincipalProvisionV1::try_new(
+                &pos_core::PrincipalRefV1::try_new([7; 16], "local")?,
+                [actor],
+                [
+                    piglor_gateway::GatewayOperationV1::CREATE_TIMELINE,
+                    piglor_gateway::GatewayOperationV1::APPEND_SIGNAL,
+                ],
+            )?,
+        )?;
+
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+        let served_path = path.clone();
+        let server = tokio::spawn(async move {
+            serve_request(
+                &local_request(addr, Some(served_path.as_str()), None),
+                None,
+                std::future::pending(),
+                LedgerEnvironment::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let created = tokio::task::spawn_blocking(move || {
+            exchange(addr, "POST", "/v1/timelines", actor, r#"{"name":"stale"}"#)
+        })
+        .await??;
+        assert!(created.starts_with("HTTP/1.1 201"), "{created}");
+        let timeline = serde_json::from_str::<serde_json::Value>(
+            created.split("\r\n\r\n").nth(1).ok_or("no body")?,
+        )?["id"]
+            .as_str()
+            .ok_or("no Timeline id")?
+            .to_owned();
+
+        let mut other_process = pos_store::sqlite::SqliteStore::open(&path)?;
+        let local = other_process
+            .load_mode_binding()?
+            .ok_or("the first serve bound the store")?;
+        let digest: [u8; 32] = std::array::from_fn(|index| {
+            u8::from_str_radix(&AIR_GAPPED_DIGEST[2 * index..2 * index + 2], 16).unwrap_or_default()
+        });
+        let air_gapped =
+            pos_core::GatewayModeProfileRefV1::try_new("gateway-mode-air-gapped-v1", digest)?;
+        other_process.migrate_mode(
+            pos_core::GatewayModeBindingHostV1::new()
+                .authorize_migration(local.profile().clone(), air_gapped)?,
+        )?;
+        drop(other_process);
+
+        let signal = format!(r#"{{"entity_id":"{actor}","dimension":"trust","value":0.5}}"#);
+        let appended = tokio::task::spawn_blocking(move || {
+            exchange(
+                addr,
+                "POST",
+                &format!("/v1/timelines/{timeline}/signals"),
+                actor,
+                &signal,
+            )
+        })
+        .await??;
+        assert!(appended.starts_with("HTTP/1.1 503"), "{appended}");
+        let exit = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .map_err(|_| "the stale signal never ended the serve loop")??;
+        assert_eq!(exit.err().as_deref(), Some("gateway mode binding is stale"));
+        Ok(())
+    }
+
+    #[test]
+    fn startup_reports_store_lock_and_open_failures() {
+        let unopenable = "/dev/null/cannot/create/this/path";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        for owner_key in [None, Some(Path::new("/dev/null/owner.key"))] {
+            assert!(runtime
+                .block_on(serve_request(
+                    &local_request(
+                        SocketAddr::from(([127, 0, 0, 1], 0)),
+                        Some(unopenable),
+                        owner_key
+                    ),
+                    None,
+                    async {},
+                    LedgerEnvironment::default(),
+                ))
+                .is_err());
+        }
+    }
+}
+
+/// A Local `serve` request; a non-loopback bind and an owner key carry
+/// their operator network grants.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_request(
+    addr: SocketAddr,
+    sqlite_path: Option<&str>,
+    owner_key: Option<&Path>,
+) -> ServeRequest {
+    let mut network_grants = BTreeSet::new();
+    if !addr.ip().is_loopback() {
+        network_grants.insert(GatewayNetworkGrantV1::PublicReadOnly);
+    }
+    if owner_key.is_some() {
+        network_grants.insert(GatewayNetworkGrantV1::OwnTracks);
+    }
+    ServeRequest {
+        args: ServeArgs {
+            addr,
+            sqlite_path: sqlite_path.map(str::to_owned),
+            owntracks_owner_key: owner_key.map(Path::to_path_buf),
+            require_local_fork_authority: false,
+        },
+        profile: GatewayModeProfileIdV1::Local,
+        network_grants,
     }
 }
 
 #[cfg(test)]
-mod coverage_startup_error_paths {
-    use super::*;
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn serve(
+    addr: SocketAddr,
+    sqlite_path: Option<&str>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), RunError> {
+    serve_with_owntracks(addr, sqlite_path, None, shutdown).await
+}
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn owner_key_fixture() -> (tempfile::TempDir, OwnTracksOwnerKey) {
-        let directory = tempfile::tempdir().unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("temporary directory failed: {error}")))
-        });
-        let path = directory.path().join("owner.key");
-        owntracks::create_or_load_owner_key(&path).unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("owner key creation failed: {error}")))
-        });
-        let owner_key = OwnTracksOwnerKey::load(&path).unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("owner key loading failed: {error}")))
-        });
-        (directory, owner_key)
-    }
-
-    #[test]
-    fn startup_gateway_reports_store_open_failures() {
-        let (_directory, owner_key) = owner_key_fixture();
-        assert!(gateway_for_startup(
-            Some("/dev/null/cannot/create/this/path"),
-            StoreConfig::Sqlite {
-                path: "/dev/null/cannot/create/this/path".to_owned(),
-            },
-            Some(&owner_key),
-        )
-        .is_err());
-        assert!(gateway_for_startup(
-            Some("/dev/null/cannot/create/this/path"),
-            StoreConfig::Sqlite {
-                path: "/dev/null/cannot/create/this/path".to_owned(),
-            },
-            None,
-        )
-        .is_err());
-    }
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn serve_with_owntracks(
+    addr: SocketAddr,
+    sqlite_path: Option<&str>,
+    owner_key: Option<&Path>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), RunError> {
+    serve_request(
+        &local_request(addr, sqlite_path, owner_key),
+        None,
+        shutdown,
+        LedgerEnvironment::default(),
+    )
+    .await
 }
