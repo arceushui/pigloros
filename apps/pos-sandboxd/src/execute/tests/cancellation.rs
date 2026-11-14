@@ -135,7 +135,7 @@ mod cases {
     async fn cancelled_at_release(
         adapter: AdapterScript,
         watchdog_ms: u64,
-    ) -> TestResult<AttemptExecution<String, FakeCgroup>> {
+    ) -> TestResult<AttemptExecution<String, FakeCgroup, u64>> {
         let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
         let mut scenario = Scenario::new()?;
         scenario.host.adapter = adapter;

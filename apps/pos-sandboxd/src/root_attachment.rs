@@ -172,7 +172,12 @@ impl VerifiedRootMount {
                 recheck(kernel, self, directory, activated.as_ref(), || {
                     entry.recheck()
                 })
-                .map(|root| CheckedRoot::rechecked(root, admitted))
+                .and_then(|root| {
+                    self.identity
+                        .kernel_identity()
+                        .map(|identity| CheckedRoot::rechecked(root, admitted, identity))
+                        .ok_or(ImageActivationError::EvidenceMismatch)
+                })
             })
     }
 

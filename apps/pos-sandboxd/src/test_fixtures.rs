@@ -44,6 +44,7 @@ pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {
     crate::CheckedRoot::rechecked(
         crate::ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component()),
         attempt.clone(),
+        crate::RootIdentity::FIXTURE,
     )
 }
 
@@ -302,4 +303,16 @@ pub mod attempt_directory {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/support/attempt_directory.rs"
     ));
+}
+
+/// A directory standing in for a bound cgroup whose `cgroup.procs` lists
+/// `main_pid`, and that directory held open.
+pub(crate) fn cgroup_listing(main_pid: u32) -> TestResult<(tempfile::TempDir, File)> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("cgroup.procs"),
+        format!("1\n{main_pid}\n"),
+    )?;
+    let held = File::open(directory.path())?;
+    Ok((directory, held))
 }

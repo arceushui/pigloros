@@ -63,6 +63,18 @@ impl VerifiedMountIdentity {
     pub(super) const fn devices(&self) -> [BlockIdentity; 2] {
         [self.mapper, self.loop_device]
     }
+
+    /// The mount, mapper and loop device as the kernel observation records
+    /// them; `None` for a device number outside the kernel's bounds.
+    pub(super) fn kernel_identity(&self) -> Option<crate::RootIdentity> {
+        let block =
+            |identity: BlockIdentity| crate::BlockDevice::of(identity.device, identity.diskseq);
+        block(self.mapper)
+            .zip(block(self.loop_device))
+            .map(|(mapper, loop_device)| {
+                crate::RootIdentity::new(self.mount.mount_id, mapper, loop_device)
+            })
+    }
 }
 
 impl Expected {
