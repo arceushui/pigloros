@@ -452,10 +452,11 @@ pub const ERASED_GATEWAY_REVISION_REQUEST_DIGEST: [u8; 32] = [0; 32];
 /// The answer to a retry under a recorded idempotency identity, given the
 /// state of the revision it committed and the request digest it kept.
 ///
-/// An erased revision answers its tombstone to every retry under the key,
-/// because erasure rewrote the kept digest to
-/// [`ERASED_GATEWAY_REVISION_REQUEST_DIGEST`]; a stored one answers the same
-/// request and refuses another.
+/// An erased revision answers its tombstone to every retry from its subject
+/// under the key, because erasure rewrote the kept digest to
+/// [`ERASED_GATEWAY_REVISION_REQUEST_DIGEST`]; a retry from another entity is
+/// a conflict, so it never learns of the erasure. A stored revision answers
+/// the same request and refuses another.
 ///
 /// # Errors
 /// Returns [`GatewayRevisionErrorV1::IdempotencyConflict`] for another
@@ -466,15 +467,19 @@ pub fn replay_gateway_revision_v1(
     kept_request_digest: [u8; 32],
     draft: &GatewayRevisionDraftV1,
 ) -> Result<GatewayRevisionCommitV1, GatewayRevisionErrorV1> {
-    match state {
-        Some(GatewayRevisionStateV1::Present(_))
-            if kept_request_digest != draft.idempotency().request_digest() =>
-        {
-            Err(GatewayRevisionErrorV1::IdempotencyConflict)
+    let conflict = match &state {
+        Some(GatewayRevisionStateV1::Present(_)) => {
+            kept_request_digest != draft.idempotency().request_digest()
         }
-        state => state
+        Some(GatewayRevisionStateV1::Erased(tombstone)) => tombstone.subject() != draft.subject(),
+        None => false,
+    };
+    if conflict {
+        Err(GatewayRevisionErrorV1::IdempotencyConflict)
+    } else {
+        state
             .map(GatewayRevisionCommitV1::Replayed)
-            .ok_or(GatewayRevisionErrorV1::InvalidRecord),
+            .ok_or(GatewayRevisionErrorV1::InvalidRecord)
     }
 }
 
@@ -753,7 +758,24 @@ mod tests {
                 ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
                 &draft
             ),
-            Ok(GatewayRevisionCommitV1::Replayed(erased))
+            Ok(GatewayRevisionCommitV1::Replayed(erased.clone()))
+        );
+        let foreign = super::GatewayRevisionDraftV1::try_new(
+            *draft.idempotency(),
+            draft.resource_id(),
+            None,
+            EntityId::new(),
+            [5; 32],
+            vec![6],
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        assert_eq!(
+            replay_gateway_revision_v1(
+                Some(erased),
+                ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
+                &foreign
+            ),
+            Err(GatewayRevisionErrorV1::IdempotencyConflict)
         );
         assert_eq!(
             replay_gateway_revision_v1(None, digest, &draft),

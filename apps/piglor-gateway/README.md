@@ -118,8 +118,8 @@ current head (`409 append-conflict`), and only `Idempotency-Key` makes a retry r
 revision. Erasure (the host-only `GatewayRevisionPortV1::erase_gateway_revision`, which the subject
 erasure workflow #309 drives) deletes the row under `secure_delete`, checkpoints the write-ahead
 log, rewrites the request digest of the idempotency record to a constant and keeps a payload-free
-tombstone, so the subject then reads `410 deleted`, every retry under the key answers `410` and
-every other caller gets `404`. The contract README states the digests.
+tombstone, so the subject then reads `410 deleted`, its retries under the key answer `410` and
+every other caller gets `404` (or `409` for a retry under the same key). The contract README states the digests.
 
 ### Session
 

@@ -474,6 +474,14 @@ async fn erasure_leaves_a_tombstone_answered_deleted_only_to_its_subject() -> Te
     let other = preference(json!([{"dimension": "cost", "weight_micro": 9}]));
     let (status, problem) = post(&served, PREFERENCES, SUBJECT, "erase-1", &other).await?;
     assert_eq!((status, code(&problem)), (StatusCode::GONE, "deleted"));
+    // Another entity of the same Principal retrying that key never learns
+    // of the erasure: it gets the conflict, without content.
+    let (status, problem) = post(&served, PREFERENCES, OTHER, "erase-1", &body).await?;
+    assert_eq!(
+        (status, code(&problem)),
+        (StatusCode::CONFLICT, "idempotency-conflict")
+    );
+    assert!(problem.get("weights").is_none());
     let (status, _) = post(
         &served,
         PREFERENCES,

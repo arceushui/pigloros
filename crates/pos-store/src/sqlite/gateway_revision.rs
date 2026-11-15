@@ -489,22 +489,45 @@ mod tests {
 
     #[test]
     fn erasure_restores_the_connection_secure_delete_setting() {
-        let mut store = SqliteStore::open_in_memory()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+            result.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+            })
+        }
+        let mut store = ok(SqliteStore::open_in_memory());
+        let profile = ok(GatewayModeProfileRefV1::try_new(
+            "gateway-mode-local-v1",
+            [7; 32],
+        ));
+        ok(pos_core::GatewayModeBindingPortV1::bind_empty_store_mode(
+            &mut store,
+            pos_core::GatewayModeBindingHostV1::new().authorize_bind(profile),
+        ));
+        let draft = ok(GatewayRevisionDraftV1::try_new(
+            pos_core::GatewayRevisionIdempotencyV1::new(
+                [1; 16],
+                GatewayRevisionKindV1::Preference,
+                [2; 32],
+                [3; 32],
+            ),
+            [4; 16],
+            None,
+            EntityId::new(),
+            [5; 32],
+            vec![6],
+        ));
+        let key = draft.key();
+        ok(store.commit_gateway_revision(draft));
         let setting = |store: &SqliteStore| {
-            store
+            ok(store
                 .conn
-                .query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0))
-                .unwrap_or(-1)
+                .query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)))
         };
-        let before = setting(&store);
-        let key =
-            GatewayRevisionKeyV1::new(GatewayRevisionKindV1::Preference, [1; 16], NonZeroU64::MIN);
-        assert_eq!(
-            store
-                .erase_gateway_revision(GatewayRevisionErasureHostV1::new().authorize_erasure(key)),
-            Ok(None)
-        );
-        assert_eq!(setting(&store), before);
+        ok(store.conn.execute_batch("PRAGMA secure_delete=0"));
+        assert_eq!(setting(&store), 0);
+        let erased = ok(store
+            .erase_gateway_revision(GatewayRevisionErasureHostV1::new().authorize_erasure(key)));
+        assert!(erased.is_some());
+        assert_eq!(setting(&store), 0);
     }
 }

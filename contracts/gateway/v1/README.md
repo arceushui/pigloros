@@ -97,7 +97,9 @@ Principal's grant must cover, and the operations need the grants `preference.cre
   another request is `409 idempotency-conflict`.
 - **Erasure.** Erasing a revision also rewrites the request digest its idempotency record kept,
   which is derived from the content, to a constant, so no byte derived from the erased values
-  survives. A retry under that `Idempotency-Key`, with any request, then answers `410 deleted`.
+  survives. A retry from the subject under that `Idempotency-Key`, with any request, then answers
+  `410 deleted`; a retry from another entity is `409 idempotency-conflict` and never learns of the
+  erasure.
 - **Views.** A revision is answered only to its subject; any other caller, and an unknown or
   foreign parent, gets `404 not-found-or-unavailable`. A revision its subject erased answers
   `410 deleted` to that subject from a payload-free tombstone (resource, revision, subject and
