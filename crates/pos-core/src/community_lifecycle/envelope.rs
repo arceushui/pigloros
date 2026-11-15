@@ -6,7 +6,7 @@ use super::{
     validate_horizon, CommunityLifecycleErrorV1 as Error, CommunityPassKeyV1, Result,
     MAX_COMMUNITY_PASS_KEY_BYTES_V1,
 };
-use crate::lower_hex::append_hex;
+use crate::append_hex;
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, KeyIdentityV1, KeyRegistryErrorV1,
     KeyRoleV1, OwnerIdV1, TimelineId,

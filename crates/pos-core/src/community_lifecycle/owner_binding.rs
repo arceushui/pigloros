@@ -5,7 +5,7 @@ use super::{
     read_hashes, read_head, record_cursor, record_prefix, validate_coordinates, validate_horizon,
     CommunityLifecycleErrorV1 as Error, Result,
 };
-use crate::lower_hex::append_hex;
+use crate::append_hex;
 use crate::{encode_bytes, encode_hash, encode_head, Hash, TimelineId};
 use zeroize::Zeroizing;
 

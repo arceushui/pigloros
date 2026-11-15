@@ -31,7 +31,6 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod factual_dependency;
-pub(crate) mod lower_hex;
 pub use canonical_length::CanonicalLengthErrorV1;
 
 pub mod fork_admission;
@@ -89,6 +88,15 @@ pub mod world_recording_receipt;
 pub mod world_replay;
 pub mod world_replay_handle;
 pub mod world_transform;
+
+/// Append the lowercase hexadecimal form of `bytes` to `out`.
+pub(crate) fn append_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+}
 
 /// Write the preferred definite-length CBOR header for one major type.
 pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
