@@ -300,7 +300,7 @@ impl GatewayOperationV1 {
     /// `GET /v1/preferences/{preference_id}/revisions/{revision}` (#304).
     pub const READ_PREFERENCE: Self =
         Self::new("preference.read", "preference.revision", "read", "read");
-    /// `POST /v1/option-specs`: create an OptionSpec or, with `parent`, its
+    /// `POST /v1/option-specs`: create an `OptionSpec` or, with `parent`, its
     /// next revision (#304).
     pub const CREATE_OPTION_SPEC: Self =
         Self::new("option-spec.create", "option-spec", "create", "operation");

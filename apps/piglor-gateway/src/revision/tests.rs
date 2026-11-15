@@ -1,4 +1,4 @@
-//! Public-seam tests of the Preference and OptionSpec resources (#304).
+//! Public-seam tests of the Preference and `OptionSpec` resources (#304).
 
 use super::*;
 use axum::{

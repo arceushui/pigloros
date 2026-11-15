@@ -1,6 +1,6 @@
 //! Gateway-managed user-authored revisions (#304).
 //!
-//! Preferences and OptionSpecs are subject-scoped resources the Gateway
+//! Preferences and `OptionSpecs` are subject-scoped resources the Gateway
 //! stores itself, outside every Timeline. Each resource is a chain of
 //! immutable revisions `1, 2, ...`; a new revision names the current head as
 //! its parent. One store transaction admits a revision together with its
@@ -51,12 +51,12 @@ pub enum GatewayRevisionErrorV1 {
 pub enum GatewayRevisionKindV1 {
     /// A Preference revision.
     Preference,
-    /// An OptionSpec revision.
+    /// An `OptionSpec` revision.
     OptionSpec,
 }
 
 impl GatewayRevisionKindV1 {
-    /// The persisted code: 1 Preference, 2 OptionSpec.
+    /// The persisted code: 1 Preference, 2 `OptionSpec`.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {

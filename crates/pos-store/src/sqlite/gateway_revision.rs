@@ -8,7 +8,7 @@
 //! binding it was produced under and its idempotency record together.
 //!
 //! Erasure deletes the revision row in one such transaction under
-//! `secure_delete`, so SQLite overwrites the freed content, inserts the
+//! `secure_delete`, so `SQLite` overwrites the freed content, inserts the
 //! tombstone, and then asks for a truncating WAL checkpoint so no committed
 //! page image of the content stays in the write-ahead log. Its completion
 //! evidence and erasure-inventory registration belong to the subject erasure

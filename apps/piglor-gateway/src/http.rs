@@ -686,7 +686,7 @@ async fn get_preference_revision(
     .await
 }
 
-/// `POST /v1/option-specs` (#304): create an OptionSpec or its next
+/// `POST /v1/option-specs` (#304): create an `OptionSpec` or its next
 /// revision.
 async fn post_option_spec(
     State(state): State<AppState>,

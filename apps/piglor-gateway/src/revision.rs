@@ -1,7 +1,7 @@
-//! The served Preference and OptionSpec resources (#304).
+//! The served Preference and `OptionSpec` resources (#304).
 //!
 //! A Preference is one subject's set of named dimension weights; an
-//! OptionSpec is one subject's ordered set of typed alternatives. Both are
+//! `OptionSpec` is one subject's ordered set of typed alternatives. Both are
 //! user-authored, subject-scoped chains of immutable revisions that the
 //! Gateway stores itself (owner decisions on #304), outside every Timeline:
 //!
@@ -104,7 +104,7 @@ pub(crate) trait GatewayRevisionFamilyV1 {
 /// The Preference family.
 pub(crate) struct PreferenceFamily;
 
-/// The OptionSpec family.
+/// The `OptionSpec` family.
 pub(crate) struct OptionSpecFamily;
 
 /// A validated parent: the resource ID and its head revision.

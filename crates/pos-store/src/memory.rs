@@ -389,7 +389,7 @@ pub struct MemoryStore {
     /// Process-local Gateway mode binding and this instance's attached epoch
     /// (ADR-134 §8).
     mode_binding: gateway_mode_binding::MemoryGatewayModeStateV1,
-    /// Gateway-managed Preference and OptionSpec revisions (#304).
+    /// Gateway-managed Preference and `OptionSpec` revisions (#304).
     gateway_revisions: gateway_revision::MemoryGatewayRevisionsV1,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
