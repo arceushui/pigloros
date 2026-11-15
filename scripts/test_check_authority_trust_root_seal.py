@@ -566,6 +566,21 @@ REJECTED_SOURCES = {
         'fn main() {\n    println!("{}", "AuthorityTrustRootSealV1::for_composition_root()");\n}\n',
         "apps/piglor-gateway/build.rs: build code names the seal",
     ),
+    "mint after a C string holding //": (
+        "crates/pos-state/src/lib.rs",
+        'let _ = c"//"; ' + SEAL_USE,
+        PINNED,
+    ),
+    "mint after a raw C string holding //": (
+        "crates/pos-state/src/lib.rs",
+        'let _ = cr#"a"//"#; ' + SEAL_USE,
+        PINNED,
+    ),
+    "mint after a raw byte string holding //": (
+        "crates/pos-state/src/lib.rs",
+        'let _ = br#"a"//"#; ' + SEAL_USE,
+        PINNED,
+    ),
     "mint after a nested block comment": (
         "crates/pos-state/src/lib.rs",
         "/* outer /* inner */ outer */\n" + SEAL_USE,
