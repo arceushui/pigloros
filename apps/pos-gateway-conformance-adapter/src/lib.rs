@@ -38,6 +38,6 @@ mod subject;
 pub use normalize::{normalize_response_v1, observation_v1, substitute_captured_v1};
 pub use subject::{
     executor_declaration, exit_code, run, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, ACTOR_ENTITY_ID,
-    BODY_ENTITY_ID, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID,
-    SUBCASE_MISMATCH,
+    BODY_ENTITY_ID, CAPABILITY_IDS, CONTRACT_VERSION, GOVERNANCE_RECORD_ID, PAYLOAD_INVALID,
+    PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
