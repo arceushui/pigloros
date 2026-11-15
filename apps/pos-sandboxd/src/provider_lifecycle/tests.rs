@@ -142,16 +142,16 @@ impl Manager {
         states: Vec<String>,
         patterns: Vec<String>,
     ) -> fdo::Result<Vec<UnitRow>> {
-        let mut state = self.lock()?;
-        state.calls.push(Call::List(states, patterns.clone()));
-        if state.fault == Fault::List {
-            return Err(fdo::Error::AccessDenied("listing denied".to_owned()));
-        }
         let prefix = patterns
             .first()
             .and_then(|pattern| pattern.strip_suffix('*'))
             .ok_or_else(|| failed("no pattern"))?
             .to_owned();
+        let mut state = self.lock()?;
+        state.calls.push(Call::List(states, patterns));
+        if state.fault == Fault::List {
+            return Err(fdo::Error::AccessDenied("listing denied".to_owned()));
+        }
         let mut rows = Vec::new();
         for (slot, unit) in state.units.iter().enumerate() {
             if unit.loaded && unit.name.starts_with(&prefix) {
@@ -192,16 +192,16 @@ impl Manager {
             .iter()
             .position(|unit| unit.loaded && unit.name == name);
         drop(state);
-        match slot {
-            Some(slot) => {
+        slot.map_or_else(
+            || Err(Box::new(ManagerError::NoSuchUnit(name)) as BoxDBusError),
+            |slot| {
                 OwnedObjectPath::try_from(UNIT_PATHS[slot]).map_err(|error| failed(error).into())
-            }
-            None => Err(Box::new(ManagerError::NoSuchUnit(name))),
-        }
+            },
+        )
     }
 
     #[zbus(name = "GetUnitByControlGroup")]
-    fn get_unit_by_control_group(&self, control_group: String) -> fdo::Result<OwnedObjectPath> {
+    fn get_unit_by_control_group(&self, control_group: &str) -> fdo::Result<OwnedObjectPath> {
         let slot = self
             .lock()?
             .units
@@ -236,11 +236,9 @@ impl Manager {
         Ok(job)
     }
 
-    fn kill_unit(&self, _name: String, _whom: String, _signal: i32) {}
-
-    fn reset_failed_unit(&self, name: String) -> fdo::Result<()> {
+    fn reset_failed_unit(&self, name: &str) -> fdo::Result<()> {
         let mut state = self.lock()?;
-        state.calls.push(Call::Reset(name.clone()));
+        state.calls.push(Call::Reset(name.to_owned()));
         let fault = state.fault;
         let keep_loaded = fault == Fault::KeepLoaded;
         let keep_cgroup = fault == Fault::KeepCgroup;
@@ -401,22 +399,22 @@ impl Harness {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let served = Arc::clone(&state);
+        let shared = Arc::clone(&state);
         let (server, client) = runtime.block_on(peer_connections(move |server| {
-            let mut builder = server.serve_at(MANAGER_PATH, Manager(Arc::clone(&served)));
+            let mut builder = server.serve_at(MANAGER_PATH, Manager(Arc::clone(&shared)));
             for (slot, path) in UNIT_PATHS.into_iter().enumerate() {
                 builder = builder
                     .serve_at(
                         path,
                         Service(Object {
-                            state: Arc::clone(&served),
+                            state: Arc::clone(&shared),
                             slot,
                         }),
                     )
                     .serve_at(
                         path,
                         Unit(Object {
-                            state: Arc::clone(&served),
+                            state: Arc::clone(&shared),
                             slot,
                         }),
                     );
@@ -597,7 +595,7 @@ fn a_unit_that_stays_loaded_misses_its_absence_deadline() -> TestResult {
         Err(ProviderLifecycleError::DeadlineExceeded)
     );
     let elapsed = started.elapsed();
-    assert!(elapsed >= Duration::from_millis(3_000), "{elapsed:?}");
+    assert!(elapsed >= Duration::from_secs(3), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
     Ok(())
 }
@@ -825,7 +823,7 @@ fn the_start_is_bounded_by_the_caller_deadline() -> TestResult {
 }
 
 #[test]
-fn the_runtime_request_names_only_the_digest_object_path() -> TestResult {
+fn the_runtime_request_names_only_the_digest_object_path() {
     let digest = [0xa1; 32];
     let path = binary_path(digest);
     assert!(ProviderRuntimeUnitRequest::new(&path, digest).is_ok());
@@ -841,7 +839,6 @@ fn the_runtime_request_names_only_the_digest_object_path() -> TestResult {
             "{invalid}"
         );
     }
-    Ok(())
 }
 
 #[test]
