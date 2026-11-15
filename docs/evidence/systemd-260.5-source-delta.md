@@ -226,3 +226,22 @@ The closure pins `linuxPackages_6_12` (6.12.117) and cryptsetup 2.8.6.
   table parser. `lib/setup.c` changes BITLK and integrity, not
   `_crypt_load_verity()`. The `cryptsetup:<uuid>-<name>` signature key and the
   `root_hash_sig_key_desc` table argument ([A26]) are unchanged.
+
+## Evidence artifact provenance
+
+Each `qemu-closure-evidence-<architecture>-<sha>` artifact is named after
+`github.sha`, which is the merge commit that the `pull_request` run tests.
+`host/provenance` records:
+
+- that commit, `git rev-parse HEAD` and the pull request head;
+- the SHA-256 of the checker, the producer script, the flake files, the module,
+  the guest, the collector and the certificate.
+
+The checker verifies these against the checkout and puts its own SHA-256 in
+`checker-verdict.json`. `SHA256SUMS` hashes every file.
+
+The manifest has no signed provenance, such as a Sigstore attestation. The
+workflow runs with `contents: read` only, and attestations need
+`id-token: write` and `attestations: write`. The artifact's integrity therefore
+rests on GitHub's artifact storage, on the run that produced it and on the
+manifest digest printed in that run's step summary.

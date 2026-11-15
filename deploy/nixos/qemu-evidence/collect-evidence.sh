@@ -6,7 +6,8 @@ out="$1"
 mkdir -p "$out"
 cd "$out"
 
-# Package and kernel identity.
+# Package and kernel identity, including this collector's own store path.
+readlink -f "$0" >collector
 uname -m >uname-machine
 uname -r >uname-release
 systemctl --version >systemctl-version

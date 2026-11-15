@@ -38,7 +38,16 @@ PATHS = {
     "systemd": store("systemd-260.5"),
     "qemu": store("qemu-host-cpu-only-10.1.2"),
     "trustedCertificate": store("root-hash-dev-test.crt"),
+    "kernelConfig": store("linux-config-6.12.117"),
+    "collector": store("piglor-qemu-evidence"),
+    "collectorUnit": store("unit-piglor-qemu-evidence.service"),
 }
+COMMIT_SHA = "1" * 40
+PR_HEAD_SHA = "2" * 40
+PROVENANCE = (
+    f"git-head\t{COMMIT_SHA}\ngithub-sha\t{COMMIT_SHA}\npr-head-sha\t{PR_HEAD_SHA}\n" + "".join(
+        f"file\t{name}\t{hashlib.sha256((ROOT / name).read_bytes()).hexdigest()}\n"
+        for name in checker.PROVENANCE_FILES))
 SYSTEMD = PATHS["systemd"]
 DAEMON = f"{SYSTEMD}/lib/systemd/systemd-mountfsd"
 WORKER = f"{SYSTEMD}/lib/systemd/systemd-mountwork"
@@ -54,6 +63,9 @@ NET_DEV = (
 NS = "pid\tpid:[4026531836]\nuser\tuser:[4026531837]\nmnt\tmnt:[4026531841]\n"
 
 
+CLOSURE = ("toplevel", "kernel", "systemd", "collector", "collectorUnit")
+
+
 def info(*names: str, paths: dict[str, str] = PATHS) -> str:
     return json.dumps({"version": 2, "storeDir": "/nix/store", "info": {
         paths[name].removeprefix("/nix/store/"): {"narHash": f"sha256-{name}"} for name in names
@@ -65,7 +77,7 @@ def with_paths(files: dict, **changes: str) -> dict[str, str]:
     paths = {**PATHS, **changes}
     files["host/store-paths.json"] = json.dumps(paths)
     files["host/path-info.json"] = info(*paths, paths=paths)
-    files["host/toplevel-closure.json"] = info("toplevel", "kernel", "systemd", paths=paths)
+    files["host/toplevel-closure.json"] = info(*CLOSURE, paths=paths)
     return paths
 
 
@@ -86,7 +98,8 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "host/flake-metadata.json": json.dumps({"locks": FLAKE_LOCK, "revision": "0" * 40}),
         "host/store-paths.json": json.dumps(PATHS),
         "host/path-info.json": info(*PATHS),
-        "host/toplevel-closure.json": info("toplevel", "kernel", "systemd"),
+        "host/toplevel-closure.json": info(*CLOSURE),
+        "host/provenance": PROVENANCE,
         "host/system-trusted-keys.pem": CERTIFICATE,
         "host/runner": f"uname\tLinux 6.11.0-1018-azure #18 SMP {architecture}\ndev-kvm\tabsent\n",
         "host/serial-console.log": "[    0.000000] Booting Linux\n",
@@ -95,6 +108,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "host/qemu-net-dev": NET_DEV,
         "host/vm-exit-status": "0\n",
         "guest/status": "complete\n",
+        "guest/collector": f"{PATHS['collector']}/bin/piglor-qemu-evidence\n",
         "guest/uname-machine": f"{architecture}\n",
         "guest/uname-release": "6.12.117\n",
         "guest/systemctl-version": "systemd 260 (260.5)\n+PAM +AUDIT -SELINUX\n",
@@ -149,6 +163,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "guest/manager-environment": "LANG=C.UTF-8\nPATH=/run/current-system/sw/bin\n",
         "guest/pid1-namespaces": NS,
     }
+    files["host/kernel-config"] = files["guest/kernel-config"]
     for pid, exe, environ in (
         ("310", DAEMON, b"LANG=C.UTF-8\0NOTIFY_SOCKET=/run/systemd/notify\0"),
         ("311", WORKER, b"LANG=C.UTF-8\0MOUNTFS_FIXED_WORKER=1\0"),
@@ -264,8 +279,13 @@ class EvidenceTests(unittest.TestCase):
         self.count += 1
         root = self.base / str(self.count)
         files = valid_files(architecture)
+        store_config = files["host/kernel-config"]
         if change:
             change(files)
+        if files.get("host/kernel-config") == store_config and "guest/kernel-config" in files:
+            # A guest kernel-config case models a different store kernel too,
+            # so that only the option under test differs.
+            files["host/kernel-config"] = files["guest/kernel-config"]
         write(root, files)
         return root
 
@@ -379,6 +399,56 @@ class EvidenceTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
+
+    def test_evidence_is_bound_to_the_tested_commit_and_inputs(self):
+        name = checker.PROVENANCE_FILES[0]
+        line = next(l for l in PROVENANCE.splitlines() if l.startswith(f"file\t{name}\t"))
+        changes = [
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(f"github-sha\t{COMMIT_SHA}", "github-sha\t" + "3" * 40)}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(f"pr-head-sha\t{PR_HEAD_SHA}\n", "")}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(PR_HEAD_SHA, "main")}),
+            lambda f: f.update({"host/provenance": PROVENANCE + f"git-head\t{COMMIT_SHA}\n"}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(line + "\n", "")}),
+            lambda f: f.update({"host/provenance": PROVENANCE + line + "\n"}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(line, line[:-64] + "0" * 64)}),
+            lambda f: f.update({"host/provenance": PROVENANCE + "file\tREADME.md\t" + "0" * 64 + "\n"}),
+            lambda f: f.update({"host/provenance": PROVENANCE + "garbage\n"}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = pathlib.Path(directory)
+            for other in checker.PROVENANCE_FILES:
+                (repository / other).parent.mkdir(parents=True, exist_ok=True)
+                (repository / other).write_bytes((ROOT / other).read_bytes())
+            checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
+            (repository / name).write_bytes(b"# edited after the run\n")
+            with self.assertRaises(checker.EvidenceError):
+                checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
+
+    def test_verdict_names_the_checker_and_the_commit(self):
+        verdict = self.verdict()
+        self.assertEqual(verdict["checker_sha256"],
+                         hashlib.sha256(pathlib.Path(checker.__file__).read_bytes()).hexdigest())
+        self.assertEqual(verdict["provenance"]["commits"]["github-sha"], COMMIT_SHA)
+
+    def test_guest_facts_match_the_store(self):
+        changes = [
+            lambda f: f.update({"guest/collector": "/tmp/fake-collector\n"}),
+            lambda f: f.update({"host/toplevel-closure.json": info("toplevel", "kernel", "systemd", "collector")}),
+            lambda f: f.update({"host/toplevel-closure.json": info("toplevel", "kernel", "systemd", "collectorUnit")}),
+            lambda f: f.update({"host/kernel-config": f["host/kernel-config"] + "CONFIG_EXTRA=y\n"}),
+            lambda f: f.update({"host/kernel-config": f["host/kernel-config"].replace("CONFIG_DM_VERITY=m", "CONFIG_DM_VERITY=y")}),
+            lambda f: f.update({"guest/kernel-config": f["guest/kernel-config"].replace("CONFIG_DM_VERITY=m\n", ""),
+                                "host/kernel-config": f["host/kernel-config"].replace("CONFIG_DM_VERITY=m\n", "")}),
+            lambda f: f.update({"guest/kernel-config": f["guest/kernel-config"].replace("CONFIG_DM_VERITY=m", "# CONFIG_DM_VERITY is not set"),
+                                "host/kernel-config": f["host/kernel-config"].replace("CONFIG_DM_VERITY=m", "# CONFIG_DM_VERITY is not set")}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+        self.verdict(change=lambda f: f.update({"host/kernel-config": "# comment\n" + f["host/kernel-config"]}))
 
     def test_kernel_release_series_is_pinned(self):
         def kernel(release: str):

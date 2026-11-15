@@ -46,7 +46,23 @@ SYSTEMD_VERSION_LINE = ("systemd", "260", "(260.5)")
 KERNEL_SERIES = "6.12"
 ARCHITECTURES = {"x86_64": "bzImage", "aarch64": "Image"}
 STORE_PATH = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+")
-STORE_NAMES = ("vm", "toplevel", "kernel", "systemd", "qemu", "trustedCertificate")
+STORE_NAMES = ("vm", "toplevel", "kernel", "systemd", "qemu", "trustedCertificate",
+               "kernelConfig", "collector", "collectorUnit")
+REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
+# The reviewed inputs whose exact bytes the evidence depends on; the host
+# records their SHA-256 in host/provenance next to the tested commit.
+PROVENANCE_FILES = (
+    "scripts/check_qemu_closure_evidence.py",
+    "scripts/qemu-closure-evidence.sh",
+    "deploy/nixos/flake.nix",
+    "deploy/nixos/flake.lock",
+    "deploy/nixos/modules/mountfsd-activation.nix",
+    "deploy/nixos/qemu-evidence/guest.nix",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh",
+    "deploy/nixos/dev-trust/root-hash-dev-test.crt",
+)
+COLLECTOR_PROGRAM = "bin/piglor-qemu-evidence"
+COMMIT = re.compile(r"[0-9a-f]{40}")
 VERITY_SIG = "DM_VERITY_VERIFY_ROOTHASH_SIG"
 VERITY_FALLBACKS = (
     "DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING",
@@ -65,10 +81,10 @@ CONTAINER_MARKERS = ("/run/systemd/container", "/run/host/container-manager")
 HOST_FILES = {
     "flake-metadata.json", "store-paths.json", "path-info.json", "toplevel-closure.json",
     "system-trusted-keys.pem", "runner", "serial-console.log", "qemu-argv", "qemu-exe",
-    "qemu-net-dev", "vm-exit-status",
+    "qemu-net-dev", "vm-exit-status", "provenance", "kernel-config",
 }
 GUEST_FILES = {
-    "status", "uname-machine", "uname-release", "systemctl-version", "current-system",
+    "status", "collector", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
@@ -312,9 +328,11 @@ def check_store_identity(evidence: Evidence, architecture: str, lock: dict) -> d
         if not isinstance(info, dict) or not isinstance(info.get("narHash"), str):
             raise EvidenceError(f"path-info.json lacks {name}")
         nar_hashes[name] = info["narHash"]
-    for name in ("toplevel", "kernel", "systemd"):
+    for name in ("toplevel", "kernel", "systemd", "collector", "collectorUnit"):
         if paths[name].removeprefix("/nix/store/") not in closure:
             raise EvidenceError(f"the toplevel closure lacks {name}")
+    if evidence.line("guest/collector") != f"{paths['collector']}/{COLLECTOR_PROGRAM}":
+        raise EvidenceError("the guest evidence was not written by the recorded collector")
     toplevel = evidence.line("guest/current-system")
     if toplevel != paths["toplevel"] or evidence.line("guest/booted-system") != toplevel:
         raise EvidenceError("the guest did not boot the recorded toplevel")
@@ -403,18 +421,28 @@ def check_command_line(evidence: Evidence, toplevel: str) -> str:
     return line.rstrip("\n")
 
 
-def check_kernel_config(evidence: Evidence, certificate_path: str) -> dict:
+def kernel_config_values(evidence: Evidence, name: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in evidence.text("guest/kernel-config").splitlines():
+    for line in evidence.text(name).splitlines():
         match = re.fullmatch(r"CONFIG_([A-Za-z0-9_]+)=(.*)|# CONFIG_([A-Za-z0-9_]+) is not set", line)
         if not match:
             if line and not line.startswith("#"):
                 raise EvidenceError(f"unparsed kernel config line: {line!r}")
             continue
-        name, value = (match.group(1), match.group(2)) if match.group(1) else (match.group(3), "n")
-        if name in values:
-            raise EvidenceError(f"kernel config repeats {name}")
-        values[name] = value
+        option, value = (match.group(1), match.group(2)) if match.group(1) else (match.group(3), "n")
+        if option in values:
+            raise EvidenceError(f"{name} repeats {option}")
+        values[option] = value
+    return values
+
+
+def check_kernel_config(evidence: Evidence, certificate_path: str) -> dict:
+    """/proc/config.gz must be the store kernel's configuration, option for option."""
+    values = kernel_config_values(evidence, "guest/kernel-config")
+    if values != kernel_config_values(evidence, "host/kernel-config"):
+        raise EvidenceError("the running kernel's configuration differs from the store kernel's")
+    if values.get("DM_VERITY") not in ("y", "m"):
+        raise EvidenceError("CONFIG_DM_VERITY must be y or m")
     recorded = {name: values.get(name, "absent") for name in (VERITY_SIG, *VERITY_FALLBACKS)}
     if recorded[VERITY_SIG] != "y":
         raise EvidenceError(f"CONFIG_{VERITY_SIG} must be y")
@@ -540,11 +568,41 @@ def check_mountfsd(evidence: Evidence, systemd: str) -> dict:
     return {"service": service, "socket": socket, "processes": executables}
 
 
-def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict) -> dict:
+def sha256_file(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def check_provenance(evidence: Evidence, repository: pathlib.Path) -> dict:
+    """Bind the evidence to the tested commit and to the checked-out inputs."""
+    commits, files = {}, {}
+    for line in evidence.text("host/provenance").splitlines():
+        fields = line.split("\t")
+        if len(fields) == 2 and fields[0] in ("git-head", "github-sha", "pr-head-sha") \
+                and fields[0] not in commits and COMMIT.fullmatch(fields[1]):
+            commits[fields[0]] = fields[1]
+        elif len(fields) == 3 and fields[0] == "file" and fields[1] not in files \
+                and re.fullmatch(r"[0-9a-f]{64}", fields[2]):
+            files[fields[1]] = fields[2]
+        else:
+            raise EvidenceError(f"malformed provenance line: {line!r}")
+    if sorted(commits) != ["git-head", "github-sha", "pr-head-sha"] \
+            or commits["git-head"] != commits["github-sha"]:
+        raise EvidenceError("the evidence does not name the tested commit")
+    if sorted(files) != sorted(PROVENANCE_FILES):
+        raise EvidenceError("provenance does not hash exactly the reviewed inputs")
+    for name, digest in files.items():
+        if sha256_file(repository / name) != digest:
+            raise EvidenceError(f"{name} differs from the input the evidence was produced from")
+    return {"commits": commits, "files": files}
+
+
+def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
+          repository: pathlib.Path = REPOSITORY) -> dict:
     if architecture not in ARCHITECTURES:
         raise EvidenceError(f"unsupported architecture {architecture!r}")
     description = kernel_key_description(pem_certificate(certificate))
     evidence = Evidence(root)
+    provenance = check_provenance(evidence, repository)
     identity = check_store_identity(evidence, architecture, lock)
     paths = identity["store_paths"]
     if evidence.text("host/system-trusted-keys.pem") != certificate \
@@ -552,6 +610,8 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict) -
         raise EvidenceError("the kernel's trusted-keys file is not the reviewed certificate")
     return {
         "architecture": architecture,
+        "checker_sha256": sha256_file(pathlib.Path(__file__).resolve()),
+        "provenance": provenance,
         **identity,
         **check_runner(evidence, architecture, paths),
         "kernel_command_line": check_command_line(evidence, paths["toplevel"]),

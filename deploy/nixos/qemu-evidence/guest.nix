@@ -38,6 +38,9 @@ in
     rootHashCertificate = ../dev-trust/root-hash-dev-test.crt;
   };
 
+  # Recorded by the host so the checker can find the collector in the closure.
+  system.build.piglorQemuEvidenceCollector = collector;
+
   system.stateVersion = "26.05";
   networking.hostName = "piglor-qemu-evidence";
   networking.useDHCP = false;

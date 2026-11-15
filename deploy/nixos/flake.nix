@@ -48,6 +48,9 @@
           systemd = "${config.systemd.package}";
           qemu = "${config.virtualisation.qemu.package}";
           trustedCertificate = "${config.piglor.mountfsdActivation.rootHashCertificateFile}";
+          kernelConfig = "${config.boot.kernelPackages.kernel.configfile}";
+          collector = "${config.system.build.piglorQemuEvidenceCollector}";
+          collectorUnit = "${config.systemd.units."piglor-qemu-evidence.service".unit}";
         }
       ) guests;
     };

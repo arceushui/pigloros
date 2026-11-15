@@ -13,6 +13,17 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flake="${root}/deploy/nixos"
 
+provenance_files=(
+  scripts/check_qemu_closure_evidence.py
+  scripts/qemu-closure-evidence.sh
+  deploy/nixos/flake.nix
+  deploy/nixos/flake.lock
+  deploy/nixos/modules/mountfsd-activation.nix
+  deploy/nixos/qemu-evidence/guest.nix
+  deploy/nixos/qemu-evidence/collect-evidence.sh
+  deploy/nixos/dev-trust/root-hash-dev-test.crt
+)
+
 usage() {
   printf 'usage: %s build|boot ARCH OUT | seal OUT\n' "$0" >&2
   exit 2
@@ -47,7 +58,8 @@ build() {
     printf 'built %s, expected %s\n' "${built}" "${vm}" >&2
     exit 1
   fi
-  local names=(vm toplevel kernel systemd qemu trustedCertificate) paths=() name
+  local names=(vm toplevel kernel systemd qemu trustedCertificate kernelConfig collector collectorUnit)
+  local paths=() name
   for name in "${names[@]}"; do
     paths+=("$(store_path "${name}" "${out}")")
   done
@@ -55,10 +67,25 @@ build() {
   nix path-info --json --json-format 2 --recursive "$(store_path toplevel "${out}")" \
     >"${out}/host/toplevel-closure.json"
   cp -- "$(store_path trustedCertificate "${out}")" "${out}/host/system-trusted-keys.pem"
+  cp -- "$(store_path kernelConfig "${out}")" "${out}/host/kernel-config"
+  record_provenance "${out}"
+}
+
+# The tested commit and the reviewed inputs the evidence depends on.
+record_provenance() {
+  local out="$1" file
+  {
+    printf 'git-head\t%s\n' "$(git -C "${root}" rev-parse HEAD)"
+    printf 'github-sha\t%s\n' "${GITHUB_SHA:?}"
+    printf 'pr-head-sha\t%s\n' "${EVIDENCE_PR_HEAD_SHA:?}"
+    for file in "${provenance_files[@]}"; do
+      printf 'file\t%s\t%s\n' "${file}" "$(sha256sum <"${root}/${file}" | cut -d' ' -f1)"
+    done
+  } >"${out}/host/provenance"
 }
 
 boot() {
-  local architecture="$1" out="$2" work runner qemu_pid="" status=0
+  local architecture="$1" out="$2" work runner qemu_pid="" status=0 pid
   require_architecture "${architecture}"
   work="$(mktemp -d)"
   mkdir -p "${work}/xchg"
@@ -83,12 +110,16 @@ boot() {
   # namespace that has only a down loopback, and the guest has no NIC.
   sudo unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups -- \
     env -i PATH="${PATH}" HOME="${HOME}" TMPDIR="${work}" USE_TMPDIR=1 \
-    timeout --kill-after=60 2700 "${runner}" \
+    timeout --kill-after=60 2700 \
+    bash -c 'printf "%s\n" "$$" >"$1" && exec "$2"' launcher "${work}/qemu.pid" "${runner}" \
     </dev/null >"${out}/host/serial-console.log" 2>&1 &
   local launcher=$!
+  # The launcher shell writes its own PID, then execs the VM runner, which
+  # execs QEMU: the same process becomes QEMU.
   for _ in $(seq 120); do
-    qemu_pid="$(pgrep --uid "$(id -u)" --newest '^qemu-system-' || true)"
-    if [[ -n ${qemu_pid} ]]; then
+    pid="$(cat "${work}/qemu.pid" 2>/dev/null || true)"
+    if [[ ${pid} =~ ^[0-9]+$ && "$(readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/qemu-system-* ]]; then
+      qemu_pid="${pid}"
       break
     fi
     sleep 1

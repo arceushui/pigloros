@@ -26,17 +26,22 @@ WORKFLOW = ".github/workflows/qemu-closure-evidence.yml"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 EVIDENCE = '"${RUNNER_TEMP}/qemu-closure-evidence"'
-ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.event.pull_request.head.sha || github.sha }}"
-# Universal newlines keep the same program across LF and CRLF checkouts.
+# github.sha is the merge commit that the pull_request run actually tests.
+ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
+# Universal newlines keep the same program across LF and CRLF checkouts. The
+# two imported policy modules are pinned too: they supply EXPECTED's headroom
+# step and the graph comparison.
 PRODUCER_SHA256 = {
+    "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
+    "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
-    "scripts/qemu-closure-evidence.sh": "0e597b8e8ca19f01b3e9dd77efebbeed5a06cfb71c7ebd5c4d5ca185df1ba0bb",
-    "scripts/check_qemu_closure_evidence.py": "69613b1e7354b9797aafa99804dbf18b8e08f38895786fa2839885b7b483e35a",
-    "deploy/nixos/flake.nix": "cb21f5011b0e1c1d319a55f6d01b89427de4a19346b8a05c3c778a9d4ab4e999",
+    "scripts/qemu-closure-evidence.sh": "f009a7f96673675e460c613b6981ff536b8e9045a10a3f4d61d8ce4acda851fd",
+    "scripts/check_qemu_closure_evidence.py": "d25088f29aaa7697e2b78f089bd310eb460fdb4d21b98fa1644701e4f5b22a71",
+    "deploy/nixos/flake.nix": "4f18580a4fafc8bcba70c61e01f076b1d85b1f40fa487cd952c7b77e9617e0c6",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
-    "deploy/nixos/qemu-evidence/guest.nix": "9ffdc5f1cbf8f6b24917838fa024638347d7c996fda82ce0500b135d24bc0c92",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "45aa1339be390fc65474787eb6935b0797b774926a50f0198a687be378421b06",
+    "deploy/nixos/qemu-evidence/guest.nix": "978bf161e0fc6847bdec39fbdcd665e4dd1bbbcdea814d9d6add871c0d7dcb5a",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "e3f4e5c47c249b6e78bd4e0e39dc3e8fafffb673c66df16d2ee288dbd189d090",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "d755a5f97a8c7865bc3f5f73b731098df03382577f02ae7087a3596ef8f5a5a7",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}
@@ -55,7 +60,6 @@ EXPECTED = {
             "scripts/install-pinned-nix.sh",
             "scripts/qemu-closure-evidence.sh",
         ]},
-        "workflow_dispatch": None,
     },
     "permissions": {"contents": "read"},
     "concurrency": {"group": "qemu-closure-evidence-${{ github.ref }}", "cancel-in-progress": True},
@@ -81,7 +85,8 @@ EXPECTED = {
             ]}},
             "runs-on": "${{ matrix.runner }}",
             "timeout-minutes": 345,
-            "env": {"EVIDENCE_ARCHITECTURE": "${{ matrix.architecture }}"},
+            "env": {"EVIDENCE_ARCHITECTURE": "${{ matrix.architecture }}",
+                    "EVIDENCE_PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}"},
             "steps": [
                 CHECKOUT_STEP,
                 EXPECTED_SDK_HEADROOM_STEP,
@@ -106,7 +111,7 @@ EXPECTED = {
                     "if-no-files-found": "error", "retention-days": 90,
                 }},
                 {"name": "Retain failed-run diagnostics, which are not evidence",
-                 "if": "${{ failure() }}", "uses": UPLOAD, "with": {
+                 "if": "${{ !success() }}", "uses": UPLOAD, "with": {
                      "name": f"qemu-closure-diagnostics-{ARTIFACT_SUFFIX}",
                      "path": "${{ runner.temp }}/qemu-closure-evidence/",
                      "if-no-files-found": "ignore", "retention-days": 7,
