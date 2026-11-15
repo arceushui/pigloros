@@ -136,8 +136,8 @@ CFG_ATTR_PATH = re.compile(r"cfg_attr\s*\([^\]]*\bpath\s*=")
 SEAL_RENAME = re.compile(rf"\b{SEAL_NAME}\s+as\s+\w+")
 BUILD_SCRIPT = "build.rs"
 TOKEN = re.compile(
-    r'//[^\n]*|/\*|(?<!\w)b?r(#*)"(?:.|\n)*?"\1|(?<!\w)b?"(?:\\[\s\S]|[^"\\])*"'
-    r"|(?<!\w)b?'(?:\\.|[^'\\\n])'"
+    r'//[^\n]*|/\*|(?<!\w)[bc]?r(#*)"(?:.|\n)*?"\1|"(?:\\[\s\S]|[^"\\])*"'
+    r"|(?:(?<!\w)b)?'(?:\\(?:u\{[0-9a-fA-F_]{1,8}\}|.)|[^'\\\n])'"
 )
 BLOCK_COMMENT = re.compile(r"/\*|\*/")
 BRACE = re.compile(r"[{}]")
