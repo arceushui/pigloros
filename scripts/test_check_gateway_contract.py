@@ -407,7 +407,8 @@ class CheckGatewayContractTest(unittest.TestCase):
     def test_the_closed_sets_say_so(self) -> None:
         schemas = DOCUMENT["components"]["schemas"]
         for schema in (schemas["ExecutionProfile"]["properties"]["state"],
-                       schemas["ProvenanceReference"]["properties"]["origin"]):
+                       schemas["ProvenanceReference"]["properties"]["origin"],
+                       schemas["SessionModeProfile"]["properties"]["network"]):
             self.assertIn("enum", schema)
             self.assertIn("deliberately closed in v1", schema["description"])
 

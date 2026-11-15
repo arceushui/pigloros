@@ -56,8 +56,28 @@ same 99% line and 99% region thresholds to changed production Rust files under
 `**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which is excluded from
 the root gate. That crate has its own thresholds (99% lines and regions for `src`
 outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
-`covgate.toml`, read by the Windows-only owner-bridge CI job (not yet landed), so
+`covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
+
+That job runs on every push to `main` and on pull requests whose changes touch
+the paths in the `owner_windows` filter of `.github/rust-scope.yml` (the owner
+crates, `pos-crypto`, `fixtures/owner-bridge`, workspace manifests, toolchain
+and root Cargo, lint, format and coverage configuration, the workflows and the
+scripts the lane or its consumers run), read from the trusted base revision.
+Failed detection, a base revision without that filter, a pull request at the
+3000-file listing limit, any renamed file, or a failure to list renames runs
+it. Only `cargo-crap` waits for the lane, and `ci-gate` requires both results
+directly; `standard-gate`, mutation and ASan never wait for it, so a failed lane
+does not hide or delay their findings. When a pull
+request skips it, `cargo-crap` scores the Linux LCOV alone and hides only
+`crates/pos-owner-bridge-windows` from scoring and from the trusted baseline;
+`ci-gate` requires the lane's success whenever it is in scope.
+
+The Windows job runs the complete native test suite, including all 1,000 real
+readiness cases, once under coverage instrumentation. Portable bridge and owner
+executable tests run separately, along with native doctests. The retained runtime
+is prepared before these tests. No test-exclusion filters are used; the complete
+native suite executes once while producing its coverage evidence.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test

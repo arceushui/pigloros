@@ -3983,7 +3983,8 @@
               "absent",
               "denied",
               "capability-granted"
-            ]
+            ],
+            "description": "The Principal's network posture: `absent`, `denied` or `capability-granted`. The set is deliberately closed in v1."
           }
         },
         "unevaluatedProperties": false

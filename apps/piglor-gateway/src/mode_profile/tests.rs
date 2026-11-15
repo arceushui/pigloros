@@ -597,6 +597,51 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     Ok(())
 }
 
+/// ADR-134 §4: migrating to a mode without network refuses a store whose
+/// Local Principal holds the network capability, so the next `serve` never
+/// fails on it; the binding is unchanged.
+#[test]
+fn migration_to_a_mode_without_network_refuses_a_networked_principal() -> TestResult {
+    use crate::{
+        local_principal::{provision_local_principal, LocalPrincipalProvisionV1},
+        GatewayOperationV1,
+    };
+    use GatewayModeProfileIdV1::{AirGapped, Local};
+    let principal = pos_core::PrincipalRefV1::try_new([1; 16], "local")?;
+    for (operations, refused) in [
+        (
+            vec![
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::NETWORK,
+            ],
+            true,
+        ),
+        (vec![GatewayOperationV1::READ_SESSION], false),
+    ] {
+        let (_directory, path) = temporary_database()?;
+        bind_gateway_mode_v1(Local, loopback(), &mut sqlite_host(&path)?)?;
+        let provision = LocalPrincipalProvisionV1::try_new(
+            &principal,
+            [pos_core::EntityId::new()],
+            operations,
+        )?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
+        let migrated = migrate_gateway_mode_v1(&path, Local, AirGapped);
+        let epoch = binding_epoch(&mut sqlite_host(&path)?)?;
+        if refused {
+            assert_eq!(migrated, Err(GatewayModeErrorV1::PrincipalNetworkRefused));
+            assert!(GatewayModeErrorV1::PrincipalNetworkRefused
+                .to_string()
+                .contains("keep the Local mode"));
+            assert_eq!(epoch, 1);
+        } else {
+            assert!(migrated.is_ok());
+            assert_eq!(epoch, 2);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn migration_refuses_unbound_mismatched_and_identical_modes() -> TestResult {
     use GatewayModeProfileIdV1::{AirGapped, Local};
@@ -782,6 +827,7 @@ fn every_error_has_a_closed_message() {
         E::StoreLockUnavailable,
         E::RefusedInMode,
         E::Stale,
+        E::PrincipalNetworkRefused,
     ] {
         assert!(!error.to_string().is_empty());
     }
