@@ -11,6 +11,17 @@
 //! checker enforces it.
 
 mod ffi;
+#[cfg(any(test, feature = "test-support"))]
+struct SubjectMutex {
+    handle: windows::Win32::Foundation::HANDLE,
+    #[cfg(test)]
+    abandoned: bool,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+struct RetainedMutex(windows::Win32::Foundation::HANDLE);
+
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
@@ -110,7 +121,11 @@ mod adapter {
     mod directory;
     mod events;
     mod host;
+    #[cfg(any(test, feature = "test-support"))]
+    mod ledger_storage;
     mod loopback;
+    #[cfg(any(test, feature = "test-support"))]
+    mod nonce_ledger;
     mod overrides;
     mod platform;
     mod process;
@@ -118,10 +133,19 @@ mod adapter {
     mod settings;
     mod socket;
     mod store;
+    #[cfg(any(test, feature = "test-support"))]
+    mod store_file_identity;
     mod surface;
 
     #[cfg(test)]
     mod native_tests;
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub use ledger_storage::WindowsNonceLedger;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use nonce_ledger::WindowsSubjectEncryptorLock;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use store_file_identity::store_file_id;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
@@ -139,6 +163,11 @@ pub use adapter::{
     VerifiedRuntime, WindowsCleanupStore, WindowsLoopbackBinder, WindowsOwnerHost,
     WindowsProcessProbe,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub use adapter::WindowsSubjectEncryptorLock;
+#[cfg(any(test, feature = "test-support"))]
+pub use adapter::{store_file_id, WindowsNonceLedger};
 
 // Private, SDK-neutral capabilities shared by sibling safe/native modules.
 // Root declarations avoid contradictory private-module visibility lints while
@@ -856,6 +885,21 @@ mod tests {
     use crate::WindowsLoopbackBinder;
 
     mod native_api;
+
+    #[test]
+    fn nonce_lock_native() {
+        crate::Native::exercise_native_lock();
+    }
+
+    #[test]
+    fn windows_store_file_identity_native() {
+        crate::Native::exercise_store_file_identity();
+    }
+
+    #[test]
+    fn windows_nonce_ledger_storage_native() {
+        crate::Native::exercise_ledger_storage();
+    }
 
     impl crate::Native {
         pub(crate) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
