@@ -141,3 +141,61 @@ fn memory_authenticated_ingress_contract() {
 fn sqlite_authenticated_ingress_contract() {
     assert_ingress_contract(&mut SqliteStore::open_in_memory().test_ok());
 }
+
+/// ADR-134 §8: on a bound file, an `OwnTracks` ingest through a handle
+/// attached to a pre-rotation epoch, or never attached, commits no location.
+#[test]
+fn sqlite_a_stale_or_unattached_handle_ingests_nothing() {
+    use pos_core::{
+        geo_admission::GeoLocationAdmissionStore, CoreError, GatewayModeBindingHostV1,
+        GatewayModeBindingPortV1, GatewayModeProfileRefV1, Seq,
+    };
+
+    let local = |byte| GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [byte; 32]);
+    let database = tempfile::NamedTempFile::new().test_ok();
+    let path = database.path().to_str().test_ok();
+    let open = || {
+        let mut store = SqliteStore::open(path).test_ok();
+        store
+            .bind_erasure_gate(std::sync::Arc::new(
+                pos_core::ErasureContainmentGateV1::new_test_open(),
+            ))
+            .test_ok();
+        store
+    };
+    let mut binder = open();
+    binder
+        .bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(local(1).test_ok()))
+        .test_ok();
+    let timeline = binder.create_timeline("bound-owntracks").test_ok().id();
+    binder
+        .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+            timeline,
+            EntityId::new(),
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+            verifier(),
+        ))
+        .test_ok();
+    let mut stale = open();
+    stale.attach_mode_binding(&local(1).test_ok()).test_ok();
+    let mut unattached = open();
+    let permit = GatewayModeBindingHostV1::new()
+        .authorize_rotation(local(1).test_ok(), local(2).test_ok())
+        .test_ok();
+    binder.rotate_mode(permit).test_ok();
+
+    // The bound handle authenticates the ingest; each writer then commits it.
+    let request = binder
+        .prepare_owntracks_ingress(input(OWNER_KEY, BASIC_SECRET))
+        .test_ok()
+        .into_admission_request();
+    for writer in [&mut stale, &mut unattached] {
+        assert!(matches!(
+            writer.admit_geo_location(request.clone()),
+            Err(CoreError::ModeBindingStale)
+        ));
+    }
+    let admitted = binder.admit_geo_location(request).test_ok();
+    assert!(admitted.is_accepted());
+    assert_eq!(admitted.event_seq(), Some(Seq::from_u64(1)));
+}
