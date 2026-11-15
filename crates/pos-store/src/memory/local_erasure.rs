@@ -44,7 +44,7 @@ impl MemoryStore {
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         ErasureRetainedObjectV1::new(canonical, max_bytes).and_then(|object| {
             self.retainable(&object)
-                .map(|()| self.insert_retained(object))
+                .map(|()| self.insert_retained(&object))
         })
     }
 
@@ -67,9 +67,9 @@ impl MemoryStore {
                 })
                 .map(|()| {
                     if let Some(object) = prepared.effect_object() {
-                        self.insert_retained(object.clone());
+                        self.insert_retained(object);
                     }
-                    self.insert_retained(prepared.owner_result().clone())
+                    self.insert_retained(prepared.owner_result())
                 })
         })
     }
@@ -122,7 +122,7 @@ impl MemoryStore {
 
     /// Insert one checked object. Only a newly inserted object becomes a
     /// sweep candidate, so a coordinator object is never marked.
-    fn insert_retained(&mut self, object: ErasureRetainedObjectV1) -> ErasureReferenceV1 {
+    fn insert_retained(&mut self, object: &ErasureRetainedObjectV1) -> ErasureReferenceV1 {
         let reference = object.reference();
         if let std::collections::btree_map::Entry::Vacant(entry) =
             self.erasure_evidence.entry(reference)

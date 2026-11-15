@@ -331,13 +331,13 @@ mod tests {
             .to_str()
             .ok_or("temporary database path is not UTF-8")?;
         let mut store = SqliteStore::open(path)?;
-        store.create("before")?;
+        store.create_timeline("before")?;
         let limits = ErasureRecoveryLimitsV1::from_maximum_requests(4)?;
         let transaction = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
         let inventory = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
-        SqliteStore::open(path)?.create("during")?;
+        SqliteStore::open(path)?.create_timeline("during")?;
         let rows = timeline_rows(&transaction, limits)?;
         assert_eq!(rows.len(), 1);
         assert_eq!(inventory.topology().len(), 1);
