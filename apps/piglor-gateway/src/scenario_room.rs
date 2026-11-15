@@ -45,6 +45,10 @@ pub(crate) enum RoomFailureV1 {
     Gateway(GatewayError),
     /// The request does not match its schema.
     Invalid,
+    /// `privacy_export_ref` names no consent the acting Principal holds.
+    ConsentInvalid,
+    /// `privacy_export_ref` names a consent that was revoked.
+    ConsentRevoked,
     /// The store refused the operation.
     Store(RoomStoreErrorV1),
 }
@@ -63,6 +67,16 @@ impl From<RoomFailureV1> for ProblemV1 {
                 ProblemCodeV1::InvalidRequest,
                 StatusCode::BAD_REQUEST,
                 "the Scenario Room request does not match its schema",
+            ),
+            RoomFailureV1::ConsentInvalid => Self::new(
+                ProblemCodeV1::ConsentInvalid,
+                StatusCode::FORBIDDEN,
+                "the room's privacy_export_ref names no consent the Principal holds",
+            ),
+            RoomFailureV1::ConsentRevoked => Self::new(
+                ProblemCodeV1::Revoked,
+                StatusCode::FORBIDDEN,
+                "the room's privacy_export_ref names a revoked consent",
             ),
             RoomFailureV1::Store(error) => Self::from(error),
         }
@@ -457,6 +471,23 @@ impl Gateway {
             .map_err(RoomFailureV1::Store)
     }
 
+    /// The consent `privacy_export_ref` names, as the decision of `permit`
+    /// pinned it (#303 decision 2a): it must be a consent the acting
+    /// Principal holds and that is not revoked. It is checked under the
+    /// permit, so a revocation waits for the operation and takes effect
+    /// before the next one.
+    fn require_room_consent(
+        &self,
+        permit: &GatewayOperationPermitV1,
+        input: &ScenarioRoomInputV1,
+    ) -> Result<(), RoomFailureV1> {
+        match self.consent_pinned(permit, EventId::from_ulid(input.privacy_export_ref.inner())) {
+            None => Err(RoomFailureV1::ConsentInvalid),
+            Some(consent) if consent.revocation().is_some() => Err(RoomFailureV1::ConsentRevoked),
+            Some(_) => Ok(()),
+        }
+    }
+
     /// Create revision 1 of a room under the `permit` of its decision.
     pub(crate) async fn create_scenario_room(
         &self,
@@ -464,6 +495,7 @@ impl Gateway {
         key: &str,
         request: ParsedRoomRequestV1,
     ) -> Result<RoomOutcomeV1, RoomFailureV1> {
+        self.require_room_consent(permit, &request.input)?;
         let claim = claim(permit, "create", None, key, request.request_digest);
         self.room_operation(RoomOperationV1::Create {
             claim,
@@ -480,6 +512,7 @@ impl Gateway {
         key: &str,
         request: ParsedRoomRequestV1,
     ) -> Result<RoomOutcomeV1, RoomFailureV1> {
+        self.require_room_consent(permit, &request.input)?;
         let claim = claim(permit, "derive", Some(room_id), key, request.request_digest);
         self.room_operation(RoomOperationV1::Derive {
             claim,

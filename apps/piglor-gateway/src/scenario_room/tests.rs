@@ -54,10 +54,10 @@ mod served {
 
     use super::super::*;
     use crate::{
-        executor::scenario_room::RoomStoreErrorV1,
+        executor::scenario_room::{RoomOutcomeV1, RoomStoreErrorV1},
         local_principal::{
-            load_local_principal, local_gateway, provision_local_principal,
-            LocalPrincipalProvisionV1,
+            load_local_principal, local_gateway, provision_local_principal, provision_on_host,
+            LocalConsentDraftV1, LocalConsentGrantDraftV1, LocalPrincipalProvisionV1,
         },
         mode_profile::{bind_test_store, test_attach_host, test_binding, GatewayModeProfileIdV1},
         operation::ACTOR_ENTITY_HEADER,
@@ -80,14 +80,30 @@ mod served {
         Ok(EntityId::from_ulid(Ulid::from_string(text)?))
     }
 
+    /// The Principal of the room tests: `operations`, the Session read and
+    /// consent revocation, and one consent (#309) that governs Timeline
+    /// creation, so it can be named as a room's `privacy_export_ref`.
     fn provision(
         operations: &[GatewayOperationV1],
         governance: Option<EntityId>,
     ) -> TestResult<LocalPrincipalProvisionV1> {
-        Ok(LocalPrincipalProvisionV1::try_new_governed(
+        Ok(LocalPrincipalProvisionV1::try_new_provisioned(
             &PrincipalRefV1::try_new([7; 16], "local")?,
             [id(ACTOR)?],
-            operations.iter().copied(),
+            operations.iter().copied().chain([
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::CREATE_TIMELINE,
+            ]),
+            Some(LocalConsentDraftV1 {
+                subject: id(ACTOR)?,
+                grantee: id(ACTOR)?,
+                grants: vec![LocalConsentGrantDraftV1 {
+                    purpose: "operation".to_owned(),
+                    data_categories: vec!["timeline".to_owned()],
+                    export_permitted: true,
+                }],
+            }),
             governance,
         )?)
     }
@@ -99,9 +115,17 @@ mod served {
         app: Router,
         _directory: tempfile::TempDir,
         path: String,
+        /// The `consent_ref` of the Principal's consent.
+        consent: String,
     }
 
-    fn served(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
+    impl Served {
+        fn descriptor(&self, value_micro: i64) -> Value {
+            descriptor(value_micro, &self.consent)
+        }
+    }
+
+    async fn served(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
@@ -113,24 +137,33 @@ mod served {
             &mut SqliteStore::open(&path)?,
             GatewayModeProfileIdV1::Local,
         )?;
-        provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
+        let host = || {
+            open_recovered_erasure_host(
+                StoreConfig::Sqlite { path: path.clone() },
+                GatewayHostStoreV1::Standard,
+                &ErasureCoordinatorCompositionV1::closed(),
+            )
+        };
+        provision_on_host(&mut host()?, provision)?;
         let binding = test_binding(GatewayModeProfileIdV1::Local, []);
-        let host = open_recovered_erasure_host(
-            StoreConfig::Sqlite { path: path.clone() },
-            GatewayHostStoreV1::Standard,
-            &ErasureCoordinatorCompositionV1::closed(),
-        )?;
+        let host = host()?;
         let gateway = local_gateway(test_attach_host(host, &binding), None, &binding)?;
         let app = router(AppState {
             gateway: gateway.clone(),
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
+        let (_, session) = send(&app, "GET", "/v1/session", None, None).await?;
+        let consent = session["consents"][0]["consent_ref"]
+            .as_str()
+            .ok_or("the Principal discloses its consent")?
+            .to_owned();
         Ok(Served {
             gateway,
             app,
             _directory: directory,
             path,
+            consent,
         })
     }
 
@@ -169,7 +202,7 @@ mod served {
         send(app, "POST", uri, key, Some(&body.to_string())).await
     }
 
-    fn descriptor(value_micro: i64) -> Value {
+    fn descriptor(value_micro: i64, consent: &str) -> Value {
         json!({
             "schema_version": 1,
             "tick_duration_ms": 100,
@@ -187,7 +220,7 @@ mod served {
                 {"entity_id": "01JC0GATEWAYW90S0C1ETY0001", "dimension": "trust", "value_micro": 600_000},
             ],
             "governance_ref": GOVERNANCE,
-            "privacy_export_ref": GOVERNANCE,
+            "privacy_export_ref": consent,
         })
     }
 
@@ -222,13 +255,14 @@ mod served {
 
     #[tokio::test]
     async fn a_room_is_created_retried_read_and_derived_over_http() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let app = &served.app;
         // The golden example's own request, so the served body has its shape.
         let example: Value = serde_json::from_str(include_str!(
             "../../../../contracts/gateway/v1/compatibility/examples/scenario-room-create.json"
         ))?;
-        let create = example["request"]["body"].clone();
+        let mut create = example["request"]["body"].clone();
+        create["descriptor"]["privacy_export_ref"] = json!(served.consent);
         let (status, created) = post(app, "/v1/scenario-rooms", Some("k-1"), &create).await?;
         assert_eq!(status, StatusCode::CREATED, "{created}");
         assert_eq!(shape(&created), shape(&golden("scenario-room-create")?));
@@ -270,7 +304,7 @@ mod served {
             app,
             "/v1/scenario-rooms",
             Some("k-1"),
-            &json!({"descriptor": descriptor(1)}),
+            &json!({"descriptor": served.descriptor(1)}),
         )
         .await?;
         assert_eq!(
@@ -299,7 +333,7 @@ mod served {
             (StatusCode::BAD_REQUEST, &json!("invalid-request"))
         );
         let revisions = format!("/v1/scenario-rooms/{room}/revisions");
-        let derive = json!({"parent_revision": 1, "descriptor": descriptor(500_000)});
+        let derive = json!({"parent_revision": 1, "descriptor": served.descriptor(500_000)});
         let (status, derived) = post(app, &revisions, Some("k-2"), &derive).await?;
         assert_eq!(
             (status, &derived["revision"], &derived["parent_revision"]),
@@ -308,7 +342,7 @@ mod served {
         assert_eq!(shape(&derived), shape(&golden("scenario-room-derive")?));
         let (status, duplicate) = post(app, &revisions, Some("k-3"), &derive).await?;
         assert_eq!((status, &duplicate), (StatusCode::OK, &derived));
-        let stale = json!({"parent_revision": 1, "descriptor": descriptor(750_000)});
+        let stale = json!({"parent_revision": 1, "descriptor": served.descriptor(750_000)});
         let (status, body) = post(app, &revisions, Some("k-4"), &stale).await?;
         assert_eq!(
             (status, &body["code"]),
@@ -337,9 +371,9 @@ mod served {
 
     #[tokio::test]
     async fn malformed_and_ungoverned_rooms_are_refused() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let with = |edit: fn(&mut Value)| {
-            let mut body = json!({"descriptor": descriptor(1)});
+            let mut body = json!({"descriptor": served.descriptor(1)});
             edit(&mut body["descriptor"]);
             body
         };
@@ -410,7 +444,7 @@ mod served {
                 "{index}: {problem}"
             );
         }
-        let body = json!({"descriptor": descriptor(1)});
+        let body = json!({"descriptor": served.descriptor(1)});
         let (status, problem) = post(&served.app, "/v1/scenario-rooms", None, &body).await?;
         assert_eq!(
             (status, &problem["code"]),
@@ -427,8 +461,8 @@ mod served {
     /// denial evidence is in the authority store before the answer.
     #[tokio::test]
     async fn an_uncovered_persona_is_a_recorded_denial() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
-        let mut body = json!({"descriptor": descriptor(1)});
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let mut body = json!({"descriptor": served.descriptor(1)});
         body["descriptor"]["participants"][1]["entity_id"] = json!("01JC0GATEWAYW90S0C1ETY0009");
         let (status, problem) =
             post(&served.app, "/v1/scenario-rooms", Some("persona"), &body).await?;
@@ -453,16 +487,22 @@ mod served {
     /// record does not name is refused.
     #[tokio::test]
     async fn every_room_operation_needs_its_grant_and_the_governance_record() -> TestResult {
-        let create = json!({"descriptor": descriptor(1)});
-        let full = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
-        let (_, created) = post(&full.app, "/v1/scenario-rooms", Some("k"), &create).await?;
+        let create = |served: &Served| json!({"descriptor": served.descriptor(1)});
+        let full = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let (_, created) = post(&full.app, "/v1/scenario-rooms", Some("k"), &create(&full)).await?;
         let room = created["id"].as_str().ok_or("room id")?.to_owned();
         full.gateway.shutdown().await?;
         for granted in [&ROOMS[1..], &[ROOMS[0], ROOMS[2]][..], &ROOMS[..2]] {
-            let served = served(&provision(granted, Some(id(GOVERNANCE)?))?)?;
-            let derive = json!({"parent_revision": 1, "descriptor": descriptor(2)});
+            let served = served(&provision(granted, Some(id(GOVERNANCE)?))?).await?;
+            let derive = json!({"parent_revision": 1, "descriptor": served.descriptor(2)});
             let answers = [
-                post(&served.app, "/v1/scenario-rooms", Some("k"), &create).await?,
+                post(
+                    &served.app,
+                    "/v1/scenario-rooms",
+                    Some("k"),
+                    &create(&served),
+                )
+                .await?,
                 post(
                     &served.app,
                     &format!("/v1/scenario-rooms/{room}/revisions"),
@@ -488,9 +528,14 @@ mod served {
             assert_eq!(refused, 1, "{answers:?}");
             served.gateway.shutdown().await?;
         }
-        let ungoverned = served(&provision(&ROOMS, None)?)?;
-        let (status, problem) =
-            post(&ungoverned.app, "/v1/scenario-rooms", Some("k"), &create).await?;
+        let ungoverned = served(&provision(&ROOMS, None)?).await?;
+        let (status, problem) = post(
+            &ungoverned.app,
+            "/v1/scenario-rooms",
+            Some("k"),
+            &create(&ungoverned),
+        )
+        .await?;
         assert_eq!(
             (status, &problem["code"]),
             (
@@ -502,6 +547,113 @@ mod served {
         Ok(())
     }
 
+    /// #303 decision 2a: `privacy_export_ref` must name a consent the acting
+    /// Principal holds; a consent it does not hold is `403 consent-invalid`
+    /// and a revoked one `403 revoked`, for a create and a derive alike. A
+    /// revocation racing an admitted create waits for its permit, so the
+    /// create commits and the next one is refused.
+    #[tokio::test]
+    async fn a_room_names_a_held_unrevoked_consent() -> TestResult {
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let (status, created) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("held"),
+            &json!({"descriptor": served.descriptor(1)}),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let room = created["id"].as_str().ok_or("room id")?.to_owned();
+        let unheld = descriptor(1, &EntityId::new().to_string());
+        let (status, problem) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("unheld"),
+            &json!({"descriptor": unheld}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("consent-invalid"))
+        );
+        let (status, problem) = post(
+            &served.app,
+            &format!("/v1/scenario-rooms/{room}/revisions"),
+            Some("unheld-derive"),
+            &json!({"parent_revision": 1, "descriptor": unheld}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("consent-invalid"))
+        );
+        // A create admitted before the revocation holds its permit; the
+        // revocation waits for it, then the next create is refused.
+        let permit = served
+            .gateway
+            .authorize_operation(
+                GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                Some(id(ACTOR)?),
+                None,
+                None,
+            )
+            .await?;
+        let app = served.app.clone();
+        let consent = served.consent.clone();
+        let revocation = tokio::spawn(async move {
+            post(
+                &app,
+                "/v1/me/consent-revocations",
+                Some("revoke"),
+                &json!({"consent_ref": consent}),
+            )
+            .await
+            .map(|(status, _)| status)
+            .map_err(|error| error.to_string())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !revocation.is_finished(),
+            "the revocation waits for the permit"
+        );
+        let body = json!({"descriptor": served.descriptor(2)});
+        let admitted = served
+            .gateway
+            .create_scenario_room(
+                &permit,
+                "admitted",
+                parse_create(&body).map_err(|_| "parse")?,
+            )
+            .await;
+        assert!(matches!(admitted, Ok(RoomOutcomeV1::Committed(_))));
+        drop(permit);
+        assert_eq!(revocation.await??, StatusCode::CREATED);
+        let (status, problem) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("revoked"),
+            &json!({"descriptor": served.descriptor(3)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
+        let (status, problem) = post(
+            &served.app,
+            &format!("/v1/scenario-rooms/{room}/revisions"),
+            Some("revoked-derive"),
+            &json!({"parent_revision": 1, "descriptor": served.descriptor(4)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
+        served.gateway.shutdown().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_store_without_an_erasure_host_cannot_hold_a_room() -> TestResult {
         let gateway = Gateway::new(pos_store::open_store(StoreConfig::Memory)?);
@@ -510,8 +662,8 @@ mod served {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
-        let create = json!({"descriptor": descriptor(1)});
-        let (status, problem) = post(&app, "/v1/scenario-rooms", Some("k"), &create).await?;
+        let read = format!("/v1/scenario-rooms/{}/revisions/1", EntityId::new());
+        let (status, problem) = send(&app, "GET", &read, None, None).await?;
         assert_eq!(
             (status, &problem["code"]),
             (

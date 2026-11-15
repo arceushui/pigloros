@@ -81,8 +81,10 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `governance_ref` must be the host's governance record: the optional `governance_record_id` of
   the Local Principal provisioning document. A room may name only the Plugin of the reviewed host
   catalogue entry the Gateway ships (`gateway-world-actions` `0.1.0`). Each room is one Timeline,
-  and the revision's `commit` is its `room.revision.v1` Event. The `privacy_export_ref` consent
-  check follows with #309.
+  and the revision's `commit` is its `room.revision.v1` Event. `privacy_export_ref` must name a consent the
+  acting Principal holds (the `consent_ref` of its `consent.granted.v1` Event): one it does not
+  hold is `403 consent-invalid` and a revoked one `403 revoked`, checked under the operation's
+  permit, so a revocation takes effect from the next room operation.
 - A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
   `400 invalid-request` before the authority decision and before any lookup; every other
   answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
