@@ -481,6 +481,8 @@ enum BarrierFault {
 struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// The RQE1 digest each release was handed.
+    requested: Arc<Mutex<Vec<[u8; 32]>>>,
     fault: BarrierFault,
     /// Requested as the release completes, so supervision sees it first.
     cancel_on_release: Option<Arc<AttemptCancel>>,
@@ -491,6 +493,7 @@ impl FakeBarrier {
         Self {
             log: Arc::clone(log),
             released: Arc::default(),
+            requested: Arc::default(),
             fault: BarrierFault::None,
             cancel_on_release: None,
         }
@@ -525,17 +528,9 @@ impl LaunchBarrier for FakeBarrier {
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
         assert_eq!(cgroup.identity(), FAKE_CGROUP);
-        // The barrier is handed the RQE1 of the verified start.
-        let requested = attempt
-            .unit_name()
-            .as_str()
-            .to_owned()
-            .requested_configuration_evidence(
-                attempt.attempt_id(),
-                attempt.admitted().grant_digest(),
-            )
-            .map(|requested| requested.digest());
-        assert_eq!(Ok(attempt.requested_configuration_evidence()), requested);
+        if let Ok(mut requested) = self.requested.lock() {
+            requested.push(attempt.requested_configuration_evidence());
+        }
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
@@ -938,6 +933,33 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
     assert!(seen[0].1 > Instant::now());
+    let requested = barrier
+        .requested
+        .lock()
+        .map_err(|error| error.to_string())?;
+    assert_eq!(*requested, vec![crate::test_fixtures::RQE1_DIGEST]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    assert!(scenario
+        .run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
+        .await?
+        .is_ok());
+    let unit = TransientServiceUnitName::from_attempt_id(ATTEMPT)?;
+    let expected = unit
+        .as_str()
+        .to_owned()
+        .requested_configuration_evidence(ATTEMPT, crate::test_fixtures::GRANT_DIGEST)?
+        .digest();
+    let requested = scenario
+        .barrier
+        .requested
+        .lock()
+        .map_err(|error| error.to_string())?;
+    assert_eq!(*requested, vec![expected]);
     Ok(())
 }
 
