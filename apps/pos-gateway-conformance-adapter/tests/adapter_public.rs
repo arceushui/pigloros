@@ -383,6 +383,12 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("slot before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/{timeline}/events");
         }),
+        case("room before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/{room}/revisions");
+        }),
+        case("revision zero", |p| {
+            first_exchange(p)["path"] = json!("/v1/scenario-rooms/r/revisions/0");
+        }),
         case("consent before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/me/consent-revocations");
             first_exchange(p)["body"] = json!({"consent_ref": "{consent}"});
@@ -543,6 +549,60 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
             "consents": [{"consent_ref": "<ulid>"}, {"consent_ref": "not-a-ulid"}],
         })
     );
+}
+
+#[test]
+fn normalization_replaces_only_well_formed_room_identities_and_hashes() {
+    let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let hash = "ab".repeat(32);
+    let correlation = "5f".repeat(16);
+    assert_eq!(
+        normalize_response_v1(json!({
+            "id": ulid,
+            "descriptor": {
+                "room_id": ulid,
+                "privacy_export_ref": ulid,
+                "governance_ref": ulid,
+                "correlation_id": correlation,
+                "descriptor_hash": hash,
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": ulid, "event_id": ulid},
+            "provenance": {"digest": hash, "origin": "principal-authored"},
+        })),
+        json!({
+            "id": "<ulid>",
+            "descriptor": {
+                "room_id": "<ulid>",
+                "privacy_export_ref": "<ulid>",
+                "governance_ref": ulid,
+                "correlation_id": "<correlation>",
+                "descriptor_hash": "<hash>",
+                "rule_set_hash": hash,
+            },
+            "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>"},
+            "provenance": {"digest": "<hash>", "origin": "principal-authored"},
+        })
+    );
+    // A host-derived provenance digest is deterministic, and a digest elsewhere, a malformed
+    // hash or correlation ID, or a non-text digest stays as it is.
+    for kept in [
+        json!({"provenance": {"digest": hash, "origin": "host-derived"}}),
+        json!({"provenance": {"digest": hash}}),
+        json!({"digest": hash, "origin": "principal-authored"}),
+        json!({"evidence": {"digest": hash, "origin": "principal-authored"}}),
+        json!({"provenance": {"digest": "AB".repeat(32), "origin": "principal-authored"}}),
+        json!({"provenance": {"digest": "ab".repeat(31), "origin": "principal-authored"}}),
+        json!({"provenance": {"digest": 1, "origin": "principal-authored"}}),
+        json!({"provenance": {"origin": hash}}),
+        json!({"correlation_id": "5F".repeat(16)}),
+        json!({"correlation_id": "5f".repeat(17)}),
+        json!({"correlation_id": "5g".repeat(16)}),
+        json!({"descriptor_hash": correlation}),
+        json!({"descriptor_hash": "ab".repeat(33)}),
+    ] {
+        assert_eq!(normalize_response_v1(kept.clone()), kept, "{kept}");
+    }
 }
 
 #[test]

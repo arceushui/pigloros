@@ -6,7 +6,8 @@ contract `2.0.0`, ABI 1.0 (Redmine #1295; owner decisions of 2026-11-07 on #1295
 surface is the served routes of the Draft Gateway v1 contract `contracts/gateway/v1/openapi.json`
 and its RFC 9457 problem-type registry (#301, #1312); `scripts/check_gateway_contract.py`
 validates every expected response below against that description. There is no Golden Path
-transition, Scenario Room, or new authentication or action contract in this profile. No fixture relies on a live
+transition, Scenario Room execution, or new authentication or action contract in this profile;
+Scenario Room authoring is the immutable revision routes of #303. No fixture relies on a live
 service or on the Gateway implementation as its oracle: every expected exchange is written by
 `scripts/generate_gateway_conformance_fixtures.py` from this text.
 
@@ -15,12 +16,12 @@ service or on the Gateway implementation as its oracle: every expected exchange 
 A case payload is RFC 8785 JSON with exactly the members `schema`
 (`pigloros.gateway-client-conformance.case.v2`), `family` (the family name) and `subcases`
 (1 to 64). There is no reader for provider contract 1.0.0. A sub-case has exactly `id`
-(`<prefix>.<n>`), `title`, `composition` (`open`, `authorized` or `authorized-air-gapped`),
-`exchanges` (1 to 128), and
+(`<prefix>.<n>`), `title`, `composition` (`open`, `authorized`, `authorized-air-gapped`,
+`authorized-consented` or `authorized-rooms`), `exchanges` (1 to 128), and
 optionally `canary` (1 to 64 printable ASCII bytes). An exchange has exactly `router`
 (`loopback` or `spectator`), `method` (`GET` or `POST`), `path`, `expect`, and optionally
-`actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"` or
-`"consent"`). An
+`actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"`,
+`"consent"` or `"room"`). An
 optional member that is null is the same as an absent one. A `title` is 1 to 160 printable ASCII
 bytes (space allowed), a `path` 1 to 256 printable ASCII bytes without space, and a sub-case `id`
 is the family prefix, a dot and one or more decimal digits. A payload outside
@@ -40,11 +41,17 @@ The path without its query names one route; any other path is outside the gramma
 | actions | `POST /v1/timelines/:id/actions` | `world.action.v1.submit` |
 | session | `GET /v1/session` | `session.read` |
 | revoke | `POST /v1/me/consent-revocations` | `consent.revoke` |
+| rooms | `POST /v1/scenario-rooms` | `scenario-room.create` |
+| revisions | `POST /v1/scenario-rooms/:room/revisions` | `scenario-room.derive` |
+| revision | `GET /v1/scenario-rooms/:room/revisions/:revision` | `scenario-room.read` |
 
 An exchange whose route capability the attempt does not hold is not sent; its observation is
 `{"refused": "capability-denied"}`. The literal `{timeline}` in a path is replaced by the `id`
 of the response of the last earlier sent exchange of the sub-case that sets `capture` to
 `timeline`; a path that uses it before any such capture is outside the grammar. The literal
+`{room}` in a path is likewise the `id` of the response of the last earlier sent exchange that
+sets `capture` to `room`, and `:revision` is a positive decimal integer without a leading zero.
+The literal
 `{consent}` in a request body is replaced by the `consent_ref` of the first member of
 `consents` of the response of the last earlier sent exchange that sets `capture` to `consent`;
 a body that uses it before any such capture is outside the grammar. A capturing exchange that is refused captures
@@ -79,6 +86,18 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   permitted, so it governs `timeline.create`. The consent is recorded at sequence 1 of the Principal's consent
   Timeline; the consent-bound grant is issued at position 1 of its own authority Timeline, so
   the Principal's Session generation is 3 until the consent is revoked.
+- `authorized-rooms`: the `authorized` composition (#303) whose fixture Local Principal is
+  granted `timeline.create`, `session.read`, `scenario-room.create` (resource `scenario-room`,
+  action `create`), `scenario-room.derive` (resource `scenario-room.revision`, action `derive`)
+  and `scenario-room.read` (resource `scenario-room.revisions`, action `read`), records the
+  single-participant governance record `01JC0GATEWAYW90G0VERN00001`, and binds one consent of
+  the fixture actor to itself, purpose `operation`, data category `timeline`, export permitted,
+  so it governs `timeline.create` and a room may name it as its `privacy_export_ref`. Its
+  Session generation is 3. A fixture room has the persona participant
+  `01JC0GATEWAYF1XTVREACT0R00` (the fixture actor) and the society participant
+  `01JC0GATEWAYW90S0C1ETY0001`, and requests the reviewed host catalogue plugin
+  `gateway-world-actions` `0.1.0`, which owns the Event type `world.action.v1`, with one rule
+  `gateway-world-actions.nudge.scale`.
 
 A request `body` is sent as compact JSON with `content-type: application/json`. Every request
 carries `idempotency-key: <sub-case id>`; routes without an idempotency key ignore it, and two
@@ -94,10 +113,16 @@ are permitted nondeterministic operational fields:
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
   becomes `"<cursor>"`;
 - a member `detail` with a text value becomes `"<message>"`;
-- in a member `id`, `consent_ref` or `instance` with a text value, every `/`-separated segment
-  that is a ULID becomes `<ulid>`, so an `id` or `consent_ref` that is a ULID becomes
-  `"<ulid>"` (a routed problem names its route template and carries no ID; only the path of a
-  request no route serves can carry one).
+- in a member `id`, `consent_ref`, `room_id`, `privacy_export_ref`, `timeline_id`, `event_id`
+  or `instance` with a text value, every `/`-separated segment that is a ULID becomes
+  `<ulid>`, so such a member that is a ULID becomes `"<ulid>"` (a routed problem names its
+  route template and carries no ID; only the path of a request no route serves can carry one);
+- a member `correlation_id` whose value is 32 lowercase hex digits becomes `"<correlation>"`,
+  and a member `descriptor_hash` whose value is 64 lowercase hex digits becomes `"<hash>"` (a
+  room's correlation ID is drawn per room, and its descriptor hash covers it);
+- the member `digest` of a member `provenance` whose `origin` is `principal-authored`, when its
+  value is 64 lowercase hex digits, becomes `"<hash>"` (a room revision's provenance covers its
+  descriptor hash and Event ID); a `host-derived` provenance digest stays as it is.
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
@@ -118,7 +143,8 @@ observation list). A `namespaced-failure` family returns its family failure when
 exchange matches and no canary is present, else `subcase-mismatch`.
 
 Usage: one execution step per sent exchange, the response body bytes as output bytes, and one
-Event per `201` response of the signals, actions or revoke route. The other counters are 0.
+Event per `201` response of the signals, actions, revoke, rooms or revisions route. The other
+counters are 0.
 
 ## 6. Families
 
@@ -128,14 +154,20 @@ Event per `201` response of the signals, actions or revoke route. The other coun
   epoch 1, no consent, the EPF1 profile `unavailable`, and the Local mode with network
   `denied` on `authorized` or the Air-Gapped mode with network `absent` on
   `authorized-air-gapped`, each with the golden mode-profile digest and the provenance digest
-  the `Session` schema states.
+  the `Session` schema states; on `authorized-consented` a revoked consent stops the operation
+  it governs and is revoked exactly once; on `authorized-rooms` a Scenario Room naming the
+  Principal's consent (captured from its Session) is created as revision 1 (`201`), an exact
+  retry answers the same revision (`200`), the revision reads back (`200`), and a derive from
+  revision 1 commits revision 2 as the third Event of the room Timeline (`201`), each with the
+  plugin composition hash and the rule set hash ADR-041 amendment A4 states.
 - **denied** (`capability-denied`): an action without a host authorizer is the `401`
   `unauthenticated` problem and an action the fixture authority does not grant is the `403`
   `unauthorized` problem, each followed by an empty poll (denial without state change); a route
   whose capability the attempt does not hold is refused; a read on the `authorized` Gateway
   without the actor header is the `401` `unauthenticated` problem; a Session read without the
   actor header on the `authorized` Gateway, and one on the `open` Gateway (which has no
-  Principal), is the `401` `unauthenticated` problem.
+  Principal), is the `401` `unauthenticated` problem; a room whose `privacy_export_ref` names a
+  consent the Principal does not hold is the `403` `consent-invalid` problem.
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
   `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
   integer action `params` are the `422` `admission-rejected` problem, and nothing is committed.

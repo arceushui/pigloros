@@ -32,11 +32,17 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   fixture document (ADR-108). The `authorized-consented` composition (#309) also grants
   `consent.revoke` and binds one consent, provisioned through the production `provision_on_host`
   path, that governs Timeline creation; an exchange that captures `consent` fills the `{consent}`
-  slot of later request bodies with the first `consent_ref` its Session lists.
-- Observations are normalized as the profile text states: ULID `id` and `consent_ref` members,
-  cursors and error messages become placeholders.
+  slot of later request bodies with the first `consent_ref` its Session lists. The
+  `authorized-rooms` composition (#303) may create, derive and read Scenario Rooms, records the
+  fixture governance record and binds one export-permitted consent; an exchange that captures
+  `room` fills the `{room}` slot of later paths with the room `id`.
+- Observations are normalized as the profile text states: ULID `id`, `consent_ref`, `room_id`,
+  `privacy_export_ref`, `timeline_id` and `event_id` members, cursors, error messages, a room's
+  correlation ID and descriptor hash, and a `principal-authored` provenance digest become
+  placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per
-  `201` signal, action or consent revocation response; the other counters are 0.
+  `201` signal, action, consent revocation, room creation or room derivation response; the other
+  counters are 0.
 
 ## Fixtures and tests
 

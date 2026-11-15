@@ -1,10 +1,13 @@
 //! The response normalization of the requirements text (section 4).
 //!
-//! The contract fixes neither Timeline and Event IDs, nor cursors, nor problem detail text, so
-//! they are permitted nondeterministic operational fields: an `id` or `consent_ref` member that
-//! is a ULID, a `next_cursor` member that is a well-formed cursor and every problem `detail` text
-//! member are replaced by placeholders, and every ULID segment of a problem `instance` path
-//! becomes `<ulid>`. Every other value stays as it is, so a malformed ID or cursor cannot match.
+//! The contract fixes neither Timeline, Event and room IDs, nor cursors, nor problem detail
+//! text, nor a room's correlation ID and the hashes that cover it, so they are permitted
+//! nondeterministic operational fields: a ULID member (`id`, `consent_ref`, `room_id`,
+//! `privacy_export_ref`, `timeline_id`, `event_id`), a `next_cursor` member that is a
+//! well-formed cursor, a well-formed `correlation_id` or `descriptor_hash`, the digest of a
+//! `principal-authored` provenance and every problem `detail` text member are replaced by
+//! placeholders, and every ULID segment of a problem `instance` path becomes `<ulid>`. Every
+//! other value stays as it is, so a malformed ID, cursor or hash cannot match.
 
 use serde_json::{json, Value};
 
@@ -30,15 +33,27 @@ pub fn normalize_response_v1(value: Value) -> Value {
 
 fn normalize(value: Value, key: Option<&str>) -> Value {
     match value {
-        Value::Object(members) => Value::Object(
-            members
-                .into_iter()
-                .map(|(name, member)| {
-                    let normalized = normalize(member, Some(&name));
-                    (name, normalized)
-                })
-                .collect(),
-        ),
+        Value::Object(members) => {
+            // The provenance of a room revision covers its run-local descriptor hash.
+            let authored = key == Some("provenance")
+                && members.get("origin").and_then(Value::as_str) == Some("principal-authored");
+            Value::Object(
+                members
+                    .into_iter()
+                    .map(|(name, member)| {
+                        let normalized = match member {
+                            Value::String(text)
+                                if authored && name == "digest" && is_hex(&text, 64) =>
+                            {
+                                Value::from("<hash>")
+                            }
+                            member => normalize(member, Some(&name)),
+                        };
+                        (name, normalized)
+                    })
+                    .collect(),
+            )
+        }
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
@@ -52,16 +67,20 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
 
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
-        Some("id" | "instance" | "consent_ref") => normalize_ulid_segments(&text),
+        Some(
+            "id" | "instance" | "consent_ref" | "room_id" | "privacy_export_ref" | "timeline_id"
+            | "event_id",
+        ) => normalize_ulid_segments(&text),
         Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
+        Some("correlation_id") if is_hex(&text, 32) => "<correlation>".to_owned(),
+        Some("descriptor_hash") if is_hex(&text, 64) => "<hash>".to_owned(),
         Some("detail") => "<message>".to_owned(),
         _ => text,
     }
 }
 
-/// Every `/`-separated segment of an `id`, a `consent_ref` or a problem `instance` that is a
-/// ULID becomes `<ulid>`; an `id` that is one ULID becomes `<ulid>`, any other value keeps its
-/// other bytes.
+/// Every `/`-separated segment of a ULID member or a problem `instance` that is a ULID becomes
+/// `<ulid>`; a member that is one ULID becomes `<ulid>`, any other value keeps its other bytes.
 fn normalize_ulid_segments(path: &str) -> String {
     path.split('/')
         .map(|segment| if is_ulid(segment) { "<ulid>" } else { segment })
@@ -80,14 +99,15 @@ fn is_cursor(text: &str) -> bool {
     let parts: Vec<&str> = text.split('.').collect();
     match parts.as_slice() {
         ["v1", generation, timeline, position] => {
-            is_generation(generation) && is_ulid(timeline) && is_position(position)
+            is_hex(generation, 64) && is_ulid(timeline) && is_position(position)
         }
         _ => false,
     }
 }
 
-fn is_generation(text: &str) -> bool {
-    text.len() == 64
+/// `length` lowercase hex digits.
+fn is_hex(text: &str, length: usize) -> bool {
+    text.len() == length
         && text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
