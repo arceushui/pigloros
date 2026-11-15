@@ -144,8 +144,10 @@ impl SystemdTransientUnitTransport {
     ) -> UnitsResult<StartedProviderUnit> {
         let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
         let completions = proxy.receive_job_removed().await;
-        self.start_runtime_with_completions(&proxy, completions, name, properties)
-            .await
+        let started = self
+            .start_runtime_with_completions(&proxy, completions, name, properties)
+            .await;
+        started
     }
 
     /// The start itself, once the job signal subscription was attempted.
