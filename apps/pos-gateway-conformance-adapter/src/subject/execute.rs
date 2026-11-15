@@ -160,22 +160,29 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// `provision_local_principal`, and the Gateway is composed over that store by `local_gateway`
 /// under that binding, which requires the recorded Principal for every protected operation.
 fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
-    match composition.mode() {
-        None => host()
-            .and_then(|host| Gateway::unprotected_for_harness(host).ok())
-            .map(|gateway| (gateway, None)),
-        Some(id) => {
-            let store = ScratchStore::new();
-            store_host(&store)
-                .and_then(|mut host| bind_mode(&mut host, id))
-                .and_then(|_| provision_store(&store))
-                .and_then(|()| store_host(&store))
-                .and_then(|mut host| {
-                    bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
-                })
-                .map(|gateway| (gateway, Some(store)))
-        }
-    }
+    composition
+        .mode()
+        .map_or_else(open_gateway, authorized_gateway)
+}
+
+/// The unprotected in-process harness Gateway of the `open` composition.
+fn open_gateway() -> Option<(Gateway, Option<ScratchStore>)> {
+    host()
+        .and_then(|host| Gateway::unprotected_for_harness(host).ok())
+        .map(|gateway| (gateway, None))
+}
+
+/// The production serve composition over a fresh store bound to the execution mode `id`.
+fn authorized_gateway(id: GatewayModeProfileIdV1) -> Option<(Gateway, Option<ScratchStore>)> {
+    let store = ScratchStore::new();
+    store_host(&store)
+        .and_then(|mut host| bind_mode(&mut host, id))
+        .and_then(|_| provision_store(&store))
+        .and_then(|()| store_host(&store))
+        .and_then(|mut host| {
+            bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
+        })
+        .map(|gateway| (gateway, Some(store)))
 }
 
 /// The recovered production host of `store`.
