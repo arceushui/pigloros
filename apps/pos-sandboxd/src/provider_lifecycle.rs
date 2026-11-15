@@ -34,11 +34,12 @@ const STALE_SHUTDOWN: Duration = Duration::from_millis(1_500);
 const STALE_UNIT_ABSENT: Duration = Duration::from_secs(3);
 
 /// Opens the cgroup2 mount for one cgroup observation.
-pub type CgroupRootSource = Box<dyn Fn() -> Result<CgroupRoot, AttemptCgroupError> + Send + Sync>;
+pub(crate) type CgroupRootSource =
+    Box<dyn Fn() -> Result<CgroupRoot, AttemptCgroupError> + Send + Sync>;
 
 /// The two selector-owned unit families (ADR-069 R12 §7.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderUnitFamily {
+pub(crate) enum ProviderUnitFamily {
     /// `pigloros-provider-runtime-<hex(lifecycle-scope-id)>.service` (R11 D7).
     Runtime,
     /// `pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service`.
@@ -58,7 +59,7 @@ impl ProviderUnitFamily {
 
 /// One loaded provider unit, resolved back to its listed object.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderUnit {
+pub(crate) struct ProviderUnit {
     name: TransientServiceUnitName,
     path: OwnedObjectPath,
 }
@@ -79,7 +80,7 @@ impl ProviderUnit {
 
 /// The started runtime unit's `MainPID` and `ControlGroup`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartedProviderUnit {
+pub(crate) struct StartedProviderUnit {
     main_pid: u32,
     control_group: String,
 }
