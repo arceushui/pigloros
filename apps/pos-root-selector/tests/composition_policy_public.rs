@@ -14,7 +14,11 @@ use std::{
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-const ACTIVATION: &str = "RootSelectorRuntime::activate";
+/// The selector runtime type. Only its defining module and the entrypoint
+/// may name it, so no alias, re-export or qualified path such as
+/// `<RootSelectorRuntime>::activate` can reach `activate` elsewhere.
+const RUNTIME_TYPE: &str = "RootSelectorRuntime";
+const DEFINING_MODULE: &str = "crates/pos-reference/src/root_selector.rs";
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn workspace_root() -> PathBuf {
@@ -41,25 +45,76 @@ fn rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) -> TestResult {
     Ok(())
 }
 
-/// Lines of `path` before its trailing inline `#[cfg(test)] mod name {` block.
+/// The crates that can link the selector runtime. Their trailing test
+/// modules are excluded under the provider A.3 scan's rule
+/// (`apps/pos-sandboxd/tests/provider_process_creation_public.rs`); every
+/// other source is scanned whole, test code included.
+const SELECTOR_CRATES: [&str; 3] = [
+    "crates/pos-reference/",
+    "apps/pos-sandboxd/",
+    "apps/pos-root-selector/",
+];
+
+/// The scanned text of one source: non-comment lines, cut at the trailing
+/// test module only inside the selector crates.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn scanned_text(path: &Path) -> TestResult<String> {
+    let relative = path
+        .strip_prefix(workspace_root())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if SELECTOR_CRATES
+        .iter()
+        .any(|root| relative.starts_with(root))
+    {
+        return production_text(path);
+    }
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Non-comment lines of `path` before its trailing inline
+/// `#[cfg(test)] mod name {` block. As in the provider's A.3 scan, a file
+/// where production code follows such a block is refused.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn production_text(path: &Path) -> TestResult<String> {
     let text = fs::read_to_string(path)?;
     let lines: Vec<&str> = text.lines().collect();
     let mut production = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if *line == "#[cfg(test)]" {
-            let module = lines[index + 1..]
-                .iter()
-                .find(|line| !line.starts_with("#["))
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index] == "#[cfg(test)]" {
+            let mut item = index + 1;
+            while lines.get(item).is_some_and(|line| line.starts_with("#[")) {
+                item += 1;
+            }
+            let module = lines
+                .get(item)
                 .is_some_and(|line| line.starts_with("mod ") && line.ends_with(" {"));
             if module {
+                let tail: Vec<&str> = lines[item + 1..]
+                    .iter()
+                    .copied()
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                assert_eq!(tail.last(), Some(&"}"), "{}", path.display());
+                assert!(
+                    tail[..tail.len() - 1]
+                        .iter()
+                        .all(|line| line.starts_with(char::is_whitespace)),
+                    "production code follows a test module in {}",
+                    path.display()
+                );
                 break;
             }
         }
-        if !line.trim_start().starts_with("//") {
-            production.push(*line);
+        if !lines[index].trim_start().starts_with("//") {
+            production.push(lines[index]);
         }
+        index += 1;
     }
     Ok(production.join("\n"))
 }
@@ -85,13 +140,24 @@ fn only_the_selector_entrypoint_activates_the_runtime() -> TestResult {
     for directory in ["crates", "apps", "plugins"] {
         rust_sources(&root.join(directory), &mut sources)?;
     }
-    let entrypoint = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
-    let mut callers = Vec::new();
+    let entrypoint = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))?;
+    let defining = fs::canonicalize(root.join(DEFINING_MODULE))?;
+    let mut naming = Vec::new();
     for path in &sources {
-        if production_text(path)?.contains(ACTIVATION) {
-            callers.push(fs::canonicalize(path)?);
+        if scanned_text(path)?.contains(RUNTIME_TYPE) {
+            naming.push(fs::canonicalize(path)?);
         }
     }
-    assert_eq!(callers, vec![fs::canonicalize(entrypoint)?]);
+    naming.sort();
+    let mut expected = vec![defining.clone(), entrypoint.clone()];
+    expected.sort();
+    assert_eq!(naming, expected);
+    // The entrypoint activates once, and the defining module never calls its
+    // own public constructor.
+    let main = production_text(&entrypoint)?;
+    assert_eq!(main.matches("RootSelectorRuntime::activate(").count(), 1);
+    assert_eq!(main.matches("activate").count(), 1, "{main}");
+    let module = production_text(&defining)?;
+    assert_eq!(module.matches("::activate(").count(), 0);
     Ok(())
 }
