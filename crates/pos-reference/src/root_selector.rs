@@ -1603,6 +1603,9 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             return write_provider_unavailable(stream, decoded);
         };
         let admitted = admission.admitted.as_ref();
+        // Read before the admission is released: SPR1 ordinal 21 must copy
+        // it (ADR-069 R9 §4.5).
+        let negative_probe = admitted.provider().host_profile().negative_probe_evidence;
         let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
             return write_policy_error(stream, decoded);
         };
@@ -1696,23 +1699,33 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             &spx1,
             terminal,
             namespace_execution.conflict,
+            negative_probe,
         )
     }
 }
 
+/// `negative_probe` is the admitted HCP1's ordinal 7, which the SPR1 of an
+/// execution must copy (ADR-069 R9 §4.5).
 fn write_provider_terminal(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
     spx1: &[u8],
     terminal: AuthenticatedProviderTerminal,
     namespace_conflict: bool,
+    negative_probe: [u8; 32],
 ) -> Result<(), SelectorBoundaryError> {
     if namespace_conflict {
         return write_namespace_conflict_terminal(stream, decoded, spx1, terminal);
     }
     match terminal {
         AuthenticatedProviderTerminal::Execution(mut execution) => {
-            match write_authenticated_execution(stream, decoded, spx1, &mut execution) {
+            match write_authenticated_execution(
+                stream,
+                decoded,
+                spx1,
+                &mut execution,
+                negative_probe,
+            ) {
                 Ok(()) => Ok(()),
                 Err(()) => write_post_admission_provider_failure(
                     stream,
@@ -1869,6 +1882,7 @@ fn write_authenticated_execution(
     decoded: &DecodedSelectorRequest,
     spx1: &[u8],
     execution: &mut AuthenticatedProviderExecution,
+    negative_probe: [u8; 32],
 ) -> Result<(), ()> {
     let staged = execution.with_verified_reply_output(
         |result, grant, receipt, audit_records, descriptor, reader| {
@@ -1882,6 +1896,7 @@ fn write_authenticated_execution(
                         receipt: Some(receipt),
                         audit_records,
                         output: Some(descriptor),
+                        negative_probe,
                     },
                 },
             )
@@ -1903,6 +1918,7 @@ fn write_authenticated_execution(
                     receipt: Some(execution.spr1_bytes()),
                     audit_records: execution.sau1_frames(),
                     output: None,
+                    negative_probe,
                 },
             },
         )
@@ -5449,6 +5465,9 @@ mod tests {
         Ok(())
     }
 
+    /// The fixture HCP1's ordinal 7, which its SPR1 ordinal 21 copies.
+    const FIXTURE_NEGATIVE_PROBE: [u8; 32] = [21; 32];
+
     #[test]
     fn authenticated_terminal_writers_preserve_result_error_and_output() -> TestResult {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
@@ -5462,6 +5481,26 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new()?;
         file.write_all(b"output")?;
         let descriptor = output_descriptor(b"output")?;
+        // ADR-069 R9 §4.5: an SPR1 whose ordinal 21 is not the admitted
+        // HCP1's ordinal 7 is not relayed.
+        let mut forged_file = tempfile::NamedTempFile::new()?;
+        forged_file.write_all(b"output")?;
+        let mut forged = AuthenticatedProviderExecution::from_test_frames(
+            fixture.agr1.clone(),
+            fixture.spr1.clone(),
+            fixture.spy1.clone(),
+            fixture.sau1.clone(),
+            Some((forged_file, descriptor.clone())),
+        );
+        let (_, mut forged_writer) = UnixStream::pair()?;
+        assert!(write_authenticated_execution(
+            &mut forged_writer,
+            &decoded,
+            &fixture.spx1,
+            &mut forged,
+            [22; 32],
+        )
+        .is_err());
         let mut execution = AuthenticatedProviderExecution::from_test_frames(
             fixture.agr1.clone(),
             fixture.spr1.clone(),
@@ -5470,8 +5509,14 @@ mod tests {
             Some((file, descriptor)),
         );
         let (mut reply_reader, mut reply_writer) = UnixStream::pair()?;
-        write_authenticated_execution(&mut reply_writer, &decoded, &fixture.spx1, &mut execution)
-            .map_err(|()| "authenticated result composition failed")?;
+        write_authenticated_execution(
+            &mut reply_writer,
+            &decoded,
+            &fixture.spx1,
+            &mut execution,
+            FIXTURE_NEGATIVE_PROBE,
+        )
+        .map_err(|()| "authenticated result composition failed")?;
         reply_writer.shutdown(std::net::Shutdown::Write)?;
         assert!(!read_frame(&mut reply_reader)?.is_empty());
         let mut trailing = Vec::new();
@@ -5494,6 +5539,7 @@ mod tests {
             &decoded,
             &fixture.spx1,
             &mut short_execution,
+            FIXTURE_NEGATIVE_PROBE,
         )
         .is_err());
 
@@ -5510,6 +5556,7 @@ mod tests {
             &decoded,
             &fixture.spx1,
             &mut no_output,
+            FIXTURE_NEGATIVE_PROBE,
         )
         .is_err());
 
@@ -5554,6 +5601,7 @@ mod tests {
             &fixture.spx1,
             AuthenticatedProviderTerminal::Execution(complete),
             false,
+            FIXTURE_NEGATIVE_PROBE,
         )?;
         let mut length = [0; 4];
         reply_reader.read_exact(&mut length)?;
@@ -5566,6 +5614,7 @@ mod tests {
             &fixture.spx1,
             AuthenticatedProviderTerminal::Error(fixture.spe1),
             false,
+            FIXTURE_NEGATIVE_PROBE,
         )?;
         reply_reader.read_exact(&mut length)?;
         assert_ne!(u32::from_be_bytes(length), 0);
@@ -5591,6 +5640,7 @@ mod tests {
             &fixture.spx1,
             AuthenticatedProviderTerminal::Error(required_error),
             true,
+            FIXTURE_NEGATIVE_PROBE,
         )?;
         let mut length = [0; 4];
         reply_reader.read_exact(&mut length)?;
@@ -5603,6 +5653,7 @@ mod tests {
             &fixture.spx1,
             AuthenticatedProviderTerminal::Error(fixture.spe1.clone()),
             true,
+            FIXTURE_NEGATIVE_PROBE,
         )?;
         assert_eq!(
             read_local_error(&mut reply_reader)?.code,
@@ -5623,6 +5674,7 @@ mod tests {
             &fixture.spx1,
             AuthenticatedProviderTerminal::Execution(unexpected_execution),
             true,
+            FIXTURE_NEGATIVE_PROBE,
         )?;
         let local = read_local_error(&mut reply_reader)?;
         assert_eq!(local.phase, SandboxLocalErrorPhase::AfterAdmission);
