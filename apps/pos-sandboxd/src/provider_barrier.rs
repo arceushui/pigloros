@@ -502,7 +502,8 @@ impl BarrierError {
     ///
     /// Before any `ReadyV1` was received, the barrier could not read the
     /// unit, hold its launcher, arm the receive or meet the deadline: no
-    /// `ReadyV1` became available, which is `0 ReadyUnavailable`. After
+    /// `ReadyV1` became available, which is `0 ReadyUnavailable` (R9 §11
+    /// O15). A setup failure before the launch records none (O15). After
     /// `ReleaseV1` was sent the attempt has progress 2, where R9 §4.6.3
     /// requires a null `barrier-failure`. `None` is also recorded for a
     /// cancellation (TME1 `cancel-source` records it), a first observation

@@ -26,7 +26,7 @@ pub trait RuntimeSigned: runtime_signed_sealed::Sealed {
     /// The record magic, `M` of the R9 §5 domains.
     const MAGIC: &'static str;
     /// The validated unsigned fields of a record of this kind.
-    type Body;
+    type Body: Clone + std::fmt::Debug + Eq;
 
     /// The runtime-attestation key ID the record names.
     fn key_id(body: &Self::Body) -> &str;
