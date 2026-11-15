@@ -10,6 +10,11 @@
 //! (`pos-sandboxd` and its `pos-reference` dependency, excluding `#[cfg(test)]`
 //! modules and the separate `pos-reference` binaries) and the manifests that
 //! choose its runtime features.
+//!
+//! The root selector is held to the same rule (ADR-069 R12 I18): systemd
+//! creates the provider runtime, and the selector only asks for it over the
+//! system bus. The scan and the manifest check therefore also cover the
+//! `apps/pos-root-selector` package.
 
 use std::{
     error::Error,
@@ -57,11 +62,12 @@ fn manifest_root() -> PathBuf {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn provider_source_roots() -> [PathBuf; 2] {
+fn provider_source_roots() -> [PathBuf; 3] {
     let root = manifest_root();
     [
         root.join("src"),
         root.join("../../crates/pos-reference/src"),
+        root.join("../pos-root-selector/src"),
     ]
 }
 
@@ -136,6 +142,12 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
             .any(|path| path.ends_with("image_activator/socket.rs")),
         "the scan must include the mountfsd transport"
     );
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.ends_with("pos-root-selector/src/main.rs")),
+        "the scan must include the root selector entrypoint"
+    );
     for path in &sources {
         for (number, line) in production_lines(path)?.iter().enumerate() {
             // Only the exact descriptor-exec name is allowed, and only in the
@@ -175,6 +187,7 @@ fn provider_manifests_enable_no_process_runtime() -> TestResult {
     for manifest in [
         root.join("Cargo.toml"),
         root.join("../../crates/pos-reference/Cargo.toml"),
+        root.join("../pos-root-selector/Cargo.toml"),
     ] {
         let text = fs::read_to_string(&manifest)?;
         let dependencies = text

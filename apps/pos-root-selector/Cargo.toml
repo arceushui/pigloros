@@ -1,0 +1,21 @@
+[package]
+name = "pos-root-selector"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The root-owned ADR-069 sandbox selector process (owner decision O7, #1399).
+# It is a package of its own so the selector can compose the systemd provider
+# lifecycle adapter of `pos-sandboxd` without a `pos-reference` dependency cycle
+# (ADR-069 R12 §3).
+[[bin]]
+name = "pos-root-selector"
+path = "src/main.rs"
+
+[dependencies]
+pos-reference = { path = "../../crates/pos-reference" }
+
+[lints]
+workspace = true

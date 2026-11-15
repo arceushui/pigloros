@@ -6259,6 +6259,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-root-selector"
+version = "0.1.0"
+dependencies = [
+ "pos-reference",
+]
+
+[[package]]
 name = "pos-runtime"
 version = "0.1.0"
 dependencies = [

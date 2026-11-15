@@ -30,6 +30,7 @@ members = [
   "apps/pos-experiment",
   "apps/pos-cli",
   "apps/pos-sandboxd",
+  "apps/pos-root-selector",
   "apps/pos-plugin-worker",
   "apps/pos-plugin-conformance-adapter",
   "apps/pos-metric-conformance-adapter",
