@@ -443,6 +443,8 @@ fn report_signing_accepts_the_last_surface_ordinal_and_refuses_the_surface_count
 
 #[test]
 fn neither_decoder_refuses_an_input_of_exactly_its_declared_size_limit_as_too_large() {
+    assert_eq!(MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1, 4096);
+    assert_eq!(MAX_NON_INTERFERENCE_REPORT_BYTES_V1, 65536);
     let at_artifact_limit = vec![0; MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1];
     assert_eq!(
         NonInterferenceExecutionArtifactV1::from_canonical_cbor(&at_artifact_limit),
