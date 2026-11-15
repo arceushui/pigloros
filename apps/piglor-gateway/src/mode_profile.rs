@@ -607,33 +607,38 @@ impl GatewayProducedUnderV1 {
 }
 
 /// The binding the commit of segment-local sequence `seq` of `timeline` was
-/// produced under: the epoch its commit evidence records and that epoch's
-/// history entry, or `None` when the store records no such commit epoch or
-/// the epoch names no compiled profile.
+/// produced under, or with no commit the binding the next commit would be
+/// produced under: the epoch its commit evidence records (the store's
+/// current epoch) and that epoch's history entry, or `None` when the store
+/// records no such epoch or the epoch names no compiled profile.
 pub(crate) fn produced_under_v1(
     port: &dyn pos_core::GatewayModeBindingPortV1,
-    timeline: pos_core::TimelineId,
-    seq: pos_core::Seq,
+    commit: Option<(pos_core::TimelineId, pos_core::Seq)>,
 ) -> Option<GatewayProducedUnderV1> {
-    port.load_commit_epoch(timeline, seq)
-        .ok()
-        .flatten()
-        .and_then(|epoch| {
-            port.load_mode_binding_history()
-                .ok()
-                .and_then(|history| {
-                    history
-                        .into_iter()
-                        .find(|entry| entry.record().binding_epoch() == epoch)
-                })
-                .and_then(|entry| compiled_profile_of(entry.record().profile()).ok())
-                .and_then(|(id, _)| installed_gateway_mode_profile_v1(id).ok())
-                .map(|profile| GatewayProducedUnderV1 {
-                    id: profile.id,
-                    digest_hex: profile.digest.to_hex(),
-                    binding_epoch: epoch,
-                })
-        })
+    let epoch = match commit {
+        Some((timeline, seq)) => port.load_commit_epoch(timeline, seq).ok().flatten(),
+        None => port
+            .load_mode_binding()
+            .ok()
+            .flatten()
+            .map(|record| record.binding_epoch()),
+    };
+    epoch.and_then(|epoch| {
+        port.load_mode_binding_history()
+            .ok()
+            .and_then(|history| {
+                history
+                    .into_iter()
+                    .find(|entry| entry.record().binding_epoch() == epoch)
+            })
+            .and_then(|entry| compiled_profile_of(entry.record().profile()).ok())
+            .and_then(|(id, _)| installed_gateway_mode_profile_v1(id).ok())
+            .map(|profile| GatewayProducedUnderV1 {
+                id: profile.id,
+                digest_hex: profile.digest.to_hex(),
+                binding_epoch: epoch,
+            })
+    })
 }
 
 /// The per-Principal `network` posture: `absent` in a mode without network,

@@ -148,13 +148,38 @@ impl Gateway {
         let Some(authorization) = self.authorization.clone() else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
-        self.bring_current(&authorization)
-            .await
+        let current = self.bring_current(&authorization).await;
+        current
             .map_err(|_| GatewayError::AuthorizationEvidenceUnavailable)
             .map(|()| {
                 authorization
                     .principal_consents()
                     .and_then(|(consents, _)| consents.named_for(actor, consent_ref))
+            })
+    }
+
+    /// The consent `consent_ref` of the acting Principal as the decision of
+    /// `permit` pinned it, when the decision's actor is its subject or
+    /// grantee (#309; the lookup #303 checks a room's consent reference
+    /// with while it holds its operation permit).
+    ///
+    /// It reads the pin without refreshing it: the decision brought the pin
+    /// current with the store, and the permit's commit fence keeps any
+    /// revocation from committing until the permit is released.
+    pub(crate) fn consent_pinned(
+        &self,
+        permit: &GatewayOperationPermitV1,
+        consent_ref: EventId,
+    ) -> Option<GatewayConsentV1> {
+        self.authorization
+            .as_deref()
+            .zip(permit.decision())
+            .and_then(|(authorization, decision)| {
+                authorization
+                    .principal_consents()
+                    .and_then(|(consents, _)| {
+                        consents.named_for(decision.actor_entity_id(), consent_ref)
+                    })
             })
     }
 
@@ -206,6 +231,11 @@ impl Gateway {
                 .await
                 .map(ConsentRevocationOutcomeV1::Original);
         }
+        // The revocation commits under the store's current binding: resolve
+        // it first, so a recorded revocation can always be rendered.
+        if !matches!(self.store.produced_under(None).await, Ok(Some(_))) {
+            return Err(GatewayError::AuthorizationEvidenceUnavailable);
+        }
         self.issue_keyed_consent_revocation(
             &consents.timeline().to_string(),
             pos_core::ConsentRevokedV1 {
@@ -218,13 +248,14 @@ impl Gateway {
         )
         .await?;
         let (revoked, _) = self.current_consents(&authorization).await?;
-        match revoked.named_for(actor, consent_ref) {
-            Some(consent) => self
-                .revocation_json(revoked.timeline(), principal, &consent)
-                .await
-                .map(ConsentRevocationOutcomeV1::Recorded),
+        let recorded = match revoked.named_for(actor, consent_ref) {
+            Some(consent) => {
+                self.revocation_json(revoked.timeline(), principal, &consent)
+                    .await
+            }
             None => Err(GatewayError::AuthorizationEvidenceUnavailable),
-        }
+        };
+        recorded.map(ConsentRevocationOutcomeV1::Recorded)
     }
 
     /// The `ConsentRevocation` of the revoked `consent` of `principal`,
@@ -239,7 +270,7 @@ impl Gateway {
             return Err(GatewayError::AuthorizationEvidenceUnavailable);
         };
         self.store
-            .produced_under(timeline, revocation.fence())
+            .produced_under(Some((timeline, revocation.fence())))
             .await
             .ok()
             .flatten()

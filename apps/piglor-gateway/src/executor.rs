@@ -1596,19 +1596,15 @@ impl StoreExecutor {
             }
         )))
     }
-    /// The binding the commit of consent Timeline sequence `seq` of
-    /// `timeline` was produced under (ADR-134 §5).
+    /// The binding the commit `commit` (a Timeline and sequence) was
+    /// produced under, or with no commit the binding the next commit would
+    /// be produced under (ADR-134 §5).
     pub(crate) async fn produced_under(
         &self,
-        timeline: TimelineId,
-        seq: Seq,
+        commit: Option<(TimelineId, Seq)>,
     ) -> Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError> {
         submit!(self, |reply| Command::Action(Box::new(
-            ProducedUnderCommand {
-                timeline,
-                seq,
-                reply
-            }
+            ProducedUnderCommand { commit, reply }
         )))
     }
     pub(crate) async fn remove_append_identities_bounded(
@@ -2414,8 +2410,7 @@ impl WorkerCommandV1 for LoadAuthorityCommand {
 }
 
 struct ProducedUnderCommand {
-    timeline: TimelineId,
-    seq: Seq,
+    commit: Option<(TimelineId, Seq)>,
     reply: oneshot::Sender<
         Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError>,
     >,
@@ -2423,14 +2418,10 @@ struct ProducedUnderCommand {
 
 impl WorkerCommandV1 for ProducedUnderCommand {
     fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
-        let Self {
-            timeline,
-            seq,
-            reply,
-        } = *self;
+        let Self { commit, reply } = *self;
         let produced = match &mut state.store {
             ExecutorStore::Host(host, _) => {
-                crate::mode_profile::produced_under_v1(host.gateway_mode_binding(), timeline, seq)
+                crate::mode_profile::produced_under_v1(host.gateway_mode_binding(), commit)
             }
             #[cfg(test)]
             ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,

@@ -387,15 +387,15 @@ impl Gateway {
         else {
             return Ok(record);
         };
-        match self
+        let read = self
             .store
             .read(
                 timeline,
                 SeqRange::all(),
                 crate::local_principal::consent_bounds(),
             )
-            .await
-        {
+            .await;
+        match read {
             Ok(events) => {
                 consented.events = Some(events);
                 Ok(record)

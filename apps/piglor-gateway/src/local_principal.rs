@@ -3075,13 +3075,51 @@ mod tests {
     }
 
     /// A Local store at `path` provisioned with `provision` through the
-    /// production host path, and the Gateway `serve` composes over it.
+    /// production host path, and a Gateway over it that requires its
+    /// recorded Principal, as `serve` composes it, with a World action
+    /// catalogue that knows the actor's body, so an admitted action commits.
     fn consented_gateway(
         path: &str,
         provision: &LocalPrincipalProvisionV1,
     ) -> TestResult<(Gateway, Router)> {
         provision_on_host(&mut sqlite_host(path)?, provision)?;
-        serve_local(path)
+        let mode = crate::mode_profile::test_binding(
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            [],
+        );
+        let mut host = crate::mode_profile::test_attach_host(sqlite_host(path)?, &mode);
+        let authorization =
+            load_host_local_principal(&mut host, &mode)?.ok_or("a provisioned store recomposes")?;
+        let gateway =
+            crate::gateway_with_erasure_host_and_authorization(host, [actor()?], authorization)?;
+        Ok((gateway.clone(), app_of(gateway)))
+    }
+
+    /// Submit one World action numbered `marker` on `timeline` as `actor`,
+    /// under its own idempotency key.
+    async fn act(
+        app: &Router,
+        timeline: &str,
+        actor: EntityId,
+        marker: u8,
+    ) -> TestResult<(StatusCode, Value)> {
+        let mut body = action(actor);
+        body["payload"]["params"] = json!([f64::from(marker), 0.0]);
+        body["payload"]["tick"] = json!(marker);
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/timelines/{timeline}/actions"))
+            .header("idempotency-key", format!("action-{marker}"))
+            .header(ACTOR_ENTITY_HEADER, actor.to_string())
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))?;
+        let response = app.clone().oneshot(request).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
     }
 
     async fn revoke_with(
@@ -3146,10 +3184,8 @@ mod tests {
         assert_eq!(created, StatusCode::CREATED);
         let timeline = timeline["id"].as_str().unwrap_or_default().to_owned();
         let signals = format!("/v1/timelines/{timeline}/signals");
-        let actions = format!("/v1/timelines/{timeline}/actions");
-        let (_, admitted_action) =
-            send(&app, "POST", &actions, Some(actor), Some(action(actor))).await?;
-        assert_ne!(admitted_action["code"], "revoked");
+        let (admitted, _) = act(&app, &timeline, actor, 1).await?;
+        assert_eq!(admitted, StatusCode::CREATED);
 
         let (recorded, revocation) = revoke_with(&app, actor, &refs[0], "revoke-first").await?;
         assert_eq!(recorded, StatusCode::CREATED);
@@ -3200,7 +3236,7 @@ mod tests {
             revoke_with(&app, actor, &refs[2], "revoke-action").await?.0,
             StatusCode::CREATED
         );
-        let (_, problem) = send(&app, "POST", &actions, Some(actor), Some(action(actor))).await?;
+        let (_, problem) = act(&app, &timeline, actor, 2).await?;
         assert_eq!(problem["code"], "revoked");
         let revoked = session_of(&app, actor).await?;
         assert_eq!(revoked["generation"], 9);
@@ -3793,5 +3829,122 @@ mod tests {
             None,
             grant.authority_registry_digest(),
         )?)
+    }
+
+    /// The pinned lookup #303 calls under its operation permit: it reads the
+    /// decision's pin, and a revocation waits until the permit is released.
+    #[tokio::test]
+    async fn the_pinned_consent_lookup_holds_under_the_permit() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
+        let consent_ref =
+            pos_core::EventId::from_ulid(Ulid::from_string(consent.as_str().unwrap_or_default())?);
+        let read = || {
+            gateway.authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+        };
+        let permit = read().await?;
+        let pinned = gateway
+            .consent_pinned(&permit, consent_ref)
+            .ok_or("the consent is pinned")?;
+        assert!(pinned.revocation().is_none());
+        assert_eq!(
+            gateway.consent_pinned(&permit, pos_core::EventId::new()),
+            None
+        );
+        let revoking = tokio::spawn({
+            let app = app.clone();
+            async move {
+                revoke_with(&app, actor, &consent, "under-permit")
+                    .await
+                    .map(|(status, _)| status)
+                    .ok()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !revoking.is_finished(),
+            "the revocation waits for the permit"
+        );
+        assert_eq!(gateway.consent_pinned(&permit, consent_ref), Some(pinned));
+        drop(permit);
+        assert_eq!(revoking.await?, Some(StatusCode::CREATED));
+        let permit = read().await?;
+        assert!(gateway
+            .consent_pinned(&permit, consent_ref)
+            .is_some_and(|consent| consent.revocation().is_some()));
+        drop(permit);
+        let open = Gateway::unprotected_for_harness(memory_host()?)?;
+        let unprotected = open
+            .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+            .await?;
+        assert_eq!(open.consent_pinned(&unprotected, consent_ref), None);
+        drop(unprotected);
+        for gateway in [gateway, open] {
+            gateway.shutdown().await?;
+            drop(gateway);
+        }
+        drop(app);
+        Ok(())
+    }
+
+    /// Actions decided on a consent-bound chain and appends decided on the
+    /// root chain alternate on one Timeline, and an action decided on the
+    /// root chain commits too: each admission persists and re-checks the
+    /// chain its decision was taken on, and the recorded chains are the
+    /// provisioned ones.
+    #[tokio::test]
+    async fn actions_persist_the_chain_they_were_decided_on() -> TestResult {
+        let with_consents = |grants| -> TestResult<LocalPrincipalProvisionV1> {
+            Ok(LocalPrincipalProvisionV1::try_new_with_consent(
+                &principal()?,
+                [actor()?],
+                CONSENTED_OPERATIONS,
+                Some(consent_of(grants)?),
+            )?)
+        };
+        // Consented actions beside root-chain signals, then root-chain
+        // actions beside consented signals.
+        let consented_actions = with_consents(vec![
+            grant_draft("operation", &["timeline"], false),
+            grant_draft("action", &["world.action.v1"], false),
+        ])?;
+        let root_actions = with_consents(vec![
+            grant_draft("operation", &["timeline"], false),
+            grant_draft("operation", &["society.signal"], false),
+        ])?;
+        for (provision, actions_consented) in
+            [(consented_provision()?, true), (root_actions, false)]
+        {
+            let directory = tempfile::tempdir()?;
+            let path = sqlite_path(&directory)?;
+            bind_local(&path)?;
+            let actor = actor()?;
+            let before = {
+                provision_on_host(&mut sqlite_host(&path)?, &provision)?;
+                recorded_state(&path)?
+            };
+            let (gateway, app) = consented_gateway(&path, &provision)?;
+            let (created, timeline) = create(&app, Some(actor)).await?;
+            assert_eq!(created, StatusCode::CREATED);
+            let timeline = timeline["id"].as_str().unwrap_or_default().to_owned();
+            let signals = format!("/v1/timelines/{timeline}/signals");
+            for marker in 1..=3 {
+                assert_eq!(
+                    act(&app, &timeline, actor, marker).await?.0,
+                    StatusCode::CREATED
+                );
+                let (status, _) =
+                    send(&app, "POST", &signals, Some(actor), Some(signal(actor))).await?;
+                assert_eq!(status, StatusCode::CREATED, "{actions_consented}");
+            }
+            gateway.shutdown().await?;
+            drop((gateway, app));
+            assert_eq!(recorded_state(&path)?, before, "{actions_consented}");
+        }
+        Ok(())
     }
 }
