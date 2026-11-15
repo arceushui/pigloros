@@ -132,8 +132,10 @@ impl Gateway {
     /// with under its operation permit, and the one a revocation checks its
     /// consent with).
     ///
-    /// It reads the pin without refreshing it: the decision brought the pin
-    /// current with the store, and the permit's commit fence keeps any
+    /// It reads the pin without refreshing it, so it is exactly as current
+    /// as the consent Timeline read the decision's `bring_current` made (the
+    /// per-decision ADR-039 boundary): the decision brought the pin current
+    /// with the store, and the permit's commit fence keeps any
     /// revocation from committing until the permit is released.
     pub(crate) fn consent_pinned(
         &self,

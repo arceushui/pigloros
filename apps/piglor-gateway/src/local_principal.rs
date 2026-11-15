@@ -3908,9 +3908,7 @@ mod tests {
             grant_draft("operation", &["timeline"], false),
             grant_draft("operation", &["society.signal"], false),
         ])?;
-        for (provision, actions_consented) in
-            [(consented_provision()?, true), (root_actions, false)]
-        {
+        for (provision, actions_consented) in [(consented_actions, true), (root_actions, false)] {
             let directory = tempfile::tempdir()?;
             let path = sqlite_path(&directory)?;
             bind_local(&path)?;
