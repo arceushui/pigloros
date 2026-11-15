@@ -205,7 +205,9 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
             }
             steps += 1;
             let path = exchange["path"].as_str().ok_or("no path")?;
-            let commits = path.ends_with("/signals") || path.ends_with("/actions");
+            let commits = path.ends_with("/signals")
+                || path.ends_with("/actions")
+                || path == "/v1/me/consent-revocations";
             if commits && exchange["expect"]["status"] == json!(201) {
                 events += 1;
             }

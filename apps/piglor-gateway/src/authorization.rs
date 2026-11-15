@@ -1194,6 +1194,14 @@ impl GatewayAuthorization {
         Arc::clone(&self.commit_lock).write_owned().await
     }
 
+    /// Whether the commit fence cannot be shared now: it is held, or an
+    /// exclusive fence is queued for it (the lock is write-preferring).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn commit_fence_contended(&self) -> bool {
+        self.commit_lock.try_read().is_err()
+    }
+
     /// The leaf grants of the pinned consent-bound chains and the consent
     /// Timeline, when the Principal's provisioning binds consents.
     pub(crate) fn consented_binding(&self) -> Option<(Vec<Hash>, TimelineId)> {

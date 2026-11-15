@@ -3344,10 +3344,25 @@ mod tests {
         drop(gateway);
         drop(app);
 
+        a_restart_and_a_migration_keep_the_revocation(&path, actor, &refs, &revoked, revocation)
+            .await?;
+        Ok(())
+    }
+
+    /// The tail of `a_revoked_consent_stops_only_the_operations_it_governs`:
+    /// the store at `path` after the revocations `revoked` shows, the first
+    /// of which answered `revocation`.
+    async fn a_restart_and_a_migration_keep_the_revocation(
+        path: &str,
+        actor: EntityId,
+        refs: &[Value],
+        revoked: &Value,
+        revocation: Value,
+    ) -> TestResult {
         // A restarted host recomposes every revocation from the consent
         // Timeline; the key still names the consent it revoked, and the
         // original answer is byte-identical.
-        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        let (gateway, app) = consented_gateway(path, &consented_provision()?)?;
         assert_eq!(
             session_of(&app, actor).await?["consents"],
             revoked["consents"]
@@ -3365,11 +3380,11 @@ mod tests {
         // Under a later binding epoch, the answer still names the binding
         // the revocation was produced under.
         crate::mode_profile::migrate_gateway_mode_v1(
-            &path,
+            path,
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         )?;
-        let mut host = sqlite_host(&path)?;
+        let mut host = sqlite_host(path)?;
         let mode = crate::mode_profile::bind_gateway_mode_v1(
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
             crate::mode_profile::GatewayServeCompositionV1 {
@@ -3515,45 +3530,152 @@ mod tests {
         Ok(())
     }
 
-    /// A permit's decision pins the consent Timeline as the store holds it:
-    /// a revocation another serving process recorded is seen by the next
-    /// decision.
+    /// A revocation admitted before another host commits anything to the
+    /// store fails closed (README "SQLite and host ownership"; the SQLite
+    /// store checks `PRAGMA data_version` on every fenced read): its re-read
+    /// of the consent Timeline under the exclusive fence is refused, so it
+    /// records nothing and answers `503`.
     #[tokio::test]
-    async fn a_decision_pins_the_current_consent_timeline() -> TestResult {
+    async fn a_revocation_admitted_before_a_foreign_commit_fails_closed() -> TestResult {
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
         bind_local(&path)?;
         let actor = actor()?;
         let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
-        let (other, other_app) = serve_local(&path)?;
         let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
-        let consent_ref =
-            pos_core::EventId::from_ulid(Ulid::from_string(consent.as_str().unwrap_or_default())?);
-        let read = || {
-            gateway.authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
-        };
-        let permit = read().await?;
-        assert!(gateway
-            .consent_pinned(&permit, consent_ref)
-            .is_some_and(|consent| consent.revocation().is_none()));
-        drop(permit);
-        // Another serving process revokes it.
+        let admitted = gateway
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
+            .await?;
+        let authorization = gateway.authorization.clone().ok_or("an authorizer")?;
+        let revoking = tokio::spawn({
+            let app = app.clone();
+            async move {
+                revoke_with(&app, actor, &consent, "racing")
+                    .await
+                    .map(|(status, problem)| (status, problem["code"].clone()))
+                    .ok()
+            }
+        });
+        // The revocation has passed its own decision once it is queued for
+        // the exclusive fence behind the admitted operation.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !authorization.commit_fence_contended() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the revocation queues for the exclusive fence"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(authorization);
+        assert!(
+            !revoking.is_finished(),
+            "the revocation waits for the admitted operation"
+        );
+        let (other, other_app) = serve_local(&path)?;
+        assert_eq!(
+            create(&other_app, Some(actor)).await?.0,
+            StatusCode::CREATED
+        );
+        drop(admitted);
+        assert_eq!(
+            revoking.await?,
+            Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable")
+            ))
+        );
+        for gateway in [gateway, other] {
+            gateway.shutdown().await?;
+            drop(gateway);
+        }
+        drop((app, other_app));
+        // Nothing was recorded: a restarted host still holds it granted.
+        let (gateway, app) = serve_local(&path)?;
+        assert_eq!(
+            session_of(&app, actor).await?["consents"][0]["state"],
+            "granted"
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
+        Ok(())
+    }
+
+    /// A host exclusively owns its store (README "SQLite and host
+    /// ownership"; the SQLite store enforces it by checking `PRAGMA
+    /// data_version` on every fenced read): once another host commits a
+    /// revocation to it, every decision the serving host's grants cover
+    /// fails closed as stale revocation state (`503`, retryable), while an
+    /// operation no grant covers is still `403 unauthorized`; a restarted
+    /// host recomposes the revocation.
+    #[tokio::test]
+    async fn a_revocation_another_host_records_fails_closed_until_a_restart() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        assert_eq!(create(&app, Some(actor)).await?.0, StatusCode::CREATED);
+        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
+        let (other, other_app) = serve_local(&path)?;
         assert_eq!(
             revoke_with(&other_app, actor, &consent, "elsewhere")
                 .await?
                 .0,
             StatusCode::CREATED
         );
-        let permit = read().await?;
-        assert!(gateway
-            .consent_pinned(&permit, consent_ref)
-            .is_some_and(|consent| consent.revocation().is_some()));
-        drop(permit);
+        let (status, problem) = create(&app, Some(actor)).await?;
+        assert_eq!(
+            (
+                status,
+                problem["code"].clone(),
+                problem["retryable"].clone()
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable"),
+                json!(true)
+            )
+        );
+        let (status, problem) = revoke_with(&app, actor, &consent, "here").await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable")
+            )
+        );
+        let (status, problem) = send(
+            &app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(actor),
+            Some(prediction()),
+        )
+        .await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (StatusCode::FORBIDDEN, json!("unauthorized"))
+        );
         for gateway in [gateway, other] {
             gateway.shutdown().await?;
             drop(gateway);
         }
         drop((app, other_app));
+
+        let (gateway, app) = serve_local(&path)?;
+        let (status, problem) = create(&app, Some(actor)).await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (StatusCode::FORBIDDEN, json!("revoked"))
+        );
+        assert_eq!(
+            session_of(&app, actor).await?["consents"][0]["state"],
+            "revoked"
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
         Ok(())
     }
 
@@ -3591,12 +3713,15 @@ mod tests {
         Ok(())
     }
 
+    /// The authority chains and the consent Timeline Event payloads a store
+    /// records.
+    type RecordedState = (Vec<Option<PersistedAuthorityV1>>, Vec<Vec<u8>>);
+
     /// The authority chains and consent Timeline Events the store at `path`
     /// records.
-    fn recorded_state(path: &str) -> TestResult<(Vec<Option<PersistedAuthorityV1>>, Vec<Vec<u8>>)> {
+    fn recorded_state(path: &str) -> TestResult<RecordedState> {
         let store = SqliteStore::open(path)?;
-        let chains = [LocalGrantKindV1::Root]
-            .into_iter()
+        let chains = std::iter::once(LocalGrantKindV1::Root)
             .chain((0..4).map(LocalGrantKindV1::Consented))
             .map(|kind| load_chain(&store, kind))
             .collect::<Result<Vec<_>, _>>()?;
@@ -3952,11 +4077,15 @@ mod tests {
             .is_some_and(|consent| consent.revocation().is_some()));
         drop(permit);
         let open = Gateway::unprotected_for_harness(memory_host()?)?;
-        let unprotected = open
-            .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
-            .await?;
-        assert_eq!(open.consent_pinned(&unprotected, consent_ref), None);
-        drop(unprotected);
+        assert_eq!(
+            open.consent_pinned(
+                &open
+                    .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+                    .await?,
+                consent_ref
+            ),
+            None
+        );
         for gateway in [gateway, open] {
             gateway.shutdown().await?;
             drop(gateway);
