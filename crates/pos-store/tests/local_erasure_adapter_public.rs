@@ -540,7 +540,8 @@ fn evidence_object_survives_while_its_retained_copy_is_swept(
     let bytes = proof.to_canonical_cbor()?;
     // (a) The evidence-path object is not a sweep candidate. It is not in the
     // retained table at all; the "address already present, so not marked"
-    // rule is covered by each adapter's own unit test.
+    // rule is covered through the coordinator CAS in
+    // `erasure_persistence.rs` (committed ERAH1 pages).
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
         0

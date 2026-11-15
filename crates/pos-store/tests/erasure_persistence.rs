@@ -774,6 +774,49 @@ fn assert_raw_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenceP
     Ok(())
 }
 
+/// The coordinator CAS stores an ERAH1 attempt-history page at its
+/// full-bytes content address, the same address `retain_erasure_object`
+/// derives (ADR-136 §4a). Retaining the committed bytes again therefore
+/// lands on the committed object, which must never become a sweep
+/// candidate: a startup sweep would otherwise delete committed evidence.
+fn assert_committed_attempt_page_is_never_swept<
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (shared, request, _) = complete(store)?;
+    let mut backend = shared.borrow_mut();
+    let page = backend
+        .attempt_page_ref(request.reference(), 0)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let bytes = backend.read_object(page)?;
+    assert_eq!(
+        backend.retain_erasure_object(&bytes, pos_core::ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?,
+        page
+    );
+    assert_eq!(
+        backend.sweep_unreferenced_erasure_objects(
+            &[pos_core::ERASURE_ATTEMPT_HISTORY_TAG_V1],
+            &[],
+            16
+        )?,
+        0
+    );
+    assert_eq!(backend.read_object(page)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn memory_committed_attempt_page_is_never_swept() -> Result<(), Box<dyn std::error::Error>> {
+    assert_committed_attempt_page_is_never_swept(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_committed_attempt_page_is_never_swept() -> Result<(), Box<dyn std::error::Error>> {
+    assert_committed_attempt_page_is_never_swept(SqliteStore::open_in_memory()?)
+}
+
 fn assert_stale_head<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
