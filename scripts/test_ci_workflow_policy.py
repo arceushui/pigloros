@@ -901,6 +901,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 
     def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
         source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
+        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
         lines = [
             line for line in source.replace("\\\n", "").splitlines()
             if line and not line.startswith("#")
@@ -908,8 +909,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(lines[0], "set -euo pipefail")
         archive_list = "/etc/apt/pigloros-mirrors.txt"
         security_list = "/etc/apt/pigloros-security-mirrors.txt"
-        # kernel.org stays preferred; the later entries are apt mirror+file
-        # failover targets, so one unreachable mirror cannot fail an install.
+        # Every entry is an apt mirror+file failover target, so one
+        # unreachable mirror cannot fail an install.
         self.assertEqual(shlex.split(lines[1]), [
             "printf", "%s\\n",
             "https://mirrors.edge.kernel.org/ubuntu",

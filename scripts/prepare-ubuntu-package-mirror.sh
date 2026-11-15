@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prefer the kernel.org mirror, but keep apt's mirror+file failover so one
-# unreachable mirror cannot fail every package install. InRelease signatures
-# are still checked against the Ubuntu archive keyring, whichever mirror serves.
+# Use apt's mirror+file failover over several archive mirrors, so one
+# unreachable mirror cannot fail every package install. Without priority
+# metadata apt picks the order at random and tries the next entry on failure.
+# InRelease is still checked against the Ubuntu archive keyring, whichever
+# mirror serves it.
 printf '%s\n' \
   https://mirrors.edge.kernel.org/ubuntu \
   http://azure.archive.ubuntu.com/ubuntu \
