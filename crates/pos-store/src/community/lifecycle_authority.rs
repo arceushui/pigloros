@@ -34,11 +34,11 @@ use pos_core::fork_authentication::{
 };
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorityTrustRootSealV1, AuthorizationDecisionV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1, EntityId, Hash,
-    PersistedAuthorityV1, TimelineId, WallTime, MAX_AUTHORITY_TEXT_BYTES,
+    AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityPersistencePortV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
+    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
+    MAX_AUTHORITY_TEXT_BYTES,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
@@ -415,33 +415,17 @@ impl CommunityLifecycleAuthorityV1 {
         verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
         at_time: WallTime,
     ) -> Option<CommunityAuthorityCallV1> {
-        let evidence = verified.evidence();
-        let record = evidence.record();
-        principal_digest_v1(&record.principal)
+        principal_digest_v1(&verified.evidence().record().principal)
             .ok()
             .and_then(|principal| self.catalogue.actor_for(principal))
             .and_then(|actor_entity_id| {
-                evidence
-                    .digest()
-                    .ok()
-                    .zip(AssuranceLevelV1::try_new(record.assurance).ok())
-                    .and_then(|(binding_digest, assurance)| {
-                        authenticated_result(AuthenticatedPrincipalDraftV1 {
-                            principal: record.principal.clone(),
-                            adapter_id: record.adapter_id.clone(),
-                            assurance,
-                            issued_at: WallTime::from_micros(record.issued_at),
-                            expires_at: WallTime::from_micros(record.expires_at),
-                            binding_digest,
-                        })
-                    })
-                    .map(|authenticated| CommunityAuthorityCallV1 {
-                        catalogue_digest: self.catalogue_digest,
-                        request,
-                        authenticated,
-                        actor_entity_id,
-                        at_time,
-                    })
+                authenticated_result(verified).map(|authenticated| CommunityAuthorityCallV1 {
+                    catalogue_digest: self.catalogue_digest,
+                    request,
+                    authenticated,
+                    actor_entity_id,
+                    at_time,
+                })
             })
     }
 

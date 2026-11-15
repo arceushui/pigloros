@@ -11,9 +11,11 @@
 //! attested at composition gives no snapshot.
 
 use pos_core::{
-    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityRegistrySnapshotV1,
-    AuthorityTrustRootSealV1, CapabilityGrantV1, Hash, PersistedAuthorityV1,
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityRegistrySnapshotV1, AuthorityTrustRootSealV1, CapabilityGrantV1, Hash,
+    PersistedAuthorityV1, WallTime,
 };
+use pos_crypto::fork_authentication::VerifiedAuthenticatedPrincipalEvidenceV1;
 
 /// The community owner's own trust-root seal, its one pinned mint site
 /// (`scripts/check_authority_trust_root_seal.py`). The owner is inside the
@@ -22,12 +24,32 @@ use pos_core::{
 /// this module and is passed only by reference.
 static OWNER_SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 
-/// The authentication result the owner derives from verified FAE1 fields
-/// (R6.2(3)(iv)), or `None` for fields the result refuses.
+/// The authentication result derived from one policy-verified FAE1
+/// (R6.2(3)(iv)): the APR1 principal, adapter, assurance and validity, with
+/// the FAE1 digest as binding digest. Only a verified witness yields one.
 pub(super) fn authenticated_result(
-    draft: AuthenticatedPrincipalDraftV1,
+    verified: &VerifiedAuthenticatedPrincipalEvidenceV1,
 ) -> Option<AuthenticatedPrincipalResultV1> {
-    AuthenticatedPrincipalResultV1::try_from_draft(&OWNER_SEAL, draft).ok()
+    let evidence = verified.evidence();
+    let record = evidence.record();
+    evidence
+        .digest()
+        .ok()
+        .zip(AssuranceLevelV1::try_new(record.assurance).ok())
+        .and_then(|(binding_digest, assurance)| {
+            AuthenticatedPrincipalResultV1::try_from_draft(
+                &OWNER_SEAL,
+                AuthenticatedPrincipalDraftV1 {
+                    principal: record.principal.clone(),
+                    adapter_id: record.adapter_id.clone(),
+                    assurance,
+                    issued_at: WallTime::from_micros(record.issued_at),
+                    expires_at: WallTime::from_micros(record.expires_at),
+                    binding_digest,
+                },
+            )
+            .ok()
+        })
 }
 
 /// The snapshot one request is evaluated against, or `None` when any chain
