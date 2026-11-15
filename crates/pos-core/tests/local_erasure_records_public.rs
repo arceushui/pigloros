@@ -826,6 +826,13 @@ fn assert_golden<R: PartialEq + std::fmt::Debug>(
 
 #[test]
 fn records_match_hand_written_golden_vectors() -> TestResult {
+    assert_bundle_goldens()?;
+    assert_trust_policy_and_authorization_goldens()?;
+    assert_request_and_owner_result_goldens()?;
+    assert_signature_and_disclosure_goldens()
+}
+
+fn assert_bundle_goldens() -> TestResult {
     let bundle = bundle()?;
     let golden = Cbor::default()
         .record("ELB1", 12)
@@ -905,7 +912,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
         LocalErasureRejectionV1::to_canonical_cbor,
         LocalErasureRejectionV1::from_canonical_cbor,
         LocalErasureRejectionV1::reference,
-    )?;
+    )
+}
+
+fn assert_trust_policy_and_authorization_goldens() -> TestResult {
     assert_golden(
         &LocalErasureTrustAnchorV1 {
             tps1: reference(14),
@@ -985,7 +995,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
         LocalErasureAuthorizationV1::to_canonical_cbor,
         LocalErasureAuthorizationV1::from_canonical_cbor,
         LocalErasureAuthorizationV1::reference,
-    )?;
+    )
+}
+
+fn assert_request_and_owner_result_goldens() -> TestResult {
     assert_golden(
         &LocalErasureSelectorV1 {
             subject: reference(23),
@@ -1062,6 +1075,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
             LocalErasureOwnerResultV1::reference,
         )?;
     }
+    Ok(())
+}
+
+fn assert_signature_and_disclosure_goldens() -> TestResult {
     assert_golden(
         &LocalErasureSignatureV1 {
             purpose: LocalErasureSignaturePurposeV1::ReceiptBody,
