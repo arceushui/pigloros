@@ -81,6 +81,41 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 - Events are ordered by Timeline sequence (`seq`), never by wall time. Draft values that must
   replay deterministically are integers (micro-units where fractional), never JSON numbers.
 
+## Preferences and OptionSpecs
+
+`POST /v1/preferences`, `POST /v1/option-specs` and their
+`GET .../{id}/revisions/{revision}` reads are served (#304). Both resources are user-authored and
+subject-scoped: the subject is the acting entity (`x-piglor-actor-entity`), which the Local
+Principal's grant must cover, and the operations need the grants `preference.create`,
+`preference.read`, `option-spec.create` and `option-spec.read`. A request carries
+`schema_version: 1`; any other version is `400 unsupported-version`.
+
+- **Revisions.** Without `parent` a request creates revision 1 of a new resource; with `parent`
+  it creates the next revision, and `parent` must name the current head (`409 append-conflict`
+  otherwise). A stored revision never changes. Identical content is never deduplicated: an exact
+  retry under the same `Idempotency-Key` returns the original revision (`200`), the same key with
+  another request is `409 idempotency-conflict`.
+- **Views.** A revision is answered only to its subject; any other caller, and an unknown or
+  foreign parent, gets `404 not-found-or-unavailable`. A revision its subject erased answers
+  `410 deleted` to that subject from a payload-free tombstone (resource, revision, subject and
+  digest) and `404` to everyone else; no erased value is reconstructed. The Gateway keeps the
+  revisions in its own store, outside every Timeline, with the execution-mode binding their
+  commit recorded (`mode_profile`).
+- **Digests.** `digest` is BLAKE3 of the ASCII domain tag
+  `PiglorOS.GatewayPreferenceRevision.v1` or `PiglorOS.GatewayOptionSpecRevision.v1`, a 0x00
+  byte, and the revision's canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array
+  `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, entries]`, IDs as
+  canonical ULID text and `parent_revision` null for revision 1. A Preference entry is
+  `[dimension, weight_micro]`, ordered by `dimension`; an OptionSpec entry is
+  `[key, label, tags, lean_hint_micro, coordinates]` in the authored order, `tags` in byte
+  order, an absent `lean_hint_micro` or `coordinates` null and `coordinates` the array
+  `[x_micro, z_micro]`. The answered `weights`, `options` and `tags` follow the same order. A
+  `revision-ref` names a revision by `id`, `revision` and this `digest`.
+  `provenance.digest` is BLAKE3 of `PiglorOS.GatewayRevisionProvenance.v1`, a 0x00 byte and the
+  deterministic CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id,
+  mode_profile_digest, binding_epoch, digest]`: text, ULIDs and lower-case hex digests, and an
+  unsigned `binding_epoch`. The golden examples carry recomputed values.
+
 ## Problems
 
 Every failure body has `type` (`urn:pigloros:gateway:v1:problem:<code>`), `title`, `status`,
@@ -215,7 +250,7 @@ URL, and the description's revision label is not part of the wire contract. The 
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
 `unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
 `draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
-`draft-replay-incompatible-profile` and
+`draft-replay-incompatible-profile`, `preference-unsupported-schema-version` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
 
 ## Changing the contract

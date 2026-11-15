@@ -242,7 +242,7 @@ pub enum GatewayAuthorizationTarget {
 /// authorizes; the Local Principal is provisioned with grants named by
 /// [`Self::name`], and `Session` discloses the ones its grant covers. Each
 /// constant has its own resource, so a grant covers exactly the constants it
-/// names. Later operations (#303, #304, #309) add a constant with a fresh
+/// names. Later operations (#303, #309) add a constant with a fresh
 /// resource and action pair and authorize through
 /// [`crate::Gateway::authorize_operation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,11 +293,29 @@ impl GatewayOperationV1 {
         "world.action.v1.submit",
         "action",
     );
+    /// `POST /v1/preferences`: create a Preference or, with `parent`, its
+    /// next revision (#304).
+    pub const CREATE_PREFERENCE: Self =
+        Self::new("preference.create", "preference", "create", "operation");
+    /// `GET /v1/preferences/{preference_id}/revisions/{revision}` (#304).
+    pub const READ_PREFERENCE: Self =
+        Self::new("preference.read", "preference.revision", "read", "read");
+    /// `POST /v1/option-specs`: create an OptionSpec or, with `parent`, its
+    /// next revision (#304).
+    pub const CREATE_OPTION_SPEC: Self =
+        Self::new("option-spec.create", "option-spec", "create", "operation");
+    /// `GET /v1/option-specs/{option_spec_id}/revisions/{revision}` (#304).
+    pub const READ_OPTION_SPEC: Self =
+        Self::new("option-spec.read", "option-spec.revision", "read", "read");
     /// Every operation this Gateway serves and the network capability, in
     /// name order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::NETWORK,
         Self::CREATE_PREDICTION,
+        Self::CREATE_OPTION_SPEC,
+        Self::READ_OPTION_SPEC,
+        Self::CREATE_PREFERENCE,
+        Self::READ_PREFERENCE,
         Self::READ_SESSION,
         Self::CREATE_TIMELINE,
         Self::READ_EVENTS,

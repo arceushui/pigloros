@@ -41,6 +41,7 @@ pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod fork_event_provenance;
 pub mod gateway_mode_binding;
+pub mod gateway_revision;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -608,6 +609,13 @@ pub use gateway_mode_binding::{
     GatewayModeBindingHistoryEntryV1, GatewayModeBindingHostV1, GatewayModeBindingKindV1,
     GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeMigrationPermitV1,
     GatewayModeProfileRefV1, GatewayModeRotationPermitV1, MAX_GATEWAY_MODE_PROFILE_ID_BYTES,
+};
+pub use gateway_revision::{
+    admit_gateway_revision_v1, gateway_revision_mode_v1, GatewayRevisionCommitV1,
+    GatewayRevisionDraftV1, GatewayRevisionErasureHostV1, GatewayRevisionErasurePermitV1,
+    GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1, GatewayRevisionKeyV1,
+    GatewayRevisionKindV1, GatewayRevisionPortV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
+    GatewayRevisionTombstoneV1, MAX_GATEWAY_REVISION_CONTENT_BYTES,
 };
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
