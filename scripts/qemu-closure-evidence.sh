@@ -117,24 +117,24 @@ boot() {
     </dev/null >"${out}/host/serial-console.log" 2>&1 &
   local launcher=$!
   # The launcher shell writes its own PID, then execs the VM runner, which
-  # execs QEMU: the same process becomes QEMU.
+  # execs QEMU: the same process becomes QEMU. Its /proc entries are read as
+  # root because the process changed credentials on its way from sudo.
   for _ in $(seq 120); do
     pid="$(cat "${work}/qemu.pid" 2>/dev/null || true)"
-    if [[ ${pid} =~ ^[0-9]+$ && "$(readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/qemu-system-* ]]; then
+    if [[ ${pid} =~ ^[0-9]+$ && "$(sudo readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/qemu-system-* ]]; then
       qemu_pid="${pid}"
       break
     fi
     sleep 1
   done
-  if [[ -z ${qemu_pid} ]]; then
-    printf 'QEMU did not start\n' >&2
-    kill "${launcher}" || true
-    exit 1
+  if [[ -n ${qemu_pid} ]]; then
+    sudo cat "/proc/${qemu_pid}/cmdline" >"${out}/host/qemu-argv"
+    sudo readlink "/proc/${qemu_pid}/exe" >"${out}/host/qemu-exe"
+    # The interfaces of QEMU's own network namespace.
+    sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
+  else
+    printf 'QEMU was not observed; launcher PID file: %s\n' "${pid:-missing}" >&2
   fi
-  cat "/proc/${qemu_pid}/cmdline" >"${out}/host/qemu-argv"
-  readlink "/proc/${qemu_pid}/exe" >"${out}/host/qemu-exe"
-  # The interfaces of QEMU's own network namespace.
-  cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
   wait "${launcher}" || status=$?
   printf '%s\n' "${status}" >"${out}/host/vm-exit-status"
   tail -n 200 "${out}/host/serial-console.log"
@@ -142,8 +142,8 @@ boot() {
     cp -R -- "${work}/xchg/guest" "${out}/guest"
   fi
   rm -rf -- "${work}"
-  if [[ ${status} -ne 0 ]]; then
-    printf 'VM exited with status %s\n' "${status}" >&2
+  if [[ -z ${qemu_pid} || ${status} -ne 0 ]]; then
+    printf 'VM observation failed (QEMU PID %s, exit status %s)\n' "${qemu_pid:-none}" "${status}" >&2
     exit 1
   fi
 }

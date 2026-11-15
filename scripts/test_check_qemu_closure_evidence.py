@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -430,6 +431,13 @@ class EvidenceTests(unittest.TestCase):
             (repository / name).write_bytes(b"# edited after the run\n")
             with self.assertRaises(checker.EvidenceError):
                 checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
+
+    def test_producer_hashes_exactly_the_checker_provenance_inputs(self):
+        script = (ROOT / "scripts/qemu-closure-evidence.sh").read_text(encoding="utf-8")
+        match = re.search(r"^provenance_files=\(\n(.*?)\n\)$", script, re.M | re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(line.strip() for line in match.group(1).splitlines()),
+                         checker.PROVENANCE_FILES)
 
     def test_verdict_names_the_checker_and_the_commit(self):
         verdict = self.verdict()

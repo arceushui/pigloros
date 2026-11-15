@@ -439,7 +439,14 @@ def kernel_config_values(evidence: Evidence, name: str) -> dict[str, str]:
 
 
 def check_kernel_config(evidence: Evidence, certificate_path: str) -> dict:
-    """/proc/config.gz must be the store kernel's configuration, option for option."""
+    """/proc/config.gz must be the store kernel's configuration, option for option.
+
+    Exact equality holds by construction: nixpkgs' generate-config.pl resolves
+    the configuration with the same toolchain, so CONFIG_CC_VERSION_TEXT and
+    the other toolchain-derived options are already final in the configfile.
+    The kernel build symlinks that configfile as .config before building, and
+    IKCONFIG embeds what it built from. Any drift fails closed.
+    """
     values = kernel_config_values(evidence, "guest/kernel-config")
     if values != kernel_config_values(evidence, "host/kernel-config"):
         raise EvidenceError("the running kernel's configuration differs from the store kernel's")
