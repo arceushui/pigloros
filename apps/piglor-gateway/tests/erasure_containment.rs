@@ -14,16 +14,16 @@ use pos_core::{
     ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceInputV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
     ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
+    ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
 };
 use pos_runtime::{
-    ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1, ErasureExecutionHostV1,
+    ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
+    ErasureExecutionHostV1,
 };
 use pos_store::StoreConfig;
 use std::collections::BTreeMap;
@@ -151,35 +151,35 @@ fn freeze_evidence_fixture(
 #[derive(Default)]
 struct HealthAuthority;
 
-impl ErasureFreezeAuthorizationVerifierV1 for HealthAuthority {
-    fn validate_freeze_authorization(
+impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
+    fn validate_freeze_authorization_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         authorization.verify_admission_body_binding(admission)
     }
-}
 
-impl ErasureRecoveryAuthorizationVerifierV1 for HealthAuthority {
-    fn validate_scope_extension(
+    fn validate_scope_extension_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
-    fn validate_administrative_resolution(
+    fn validate_administrative_resolution_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
-}
 
-impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
     fn verified_topology_observation(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -190,12 +190,17 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
         )))
     }
 
-    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+    fn authenticate(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
     fn admit_authorization(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
@@ -207,6 +212,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_corrected_submission(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: &ErasureRequestV1,
         _correction: &ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -215,6 +221,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_atomic_freeze(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -266,6 +273,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
@@ -273,6 +281,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -281,6 +290,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn resolve_fork_child_scope(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _parent: TimelineId,
         _child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -289,6 +299,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn resolve_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
@@ -305,6 +316,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_administrative_resolution(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
@@ -312,6 +324,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn dispatch_destruction(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
@@ -320,6 +333,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_attempt(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &pos_core::ErasureRetryAdmissionV1,
     ) -> Result<pos_core::ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
         Ok(pos_core::ErasureAttemptQuotaReservationV1::new(
@@ -330,12 +344,17 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
 
     fn admit_acknowledgement(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    fn admit_receipt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 }

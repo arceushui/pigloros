@@ -174,6 +174,7 @@ mod gateway_mode_binding;
 #[doc(hidden)]
 pub mod interval_test_support;
 mod local_cut_owner;
+mod local_erasure;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
 // builds expose no Plugin admission surface.
@@ -642,6 +643,47 @@ const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             "CHECK (subject_digest IS NULL OR length(subject_digest) = 32)",
             "CHECK (length(effect_cbor) <= 16777216)",
             "UNIQUE (subject_digest)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "erasure_store_identity",
+        columns_query: "PRAGMA table_info(erasure_store_identity)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "singleton",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "identity",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (singleton = 1)", "CHECK (length(identity) = 32)"],
+    },
+    SqliteSchemaTable {
+        name: "erasure_retained_objects",
+        columns_query: "PRAGMA table_info(erasure_retained_objects)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "reference_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "tag",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(reference_digest) = 32)",
+            "CHECK (length(tag) BETWEEN 2 AND 8)",
         ],
     },
 ];
@@ -9967,6 +10009,46 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         self.erasure_inventory_data_version = version_after;
         self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
+    }
+
+    fn erasure_authority_snapshot_with_limits(
+        &mut self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+        self.local_erasure_authority_snapshot(limits)
+    }
+
+    fn retain_erasure_object(
+        &mut self,
+        canonical: &[u8],
+        max_bytes: usize,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_retain(canonical, max_bytes)
+    }
+
+    fn commit_local_owner_effect(
+        &mut self,
+        effect: pos_core::LocalOwnerEffectV1,
+        elo1: &[u8],
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        self.local_erasure_commit_owner_effect(effect, elo1)
+    }
+
+    fn erasure_store_identity(&mut self) -> Result<Option<Hash>, ErasureErrorV1> {
+        self.local_erasure_store_identity()
+    }
+
+    fn init_erasure_store_identity(&mut self, id: Hash) -> Result<Hash, ErasureErrorV1> {
+        self.local_erasure_init_store_identity(id)
+    }
+
+    fn sweep_unreferenced_erasure_objects(
+        &mut self,
+        tags: &[&str],
+        keep: &[ErasureReferenceV1],
+        max: usize,
+    ) -> Result<usize, ErasureErrorV1> {
+        self.local_erasure_sweep(tags, keep, max)
     }
 
     fn begin_protected_effect_interval(

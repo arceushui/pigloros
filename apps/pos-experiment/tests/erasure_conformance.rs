@@ -20,18 +20,30 @@ use pos_core::erasure::{
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureAuthorizationDecisionV1,
     ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureHostErrorV1, ErasureInventoryResultV1,
     ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureVerifiedTopologyObservationV1,
+    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureVerifiedTopologyObservationV1,
 };
-use pos_core::{CanonicalBytes, EntityId, EventDraft, Kind, Seq, TimelineId, TimelineMeta};
+use pos_core::{
+    CanonicalBytes, EntityId, ErasureAuthoritySnapshotV1, ErasurePersistenceInventorySnapshotV1,
+    EventDraft, Kind, Seq, TimelineId, TimelineMeta,
+};
 use pos_experiment::erasure_conformance::{
     case_obligations, ErasureCaseCatalogueV1, ErasureCaseDigestV1, ErasureCaseErrorV1,
     ErasureCaseRecordV1, ErasureCaseRunV1, ErasureCaseV1,
 };
-use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureHostStatusV1};
+use pos_runtime::{
+    ErasureAuthoritySnapshotViewV1, ErasureCoordinatorAuthorityV1, ErasureHostStatusV1,
+};
 use pos_store::StoreConfig;
 use serde_json::{json, Value};
+
+/// An empty authority view for calling an authority directly.
+fn view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+    ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+        .and_then(|inventory| ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None))
+        .map(ErasureAuthoritySnapshotViewV1::new)
+}
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -706,7 +718,7 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         ),
     ] {
         assert_eq!(
-            authority.admit_authorization(request, digest(81), decision),
+            authority.admit_authorization(&view()?, request, digest(81), decision),
             expected
         );
     }
@@ -720,8 +732,14 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         admission_provenance: digest(85),
     })
     .map_err(fail)?;
-    assert_eq!(authority.validate_scope_extension(&extension), Ok(()));
-    assert_eq!(authority.admit_scope_extension(&extension), Ok(()));
+    assert_eq!(
+        authority.validate_scope_extension_with_view(&view()?, &extension),
+        Ok(())
+    );
+    assert_eq!(
+        authority.admit_scope_extension(&view()?, &extension),
+        Ok(())
+    );
     let resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: conflicted,
@@ -738,12 +756,17 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         })
         .map_err(fail)?;
     assert_eq!(
-        authority.validate_administrative_resolution(&resolution),
+        authority.validate_administrative_resolution_with_view(&view()?, &resolution),
         Ok(())
     );
     let child = TimelineMeta::root("erasure-fork-candidate");
     assert_eq!(
-        authority.verified_topology_observation_for_candidate(digest(91), digest(92), &child),
+        authority.verified_topology_observation_for_candidate(
+            &view()?,
+            digest(91),
+            digest(92),
+            &child
+        ),
         Ok(Some(ErasureVerifiedTopologyObservationV1::new(
             digest(92),
             Vec::new(),
@@ -752,7 +775,7 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         "before the freeze a Fork candidate is known and unaffected"
     );
     assert_eq!(
-        authority.resolve_fork_child_scope(child.id, &child),
+        authority.resolve_fork_child_scope(&view()?, child.id, &child),
         Ok(catalogue.scope_member.reference())
     );
     let admission = ErasureForkAdmissionInputV1 {
@@ -762,11 +785,11 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         child,
     };
     assert_eq!(
-        authority.admit_fork_scope_extension(&extension, &admission),
+        authority.admit_fork_scope_extension(&view()?, &extension, &admission),
         Ok(())
     );
     assert_eq!(
-        authority.admit_administrative_resolution(&resolution),
+        authority.admit_administrative_resolution(&view()?, &resolution),
         Ok(())
     );
     Ok(())

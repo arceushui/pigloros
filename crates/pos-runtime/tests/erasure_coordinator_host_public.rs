@@ -12,24 +12,32 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
-    ErasureCorrectionProvenanceInputV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
-    ErasureVerifiedTopologyObservationV1, EventDraft, EventReadBounds, Kind, SeqRange, TimelineId,
-    TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthoritySnapshotV1,
+    ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
+    ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
+    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistenceInventorySnapshotV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, EventDraft, EventReadBounds,
+    Kind, SeqRange, TimelineId, TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
-    ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
-    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+    ClosedErasureCoordinatorAuthorityV1, ErasureAuthorityReadViewV1,
+    ErasureAuthoritySnapshotViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
+    ErasureExecutionHostV1, ErasureHostStatusV1,
 };
+
+/// An empty authority view for calling an authority directly.
+fn view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
+    ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+        .and_then(|inventory| ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None))
+        .map(ErasureAuthoritySnapshotViewV1::new)
+}
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -283,19 +291,19 @@ impl TestAuthority {
     }
 }
 
-impl ErasureFreezeAuthorizationVerifierV1 for TestAuthority {
-    fn validate_freeze_authorization(
+impl ErasureCoordinatorAuthorityV1 for TestAuthority {
+    fn validate_freeze_authorization_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         authorization.verify_admission_body_binding(admission)
     }
-}
 
-impl ErasureRecoveryAuthorizationVerifierV1 for TestAuthority {
-    fn validate_scope_extension(
+    fn validate_scope_extension_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         (!self.deny_scope_extension.load(Ordering::Acquire))
@@ -303,17 +311,17 @@ impl ErasureRecoveryAuthorizationVerifierV1 for TestAuthority {
             .ok_or(ErasureErrorV1::Unauthorized)
     }
 
-    fn validate_administrative_resolution(
+    fn validate_administrative_resolution_with_view(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
-}
 
-impl ErasureCoordinatorAuthorityV1 for TestAuthority {
     fn verified_topology_observation(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -322,6 +330,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn verified_topology_observation_for_candidate(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
         candidate: &TimelineMeta,
@@ -334,7 +343,11 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             .map(Some)
     }
 
-    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+    fn authenticate(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &ErasureRequestV1,
+    ) -> Result<(), ErasureErrorV1> {
         (!self.deny_authentication.load(Ordering::Acquire))
             .then_some(())
             .ok_or(ErasureErrorV1::Unauthorized)
@@ -342,6 +355,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_authorization(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
         decision: ErasureAuthorizationDecisionV1,
@@ -355,6 +369,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_corrected_submission(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: &ErasureRequestV1,
         _correction: &pos_core::ErasureCorrectionProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -366,6 +381,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_atomic_freeze(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
@@ -436,6 +452,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
@@ -443,6 +460,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_fork_scope_extension(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _extension: &ErasureScopeExtensionV1,
         _input: &ErasureForkAdmissionInputV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -451,6 +469,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn resolve_fork_child_scope(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _parent: TimelineId,
         child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -471,12 +490,16 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn resolve_fork_scope_extension(
         &self,
+        view: &dyn ErasureAuthorityReadViewV1,
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
         if self.use_closed_scope_resolution.load(Ordering::Acquire) {
-            return ClosedErasureCoordinatorAuthorityV1
-                .resolve_fork_scope_extension(requirement, input);
+            return ClosedErasureCoordinatorAuthorityV1.resolve_fork_scope_extension(
+                view,
+                requirement,
+                input,
+            );
         }
         if self.fail_fork_scope_extension.load(Ordering::Acquire) {
             return Err(ErasureErrorV1::ProvenanceMissing);
@@ -494,6 +517,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_administrative_resolution(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         self.allow_administrative_resolution
@@ -504,6 +528,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn dispatch_destruction(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _request: ErasureReferenceV1,
         _commands: &[ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
@@ -515,6 +540,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_attempt(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
         self.allow_attempt
@@ -528,6 +554,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn admit_acknowledgement(
         &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
         _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         self.allow_ack
@@ -536,7 +563,11 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             .ok_or(ErasureErrorV1::Unauthorized)
     }
 
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+    fn admit_receipt(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _input: &ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
         self.allow_receipt
             .load(Ordering::Acquire)
             .then_some(())
@@ -2212,7 +2243,7 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
 
     let authority = ClosedErasureCoordinatorAuthorityV1;
     assert_eq!(
-        authority.verified_topology_observation(reference(1), reference(2)),
+        authority.verified_topology_observation(&view()?, reference(1), reference(2)),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -2224,11 +2255,12 @@ fn closed_authority_rejects_request_operations() -> Result<(), Box<dyn std::erro
     let request = test_stage("construct closed-authority request", persistence_request())?;
     let request_reference = request.reference();
     assert_eq!(
-        authority.authenticate(&request),
+        authority.authenticate(&view()?, &request),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
         authority.admit_authorization(
+            &view()?,
             request_reference,
             reference(230),
             ErasureAuthorizationDecisionV1::Authorized,
@@ -2245,7 +2277,7 @@ fn closed_authority_rejects_request_operations() -> Result<(), Box<dyn std::erro
         }),
     )?;
     assert_eq!(
-        authority.admit_corrected_submission(&request, &correction),
+        authority.admit_corrected_submission(&view()?, &request, &correction),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -2292,7 +2324,11 @@ fn closed_authority_rejects_freeze_and_scope_operations() -> Result<(), Box<dyn 
         }),
     )?;
     assert_eq!(
-        authority.validate_freeze_authorization(&freeze_admission, &freeze_authorization),
+        authority.validate_freeze_authorization_with_view(
+            &view()?,
+            &freeze_admission,
+            &freeze_authorization
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     let extension = test_stage(
@@ -2323,23 +2359,23 @@ fn closed_authority_rejects_freeze_and_scope_operations() -> Result<(), Box<dyn 
         child: pos_core::TimelineMeta::root("closed-authority-child"),
     };
     assert_eq!(
-        authority.admit_atomic_freeze(request_reference, &transition),
+        authority.admit_atomic_freeze(&view()?, request_reference, &transition),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.admit_scope_extension(&extension),
+        authority.admit_scope_extension(&view()?, &extension),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.admit_fork_scope_extension(&extension, &fork_input),
+        authority.admit_fork_scope_extension(&view()?, &extension, &fork_input),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.resolve_fork_child_scope(fork_input.child.id, &fork_input.child),
+        authority.resolve_fork_child_scope(&view()?, fork_input.child.id, &fork_input.child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.validate_scope_extension(&extension),
+        authority.validate_scope_extension_with_view(&view()?, &extension),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -2390,11 +2426,11 @@ fn closed_authority_rejects_retry_and_acknowledgement_operations(
         }),
     )?;
     assert_eq!(
-        authority.admit_attempt(&retry),
+        authority.admit_attempt(&view()?, &retry),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.admit_acknowledgement(&acknowledgement),
+        authority.admit_acknowledgement(&view()?, &acknowledgement),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -2450,19 +2486,19 @@ fn closed_authority_rejects_receipt_and_administrative_operations(
         receipt_digest: reference(0),
     };
     assert_eq!(
-        authority.admit_receipt(&receipt),
+        authority.admit_receipt(&view()?, &receipt),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.admit_administrative_resolution(&resolution),
+        authority.admit_administrative_resolution(&view()?, &resolution),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.validate_administrative_resolution(&resolution),
+        authority.validate_administrative_resolution_with_view(&view()?, &resolution),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        authority.dispatch_destruction(request_reference, &[]),
+        authority.dispatch_destruction(&view()?, request_reference, &[]),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
