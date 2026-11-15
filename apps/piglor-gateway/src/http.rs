@@ -2234,6 +2234,30 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["events"][0]["seq"], 2);
+        // Hex digits are case-insensitive: an uppercase digest names the
+        // same generation and resumes at the same position.
+        let mut parts = cursor.split('.').map(str::to_owned).collect::<Vec<_>>();
+        parts[1] = parts[1].to_ascii_uppercase();
+        assert_ne!(parts[1], cursor.split('.').nth(1).test_ok());
+        let uppercase = parts.join(".");
+        let (status, upper) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={uppercase}&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upper["events"], second["events"]);
+        // A repeated cursor is malformed even when both copies are valid.
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&cursor={cursor}&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
         assert!(gateway
@@ -2700,6 +2724,23 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(missing["detail"], "authorization unavailable");
+
+        // An out-of-range page limit is malformed input, refused before any
+        // actor is authenticated or denied.
+        let wrong_actor = EntityId::new().to_string();
+        for limit in [0, MAX_EVENTS_PER_POLL + 1] {
+            let uri = format!("/v1/timelines/{id}/events?limit={limit}");
+            let (status, _) = json_request(app.clone(), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let request = Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header("x-piglor-actor-entity", &wrong_actor)
+                .body(Body::empty())
+                .test_ok();
+            let response = app.clone().oneshot(request).await.test_ok();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
 
         let request = Request::builder()
             .method("GET")
