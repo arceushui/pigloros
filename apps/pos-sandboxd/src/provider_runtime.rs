@@ -16,7 +16,7 @@
 //!    `min(BHC1 limit 13, 256)` slots.
 //! 6. **Key.** The SPI1 key file's public key must be the TRS1
 //!    runtime-attestation key that the SPM1 key ID names and the current
-//!    RVS1 does not revoke. It becomes the one R9 runtime-attestation
+//!    RVS1 does not revoke, as admission resolved it. It becomes the one R9 runtime-attestation
 //!    signer.
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
@@ -29,7 +29,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use ed25519_dalek::VerifyingKey;
-use pos_reference::sandbox_provider_protocol::SandboxTrustRole;
 use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
@@ -41,7 +40,7 @@ use crate::{KeyFileReleaseSigner, ProviderInstallation, ProviderInstallationErro
 /// The process's own executable, followed through its magic link.
 const SELF_EXECUTABLE: &str = "/proc/self/exe";
 /// The BHC1 limit that bounds how many attempts admission can use.
-const ATTEMPT_LIMIT_ID: usize = 13;
+const ATTEMPT_LIMIT_ID: u8 = 13;
 /// The most attempts one runtime holds (ADR-069 §4.1, RCC1).
 const MAX_SLOTS: u64 = 256;
 
@@ -61,10 +60,6 @@ pub enum ProviderStartupError {
     /// Step 5: the attempt range holds fewer slots than admission can use.
     #[error("the attempt range holds fewer slots than admission can use")]
     SlotCount,
-    /// Step 6: SPM1 names no runtime-attestation key that TRS1 holds and
-    /// RVS1 leaves active.
-    #[error("the runtime-attestation key is not admitted")]
-    RuntimeKeyNotAdmitted,
 }
 
 /// The admitted provider, its SPI1 values and its runtime-attestation
@@ -116,12 +111,12 @@ impl ProviderRuntimeAuthority {
             .manifest()
             .runtime_attestation_key_id
             .clone();
-        let (runtime_key, signer) = admitted_runtime_key(&admitted).and_then(|runtime_key| {
-            RuntimeKey::open(&installation)
-                .and_then(|key| key.require_admitted(&runtime_key))
-                .map(|key| (runtime_key, key.into_signer(key_id)))
-                .map_err(ProviderStartupError::from)
-        })?;
+        // Admission already resolved the TRS1 role-3 key that the SPM1 key
+        // ID names and RVS1 leaves active.
+        let runtime_key = *admitted.provider().runtime_attestation_key();
+        let signer = RuntimeKey::open(&installation)
+            .and_then(|key| key.require_admitted(&runtime_key))?
+            .into_signer(key_id);
         Ok(Self {
             admitted,
             installation,
@@ -171,29 +166,13 @@ fn runs_admitted_binary(admitted: &AdmittedSelectorProvider, executable: &Path) 
         .is_some_and(|(held, running)| held.dev() == running.dev() && held.ino() == running.ino())
 }
 
-/// `min(BHC1 limit 13, 256)`. BHC1 holds every limit in ID order, so a
-/// missing limit can only require the most.
+/// `min(BHC1 limit 13, 256)`.
 fn required_slots(admitted: &AdmittedSelectorProvider) -> u64 {
     admitted
         .provider()
         .broker_hard_caps()
-        .get(ATTEMPT_LIMIT_ID)
-        .map_or(MAX_SLOTS, |limit| limit.value)
-        .min(MAX_SLOTS)
-}
-
-/// The TRS1 role-3 key that the SPM1 key ID names, unrevoked by RVS1.
-fn admitted_runtime_key(
-    admitted: &AdmittedSelectorProvider,
-) -> Result<VerifyingKey, ProviderStartupError> {
-    let bootstrap = admitted.bootstrap();
-    bootstrap
-        .revocation()
-        .active_key(
-            bootstrap.trust(),
-            &admitted.provider().manifest().runtime_attestation_key_id,
-            SandboxTrustRole::ProviderRuntimeAttestation,
-        )
-        .ok()
-        .ok_or(ProviderStartupError::RuntimeKeyNotAdmitted)
+        .iter()
+        .filter(|limit| limit.limit_id == ATTEMPT_LIMIT_ID)
+        .map(|limit| limit.value)
+        .fold(MAX_SLOTS, u64::min)
 }

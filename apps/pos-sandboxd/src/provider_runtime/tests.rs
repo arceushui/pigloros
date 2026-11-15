@@ -45,14 +45,16 @@ fn spi1(ipv4_length: u64) -> TestResult<Vec<u8>> {
         Value::Array([500, 1000, 1500, 3000, 5000].map(int).to_vec()),
         Value::Text(KEY_FILE.to_owned()),
     ]);
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&unsigned, &mut encoded)?;
     let mut preimage = b"PiglorOS.SPI1.v1\0".to_vec();
-    preimage.extend(encoded);
+    preimage.extend(encode(&unsigned)?);
     let digest = Value::Bytes(blake3::hash(&preimage).as_bytes().to_vec());
-    let mut document = Vec::new();
-    ciborium::into_writer(&Value::Array(vec![unsigned, digest]), &mut document)?;
-    Ok(document)
+    encode(&Value::Array(vec![unsigned, digest]))
+}
+
+fn encode(value: &Value) -> TestResult<Vec<u8>> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded)?;
+    Ok(encoded)
 }
 
 /// Write `bytes` to `path` with `mode`.
@@ -218,5 +220,17 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
         ))
     );
     drop(staged);
+    for (error, text) in [
+        (
+            ProviderStartupError::SelfBinding,
+            "the running executable is not the admitted provider binary",
+        ),
+        (
+            ProviderStartupError::SlotCount,
+            "the attempt range holds fewer slots than admission can use",
+        ),
+    ] {
+        assert_eq!(error.to_string(), text);
+    }
     Ok(())
 }
