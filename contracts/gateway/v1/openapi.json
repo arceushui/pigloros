@@ -859,7 +859,7 @@
             }
           },
           "200": {
-            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "description": "An exact retry (the same `Idempotency-Key` and request): the revision it committed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -889,7 +889,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
+            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -899,7 +899,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict` or `incompatible-profile`.",
+            "description": "`idempotency-conflict`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -929,7 +929,7 @@
             }
           },
           "422": {
-            "description": "`admission-rejected`: governance, composition or Plugin admission failed.",
+            "description": "`admission-rejected`: a plugin the deployment does not bundle at exactly that version, a rule whose first segment names no requested plugin, or a `governance_ref` that names no governance record of the host.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -940,6 +940,16 @@
           },
           "default": {
             "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }
@@ -955,7 +965,7 @@
         "tags": [
           "scenario-room"
         ],
-        "description": "Draft (#303): Derive the next immutable revision of a Scenario Room from a parent revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Draft (#303): Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (ADR-041 sections 5, 7 and 9). Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
         "parameters": [
           {
             "$ref": "#/components/parameters/RoomId"
@@ -986,7 +996,7 @@
             }
           },
           "200": {
-            "description": "An exact retry or an identical descriptor: the existing revision.",
+            "description": "An exact retry, or a proposal identical to the revision already derived from `parent_revision` (ADR-041 section 7): the existing revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1016,7 +1026,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` or `consent-invalid`.",
+            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1026,7 +1036,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, `append-conflict` (stale parent) or `incompatible-profile`.",
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1056,7 +1066,7 @@
             }
           },
           "404": {
-            "description": "`not-found-or-unavailable`.",
+            "description": "`not-found-or-unavailable`: no such room or `parent_revision`, identical for a missing and a protected room.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1066,7 +1076,7 @@
             }
           },
           "422": {
-            "description": "`admission-rejected`.",
+            "description": "`admission-rejected`, as for `createScenarioRoom`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1077,6 +1087,16 @@
           },
           "default": {
             "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }
@@ -1144,6 +1164,26 @@
           },
           "default": {
             "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }
@@ -4208,7 +4248,7 @@
         "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the correlation ID and hashes are server-owned and cannot be supplied. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`).",
+        "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the room ID, revision, correlation ID and hashes are server-owned and cannot be supplied. The server admits the lists sorted (plugins by `plugin_id`, rules by `rule_id`, participants by `entity_id`, initial conditions by `entity_id` then `dimension`) and refuses a duplicate key, a `plugin_id` containing `.`, a `rule_id` whose first `.`-separated segment names no requested plugin, and an initial condition whose `entity_id` is not a participant. Every plugin must be bundled by the deployment at exactly its `version`. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`), measured on the admitted `room.revision.v1` payload.",
         "required": [
           "schema_version",
           "tick_duration_ms",
@@ -4399,7 +4439,7 @@
         "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "The admitted ADR-041 descriptor, the payload of one `room.revision.v1` Event.",
+        "description": "The admitted ADR-041 descriptor: the payload of one `room.revision.v1` Event, encoded as the RFC 8785 bytes of this object. `plugin_composition_hash`, `rule_set_hash` and `descriptor_hash` are defined by the Redmine #303 amendment of ADR-041; a client recomputes `rule_set_hash` and `descriptor_hash` from the members.",
         "required": [
           "room_id",
           "revision",
