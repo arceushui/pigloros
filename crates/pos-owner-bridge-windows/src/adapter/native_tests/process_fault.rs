@@ -4157,6 +4157,44 @@ enum EarlyRendererPhase {
     AwaitingLoad,
 }
 
+const EARLY_SNAPSHOT_REFUSED: &str = "renderer snapshot unavailable or ambiguous";
+const RENDERER_START_MISSED: &str =
+    "renderer load phase ended or timed out before the renderer started";
+
+/// WebView2 starts the main renderer asynchronously after navigation
+/// commits, so a load-phase snapshot can precede it. Only that transient
+/// absence is resampled; a navigating snapshot is classified as taken.
+fn renderer_start_pending(phase: EarlyRendererPhase, presence: crate::RendererPresence) -> bool {
+    matches!(
+        (phase, presence),
+        (
+            EarlyRendererPhase::AwaitingLoad,
+            crate::RendererPresence::Absent
+        )
+    )
+}
+
+#[test]
+fn only_a_load_phase_absence_waits_for_the_renderer() {
+    use crate::RendererPresence::{Absent, Unique};
+    assert!(renderer_start_pending(
+        EarlyRendererPhase::AwaitingLoad,
+        Absent
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::AwaitingLoad,
+        Unique
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::Navigating,
+        Absent
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::Navigating,
+        Unique
+    ));
+}
+
 #[test]
 fn native_early_renderer_classification_and_faults() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
@@ -4221,11 +4259,8 @@ impl Fixture {
             ));
             if reached.is_none() && step_pending(&step) {
                 if let Some(mark) = self.early_renderer_state(driver, phase) {
-                    let presence = pass(
-                        self.surface
-                            .early_renderer_presence()
-                            .map_err(|()| "renderer snapshot unavailable or ambiguous"),
-                    );
+                    let presence =
+                        pass(self.settled_early_presence(driver, phase, mark, &SystemClock));
                     // Recheck the phase after the complete pair of snapshots.
                     assert_eq!(
                         self.early_renderer_state(driver, phase),
@@ -4294,6 +4329,32 @@ impl Fixture {
                 }
                 Step::Done => return Err("early renderer driver ended without result".into()),
                 Step::Pending => pass(readiness::pump(&self.surface)),
+            }
+        }
+    }
+
+    /// Snapshot renderer presence, resampling a transient load-phase absence
+    /// while the driver holds the same mark (see `renderer_start_pending`).
+    fn settled_early_presence(
+        &mut self,
+        driver: &CeremonyDriver,
+        phase: EarlyRendererPhase,
+        mark: ProcessFaultMark,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> Result<crate::RendererPresence, Box<dyn std::error::Error>> {
+        loop {
+            let presence = self
+                .surface
+                .early_renderer_presence()
+                .map_err(|()| EARLY_SNAPSHOT_REFUSED)?;
+            if !renderer_start_pending(phase, presence) {
+                return Ok(presence);
+            }
+            readiness::pump(&self.surface)?;
+            if clock.now() >= self.deadline
+                || self.early_renderer_state(driver, phase) != Some(mark)
+            {
+                return Err(RENDERER_START_MISSED.into());
             }
         }
     }
