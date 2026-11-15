@@ -262,8 +262,9 @@ pub fn provision_local_principal_from_credentials(
                     .map_err(io::Error::other)
                     .and_then(|mut store| {
                         crate::mode_profile::attach_offline_writer_v1(&mut store)
+                            .and_then(|mode| admit_in_mode(&provision, mode))
                             .map_err(io::Error::other)
-                            .and_then(|_| {
+                            .and_then(|()| {
                                 provision_local_principal(&mut store, &provision)
                                     .map(|_| ())
                                     .map_err(io::Error::other)
@@ -273,6 +274,20 @@ pub fn provision_local_principal_from_credentials(
                 provisioned
             })
     })
+}
+
+/// ADR-134 §4 and D6: a store bound to a mode without network refuses a
+/// Principal grant that names the network capability.
+#[cfg(target_os = "linux")]
+fn admit_in_mode(
+    provision: &LocalPrincipalProvisionV1,
+    mode: crate::mode_profile::GatewayModeProfileIdV1,
+) -> Result<(), crate::mode_profile::GatewayModeErrorV1> {
+    if crate::authorization::scope_names(provision.grant.scope(), GatewayOperationV1::NETWORK) {
+        crate::mode_profile::refuse_air_gapped(mode)
+    } else {
+        Ok(())
+    }
 }
 
 /// Compose the Local Principal recorded in `store` as the Gateway
@@ -1422,6 +1437,45 @@ mod tests {
                 "capability-granted",
             )?
         );
+        Ok(())
+    }
+
+    /// ADR-134 §4 and D6: an Air-Gapped store refuses a Principal network
+    /// grant when it is provisioned and when a Gateway composes over it, so
+    /// an Air-Gapped Session never lists it.
+    #[tokio::test]
+    async fn an_air_gapped_store_refuses_the_principal_network_capability() -> TestResult {
+        use crate::mode_profile::GatewayModeProfileIdV1::{AirGapped, Local};
+        let networked = provision([
+            GatewayOperationV1::READ_SESSION,
+            GatewayOperationV1::NETWORK,
+        ])?;
+        let reader = provision([GatewayOperationV1::READ_SESSION])?;
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                admit_in_mode(&networked, AirGapped),
+                Err(crate::mode_profile::GatewayModeErrorV1::RefusedInMode)
+            );
+            assert_eq!(admit_in_mode(&networked, Local), Ok(()));
+            assert_eq!(admit_in_mode(&reader, AirGapped), Ok(()));
+        }
+        let refused = read_session(&networked, (AirGapped, &[]), false, Some(actor()?)).await;
+        assert!(
+            refused.is_err_and(|error| error.to_string().contains("refuses this operation")),
+            "an Air-Gapped composition refuses a networked Principal"
+        );
+        let (status, session) =
+            read_session(&networked, (Local, &[]), false, Some(actor()?)).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            session["grants"],
+            json!(["gateway.network.v1", "session.read"])
+        );
+        let (status, session) =
+            read_session(&reader, (AirGapped, &[]), false, Some(actor()?)).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session["grants"], json!(["session.read"]));
         Ok(())
     }
 

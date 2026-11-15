@@ -43,6 +43,16 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   request. It requires the `session.read` grant like any protected operation.
   `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on;
   a client accepts both.
+- Open identifiers and server invariants. Frozen with Session, `ExecutionProfileId`,
+  `GatewayModeProfileId`, `mode`, `execution_profile.reason` and `network_grants` are bounded,
+  pattern-checked strings rather than enumerations, so a later v1 revision can add a profile,
+  mode, reason or operator grant. What the Gateway emits today is a server invariant stated in
+  each schema: the profile families of rule 3, the two modes `local` and `air-gapped` of
+  `gateway-mode-local-v1` and `gateway-mode-air-gapped-v1`, the reason `not-installed`, and the
+  operator grants `owntracks` and `public-read-only` (none in Air-Gapped mode). A client handles
+  a value it does not know as unknown and never fails on it. `execution_profile.state`,
+  `provenance.origin` and the Session `network` posture are deliberately closed in v1, like
+  every other response enumeration except the problem `code`.
 - `mode_profile` is the Gateway execution-mode profile (GMP1, ADR-134) the resource was produced
   under: its ID (`gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`), mode, digest and the
   store `binding_epoch` recorded in the producing commit's evidence. Only `Session` reports the
@@ -151,9 +161,11 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    profile the deployment cannot serve is `409 incompatible-profile`; a Local deployment never
    reports or serves an Air-Gapped profile. The servable sets are Local {`replay-v1`,
    `deterministic-local-v1`, `live-local-v1`} and Air-Gapped {`replay-v1`,
-   `deterministic-air-gapped-v1`, plus the live Air-Gapped family once #1372 is accepted}; they
-   also constrain an `installed` `execution_profile.profile_id` at envelope level. A profile in
-   the set is served only once its EPF1 is installed (ADR-134 §5):
+   `deterministic-air-gapped-v1`, plus the live Air-Gapped family once #1372 is accepted}. They
+   are a server invariant, not a schema rule: an `installed` `execution_profile.profile_id` is
+   always in the servable set of the resource's `mode_profile.mode`, while the schema keeps the
+   identifier open so a later family stays within v1. A profile in the set is served only once
+   its EPF1 is installed (ADR-134 §5):
 
    | Requested ADR-058 profile | Local | Air-Gapped | Served when |
    |---|---|---|---|

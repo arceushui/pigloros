@@ -3545,19 +3545,19 @@
       },
       "ExecutionProfileId": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile-id",
-        "enum": [
-          "replay-v1",
-          "deterministic-local-v1",
-          "deterministic-air-gapped-v1",
-          "live-local-v1"
-        ],
-        "description": "An ADR-058 execution profile family."
+        "type": "string",
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*-v[1-9][0-9]*$",
+        "not": {
+          "pattern": "^gateway-mode-"
+        },
+        "description": "An ADR-058 execution profile family: a versioned lower-case slug, never in the `gateway-mode-` namespace of `GatewayModeProfileId`. The set is open so a later family (such as the live Air-Gapped family of #1372) stays within v1; a client handles an identifier it does not know as an unknown profile. Server invariant in v1: the Gateway names only `replay-v1`, `deterministic-local-v1`, `deterministic-air-gapped-v1` and `live-local-v1`, and a Local deployment never reports an Air-Gapped profile (the servable sets of README rule 3)."
       },
       "ExecutionProfile": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile",
         "type": "object",
         "additionalProperties": false,
-        "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Until #461 installs an EPF1 every Gateway resource reports `state: unavailable` with `reason: not-installed`. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; the resource envelope constrains `profile_id` to the servable set of its mode.",
+        "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Until #461 installs an EPF1 every Gateway resource reports `state: unavailable` with `reason: not-installed`. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; `profile_id` is always in the servable set of the resource's mode (a server invariant, README rule 3).",
         "required": [
           "profile_kind",
           "state"
@@ -3570,7 +3570,8 @@
             "enum": [
               "installed",
               "unavailable"
-            ]
+            ],
+            "description": "`installed` or `unavailable`. The set is deliberately closed in v1."
           },
           "profile_id": {
             "$ref": "urn:pigloros:gateway:v1:schema:execution-profile-id"
@@ -3579,7 +3580,10 @@
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
           },
           "reason": {
-            "const": "not-installed"
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "description": "Why no EPF1 is reported. Open within v1; server invariant: `not-installed` is the only reason the Gateway emits."
           }
         },
         "allOf": [
@@ -3641,11 +3645,10 @@
       },
       "GatewayModeProfileId": {
         "$id": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id",
-        "enum": [
-          "gateway-mode-air-gapped-v1",
-          "gateway-mode-local-v1"
-        ],
-        "description": "A Gateway execution-mode profile (GMP1, ADR-134 §1). Its namespace is disjoint from the ADR-058 `ExecutionProfileId`: neither is ever accepted where the other is expected. The profiles are composition-verified, never installed, qualified or a reproducibility claim; their public declaration is `execution-mode-profiles.json`."
+        "type": "string",
+        "maxLength": 64,
+        "pattern": "^gateway-mode-[a-z0-9]+(-[a-z0-9]+)*-v[1-9][0-9]*$",
+        "description": "A Gateway execution-mode profile (GMP1, ADR-134 §1). Its `gateway-mode-` namespace is disjoint from the ADR-058 `ExecutionProfileId`: neither is ever accepted where the other is expected. The profiles are composition-verified, never installed, qualified or a reproducibility claim; their public declaration is `execution-mode-profiles.json`. The set is open, so an ADR-134 amendment may add a profile within v1. Server invariant in v1: the Gateway serves only `gateway-mode-local-v1` and `gateway-mode-air-gapped-v1`."
       },
       "ModeProfileIdentity": {
         "$id": "urn:pigloros:gateway:v1:schema:mode-profile-identity",
@@ -3666,10 +3669,10 @@
             "$ref": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id"
           },
           "mode": {
-            "enum": [
-              "local",
-              "air-gapped"
-            ]
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "description": "The serving mode the profile declares. Open within v1; server invariant: `local` for `gateway-mode-local-v1` and `air-gapped` for `gateway-mode-air-gapped-v1` (the pairing below), and no other mode."
           },
           "mode_profile_digest": {
             "$ref": "urn:pigloros:gateway:v1:schema:digest"
@@ -3794,14 +3797,13 @@
           "network_grants": {
             "type": "array",
             "uniqueItems": true,
-            "maxItems": 2,
+            "maxItems": 16,
             "items": {
-              "enum": [
-                "owntracks",
-                "public-read-only"
-              ]
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
             },
-            "description": "The operator's `--network-grant` values, sorted. Air-Gapped accepts none."
+            "description": "The operator's `--network-grant` values, sorted. Open within v1; server invariant: only `owntracks` and `public-read-only` exist, and Air-Gapped accepts none."
           },
           "network": {
             "enum": [
@@ -3857,7 +3859,8 @@
               "principal-authored",
               "host-derived",
               "imported-artifact"
-            ]
+            ],
+            "description": "The origin class of the provenance record. The set is deliberately closed in v1."
           }
         }
       },
@@ -3932,7 +3935,7 @@
       "ResourceEnvelope": {
         "$id": "urn:pigloros:gateway:v1:schema:resource-envelope",
         "type": "object",
-        "description": "The members every enveloped resource (Session and each Draft resource) carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the GMP1 `mode_profile` it was produced under (Session: the current binding), the EPF1-only `execution_profile` and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
+        "description": "The members every enveloped resource (Session and each Draft resource) carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the GMP1 `mode_profile` it was produced under (Session: the current binding), the EPF1-only `execution_profile` and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`. Server invariant: an `installed` `execution_profile.profile_id` is in the servable set of `mode_profile.mode` (README rule 3).",
         "required": [
           "schema_id",
           "id",
@@ -4011,73 +4014,6 @@
               "properties": {
                 "mode_profile": {
                   "$ref": "urn:pigloros:gateway:v1:schema:mode-profile"
-                }
-              }
-            }
-          },
-          {
-            "if": {
-              "properties": {
-                "mode_profile": {
-                  "properties": {
-                    "mode": {
-                      "const": "local"
-                    }
-                  },
-                  "required": [
-                    "mode"
-                  ]
-                }
-              },
-              "required": [
-                "mode_profile"
-              ]
-            },
-            "then": {
-              "properties": {
-                "execution_profile": {
-                  "properties": {
-                    "profile_id": {
-                      "enum": [
-                        "replay-v1",
-                        "deterministic-local-v1",
-                        "live-local-v1"
-                      ]
-                    }
-                  }
-                }
-              }
-            }
-          },
-          {
-            "if": {
-              "properties": {
-                "mode_profile": {
-                  "properties": {
-                    "mode": {
-                      "const": "air-gapped"
-                    }
-                  },
-                  "required": [
-                    "mode"
-                  ]
-                }
-              },
-              "required": [
-                "mode_profile"
-              ]
-            },
-            "then": {
-              "properties": {
-                "execution_profile": {
-                  "properties": {
-                    "profile_id": {
-                      "enum": [
-                        "replay-v1",
-                        "deterministic-air-gapped-v1"
-                      ]
-                    }
-                  }
                 }
               }
             }
@@ -4163,7 +4099,7 @@
       "Session": {
         "$id": "urn:pigloros:gateway:v1:schema:session",
         "type": "object",
-        "description": "The authenticated Principal's own session: its entities, effective grants, consent, the current execution mode (`mode_profile`, with the operator network grants and this Principal's network posture) and the EPF1 execution profile. `id` is the Principal's ID. `generation` is the authority generation: the head position of the Principal's recorded authority chain plus the head of its consent Timeline (0 when its grant binds none), so it advances on every grant, consent or revocation change and never uses wall time. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewaySession.v1` || 0x00 || the 16 Principal ID bytes || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on; a client accepts both.",
+        "description": "The authenticated Principal's own session: its entities, effective grants, consent, the current execution mode (`mode_profile`, with the operator network grants and this Principal's network posture) and the EPF1 execution profile. `id` is the Principal's ID. `generation` is the authority generation: the head position of the Principal's recorded authority chain plus the head of its consent Timeline (0 when its grant binds none), so it advances on every grant, consent or revocation change and never uses wall time. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewaySession.v1` || 0x00 || the 16 bytes of the 128-bit big-endian value of `id` decoded as a Crockford base32 ULID || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. The digest covers the Principal, the generation, the mode digest and the epoch only: the entities, grants and network grants move with the authority head and the binding epoch. `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on; a client accepts both.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -4214,7 +4150,7 @@
             "items": {
               "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
             },
-            "description": "The names of the operations and capabilities the Principal's recorded grant covers for the acting entity, sorted, as the host's own authority evaluator decides them; a client never supplies a trusted capability. The DomainKey `gateway.network.v1` is the Principal network capability (ADR-134 §4): it authorizes no operation in v1 and only decides the `mode_profile.network` disclosure; it is granted only through explicit-grant provisioning, never an operator flag."
+            "description": "The names of the operations and capabilities the Principal's recorded grant covers for the acting entity, sorted, as the host's own authority evaluator decides them; a client never supplies a trusted capability. The DomainKey `gateway.network.v1` is the Principal network capability (ADR-134 §4): it authorizes no operation in v1 and only decides the `mode_profile.network` disclosure; it is granted only through explicit-grant provisioning, never an operator flag. A listed name means the grant covers that capability, not that the operation will succeed: the operation may still be refused for its own reasons."
           },
           "consents": {
             "type": "array",
@@ -7386,6 +7322,20 @@
       "enforced_by": {
         "schema": [
           "/components/schemas/Export/properties/produced_under_mode_profiles/maxItems"
+        ]
+      }
+    },
+    "session_network_grants": {
+      "value": 16,
+      "unit": "items",
+      "scope": "structural",
+      "origin": "new",
+      "source": "chosen by #1362 (owner freeze decision): room for operator network grants beyond v1's two",
+      "surface": "served",
+      "direction": "response",
+      "enforced_by": {
+        "schema": [
+          "/components/schemas/SessionModeProfile/properties/network_grants/maxItems"
         ]
       }
     }
