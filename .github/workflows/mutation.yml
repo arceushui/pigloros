@@ -1,115 +1,59 @@
-# Diff-scoped mutation testing keeps new or changed logic covered without
-# turning the normal pull-request suite into a full-workspace mutation run.
+# Redmine #777 diagnostic branch only: crate-scoped mutation proofs for the
+# retrospective audit. This file is not proposed for the normal pull-request
+# gate. Omitting workflow_call makes an accidental PR from this branch fail closed.
 name: mutation
 
 on:
-  workflow_call:
   workflow_dispatch:
+    inputs:
+      package:
+        description: Owning Cargo package to mutate
+        required: true
+        type: string
+      files:
+        description: Optional space-separated source paths (each passed as --file)
+        required: false
+        default: ""
+        type: string
+      re:
+        description: Optional mutant-name regex (passed as --re)
+        required: false
+        default: ""
+        type: string
+      per_shard:
+        description: Target mutants per shard (sharding only; limits unchanged)
+        required: false
+        default: "60"
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: mutation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: mutation-777-${{ inputs.package }}-${{ inputs.files }}-${{ inputs.re }}
+  cancel-in-progress: false
 
-# Installing nightly alone does not override the repository's stable pin.
-# Baseline and mutant subprocesses must select the same libtest harness.
 env:
-  # Match ASan's nightly to avoid a reported Bevy solver memory regression.
-  # https://github.com/rust-lang/rust/issues/161748
   RUSTUP_TOOLCHAIN: nightly-2026-07-01
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Each mutation runner uses one worker with one compiler job.
   CARGO_BUILD_JOBS: "1"
+  AUDIT_PACKAGE: ${{ inputs.package }}
+  AUDIT_FILES: ${{ inputs.files }}
+  AUDIT_RE: ${{ inputs.re }}
 
 jobs:
-  mutation-changes:
-    name: detect mutation-relevant changes
-    runs-on: ubuntu-24.04
-    outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - id: changes
-        name: Classify changed paths
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          FORCE_MUTATION: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
-          set -euo pipefail
-          relevant=false
-          if [[ "$FORCE_MUTATION" = true ]]; then
-            relevant=true
-          else
-            while IFS= read -r path; do
-              case "$path" in
-                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/test_mutation_workflow_policy.py)
-                  relevant=true
-                  break
-                  ;;
-              esac
-            done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
-          fi
-          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
-
   mutation-baseline:
-    name: mutation test baseline
-    needs: mutation-changes
-    if: needs.mutation-changes.outputs.relevant == 'true'
+    name: crate-scoped baseline and inventory
     runs-on: ubuntu-24.04
-    # The baseline builds one workspace with three compiler jobs;
-    # mutant workers retain the single-job workflow default above.
     env:
       CARGO_BUILD_JOBS: "3"
     timeout-minutes: 30
+    outputs:
+      shards: ${{ steps.inventory.outputs.shards }}
+      shard_count: ${{ steps.inventory.outputs.shard_count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: mutation
-      # The stable core suite does not prove nightly-only libtest arguments.
-      # Prove them once on the full unmutated workspace before any shard starts.
-      - name: Prove the mutation test harness
-        # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
-        env:
-          CARGO_INCREMENTAL: "1"
-        run: |
-          set -euo pipefail
-          cargo test --workspace --all-features --locked -- \
-            -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
-            2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
-          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
-      - name: Upload mutation baseline log
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mutation-baseline
-          path: ${{ runner.temp }}/mutation-baseline.log
-          if-no-files-found: error
-
-  mutation:
-    name: diff mutation testing (shard ${{ matrix.shard }})
-    needs: [mutation-changes, mutation-baseline]
-    if: needs.mutation-changes.outputs.relevant == 'true' && needs.mutation-baseline.result == 'success'
-    runs-on: ubuntu-24.04
-    # The shell watchdog below exits with diagnostics before this outer limit.
-    timeout-minutes: 70
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
@@ -119,35 +63,103 @@ jobs:
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Capture pull-request diff
+      - id: inventory
+        name: Record the scoped inventory and exact source
+        env:
+          PER_SHARD: ${{ inputs.per_shard }}
         run: |
           set -euo pipefail
-          base_ref="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
-          git diff --relative --unified=0 \
-            "origin/${base_ref}...HEAD" \
-            > "${RUNNER_TEMP}/changes.diff"
-      # The shared baseline proves the workspace harness. Each worker also
-      # proves its own unmutated scratch copy before reporting caught mutants.
-      # Each mutant retains the owning-package test selection used on main;
-      # One worker retains four harness threads without competing with another
-      # owning-package suite or compiler on this runner. Sixteen shards retain
-      # the full selection and unchanged watchdogs; at most eight run together.
-      - name: Run mutants in changed lines
-        # Reuse each worker's compiler state instead of rebuilding every edit.
+          rustc --version
+          cargo mutants --version
+          git rev-parse HEAD
+          [[ "$AUDIT_PACKAGE" =~ ^[a-z0-9-]+$ ]]
+          [[ "$PER_SHARD" =~ ^[1-9][0-9]*$ ]]
+          file_args=()
+          for f in $AUDIT_FILES; do
+            [[ "$f" =~ ^[A-Za-z0-9_./-]+$ ]]
+            test -f "$f"
+            file_args+=(--file "$f")
+          done
+          if [[ -n "$AUDIT_RE" ]]; then file_args+=(--re "$AUDIT_RE"); fi
+          git ls-files -z Cargo.toml Cargo.lock rust-toolchain.toml .cargo apps crates \
+            | xargs -0 sha256sum > "${RUNNER_TEMP}/mutation-source.sha256"
+          cargo mutants --package "$AUDIT_PACKAGE" "${file_args[@]}" --all-features \
+            --no-shuffle --list --json > "${RUNNER_TEMP}/mutation-inventory.json"
+          python3 - "${RUNNER_TEMP}/mutation-inventory.json" "$PER_SHARD" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, math, sys
+          rows = json.load(open(sys.argv[1]))
+          assert isinstance(rows, list) and rows
+          count = min(256, max(1, math.ceil(len(rows) / int(sys.argv[2]))))
+          print(f"Scoped inventory: {len(rows)} mutants in {count} shards", file=sys.stderr)
+          print(f"shard_count={count}")
+          print("shards=" + json.dumps(list(range(count))))
+          PY
+      - name: Prove the owning-package harness
         env:
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
+          cargo test --package "$AUDIT_PACKAGE" --all-features --locked -- \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
+            2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
+          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
+      - name: Upload baseline, inventory and source hashes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-audit-inventory
+          path: |
+            ${{ runner.temp }}/mutation-baseline.log
+            ${{ runner.temp }}/mutation-inventory.json
+            ${{ runner.temp }}/mutation-source.sha256
+          if-no-files-found: error
+
+  mutation:
+    name: crate-scoped mutants (shard ${{ matrix.shard }})
+    needs: mutation-baseline
+    if: needs.mutation-baseline.result == 'success'
+    runs-on: ubuntu-24.04
+    # The shell watchdog below exits with diagnostics before this outer limit.
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: ${{ fromJSON(needs.mutation-baseline.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: mutation
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      # Each scratch copy must independently prove its unmutated harness.
+      # Limits are unchanged from the hosted diff gate.
+      - name: Run crate-scoped mutants
+        env:
+          CARGO_INCREMENTAL: "1"
+          SHARD_COUNT: ${{ needs.mutation-baseline.outputs.shard_count }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo mutants --version
+          file_args=()
+          for f in $AUDIT_FILES; do
+            file_args+=(--file "$f")
+          done
+          if [[ -n "$AUDIT_RE" ]]; then file_args+=(--re "$AUDIT_RE"); fi
           set +e
-          # Each worker has an isolated target directory. A changed
-          # world-client fixture can cold-build Bevy and WASM dependencies;
-          # the build allowance stays separate from the per-test timeout.
           timeout --foreground 60m cargo mutants \
-            --workspace \
+            --package "$AUDIT_PACKAGE" \
+            "${file_args[@]}" \
             --all-features \
-            --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/16" \
+            --shard "${SHARD}/${SHARD_COUNT}" \
             --baseline run \
             --jobs 1 \
             --timeout 120 \
@@ -164,17 +176,6 @@ jobs:
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
             echo "Mutation shard watchdog timed out after 60 minutes."
-            latest_log=""
-            if [[ -d mutants.out ]]; then
-              # Consume the whole listing: head can SIGPIPE sort under pipefail,
-              # hiding both the latest log and the original timeout status.
-              latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
-                | sort -nr | sed -n '1p' | cut -d' ' -f2-)"
-            fi
-            if [[ -n "$latest_log" ]]; then
-              echo "Most recent mutant log: $latest_log"
-              tail -n 120 "$latest_log"
-            fi
           fi
           exit "$mutation_status"
       - name: Upload mutation report
@@ -184,22 +185,3 @@ jobs:
           name: mutation-report-shard-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
-
-  mutation-gate:
-    # The caller waits on this fan-in before starting ASan. Individual shards
-    # must never be configured as independent merge approvals.
-    name: diff mutation testing
-    if: always()
-    needs: [mutation-changes, mutation-baseline, mutation]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require every relevant mutation shard to pass
-        run: |
-          test "${{ needs.mutation-changes.result }}" = success
-          if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
-            test "${{ needs.mutation-baseline.result }}" = success
-            test "${{ needs.mutation.result }}" = success
-          else
-            test "${{ needs.mutation-baseline.result }}" = skipped
-            test "${{ needs.mutation.result }}" = skipped
-          fi
