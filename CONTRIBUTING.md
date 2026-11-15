@@ -159,17 +159,28 @@ flowchart TD
 ### Stage 1: fast preflight
 
 Pull requests run Trunk in its native diff mode before Cargo-heavy work. The
-same stage validates pinned workflow dependencies and the Linux/non-Linux
-conformance boundaries.
+same stage validates pinned workflow dependencies, the repository's source and
+owner-bridge policy checks, and the Linux/non-Linux conformance boundaries.
+The policy checks run as three parallel jobs so each one stays well inside its
+10-minute limit: `pinned-dependencies` (supply-chain pins plus workflow, CI,
+vector and notice policy tests), `source-policies` (the source-confinement
+checkers) and `owner-bridge-policies` (the owner-bridge unsafe, lock,
+subject-encryption and Windows shim coverage checks). Rust-affecting changes
+and every non-pull-request event run all three, and `preflight-gate` requires
+each to pass.
 
 ```mermaid
 flowchart LR
     S["Trusted scope"] --> T["Trunk changed-file check"]
-    S --> P["Pinned workflow policy"]
+    S --> P["pinned-dependencies"]
+    S --> SP["source-policies"]
+    S --> OP["owner-bridge-policies"]
     S --> F["Conformance fixtures"]
     S --> N["Non-Linux boundary"]
     T --> G["preflight-gate"]
     P --> G
+    SP --> G
+    OP --> G
     F --> G
     N --> G
 ```
