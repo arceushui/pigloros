@@ -9,8 +9,10 @@ bash scripts/check-pinned-dependencies.sh
 bash scripts/test-check-pinned-dependencies.sh
 ```
 
-The `pinned-dependencies` CI job runs the first command on every pull request
-and push. The second command is run locally and in CI to verify that the guard
+The `pinned-dependencies` CI job runs the first command on every
+Rust-affecting pull request and every push. Its source-confinement and
+owner-bridge policy checks run beside it in the parallel `source-policies` and
+`owner-bridge-policies` preflight jobs, and `preflight-gate` requires all three. The second command is run locally and in CI to verify that the guard
 rejects floating, multiline, and malformed Action and image references. The
 offline checker validates reference syntax; it cannot prove that a 40-hex
 Action revision exists or is a commit in the upstream repository.
