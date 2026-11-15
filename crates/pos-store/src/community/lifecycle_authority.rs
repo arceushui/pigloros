@@ -44,7 +44,7 @@ use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
 };
 
-use super::attestation::{evaluation_snapshot, OWNER_SEAL};
+use super::attestation::{authenticated_result, evaluation_snapshot};
 use super::memory_domain::MemoryCommunityDomainV1;
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
@@ -426,18 +426,14 @@ impl CommunityLifecycleAuthorityV1 {
                     .ok()
                     .zip(AssuranceLevelV1::try_new(record.assurance).ok())
                     .and_then(|(binding_digest, assurance)| {
-                        AuthenticatedPrincipalResultV1::try_from_draft(
-                            &OWNER_SEAL,
-                            AuthenticatedPrincipalDraftV1 {
-                                principal: record.principal.clone(),
-                                adapter_id: record.adapter_id.clone(),
-                                assurance,
-                                issued_at: WallTime::from_micros(record.issued_at),
-                                expires_at: WallTime::from_micros(record.expires_at),
-                                binding_digest,
-                            },
-                        )
-                        .ok()
+                        authenticated_result(AuthenticatedPrincipalDraftV1 {
+                            principal: record.principal.clone(),
+                            adapter_id: record.adapter_id.clone(),
+                            assurance,
+                            issued_at: WallTime::from_micros(record.issued_at),
+                            expires_at: WallTime::from_micros(record.expires_at),
+                            binding_digest,
+                        })
                     })
                     .map(|authenticated| CommunityAuthorityCallV1 {
                         catalogue_digest: self.catalogue_digest,

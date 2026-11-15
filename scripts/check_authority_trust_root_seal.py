@@ -7,13 +7,16 @@ installed by `pos_store::community::CommunityMetadataAuthorityV1::new`. Its cons
 only with `pos-core`'s `authority-trust-root` feature, so:
 
 - only `apps/piglor-gateway`, `apps/pos-experiment` and `apps/pos-plugin-conformance-adapter`
-  (the trusted composition roots) may enable `authority-trust-root` in a deployable dependency
-  table or forward it from a feature; every manifest may enable it from `[dev-dependencies]`;
+  (the trusted composition roots) and `crates/pos-store` (the community owner, #560) may enable
+  `authority-trust-root` in a deployable dependency table or forward it from a feature; every
+  manifest may enable it from `[dev-dependencies]`;
 - no feature named `local-admission-host`, nor any feature it reaches, forwards it, in any
   manifest: the local scheduled-admission host takes the seal from its caller and never mints it;
 - outside `crates/pos-core/`, non-test code calls `for_composition_root` only at the pinned mint
   sites, exactly once each: `apps/piglor-gateway/src/local_principal.rs`,
-  `apps/pos-experiment/src/lib.rs` and `apps/pos-plugin-conformance-adapter/src/main.rs`. Crates
+  `apps/pos-experiment/src/lib.rs`, `apps/pos-plugin-conformance-adapter/src/main.rs` and
+  `crates/pos-store/src/community/attestation.rs` (the community owner's per-request snapshot and
+  verified authentication result, ADR-129 R6.2(5)). Crates
   that depend on an allowed crate compile the minter too (Cargo features are global) but cannot
   call it. Test code is exempt: a crate's top-level `tests` directory, an inline
   `#[cfg(test)] mod name { .. }`, and the file of a module declared `#[cfg(test)] mod name;`
@@ -79,6 +82,7 @@ ENABLING_MANIFESTS = (
     "apps/piglor-gateway/Cargo.toml",
     "apps/pos-experiment/Cargo.toml",
     "apps/pos-plugin-conformance-adapter/Cargo.toml",
+    "crates/pos-store/Cargo.toml",
 )
 ADMISSION_FEATURE = "local-admission-host"
 CORE_SOURCES = "crates/pos-core/"
@@ -88,6 +92,7 @@ MINT_SITES = {
     "apps/piglor-gateway/src/local_principal.rs": 1,
     "apps/pos-experiment/src/lib.rs": 1,
     "apps/pos-plugin-conformance-adapter/src/main.rs": 1,
+    "crates/pos-store/src/community/attestation.rs": 1,
 }
 TEST_ATTRIBUTES = r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*"
 INLINE_TEST_MODULE = re.compile(TEST_ATTRIBUTES + r"\{")

@@ -11,15 +11,24 @@
 //! attested at composition gives no snapshot.
 
 use pos_core::{
-    AuthorityRegistrySnapshotV1, AuthorityTrustRootSealV1, CapabilityGrantV1, Hash,
-    PersistedAuthorityV1,
+    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityRegistrySnapshotV1,
+    AuthorityTrustRootSealV1, CapabilityGrantV1, Hash, PersistedAuthorityV1,
 };
 
-/// The community owner's own trust-root seal. The owner is inside the
+/// The community owner's own trust-root seal, its one pinned mint site
+/// (`scripts/check_authority_trust_root_seal.py`). The owner is inside the
 /// trusted boundary (ADR-129 A5.9): it builds the per-request snapshot and
-/// the verified authentication result itself, and never returns the seal.
-pub(super) const OWNER_SEAL: AuthorityTrustRootSealV1 =
-    AuthorityTrustRootSealV1::for_composition_root();
+/// the verified authentication result itself. The seal stays private to
+/// this module and is passed only by reference.
+static OWNER_SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
+
+/// The authentication result the owner derives from verified FAE1 fields
+/// (R6.2(3)(iv)), or `None` for fields the result refuses.
+pub(super) fn authenticated_result(
+    draft: AuthenticatedPrincipalDraftV1,
+) -> Option<AuthenticatedPrincipalResultV1> {
+    AuthenticatedPrincipalResultV1::try_from_draft(&OWNER_SEAL, draft).ok()
+}
 
 /// The snapshot one request is evaluated against, or `None` when any chain
 /// grant's as-issued binding is not attested by `attestation`.
