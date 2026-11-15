@@ -368,6 +368,12 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("unknown tail", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/t/forks");
         }),
+        case("nested Timeline", |p| {
+            first_exchange(p)["path"] = json!("/v1/timelines/a/b/events");
+        }),
+        case("session tail", |p| {
+            first_exchange(p)["path"] = json!("/v1/session/events");
+        }),
         case("spaced path", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/a b/events");
         }),
