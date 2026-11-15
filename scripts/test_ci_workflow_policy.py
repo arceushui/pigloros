@@ -901,18 +901,40 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 
     def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
         source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
-        prefix, separator, command = source.partition("\nsudo ")
-        self.assertEqual(prefix, "#!/usr/bin/env bash\nset -euo pipefail\n")
-        self.assertEqual(separator, "\nsudo ")
-        expressions = [
-            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
-            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
+        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
+        lines = [
+            line for line in source.replace("\\\n", "").splitlines()
+            if line and not line.startswith("#")
         ]
-        arguments = shlex.split(command.replace("\\\n", ""))
-        self.assertEqual(arguments, [
-            "sed", "-i", "-e", expressions[0], "-e", expressions[1],
+        self.assertEqual(lines[0], "set -euo pipefail")
+        archive_list = "/etc/apt/pigloros-mirrors.txt"
+        security_list = "/etc/apt/pigloros-security-mirrors.txt"
+        # Every entry is an apt mirror+file failover target, so one
+        # unreachable mirror cannot fail an install.
+        self.assertEqual(shlex.split(lines[1]), [
+            "printf", "%s\\n",
+            "https://mirrors.edge.kernel.org/ubuntu",
+            "http://azure.archive.ubuntu.com/ubuntu",
+            "http://archive.ubuntu.com/ubuntu",
+            "|", "sudo", "tee", archive_list, ">/dev/null",
+        ])
+        self.assertEqual(shlex.split(lines[2]), [
+            "printf", "%s\\n",
+            "https://mirrors.edge.kernel.org/ubuntu",
+            "http://security.ubuntu.com/ubuntu",
+            "|", "sudo", "tee", security_list, ">/dev/null",
+        ])
+        expressions = [
+            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: mirror+file:"
+            + archive_list + "|",
+            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: mirror+file:"
+            + security_list + "|",
+        ]
+        self.assertEqual(shlex.split(lines[3]), [
+            "sudo", "sed", "-i", "-e", expressions[0], "-e", expressions[1],
             "/etc/apt/sources.list.d/ubuntu.sources",
         ])
+        self.assertEqual(len(lines), 4)
         original = (
             "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
             "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
@@ -932,10 +954,10 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         )
         expected = original.replace(
             "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
-            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
+            "\nURIs: mirror+file:" + archive_list + "\n",
         ).replace(
             "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
-            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
+            "\nURIs: mirror+file:" + security_list + "\n",
         )
         self.assertEqual(completed.stdout, expected)
 
