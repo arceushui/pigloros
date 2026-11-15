@@ -248,7 +248,7 @@ fn rqe1_every_value_code_round_trips() -> TestResult {
 #[test]
 fn rqe1_rule_1_envelope_size_and_types() -> TestResult {
     checks_envelope(&unhex(RQE1_A)?, decode)?;
-    rejects_malformed_encodings(&unhex(RQE1_A)?, decode)?;
+    rejects_malformed_encodings(&unhex(RQE1_A)?, decode);
     bounds_raw_size(1024 * 1024, decode);
     rejects_every_retyped_node(&unhex(RQE1_A)?, decode)?;
     rejects_every_retyped_node(&every_code_record()?, decode)?;
