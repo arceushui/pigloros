@@ -129,36 +129,44 @@ pub(super) struct RouteV2 {
 
 /// The route table of the requirements text, section 2, in its order.
 const ROUTES: [RouteV2; 7] = [
-    RouteV2::new("/health", "gateway.health.read", false),
-    RouteV2::new("/v1/ledger", "gateway.ledger.read", false),
-    RouteV2::new("/v1/timelines", "timeline.create", false),
-    RouteV2::new(
-        "/v1/timelines/{timeline}/events",
-        "timeline.events.read",
-        false,
-    ),
-    RouteV2::new(
-        "/v1/timelines/{timeline}/signals",
-        "timeline.signals.append",
-        true,
-    ),
-    RouteV2::new(
-        "/v1/timelines/{timeline}/actions",
-        "world.action.v1.submit",
-        true,
-    ),
-    RouteV2::new("/v1/session", "session.read", false),
+    RouteV2 {
+        path: "/health",
+        capability: "gateway.health.read",
+        commits: false,
+    },
+    RouteV2 {
+        path: "/v1/ledger",
+        capability: "gateway.ledger.read",
+        commits: false,
+    },
+    RouteV2 {
+        path: "/v1/timelines",
+        capability: "timeline.create",
+        commits: false,
+    },
+    RouteV2 {
+        path: "/v1/timelines/{timeline}/events",
+        capability: "timeline.events.read",
+        commits: false,
+    },
+    RouteV2 {
+        path: "/v1/timelines/{timeline}/signals",
+        capability: "timeline.signals.append",
+        commits: true,
+    },
+    RouteV2 {
+        path: "/v1/timelines/{timeline}/actions",
+        capability: "world.action.v1.submit",
+        commits: true,
+    },
+    RouteV2 {
+        path: "/v1/session",
+        capability: "session.read",
+        commits: false,
+    },
 ];
 
 impl RouteV2 {
-    const fn new(path: &'static str, capability: &'static str, commits: bool) -> Self {
-        Self {
-            path,
-            capability,
-            commits,
-        }
-    }
-
     /// The capability an attempt must hold for the route.
     pub(super) const fn capability(self) -> &'static str {
         self.capability
