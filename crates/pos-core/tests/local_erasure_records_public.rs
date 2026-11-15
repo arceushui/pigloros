@@ -23,7 +23,7 @@ const fn reference(seed: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([seed; 32])
 }
 
-fn timeline(seed: u8) -> TimelineId {
+const fn timeline(seed: u8) -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([seed; 16]))
 }
 
@@ -91,7 +91,7 @@ fn assert_codec<R: PartialEq + std::fmt::Debug>(
         assert!(from_bytes(&corrupted).is_err(), "{corrupted:02x?}");
     }
     // A non-minimal integer head is not canonical.
-    let mut padded = bytes.clone();
+    let mut padded = bytes;
     padded.insert(1, 0x18);
     assert!(from_bytes(&padded).is_err());
     let mut wrong_version = value.clone();
@@ -580,6 +580,12 @@ fn request_binding_records_round_trip() -> TestResult {
 
 #[test]
 fn owner_result_signature_and_disclosure_records_round_trip() -> TestResult {
+    assert_owner_result_records()?;
+    assert_signature_records()?;
+    assert_disclosure_records()
+}
+
+fn assert_owner_result_records() -> TestResult {
     for error in [None, Some(ErasureErrorV1::ArtifactDeletionFailed)] {
         assert_codec(
             &LocalErasureOwnerResultV1 {
@@ -621,7 +627,10 @@ fn owner_result_signature_and_disclosure_records_round_trip() -> TestResult {
         }
         assert!(LocalErasureOwnerResultV1::from_canonical_cbor(&encode(&changed)?).is_err());
     }
+    Ok(())
+}
 
+fn assert_signature_records() -> TestResult {
     for purpose in [
         LocalErasureSignaturePurposeV1::FreezeAuthorization,
         LocalErasureSignaturePurposeV1::OwnerResult,
@@ -681,7 +690,10 @@ fn owner_result_signature_and_disclosure_records_round_trip() -> TestResult {
             Err(ErasureErrorV1::ScopeInvalid)
         );
     }
+    Ok(())
+}
 
+fn assert_disclosure_records() -> TestResult {
     assert_codec(
         &LocalErasureDisclosureV1 {
             ack_class: "local-backup-inventory".to_owned(),
@@ -725,7 +737,7 @@ fn data_class_codes_are_one_closed_mapping() {
     for code in 0..=u64::try_from(classes.len()).unwrap_or(u64::MAX) {
         let decoded = ArtifactDataClassV1::from_code(code);
         assert_eq!(decoded.is_ok(), code < 5, "{code}");
-        assert_eq!(decoded.map(u64::from).unwrap_or(code), code);
+        assert_eq!(decoded.map_or(code, u64::from), code);
     }
     for (code, class) in (0_u64..).zip(classes) {
         assert_eq!(u64::from(class), code);
@@ -743,19 +755,21 @@ impl Cbor {
         let tag = major << 5;
         match value {
             0..=23 => self.0.push(tag | u8::try_from(value).unwrap_or(0)),
-            24..=0xff => self.0.extend([tag | 24, u8::try_from(value).unwrap_or(0)]),
+            24..=0xff => self
+                .0
+                .extend([tag | 0x18, u8::try_from(value).unwrap_or(0)]),
             0x100..=0xffff => {
-                self.0.push(tag | 25);
+                self.0.push(tag | 0x19);
                 self.0
                     .extend(u16::try_from(value).unwrap_or(0).to_be_bytes());
             }
             0x1_0000..=0xffff_ffff => {
-                self.0.push(tag | 26);
+                self.0.push(tag | 0x1a);
                 self.0
                     .extend(u32::try_from(value).unwrap_or(0).to_be_bytes());
             }
             _ => {
-                self.0.push(tag | 27);
+                self.0.push(tag | 0x1b);
                 self.0.extend(value.to_be_bytes());
             }
         }
@@ -812,6 +826,13 @@ fn assert_golden<R: PartialEq + std::fmt::Debug>(
 
 #[test]
 fn records_match_hand_written_golden_vectors() -> TestResult {
+    assert_bundle_goldens()?;
+    assert_trust_policy_and_authorization_goldens()?;
+    assert_request_and_owner_result_goldens()?;
+    assert_signature_and_disclosure_goldens()
+}
+
+fn assert_bundle_goldens() -> TestResult {
     let bundle = bundle()?;
     let golden = Cbor::default()
         .record("ELB1", 12)
@@ -891,7 +912,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
         LocalErasureRejectionV1::to_canonical_cbor,
         LocalErasureRejectionV1::from_canonical_cbor,
         LocalErasureRejectionV1::reference,
-    )?;
+    )
+}
+
+fn assert_trust_policy_and_authorization_goldens() -> TestResult {
     assert_golden(
         &LocalErasureTrustAnchorV1 {
             tps1: reference(14),
@@ -971,7 +995,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
         LocalErasureAuthorizationV1::to_canonical_cbor,
         LocalErasureAuthorizationV1::from_canonical_cbor,
         LocalErasureAuthorizationV1::reference,
-    )?;
+    )
+}
+
+fn assert_request_and_owner_result_goldens() -> TestResult {
     assert_golden(
         &LocalErasureSelectorV1 {
             subject: reference(23),
@@ -1048,6 +1075,10 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
             LocalErasureOwnerResultV1::reference,
         )?;
     }
+    Ok(())
+}
+
+fn assert_signature_and_disclosure_goldens() -> TestResult {
     assert_golden(
         &LocalErasureSignatureV1 {
             purpose: LocalErasureSignaturePurposeV1::ReceiptBody,
