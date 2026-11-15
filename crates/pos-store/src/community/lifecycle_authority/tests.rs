@@ -165,6 +165,7 @@ fn a_revocation_after_a_successful_call_refuses_the_same_call() -> Fallible<()> 
             attestation,
             fork_admission_policies: vec![],
             member_recipient: "community-recipient".to_owned(),
+            store_incarnation: [0x5a; 16],
         },
         ScriptedTrustedWallSourceV1::from_micros([500]),
     )?;

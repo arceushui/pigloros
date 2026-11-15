@@ -280,6 +280,8 @@ pub struct CommunityLifecycleAuthorityInputV1 {
     /// The installed recipient of the selected cells (A5.2(2)–(3)), the
     /// audience of every in-operation member request; 1..128 bytes.
     pub member_recipient: String,
+    /// The nonzero incarnation of the one domain this authority serves.
+    pub store_incarnation: [u8; 16],
 }
 
 /// Installed community lifecycle authority with its trusted wall source.
@@ -289,6 +291,7 @@ pub struct CommunityLifecycleAuthorityV1 {
     policy: ForkAuthenticationPolicyV1,
     attestation: AuthorityRegistrySnapshotV1,
     member_recipient: String,
+    store_incarnation: [u8; 16],
     wall: Box<dyn TrustedWallSourceV1>,
 }
 
@@ -315,7 +318,8 @@ impl CommunityLifecycleAuthorityV1 {
     /// FAP1 digest differs from CAP1's, the attestation snapshot's registry
     /// digest or attestation digest differs from CAP1's, or any community
     /// adapter key also appears in an installed Fork-admission FAP1, and for
-    /// an empty or over-128-byte member recipient.
+    /// an empty or over-128-byte member recipient, and for a zero store
+    /// incarnation.
     pub fn new(
         _seal: &AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
@@ -339,6 +343,7 @@ impl CommunityLifecycleAuthorityV1 {
                 != pins.capability_attestation_digest
             || overlap
             || !(1..=MAX_AUTHORITY_TEXT_BYTES).contains(&input.member_recipient.len())
+            || input.store_incarnation == [0; 16]
         {
             return Err(Error::InvalidBinding);
         }
@@ -348,6 +353,7 @@ impl CommunityLifecycleAuthorityV1 {
             policy: input.authentication_policy,
             attestation: input.attestation,
             member_recipient: input.member_recipient,
+            store_incarnation: input.store_incarnation,
             wall: Box::new(wall),
         })
     }
@@ -446,7 +452,7 @@ impl CommunityLifecycleAuthorityV1 {
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a call another authority issued, a
-    /// missing or foreign leaf, a leaf that binds consent references, a
+    /// domain other than the installed one, a missing or foreign leaf, a leaf that binds consent references, a
     /// chain grant not attested as issued, or a decision that is not
     /// `Active`.
     pub fn authorize_administrative(
@@ -505,8 +511,9 @@ impl CommunityLifecycleAuthorityV1 {
         )
     }
 
-    /// Check the call is this authority's, load the chain from the domain's
-    /// own store, and evaluate it.
+    /// Check the call is this authority's and the domain is the one it was
+    /// installed for, load the chain from the domain's own store, and
+    /// evaluate it.
     fn evaluate(
         &self,
         call: &CommunityAuthorityCallV1,
@@ -514,7 +521,9 @@ impl CommunityLifecycleAuthorityV1 {
         leaf_grant_id: Hash,
         shape: RequestShapeV1<'_>,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
-        if call.catalogue_digest != self.catalogue_digest {
+        if call.catalogue_digest != self.catalogue_digest
+            || domain.store_incarnation() != self.store_incarnation
+        {
             return Err(Error::EvidenceUnavailable);
         }
         domain

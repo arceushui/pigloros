@@ -52,6 +52,7 @@ const AUDIENCE: &str = "community-host";
 const RECIPIENT: &str = "community-recipient";
 const ADAPTER: &str = "community-adapter";
 const SEED: [u8; 32] = [7; 32];
+const INCARNATION: [u8; 16] = [0x5a; 16];
 const OPERATION: [u8; 16] = [
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
@@ -342,6 +343,7 @@ fn install(
             attestation,
             fork_admission_policies: vec![],
             member_recipient: RECIPIENT.to_owned(),
+            store_incarnation: INCARNATION,
         },
         ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
     )?)
@@ -404,7 +406,7 @@ impl World {
         let catalogue = CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?;
         let digest = catalogue.digest();
         Ok(Self {
-            domain: MemoryCommunityDomainV1::new(store, [0x5a; 16])?,
+            domain: MemoryCommunityDomainV1::new(store, INCARNATION)?,
             authority: install(catalogue, attestation, &[NOW; 64])?,
             catalogue: digest,
         })
@@ -626,6 +628,7 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
                 attestation,
                 fork_admission_policies: forks,
                 member_recipient: recipient,
+                store_incarnation: INCARNATION,
             },
             ScriptedTrustedWallSourceV1::from_micros([NOW]),
         ))
@@ -677,6 +680,22 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
         );
     }
     assert!(attempt(good.clone(), attestation.clone(), vec![], "r".repeat(128))?.is_ok());
+    assert_eq!(
+        CommunityLifecycleAuthorityV1::new(
+            &SEAL,
+            CommunityLifecycleAuthorityInputV1 {
+                catalogue: CommunityAuthorityCatalogueV1::new(&SEAL, good.clone())?,
+                authentication_policy: fap1(SEED)?,
+                attestation: attestation.clone(),
+                fork_admission_policies: vec![],
+                member_recipient: RECIPIENT.to_owned(),
+                store_incarnation: [0; 16],
+            },
+            ScriptedTrustedWallSourceV1::from_micros([NOW]),
+        )
+        .err(),
+        Some(Error::InvalidBinding)
+    );
     assert!(attempt(
         good,
         attestation,
@@ -1074,6 +1093,25 @@ fn a_call_is_refused_by_another_authority_and_for_an_unknown_leaf() -> TestResul
             .err(),
         Some(Error::EvidenceUnavailable)
     );
+    // A second, legitimate domain holding the same attested grant is not
+    // the domain this authority was installed for.
+    let other_domain = World::new(std::slice::from_ref(&leaf))?.domain;
+    let mut second = MemoryStore::new();
+    let host = AuthorityPersistenceHostV1::new(&snapshot(&[&leaf])?);
+    second.bind_authority_persistence(host.persistence_binding())?;
+    second.issue_capability_grant(host.authorize_grant(&leaf)?, &leaf)?;
+    let foreign = MemoryCommunityDomainV1::new(second, [0x5b; 16])?;
+    assert!(world
+        .authority
+        .authorize_administrative(&call, &other_domain, leaf.grant_id())
+        .is_ok());
+    assert_eq!(
+        world
+            .authority
+            .authorize_administrative(&call, &foreign, leaf.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
     Ok(())
 }
 
@@ -1275,7 +1313,11 @@ fn a_refused_credential_consumes_no_wall_sample() -> TestResult {
         },
         SEED,
     )?;
-    for refused in [wrong_nonce, sign(world.record(&initialize())?, [9; 32])?] {
+    for refused in [
+        vec![0xff; 16],
+        wrong_nonce,
+        sign(world.record(&initialize())?, [9; 32])?,
+    ] {
         assert_eq!(
             authority.authenticate(&refused, request).err(),
             Some(Error::EvidenceUnavailable)
