@@ -482,7 +482,7 @@ impl BarrierError {
     /// release itself. Each leaves the classifier's fail-closed fallback or
     /// another candidate to decide the terminal code.
     #[must_use]
-    pub fn barrier_failure(&self) -> Option<BarrierFailure> {
+    pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
             Self::Identity(_) | Self::LauncherIdentity | Self::Timeout(_) => {
                 Some(BarrierFailure::ReadyUnavailable)

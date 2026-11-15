@@ -1078,7 +1078,14 @@ fn a_verified_start_is_recorded_as_a_status_0_rqe1() -> Result<(), Box<dyn Error
         DbusValue, RequestedConfigurationEvidence, RequestedConfigurationStatus,
     };
     let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    for mode in [LaunchMode::AirGapped, LaunchMode::Local] {
+    for local in [false, true] {
+        let mode = if local {
+            LaunchMode::Local {
+                host_service: descriptor()?,
+            }
+        } else {
+            LaunchMode::AirGapped
+        };
         let request = request(mode)?;
         let readback = exact_readback(&request, &authority.expected_effective_names);
         request.verify_readback(&readback)?;
