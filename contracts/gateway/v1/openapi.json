@@ -938,9 +938,6 @@
               }
             }
           },
-          "default": {
-            "$ref": "#/components/responses/Problem"
-          },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
             "content": {
@@ -950,6 +947,9 @@
                 }
               }
             }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
           }
         }
       }
@@ -996,7 +996,7 @@
             }
           },
           "200": {
-            "description": "An exact retry, or a proposal identical to the revision already derived from `parent_revision` (ADR-041 section 7): the existing revision.",
+            "description": "An exact retry, or a derive whose `parent_revision` is no longer the head and whose descriptor equals the revision already derived from that parent (ADR-041 section 7): the existing revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1085,9 +1085,6 @@
               }
             }
           },
-          "default": {
-            "$ref": "#/components/responses/Problem"
-          },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
             "content": {
@@ -1097,6 +1094,9 @@
                 }
               }
             }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
           }
         }
       }
@@ -1162,9 +1162,6 @@
               }
             }
           },
-          "default": {
-            "$ref": "#/components/responses/Problem"
-          },
           "403": {
             "description": "`unauthorized` or `revoked`: the authority decision precedes any lookup.",
             "content": {
@@ -1184,6 +1181,9 @@
                 }
               }
             }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
           }
         }
       }
@@ -4623,7 +4623,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. An identical descriptor is deduplicated to the existing revision.",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"

@@ -64,7 +64,7 @@
       "id": "01JC0GATEWAYW9R00M00000001",
       "revision": 2,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "e75b0b28fbeb9489c35b4316acf258486abc2ae698891de748072a8efb3f206c",
         "origin": "principal-authored"
       },
       "mode_profile": {
@@ -94,11 +94,11 @@
         "intervention_policy": 1,
         "plugins": [
           {
-            "plugin_id": "world",
+            "plugin_id": "society",
             "version": "1.0.0"
           },
           {
-            "plugin_id": "society",
+            "plugin_id": "world",
             "version": "1.0.0"
           }
         ],
@@ -129,14 +129,14 @@
         "privacy_export_ref": "01JC0GATEWAYW90PR1VACY0001",
         "correlation_id": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
         "plugin_composition_hash": "0606060606060606060606060606060606060606060606060606060606060606",
-        "rule_set_hash": "0707070707070707070707070707070707070707070707070707070707070707",
-        "descriptor_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        "rule_set_hash": "1437f1e9edbb7566afb1822cc6117a18c93de3fa9f3b8786bdf8468b1ab7bb2f",
+        "descriptor_hash": "07d48604773187dffc0b83ca9542061e691b4110e8b8166a83681ac685709ec2"
       },
       "parent_revision": 1,
       "commit": {
         "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
         "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
-        "event_id": "01JC0GATEWAYW9EVENT0000001",
+        "event_id": "01JC0GATEWAYW9EVENT0000002",
         "seq": 2,
         "event_schema_id": "room.revision.v1",
         "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.3"
