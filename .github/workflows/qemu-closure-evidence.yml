@@ -18,6 +18,8 @@ on:
       - scripts/check_owner_runtime_custody_policy.py
       - scripts/install-pinned-nix.sh
       - scripts/qemu-closure-evidence.sh
+      - scripts/qemu_qmp_query_kvm.py
+      - scripts/test_qemu_closure_evidence_producer.py
 
 permissions:
   contents: read
@@ -40,6 +42,8 @@ jobs:
         run: python scripts/test_check_qemu_closure_workflow_policy.py
       - name: Test the evidence checker
         run: python scripts/test_check_qemu_closure_evidence.py
+      - name: Test the evidence producer
+        run: python scripts/test_qemu_closure_evidence_producer.py
 
   evidence:
     name: evidence (${{ matrix.architecture }})

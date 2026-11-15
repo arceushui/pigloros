@@ -9,7 +9,6 @@
 # scripts/check_qemu_closure_evidence.py judges the result between boot and
 # seal. This script records; it decides nothing beyond its own preconditions.
 set -euo pipefail
-shopt -s extglob
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flake="${root}/deploy/nixos"
@@ -17,6 +16,7 @@ flake="${root}/deploy/nixos"
 provenance_files=(
   scripts/check_qemu_closure_evidence.py
   scripts/qemu-closure-evidence.sh
+  scripts/qemu_qmp_query_kvm.py
   deploy/nixos/flake.nix
   deploy/nixos/flake.lock
   deploy/nixos/modules/mountfsd-activation.nix
@@ -87,9 +87,96 @@ record_provenance() {
   } >"${out}/host/provenance"
 }
 
+# The exact running image of the recorded QEMU package: nixpkgs wraps
+# qemu-system-<arch> with wrapGApp, so it is either that binary or its
+# .qemu-system-<arch>-wrapped target.
+is_qemu_image() { # EXE QEMU_STORE_PATH ARCH
+  [[ $1 == "$2/bin/qemu-system-$3" || $1 == "$2/bin/.qemu-system-$3-wrapped" ]]
+}
+
+# "<state> <start time>" from /proc/PID/stat, or nothing if PID is gone.
+# The comm field may hold spaces, so fields are read after its last ')'.
+process_stat() { # PID
+  local stat
+  stat="$(sudo cat "/proc/$1/stat" 2>/dev/null || true)"
+  [[ -n ${stat} ]] || return 0
+  local fields
+  read -r -a fields <<<"${stat##*) }"
+  printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+}
+
+# True when the process PID that started at START has exited: it is gone,
+# a zombie, or its PID now belongs to a process with another start time.
+qemu_gone() { # PID START
+  local stat
+  stat="$(process_stat "$1")"
+  [[ -z ${stat} || ${stat%% *} == [ZX] || ${stat#* } != "$2" ]]
+}
+
+# Stop the observed QEMU process if it is still running, and wait for it.
+stop_qemu() { # PID START
+  qemu_gone "$1" "$2" && return 0
+  sudo kill -KILL "$1" || true
+  for _ in $(seq 30); do
+    qemu_gone "$1" "$2" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Copy QEMU's argv, executable and network interfaces. A failed read is
+# reported through the status, never by exiting before the cleanup.
+record_qemu() { # PID OUT
+  local failed=0
+  sudo cat "/proc/$1/cmdline" >"$2/host/qemu-argv" || failed=1
+  sudo readlink "/proc/$1/exe" >"$2/host/qemu-exe" || failed=1
+  # The interfaces of QEMU's own network namespace.
+  sudo cat "/proc/$1/net/dev" >"$2/host/qemu-net-dev" || failed=1
+  return "${failed}"
+}
+
+write_cleanup_record() { # PID START WORK OUT
+  {
+    if [[ -n $1 ]] && qemu_gone "$1" "$2"; then
+      printf 'qemu-process\texited\n'
+    else
+      printf 'qemu-process\tunobserved-or-running\n'
+    fi
+    if [[ ! -e $3 ]]; then
+      printf 'work-directory\tremoved\n'
+    else
+      printf 'work-directory\tpresent\n'
+    fi
+  } >"$4/host/vm-cleanup"
+}
+
+# Everything after the launch, on every path: wait for the launcher, keep
+# the console and guest record, stop the exact QEMU process, remove the
+# working directory and record both (ADR-069 R13 §4). Fails only at the end.
+finish_boot() { # LAUNCHER QEMU_PID QEMU_START OBSERVE_FAILED WORK OUT
+  local status=0 stopped=0
+  wait "$1" || status=$?
+  printf '%s\n' "${status}" >"$6/host/vm-exit-status"
+  tail -n 200 "$6/host/serial-console.log" || true
+  if [[ -d "$5/xchg/guest" ]]; then
+    cp -R -- "$5/xchg/guest" "$6/guest"
+  fi
+  if [[ -n $2 ]]; then
+    stop_qemu "$2" "$3" || stopped=1
+  fi
+  rm -rf -- "$5"
+  write_cleanup_record "$2" "$3" "$5" "$6"
+  if [[ -z $2 || ${status} -ne 0 || $4 -ne 0 || ${stopped} -ne 0 ]]; then
+    printf 'VM observation failed (QEMU PID %s, exit status %s, observation failed %s, stop failed %s)\n' \
+      "${2:-none}" "${status}" "$4" "${stopped}" >&2
+    return 1
+  fi
+}
+
 boot() {
-  local architecture="$1" out="$2" work runner qemu_pid="" status=0 pid qmp_failed=0
+  local architecture="$1" out="$2" work runner qemu qemu_pid="" qemu_start="" pid observe_failed=0
   require_architecture "${architecture}"
+  qemu="$(store_path qemu "${out}")"
   work="$(mktemp -d)"
   mkdir -p "${work}/xchg"
   shopt -s nullglob
@@ -118,25 +205,26 @@ boot() {
     </dev/null >"${out}/host/serial-console.log" 2>&1 &
   local launcher=$!
   # The launcher shell writes its own PID, then execs the VM runner, which
-  # execs QEMU: the same process becomes QEMU. nixpkgs wraps qemu-system-*
-  # with wrapGApp, so the running image is bin/.qemu-system-<arch>-wrapped.
+  # execs QEMU: the same process becomes QEMU.
   for _ in $(seq 120); do
     pid="$(cat "${work}/qemu.pid" 2>/dev/null || true)"
-    if [[ ${pid} =~ ^[0-9]+$ && "$(sudo readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/?(.)qemu-system-* ]]; then
-      qemu_pid="${pid}"
-      break
+    if [[ ${pid} =~ ^[0-9]+$ ]] && is_qemu_image "$(sudo readlink "/proc/${pid}/exe" 2>/dev/null || true)" \
+      "${qemu}" "${architecture}"; then
+      # The start time pins this exact process against PID reuse.
+      qemu_start="$(process_stat "${pid}")"
+      if [[ ${qemu_start} =~ ^[A-Za-z]\ [0-9]+$ ]]; then
+        qemu_pid="${pid}"
+        qemu_start="${qemu_start#* }"
+        break
+      fi
     fi
     sleep 1
   done
   if [[ -n ${qemu_pid} ]]; then
-    sudo cat "/proc/${qemu_pid}/cmdline" >"${out}/host/qemu-argv"
-    sudo readlink "/proc/${qemu_pid}/exe" >"${out}/host/qemu-exe"
-    # The interfaces of QEMU's own network namespace.
-    sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
+    record_qemu "${qemu_pid}" "${out}" || observe_failed=1
     # The accelerator QEMU itself reports (ADR-069 R13 §2.3).
-    # A failure must not skip the QEMU stop and cleanup below; it fails the
-    # step at the end instead.
-    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json" || qmp_failed=1
+    python3 -I "${root}/scripts/qemu_qmp_query_kvm.py" "${work}/qmp.sock" "${qemu_pid}" \
+      >"${out}/host/qemu-query-kvm.json" || observe_failed=1
   else
     # Say why, so the next run names the cause rather than a timeout.
     {
@@ -144,73 +232,11 @@ boot() {
       if [[ ${pid} =~ ^[0-9]+$ ]]; then
         sudo ls -l "/proc/${pid}/exe" || true
         sudo cat "/proc/${pid}/comm" || true
-        readlink "/proc/${pid}/exe" || true
       fi
       ps -o pid,ppid,user,stat,comm,args -u "$(id -u)" || true
     } >&2
   fi
-  wait "${launcher}" || status=$?
-  printf '%s\n' "${status}" >"${out}/host/vm-exit-status"
-  tail -n 200 "${out}/host/serial-console.log"
-  if [[ -d "${work}/xchg/guest" ]]; then
-    cp -R -- "${work}/xchg/guest" "${out}/guest"
-  fi
-  # Stop the exact QEMU process and remove every disposable object before
-  # any evidence is accepted (ADR-069 R13 §4). After a normal exit the wait
-  # above has already reaped QEMU, so the kill only acts on a stuck process.
-  if [[ -n ${qemu_pid} ]] && sudo kill -0 "${qemu_pid}" 2>/dev/null; then
-    sudo kill -KILL "${qemu_pid}" || true
-  fi
-  rm -rf -- "${work}"
-  {
-    if [[ -n ${qemu_pid} && ! -e "/proc/${qemu_pid}" ]]; then
-      printf 'qemu-process\texited\n'
-    else
-      printf 'qemu-process\tunobserved-or-running\n'
-    fi
-    if [[ ! -e ${work} ]]; then
-      printf 'work-directory\tremoved\n'
-    else
-      printf 'work-directory\tpresent\n'
-    fi
-  } >"${out}/host/vm-cleanup"
-  if [[ -z ${qemu_pid} || ${status} -ne 0 || ${qmp_failed} -ne 0 ]]; then
-    printf 'VM observation failed (QEMU PID %s, exit status %s, QMP failed %s)\n' \
-      "${qemu_pid:-none}" "${status}" "${qmp_failed}" >&2
-    exit 1
-  fi
-}
-
-# One QMP exchange: capabilities, then query-kvm. Prints the query reply.
-query_qmp() {
-  python3 -I - "$1" <<'PYTHON'
-import json, socket, sys
-import time
-# QEMU creates the listening socket shortly after its exec; retry briefly.
-for attempt in range(60):
-    client = socket.socket(socket.AF_UNIX)
-    client.settimeout(10)
-    try:
-        client.connect(sys.argv[1])
-        break
-    except (FileNotFoundError, ConnectionRefusedError):
-        client.close()
-        time.sleep(0.5)
-else:
-    sys.exit("QMP socket never accepted a connection")
-stream = client.makefile("rw")
-def reply():
-    while True:
-        message = json.loads(stream.readline())
-        if "event" not in message:
-            return message
-reply()  # greeting
-for command in ("qmp_capabilities", "query-kvm"):
-    stream.write(json.dumps({"execute": command}) + "\n")
-    stream.flush()
-    answer = reply()
-print(json.dumps(answer, sort_keys=True))
-PYTHON
+  finish_boot "${launcher}" "${qemu_pid}" "${qemu_start}" "${observe_failed}" "${work}" "${out}"
 }
 
 seal() {
@@ -226,14 +252,18 @@ seal() {
   fi
 }
 
-case "${1-}" in
-build | boot)
-  [[ $# -eq 3 ]] || usage
-  "$1" "$2" "$3"
-  ;;
-seal)
-  [[ $# -eq 2 ]] || usage
-  seal "$2"
-  ;;
-*) usage ;;
-esac
+# Sourcing the script (scripts/test_qemu_closure_evidence_producer.py) only
+# defines the functions.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  case "${1-}" in
+  build | boot)
+    [[ $# -eq 3 ]] || usage
+    "$1" "$2" "$3"
+    ;;
+  seal)
+    [[ $# -eq 2 ]] || usage
+    seal "$2"
+    ;;
+  *) usage ;;
+  esac
+fi

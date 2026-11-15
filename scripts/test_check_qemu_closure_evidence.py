@@ -94,11 +94,17 @@ def with_paths(files: dict, **changes: str) -> dict[str, str]:
 def qemu_argv(architecture: str, *extra: str) -> bytes:
     # The derived runner: qemu-vm's -machine without its kvm:tcg list, then -accel tcg.
     machine = {"x86_64": [], "aarch64": ["-machine", "virt,gic-version=max"]}
+    # qemu-vm's aarch64 input and display devices, as recorded on the hosted runner.
+    devices = {"x86_64": ["-device", "virtio-keyboard", "-usb", "-device", "usb-tablet,bus=usb-bus.0"],
+               "aarch64": ["-device", "virtio-keyboard", "-device", "virtio-gpu-pci",
+                                         "-device", "usb-ehci,id=usb0", "-device", "usb-kbd",
+                                         "-device", "usb-tablet"]}
     argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", *machine[architecture],
             "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
             "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,security_model=none,mount_tag=nix-store",
             "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=xchg",
             "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=shared",
+            *devices[architecture],
             "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
             "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
             "-nic", "none", "-no-reboot", "-qmp", "unix:qmp.sock,server=on,wait=off", *extra]
@@ -448,13 +454,6 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(checker.EvidenceError):
                 checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
 
-    def test_producer_hashes_exactly_the_checker_provenance_inputs(self):
-        script = (ROOT / "scripts/qemu-closure-evidence.sh").read_text(encoding="utf-8")
-        match = re.search(r"^provenance_files=\(\n(.*?)\n\)$", script, re.M | re.S)
-        self.assertIsNotNone(match)
-        self.assertEqual(tuple(line.strip() for line in match.group(1).splitlines()),
-                         checker.PROVENANCE_FILES)
-
     def test_verdict_names_the_checker_and_the_commit(self):
         verdict = self.verdict()
         self.assertEqual(verdict["checker_sha256"],
@@ -482,6 +481,19 @@ class EvidenceTests(unittest.TestCase):
         wrapped = f"{PATHS['qemu']}/bin/.qemu-system-x86_64-wrapped\n"
         self.verdict(change=lambda f: f.update({"host/qemu-exe": wrapped}))
 
+    def test_systemctl_omits_an_empty_environment_files_list(self):
+        key = "guest/mountfsd-service-properties"
+        self.verdict(change=lambda f: f.update({key: f[key].replace("EnvironmentFiles=\n", "")}))
+
+    def test_escaped_mount_points_are_unescaped(self):
+        spaced = MOUNTINFO + "64 22 0:64 / /run/with\\040space rw - tmpfs tmpfs rw\n"
+        self.verdict(change=lambda f: f.update({"guest/mountinfo": spaced}))
+        self.assertEqual(checker.unescape_mount_field("/run/with\\040space\\134x"), "/run/with space\\x")
+        # A block device behind an escaped mount point is still found.
+        hidden = MOUNTINFO + "65 22 254:0 / /srv/a\\040b rw - ext4 /dev/vdd rw\n"
+        with self.assertRaisesRegex(checker.EvidenceError, "/srv/a b"):
+            self.verdict(change=lambda f: f.update({"guest/mountinfo": hidden}))
+
     def test_boot_nonce_disks_and_overlays_are_recorded(self):
         verdict = self.verdict()["guest_storage"]
         self.assertEqual(verdict["boot_id"], "5f431e7d-06ad-4bf8-a098-5e35ceb5569a")
@@ -494,6 +506,8 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace(" - overlay overlay", " - 9p nix-store")}),
             lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace("/nix/.rw-store", "/nix/.other")}),
             lambda f: f.update({"guest/mountinfo": MOUNTINFO + "garbage\n"}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO + "62 22 254:0 / /mnt/a\\040b rw - ext4 data rw\n"}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO + "63 22 254:0 / /media rw - erofs image rw\n"}),
             lambda f: f.update({"guest/mountinfo": MOUNTINFO + "60 22 254:0 / /srv rw - ext4 /dev/vdc rw\n"
                                                               "61 22 0:61 / /srv rw - tmpfs tmpfs rw\n"}),
         ]
@@ -539,6 +553,21 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-blk-pci,drive=d")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home,mount_tag=home")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home")}),
+            *[lambda f, o=option: f.update({"host/qemu-argv": qemu_argv("x86_64", o, "x")})
+              for option in ("-hdc", "-hdd", "-fda", "-pflash", "-sd", "-mtdblock", "-global",
+                             "-usbdevice", "-cdrom")],
+            *[lambda f, d=device: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", d)})
+              for device in ("scsi-hd,drive=d", "virtio-scsi-pci", "ide-cd", "usb-storage",
+                             "nvme,serial=1", "e1000,netdev=n", "vhost-user-fs-pci", "usb-net",
+                             "usb-uas")],
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"path=/nix/store,", b"path=/,")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"path=/tmp/w/xchg,security_model=none,mount_tag=shared", b"path=/home,security_model=none,mount_tag=shared")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"security_model=none,mount_tag=xchg", b"security_model=passthrough,mount_tag=xchg")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"mount_tag=xchg", b"mount_tag=xchg,readonly=on")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"mount_tag=shared", b"mount_tag=home")}),
             lambda f: f.update({"host/qemu-query-kvm.json": '{"return": {"enabled": true, "present": true}}'}),
             lambda f: f.update({"host/qemu-query-kvm.json": '{"error": {"class": "GenericError"}}'}),

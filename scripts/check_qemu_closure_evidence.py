@@ -56,6 +56,7 @@ REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 PROVENANCE_FILES = (
     "scripts/check_qemu_closure_evidence.py",
     "scripts/qemu-closure-evidence.sh",
+    "scripts/qemu_qmp_query_kvm.py",
     "deploy/nixos/flake.nix",
     "deploy/nixos/flake.lock",
     "deploy/nixos/modules/mountfsd-activation.nix",
@@ -76,10 +77,20 @@ REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
 # The guest has no disk image (tmpfs root) and no network: any disk or
 # network option is foreign to the reviewed runner.
 FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "hda", "hdb",
-                          "cdrom", "snapshot", "fsdev"}
-FORBIDDEN_DEVICE_PREFIXES = ("virtio-net", "virtio-blk", "nvme", "scsi-hd", "ide-hd", "usb-storage")
-# qemu-vm's shared directories for this guest (useHostCerts is off).
-VIRTFS_TAGS = ["nix-store", "shared", "xchg"]
+                          "hdc", "hdd", "fda", "fdb", "cdrom", "pflash", "sd", "mtdblock",
+                          "snapshot", "fsdev", "usbdevice", "global"}
+# -usb is allowed: qemu-vm's x86_64 runner passes `-usb -device usb-tablet` for
+# input. USB storage and network models stay banned by device type below.
+# Disk and network device models. qemu-vm's aarch64 input and display
+# devices (virtio-keyboard, virtio-gpu-pci, usb-ehci, usb-kbd, usb-tablet)
+# are neither.
+FORBIDDEN_DEVICE_PREFIXES = ("virtio-net", "virtio-blk", "virtio-scsi", "vhost-", "nvme", "scsi-",
+                             "ide-", "ahci", "floppy", "sdhci", "sd-card", "usb-storage", "usb-uas",
+                             "usb-bot", "usb-net", "megasas", "lsi53c", "pvscsi", "e1000",
+                             "rtl8139")
+# Block-device file systems; the guest mounts none of them.
+BLOCK_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "msdos", "exfat", "ntfs", "ntfs3",
+                 "f2fs", "erofs", "squashfs", "iso9660", "udf", "jfs", "reiserfs", "bcachefs"}
 # The workflow writes these beside guest/ and host/ after the check.
 SEAL_FILES = {"checker-verdict.json", "SHA256SUMS"}
 FORBIDDEN_EXACT = {"SYSTEMD_PROC_CMDLINE", "SYSTEMD_VERITY_SHARING"}
@@ -416,15 +427,38 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
         raise EvidenceError(f"QEMU's network namespace has interfaces {interfaces}, not only lo")
     if evidence.line("guest/detect-virt-vm") != "qemu":
         raise EvidenceError("the guest does not detect TCG QEMU virtualization")
-    tags = sorted(option.removeprefix("mount_tag=") for share in shares
-                  for option in share.split(",") if option.startswith("mount_tag="))
-    if len(tags) != len(shares) or tags != VIRTFS_TAGS:
-        raise EvidenceError(f"QEMU shares {tags}, not exactly {VIRTFS_TAGS}")
+    virtfs = check_virtfs(shares)
     cleanup = tab_map(evidence.text("host/vm-cleanup"), "vm-cleanup")
     if cleanup != {"qemu-process": "exited", "work-directory": "removed"}:
         raise EvidenceError(f"the run did not stop QEMU and remove its disposable state: {cleanup}")
     return {"accelerator": "tcg", "qemu_reports": reported["return"], "virtualization": "qemu",
-            "runner": runner, "virtfs": shares, "cleanup": cleanup}
+            "runner": runner, "virtfs": virtfs, "cleanup": cleanup}
+
+
+def check_virtfs(shares: list[str]) -> dict[str, str]:
+    """qemu-vm's three 9p shares for this guest (useHostCerts is off): the
+    host store, and the run's exchange directory as both xchg and shared."""
+    parsed = {}
+    for share in shares:
+        if ",," in share:
+            raise EvidenceError("escaped commas in -virtfs are not interpreted")
+        fields = share.split(",")
+        options = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+        if fields[0] != "local" or len(options) != len(fields) - 1 or set(options) != {
+                "path", "security_model", "mount_tag"} or options["security_model"] != "none" \
+                or options["mount_tag"] in parsed:
+            raise EvidenceError(f"unexpected -virtfs share: {share}")
+        parsed[options["mount_tag"]] = options["path"]
+    exchange = parsed.get("xchg", "")
+    if sorted(parsed) != ["nix-store", "shared", "xchg"] or parsed["nix-store"] != "/nix/store" \
+            or not re.fullmatch(r"/[^,]+/xchg", exchange) or parsed["shared"] != exchange:
+        raise EvidenceError(f"QEMU shares {parsed}, not the store and the run's exchange directory")
+    return parsed
+
+
+def unescape_mount_field(field: str) -> str:
+    """mountinfo escapes space, tab, newline and backslash as \\ooo octal."""
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), field)
 
 
 def check_guest_storage(evidence: Evidence) -> dict:
@@ -441,9 +475,11 @@ def check_guest_storage(evidence: Evidence) -> dict:
         fields, tail = left.split(), right.split()
         if not separator or len(fields) < 6 or len(tail) < 2:
             raise EvidenceError(f"malformed mountinfo line: {line!r}")
-        mounts[fields[4]] = {"fstype": tail[0], "source": tail[1], "options": fields[5]}
-        if tail[1].startswith("/dev/"):
-            disks.append(fields[4])
+        point = unescape_mount_field(fields[4])
+        mounts[point] = {"fstype": tail[0], "source": unescape_mount_field(tail[1]),
+                         "options": fields[5]}
+        if mounts[point]["source"].startswith("/dev/") or tail[0] in BLOCK_FSTYPES:
+            disks.append(point)
     # qemu-vm with no disk image: a tmpfs root, the host store over 9p, and a
     # tmpfs-backed overlay as the writable /nix/store. No block device.
     expected = {"/": "tmpfs", "/nix/.ro-store": "9p", "/nix/.rw-store": "tmpfs", "/nix/store": "overlay"}
@@ -587,9 +623,12 @@ def check_mountfsd(evidence: Evidence, systemd: str) -> dict:
     if service.get("Id") != "systemd-mountfsd.service" or service.get("ActiveState") != "active" \
             or socket.get("Id") != "systemd-mountfsd.socket" or socket.get("ActiveState") != "active":
         raise EvidenceError("mountfsd's service and socket must both be active")
-    for key in ("Environment", "EnvironmentFiles", "PassEnvironment", "DropInPaths"):
+    for key in ("Environment", "PassEnvironment", "DropInPaths"):
         if service.get(key) != "":
             raise EvidenceError(f"systemd-mountfsd.service must have an empty {key}=")
+    # systemctl show omits an empty EnvironmentFiles= list instead of printing it.
+    if service.get("EnvironmentFiles", "") != "":
+        raise EvidenceError("systemd-mountfsd.service must have no EnvironmentFiles=")
     for line in evidence.text("guest/mountfsd-units").splitlines():
         directive = line.strip().split("=", 1)[0].strip()
         if directive in ("Environment", "EnvironmentFile", "PassEnvironment"):
