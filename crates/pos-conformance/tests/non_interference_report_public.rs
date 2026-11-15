@@ -345,12 +345,196 @@ fn report_records_the_first_failed_mode_without_claiming_conformance() {
         &[],
     ));
     assert!(!report.is_conformant());
+    let bytes = test_ok(report.to_canonical_cbor());
+    assert_eq!(
+        NonInterferenceReportV1::from_canonical_cbor(
+            &bytes,
+            &trusted_signer(),
+            &[trusted_executor()],
+            &artifacts
+        ),
+        Ok(report)
+    );
     assert!(!test_ok(pos_reference::verify_non_interference_report_v1(
-        &test_ok(report.to_canonical_cbor()),
+        &bytes,
         &trusted_signer(),
         &[trusted_executor()],
         &artifacts
     )));
+}
+
+fn surface_count(fixture_id: &str) -> u16 {
+    let profile = non_interference_capture_profiles_v1()
+        .into_iter()
+        .find(|profile| profile.fixture_id == fixture_id)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing profile")));
+    test_ok(u16::try_from(profile.surface_names.len()))
+}
+
+fn local_divergence(surface_ordinal: u16) -> NonInterferenceDivergenceCoordinateV1 {
+    NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: "NI-TOOL-001".to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        surface_ordinal,
+        byte_offset: 0,
+    }
+}
+
+#[test]
+fn artifact_signing_accepts_the_last_surface_ordinal_and_refuses_the_surface_count() {
+    let values = outcomes();
+    let surfaces = surface_count(&values[0].fixture_id);
+    let mut divergent = artifact_body(&values[0], &values[0].modes[0]);
+    divergent.equal = false;
+
+    let mut last = divergent.clone();
+    last.divergence = Some(local_divergence(surfaces - 1));
+    let signed = test_ok(NonInterferenceExecutionArtifactV1::sign(
+        last,
+        &SigningKey::from_bytes(&[8; 32]),
+    ));
+    assert_eq!(signed.divergence, Some(local_divergence(surfaces - 1)));
+    assert_eq!(
+        NonInterferenceExecutionArtifactV1::from_canonical_cbor(&test_ok(
+            signed.to_canonical_cbor()
+        )),
+        Ok(signed)
+    );
+
+    let mut past = divergent;
+    past.divergence = Some(local_divergence(surfaces));
+    assert_eq!(
+        NonInterferenceExecutionArtifactV1::sign(past, &SigningKey::from_bytes(&[8; 32])),
+        Err(NonInterferenceReportErrorV1::InvalidShape)
+    );
+}
+
+#[test]
+fn report_signing_accepts_the_last_surface_ordinal_and_refuses_the_surface_count() {
+    let surfaces = surface_count("NI-TOOL-001");
+
+    let mut last = outcomes();
+    last[0].modes[0].equal = false;
+    last[0].first_divergence = Some(local_divergence(surfaces - 1));
+    let artifacts = execution_artifacts(&mut last);
+    let report = test_ok(NonInterferenceReportV1::sign(
+        last,
+        &SigningKey::from_bytes(&[7; 32]),
+        &[],
+    ));
+    assert_eq!(
+        report.outcomes[0].first_divergence,
+        Some(local_divergence(surfaces - 1))
+    );
+    assert_eq!(
+        report.validate(&trusted_signer(), &[trusted_executor()], &artifacts),
+        Ok(())
+    );
+
+    let mut past = outcomes();
+    past[0].modes[0].equal = false;
+    past[0].first_divergence = Some(local_divergence(surfaces));
+    assert_eq!(
+        NonInterferenceReportV1::sign(past, &SigningKey::from_bytes(&[7; 32]), &[]),
+        Err(NonInterferenceReportErrorV1::InvalidShape)
+    );
+}
+
+#[test]
+fn neither_decoder_refuses_an_input_of_exactly_its_declared_size_limit_as_too_large() {
+    assert_eq!(MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1, 4096);
+    assert_eq!(MAX_NON_INTERFERENCE_REPORT_BYTES_V1, 65536);
+    let at_artifact_limit = vec![0; MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1];
+    assert_eq!(
+        NonInterferenceExecutionArtifactV1::from_canonical_cbor(&at_artifact_limit),
+        Err(NonInterferenceReportErrorV1::NonCanonical)
+    );
+    let past_artifact_limit = vec![0; MAX_NON_INTERFERENCE_EXECUTION_ARTIFACT_BYTES_V1 + 1];
+    assert_eq!(
+        NonInterferenceExecutionArtifactV1::from_canonical_cbor(&past_artifact_limit),
+        Err(NonInterferenceReportErrorV1::TooLarge)
+    );
+
+    let at_report_limit = vec![0; MAX_NON_INTERFERENCE_REPORT_BYTES_V1];
+    assert_eq!(
+        NonInterferenceReportV1::from_canonical_cbor(
+            &at_report_limit,
+            &trusted_signer(),
+            &[trusted_executor()],
+            &[]
+        ),
+        Err(NonInterferenceReportErrorV1::NonCanonical)
+    );
+    assert_eq!(
+        pos_reference::verify_non_interference_report_v1(
+            &at_report_limit,
+            &trusted_signer(),
+            &[trusted_executor()],
+            &[],
+        ),
+        Err(IndependentError::NonCanonical)
+    );
+}
+
+#[test]
+fn report_rejects_an_extra_valid_execution_artifact_from_a_trusted_executor() {
+    let (report, mut artifacts) = report_bundle();
+    let mut body = artifact_body(&report.outcomes[0], &report.outcomes[0].modes[0]);
+    body.execution_provenance_digest = digest(230);
+    let extra = test_ok(NonInterferenceExecutionArtifactV1::sign(
+        body,
+        &SigningKey::from_bytes(&[8; 32]),
+    ));
+    artifacts.push(test_ok(extra.to_canonical_cbor()));
+    assert_eq!(artifacts.len(), 193);
+    assert_both_verifiers_reject_artifacts(
+        &report,
+        &artifacts,
+        &[trusted_executor()],
+        NonInterferenceReportErrorV1::InvalidShape,
+    );
+}
+
+#[test]
+fn report_rejects_an_artifact_that_differs_from_its_reference_in_one_execution_field() {
+    let mutations: [fn(&mut NonInterferenceExecutionArtifactBodyV1); 3] = [
+        |body| body.result_digest = digest(231),
+        |body| body.execution_provenance_digest = digest(232),
+        |body| {
+            body.equal = false;
+            body.divergence = Some(NonInterferenceDivergenceCoordinateV1 {
+                fixture_id: body.fixture_id.clone(),
+                variant: body.variant,
+                mode: body.mode,
+                surface_ordinal: 0,
+                byte_offset: 0,
+            });
+        },
+    ];
+    for mutation in mutations {
+        let mut values = outcomes();
+        let mut artifacts = execution_artifacts(&mut values);
+        let mut body = artifact_body(&values[0], &values[0].modes[0]);
+        mutation(&mut body);
+        let mismatched = test_ok(NonInterferenceExecutionArtifactV1::sign(
+            body,
+            &SigningKey::from_bytes(&[8; 32]),
+        ));
+        values[0].modes[0].artifact_digest = test_ok(mismatched.content_digest());
+        artifacts[0] = test_ok(mismatched.to_canonical_cbor());
+        let report = test_ok(NonInterferenceReportV1::sign(
+            values,
+            &SigningKey::from_bytes(&[7; 32]),
+            &[],
+        ));
+        assert_both_verifiers_reject_artifacts(
+            &report,
+            &artifacts,
+            &[trusted_executor()],
+            NonInterferenceReportErrorV1::InvalidShape,
+        );
+    }
 }
 
 #[test]
