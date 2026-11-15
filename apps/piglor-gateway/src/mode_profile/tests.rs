@@ -364,6 +364,14 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
     );
     assert_eq!(GatewayNetworkGrantV1::OwnTracks.tag(), 0x01);
     assert_eq!(GatewayNetworkGrantV1::PublicReadOnly.tag(), 0x02);
+    for grant in [
+        GatewayNetworkGrantV1::OwnTracks,
+        GatewayNetworkGrantV1::PublicReadOnly,
+    ] {
+        assert_eq!(grant.as_str().parse(), Ok(grant));
+    }
+    assert_eq!(GatewayModeProfileIdV1::Local.mode(), "local");
+    assert_eq!(GatewayModeProfileIdV1::AirGapped.mode(), "air-gapped");
 }
 
 #[test]
@@ -578,8 +586,13 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     );
     drop(serving);
     let mut reopened = sqlite_host(&path)?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut reopened)?;
+    let migrated =
+        bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut reopened)?;
     assert_eq!(binding_epoch(&mut reopened)?, 2);
+    // The handle carries the epoch it was bound at, which Session discloses.
+    let session = migrated.session_mode();
+    assert_eq!(session.provenance_fields(), (AIR_GAPPED_DIGEST_HEX, 2));
+    assert_eq!(session.disclosure(false)["binding_epoch"], 2);
     assert_eq!(reopened.command_sender()?.logical_head(timeline)?, head);
     Ok(())
 }
@@ -705,6 +718,40 @@ fn the_handle_discloses_only_its_revision_inputs_and_selection() {
     assert_eq!(hex(revision.fields()[0]), AIR_GAPPED_DIGEST_HEX);
     assert!(revision.fields()[2].is_empty());
     assert!(revision.revocation_current_by_construction());
+}
+
+#[test]
+fn only_session_discloses_the_current_mode_and_network_posture() {
+    let local = test_binding(
+        GatewayModeProfileIdV1::Local,
+        [
+            GatewayNetworkGrantV1::PublicReadOnly,
+            GatewayNetworkGrantV1::OwnTracks,
+        ],
+    )
+    .session_mode();
+    assert_eq!(
+        local.disclosure(false),
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": "gateway-mode-local-v1",
+            "mode": "local",
+            "mode_profile_digest": LOCAL_DIGEST_HEX,
+            "binding_epoch": 1,
+            "network_grants": ["owntracks", "public-read-only"],
+            "network": "denied",
+        })
+    );
+    assert_eq!(local.disclosure(true)["network"], "capability-granted");
+    assert_eq!(local.provenance_fields(), (LOCAL_DIGEST_HEX, 1));
+    let air_gapped = test_binding(GatewayModeProfileIdV1::AirGapped, []).session_mode();
+    for capability in [false, true] {
+        let disclosure = air_gapped.disclosure(capability);
+        assert_eq!(disclosure["network"], "absent");
+        assert_eq!(disclosure["mode"], "air-gapped");
+        assert_eq!(disclosure["mode_profile_digest"], AIR_GAPPED_DIGEST_HEX);
+        assert_eq!(disclosure["network_grants"], serde_json::json!([]));
+    }
 }
 
 #[tokio::test]

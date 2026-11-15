@@ -1,5 +1,5 @@
 {
-  "name": "draft-session-unauthenticated",
+  "name": "session-unauthenticated",
   "operation_id": "getSession",
   "request": {
     "headers": {}

@@ -234,10 +234,14 @@ pub enum GatewayAuthorizationTarget {
 /// `action` a Principal's grant must cover, and the `purpose` it is
 /// evaluated for (#1361).
 ///
-/// The named constants are the closed set this Gateway serves; the Local
-/// Principal is provisioned with grants named by [`Self::name`]. Later
-/// operations (#303, #304, #309) add a constant with a fresh resource and
-/// action pair and authorize through [`crate::Gateway::authorize_operation`].
+/// The named constants are the closed set this Gateway serves, plus the
+/// Principal network capability [`Self::NETWORK`], which no route
+/// authorizes; the Local Principal is provisioned with grants named by
+/// [`Self::name`], and `Session` discloses the ones its grant covers. Each
+/// constant has its own resource, so a grant covers exactly the constants it
+/// names. Later operations (#303, #304, #309) add a constant with a fresh
+/// resource and action pair and authorize through
+/// [`crate::Gateway::authorize_operation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayOperationV1 {
     name: &'static str,
@@ -247,6 +251,17 @@ pub struct GatewayOperationV1 {
 }
 
 impl GatewayOperationV1 {
+    /// The Principal network capability `gateway.network.v1` (ADR-134 §4):
+    /// it authorizes no operation in v1 and only decides the Session
+    /// `network` disclosure.
+    pub const NETWORK: Self = Self::new(
+        crate::mode_profile::GATEWAY_NETWORK_CAPABILITY_V1,
+        "gateway.network",
+        "use",
+        "network",
+    );
+    /// `GET /v1/session`: read the Principal's own session (#1362).
+    pub const READ_SESSION: Self = Self::new("session.read", "session", "read", "read");
     /// `POST /v1/timelines`: create a root Timeline.
     pub const CREATE_TIMELINE: Self =
         Self::new("timeline.create", "timeline", "create", "operation");
@@ -275,9 +290,12 @@ impl GatewayOperationV1 {
         "world.action.v1.submit",
         "action",
     );
-    /// Every operation this Gateway serves, in name order.
-    pub const ALL: [Self; 5] = [
+    /// Every operation this Gateway serves and the network capability, in
+    /// name order.
+    pub const ALL: [Self; 7] = [
+        Self::NETWORK,
         Self::CREATE_PREDICTION,
+        Self::READ_SESSION,
         Self::CREATE_TIMELINE,
         Self::READ_EVENTS,
         Self::APPEND_SIGNAL,
@@ -670,6 +688,8 @@ pub struct GatewayAuthorization {
     /// The bound Gateway execution mode of the composition (ADR-134 §6); an
     /// unbound composition admits no action.
     execution_mode: Option<crate::mode_profile::GatewayExecutionModeRevisionV1>,
+    /// The current execution mode `Session` discloses, from the same binding.
+    session_mode: Option<crate::mode_profile::GatewaySessionModeV1>,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
     denial_budget: Arc<Mutex<DenialRecordBudget>>,
@@ -715,6 +735,7 @@ impl GatewayAuthorization {
             source: None,
             revocation_state_current,
             execution_mode: None,
+            session_mode: None,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
             denial_budget: Arc::new(Mutex::new(DenialRecordBudget::default())),
@@ -1179,7 +1200,50 @@ impl GatewayAuthorization {
         }
         self.revocation_state_current |= current;
         self.execution_mode = Some(revision);
+        self.session_mode = Some(mode.session_mode());
         Ok(self)
+    }
+
+    /// The `Session` of the Principal `decision` admitted to read it
+    /// (#1362), or `None` for an authorizer bound to no execution mode.
+    ///
+    /// Call it while the decision's permit holds the commit fence, so the
+    /// pinned authority read here is the one the decision used. The grants
+    /// are every [`GatewayOperationV1::ALL`] entry the pinned authority
+    /// allows the decision's actor, decided by the same evaluator as
+    /// [`Self::authorize`] and recording nothing; the entities are the leaf
+    /// grant's actors. Nothing comes from the request but the actor.
+    pub(crate) fn session(
+        &self,
+        decision: &GatewayAuthorizationDecision,
+    ) -> Option<crate::session::GatewaySessionV1> {
+        self.session_mode.clone().map(|mode| {
+            let pinned = self.pinned();
+            let authority = pinned.view.authority();
+            let actor = decision.actor_entity_id();
+            let at_time = decision.request().at_time;
+            crate::session::GatewaySessionV1 {
+                principal: decision.principal().clone(),
+                entity_ids: authority
+                    .chain()
+                    .grants()
+                    .last()
+                    .map(|leaf| leaf.scope().actor_entity_ids().to_vec())
+                    .unwrap_or_default(),
+                grants: GatewayOperationV1::ALL
+                    .into_iter()
+                    .filter(|operation| {
+                        self.evaluate(GatewayAuthorizationRequest::operation(
+                            actor, *operation, None, at_time,
+                        ))
+                        .is_ok_and(|evaluated| evaluated.is_allowed())
+                    })
+                    .map(GatewayOperationV1::name)
+                    .collect(),
+                authority_head: authority.head_position(),
+                mode,
+            }
+        })
     }
 
     /// The pinned authority registry digest, revocation-freshness claim and
