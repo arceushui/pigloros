@@ -45,7 +45,8 @@ PATHS = {
 COMMIT_SHA = "1" * 40
 PR_HEAD_SHA = "2" * 40
 PROVENANCE = (
-    f"git-head\t{COMMIT_SHA}\ngithub-sha\t{COMMIT_SHA}\npr-head-sha\t{PR_HEAD_SHA}\n" + "".join(
+    f"git-head\t{COMMIT_SHA}\ngithub-sha\t{COMMIT_SHA}\npr-head-sha\t{PR_HEAD_SHA}\n"
+    f"merge-parent\t{'4' * 40}\nmerge-parent\t{PR_HEAD_SHA}\n" + "".join(
         f"file\t{name}\t{hashlib.sha256((ROOT / name).read_bytes()).hexdigest()}\n"
         for name in checker.PROVENANCE_FILES))
 SYSTEMD = PATHS["systemd"]
@@ -413,6 +414,9 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/provenance": PROVENANCE.replace(line, line[:-64] + "0" * 64)}),
             lambda f: f.update({"host/provenance": PROVENANCE + "file\tREADME.md\t" + "0" * 64 + "\n"}),
             lambda f: f.update({"host/provenance": PROVENANCE + "garbage\n"}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(f"merge-parent\t{PR_HEAD_SHA}\n", "")}),
+            lambda f: f.update({"host/provenance": PROVENANCE.replace(f"merge-parent\t{PR_HEAD_SHA}", "merge-parent\t" + "5" * 40)}),
+            lambda f: f.update({"host/provenance": PROVENANCE + f"merge-parent\t{PR_HEAD_SHA}\n"}),
         ]
         for change in changes:
             with self.subTest(change=change):

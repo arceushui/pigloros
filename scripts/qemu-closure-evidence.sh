@@ -78,6 +78,8 @@ record_provenance() {
     printf 'git-head\t%s\n' "$(git -C "${root}" rev-parse HEAD)"
     printf 'github-sha\t%s\n' "${GITHUB_SHA:?}"
     printf 'pr-head-sha\t%s\n' "${EVIDENCE_PR_HEAD_SHA:?}"
+    # The raw commit object names both merge parents even in a shallow clone.
+    git -C "${root}" cat-file commit HEAD | awk '/^$/ { body = 1 } !body && $1 == "parent" { print "merge-parent\t" $2 }'
     for file in "${provenance_files[@]}"; do
       printf 'file\t%s\t%s\n' "${file}" "$(sha256sum <"${root}/${file}" | cut -d' ' -f1)"
     done

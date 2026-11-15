@@ -20,7 +20,9 @@ scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
 itself, independently of the kernel. A published artifact can be checked
 again: its checker-verdict.json and SHA256SUMS sit beside guest/ and host/,
-and every file must then match SHA256SUMS.
+and every file must then match SHA256SUMS. The provenance check hashes the
+reviewed inputs in this checker's own checkout, so a re-check needs the
+repository at the tested commit.
 Usage:
 
   check_qemu_closure_evidence.py --architecture ARCH --certificate PEM \
@@ -574,12 +576,14 @@ def sha256_file(path: pathlib.Path) -> str:
 
 def check_provenance(evidence: Evidence, repository: pathlib.Path) -> dict:
     """Bind the evidence to the tested commit and to the checked-out inputs."""
-    commits, files = {}, {}
+    commits, files, parents = {}, {}, []
     for line in evidence.text("host/provenance").splitlines():
         fields = line.split("\t")
         if len(fields) == 2 and fields[0] in ("git-head", "github-sha", "pr-head-sha") \
                 and fields[0] not in commits and COMMIT.fullmatch(fields[1]):
             commits[fields[0]] = fields[1]
+        elif len(fields) == 2 and fields[0] == "merge-parent" and COMMIT.fullmatch(fields[1]):
+            parents.append(fields[1])
         elif len(fields) == 3 and fields[0] == "file" and fields[1] not in files \
                 and re.fullmatch(r"[0-9a-f]{64}", fields[2]):
             files[fields[1]] = fields[2]
@@ -588,12 +592,15 @@ def check_provenance(evidence: Evidence, repository: pathlib.Path) -> dict:
     if sorted(commits) != ["git-head", "github-sha", "pr-head-sha"] \
             or commits["git-head"] != commits["github-sha"]:
         raise EvidenceError("the evidence does not name the tested commit")
+    # pull_request tests refs/pull/N/merge: base first, pull request head second.
+    if len(parents) != 2 or parents[1] != commits["pr-head-sha"]:
+        raise EvidenceError("the tested commit is not the merge of the recorded pull request head")
     if sorted(files) != sorted(PROVENANCE_FILES):
         raise EvidenceError("provenance does not hash exactly the reviewed inputs")
     for name, digest in files.items():
         if sha256_file(repository / name) != digest:
             raise EvidenceError(f"{name} differs from the input the evidence was produced from")
-    return {"commits": commits, "files": files}
+    return {"commits": commits, "merge_parents": parents, "files": files}
 
 
 def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,

@@ -233,11 +233,13 @@ Each `qemu-closure-evidence-<architecture>-<sha>` artifact is named after
 `github.sha`, which is the merge commit that the `pull_request` run tests.
 `host/provenance` records:
 
-- that commit, `git rev-parse HEAD` and the pull request head;
+- that commit, `git rev-parse HEAD`, the pull request head and the merge
+  commit's two parents (the second must be the pull request head);
 - the SHA-256 of the checker, the producer script, the flake files, the module,
   the guest, the collector and the certificate.
 
-The checker verifies these against the checkout and puts its own SHA-256 in
+The checker verifies these against its own checkout, so re-checking an artifact
+needs the repository at the tested commit. It puts its own SHA-256 in
 `checker-verdict.json`. `SHA256SUMS` hashes every file.
 
 The manifest has no signed provenance, such as a Sigstore attestation. The
