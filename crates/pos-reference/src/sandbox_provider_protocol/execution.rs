@@ -901,8 +901,8 @@ pub struct SandboxProviderError {
     pub code: SandboxProviderErrorCode,
     pub safe_detail: Option<String>,
     pub runtime_attestation_key_id: String,
-    pub error_digest: [u8; 32],
-    pub signature: [u8; 64],
+    error_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 impl SandboxProviderError {
@@ -1002,6 +1002,18 @@ impl SandboxProviderError {
         validate_error_fields(&self.fields())?;
         require_signature(&self.signature)?;
         verify_digest("SPE1", unsigned, self.error_digest)
+    }
+
+    /// The SPE1 self-digest.
+    #[must_use]
+    pub const fn error_digest(&self) -> [u8; 32] {
+        self.error_digest
+    }
+
+    /// The runtime-attestation signature over the self-digest.
+    #[must_use]
+    pub const fn signature(&self) -> [u8; 64] {
+        self.signature
     }
 
     fn fields(&self) -> SandboxProviderErrorFields {

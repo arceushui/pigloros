@@ -1435,8 +1435,9 @@ fn provider_error_validation_precedence_agrees() -> TestResult {
 
     producer.operation = None;
     producer.signature = [0; 64];
+    // The decoded record keeps its signature private; the identity check
+    // fails before the signature is read.
     reference.operation = None;
-    reference.signature = [0; 64];
     assert_eq!(
         producer.validate(),
         Err(SandboxContractErrorV1::InconsistentFields)
@@ -2317,7 +2318,8 @@ fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
     );
     let mut invalid_independent_described = independent_described;
-    invalid_independent_described.response_digest[0] ^= 1;
+    // The retained digest no longer binds a changed field.
+    invalid_independent_described.spm1_digest[0] ^= 1;
     assert_eq!(
         invalid_independent_described.validate_for_request(&independent_describe),
         Err(independent::SandboxProviderProtocolError::DigestMismatch)
