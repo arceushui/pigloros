@@ -22,15 +22,20 @@ only with `pos-core`'s `authority-trust-root` feature, so:
   call it. Test code is exempt: a crate's top-level `tests` directory, an inline
   `#[cfg(test)] mod name { .. }`, and the file of a module declared `#[cfg(test)] mod name;`
   with all of its descendant modules. Any other guard (`cfg(all(test, ..))`, `#[path]`) is not
-  recognised, so such a mint is rejected. A file that non-test code pulls in with `include!` or
-  `#[path]` is non-test, whatever else declares it, even under a `tests` directory or with
-  another extension. String and char literals are blanked first, so braces or names inside
-  them change nothing;
+  recognised, so such a mint is rejected;
+- non-test code pulls in files only by a plain string literal: `include!("..")`, `#[path = ".."]`
+  or `include!(concat!(env!("CARGO_MANIFEST_DIR"), ".."))`, resolved and then checked as non-test
+  code whatever else declares them (even under `tests` or with another extension), and
+  `include!(concat!(env!("OUT_DIR"), ".."))` for build-script output. Every other `include!` or
+  `path` form, including a `cfg_attr` that sets `path`, is rejected, as is a reference outside the
+  repository. Build scripts and the files they pull in may not name the seal at all, not even in
+  a literal, since they generate the `OUT_DIR` code. String and char literals are blanked
+  (length-preserving) before any scan, so braces or names inside them change nothing;
 - in non-test `crates/pos-core/src` code, the seal derives only `Debug` (no `cfg_attr` on it), has
   exactly one inherent impl (in `authority.rs`) whose only fn is `for_composition_root`, has no
-  trait impl and no type alias, is never constructed by a literal (nor by `Self(())` outside that
-  impl), and `for_composition_root` is never called, so no second constructor can bypass the
-  doctests;
+  trait impl, no type alias and no `use .. as` rename, is never constructed by a literal (nor by
+  `Self(())` outside that impl), and `for_composition_root` is never called, so no second
+  constructor can bypass the doctests;
 - no `default` feature closure reaches `authority-trust-root` or a feature that forwards it, and
   no `pos-core` feature forwards it;
 - outside `crates/pos-core/` and the crates' top-level `tests` directories, no source re-exports
@@ -120,7 +125,16 @@ STATIC_MINT = re.compile(
     rf"\bstatic\s+[A-Z_][A-Z0-9_]*\s*:\s*{SEAL_PATH}\s*=\s*"
     rf"{SEAL_PATH}::for_composition_root\(\s*\)\s*;"
 )
-FILE_REFERENCE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)|#\[path\s*=\s*"([^"]+)"\]')
+REFERENCE_START = re.compile(r"\binclude\s*!|#\[\s*path\b|\bcfg_attr\s*\(")
+PLAIN_INCLUDE = re.compile(r'include!\(\s*"([^"\\]+)"\s*\)')
+PLAIN_PATH = re.compile(r'#\[\s*path\s*=\s*"([^"\\]+)"\s*\]')
+ENV_INCLUDE = re.compile(
+    r'include!\(\s*concat!\(\s*env!\(\s*"(OUT_DIR|CARGO_MANIFEST_DIR)"\s*\)\s*,'
+    r'\s*"([^"\\]+)"\s*\)\s*\)'
+)
+CFG_ATTR_PATH = re.compile(r"cfg_attr\s*\([^\]]*\bpath\s*=")
+SEAL_RENAME = re.compile(rf"\b{SEAL_NAME}\s+as\s+\w+")
+BUILD_SCRIPT = "build.rs"
 LITERAL = re.compile(
     r'(?<!\w)b?r(#*)"(?:.|\n)*?"\1|(?<!\w)b?"(?:\\.|[^"\\])*"|(?<!\w)b?\'(?:\\.|[^\'\\\n])\''
 )
@@ -215,9 +229,62 @@ def _leaks(name: str, code: str) -> list[str]:
     return found
 
 
+def _blank_interior(match: re.Match[str]) -> str:
+    text = match.group(0)
+    opening = text.index(text[-1] if text[-1] == "'" else '"') + 1
+    closing = len(text) - (len(match.group(1) or "") + 1 if text[-1] != "'" else 1)
+    interior = "".join("\n" if char == "\n" else " " for char in text[opening:closing])
+    return text[:opening] + interior + text[closing:]
+
+
 def _blank_literals(code: str) -> str:
-    """Empty every string and char literal, so braces and names inside them are not code."""
-    return LITERAL.sub(lambda match: match.group(0)[:1] + match.group(0)[-1:], code)
+    """Blank the interior of every string and char literal, keeping every offset.
+
+    Braces and names inside a literal are then not code, and a span found in the blanked text
+    is the same span in the original text.
+    """
+    return LITERAL.sub(_blank_interior, code)
+
+
+def _crate_directory(path: Path) -> Path:
+    return next(
+        (parent for parent in path.parents if (parent / "Cargo.toml").is_file()), path.parent
+    )
+
+
+def _references(path: Path, raw: str) -> tuple[list[Path], list[str]]:
+    """Return the files that non-test `raw` (the code of `path`) pulls in, and refused forms.
+
+    `include!` must take exactly one plain string literal, or be
+    `include!(concat!(env!("CARGO_MANIFEST_DIR"), ".."))`, resolved against the crate, or
+    `include!(concat!(env!("OUT_DIR"), ".."))`, whose generated code the build-script rule
+    covers; `#[path]` must take exactly one plain string literal; and no `cfg_attr` may set
+    `path`. `include_str!` and `include_bytes!` (which `include\\s*!` does not match) pull in
+    data, not code, so they are allowed.
+    """
+    blanked = _blank_literals(raw)
+    spans = _test_spans(blanked)
+    files: list[Path] = []
+    refused: list[str] = []
+    for match in REFERENCE_START.finditer(blanked):
+        start = match.start()
+        if any(low <= start < high for low, high in spans):
+            continue
+        token = match.group(0)
+        if token.startswith("cfg_attr"):
+            if CFG_ATTR_PATH.match(blanked, start):
+                refused.append("a cfg_attr path")
+            continue
+        plain = (PLAIN_INCLUDE if token.startswith("include") else PLAIN_PATH).match(raw, start)
+        generated = ENV_INCLUDE.match(raw, start) if token.startswith("include") else None
+        if plain:
+            files.append((path.parent / plain.group(1)).resolve())
+        elif generated and generated.group(1) == "CARGO_MANIFEST_DIR":
+            relative = generated.group(2).lstrip("/")
+            files.append((_crate_directory(path) / relative).resolve())
+        elif not generated:
+            refused.append(f"`{raw[start : start + 40].splitlines()[0]}`")
+    return files, refused
 
 
 def _block_end(code: str, start: int) -> int:
@@ -281,8 +348,12 @@ def _non_test_references(
     pending = list(non_test)
     while pending:
         path = pending.pop()
-        for match in FILE_REFERENCE.finditer(_without_tests(raw[path])):
-            target = (path.parent / (match.group(1) or match.group(2))).resolve()
+        files, refused = _references(path, raw[path])
+        outside.extend(
+            f"{path.relative_to(base).as_posix()}: pulls in a file by a non-literal path: {form}"
+            for form in refused
+        )
+        for target in files:
             if target in found or not target.is_file():
                 continue
             if not target.is_relative_to(base):
@@ -344,7 +415,7 @@ def _core_seal_violations(name: str, code: str) -> list[str]:
     found: list[str] = []
     if SEAL_IMPL.search(code):
         found.append(f"{name}: implements a trait for the authority trust-root seal")
-    if ALIAS.search(code):
+    if ALIAS.search(code) or SEAL_RENAME.search(code):
         found.append(f"{name}: aliases the authority trust-root seal")
     bodies = [
         (match.end(), _block_end(code, match.end())) for match in SEAL_INHERENT.finditer(code)
@@ -364,6 +435,28 @@ def _core_seal_violations(name: str, code: str) -> list[str]:
         found.append(f"{name}: constructs the seal outside for_composition_root")
     if len(MINT.findall(code)) != len(MINT_DEFINITION.findall(code)):
         found.append(f"{name}: mints the authority trust-root seal inside pos-core")
+    return found
+
+
+def _build_script_violations(raw: dict[Path, str], base: Path) -> list[str]:
+    """Reject a build script, or a file it pulls in, that names the seal even in a literal.
+
+    Code a build script generates into `OUT_DIR` reaches a crate through
+    `include!(concat!(env!("OUT_DIR"), ..))`, which this checker cannot read; the script's own
+    text is checked instead, literals included.
+    """
+    pending = [path for path in raw if path.name == BUILD_SCRIPT]
+    seen: set[Path] = set()
+    found: list[str] = []
+    while pending:
+        path = pending.pop()
+        if path in seen or path not in raw:
+            continue
+        seen.add(path)
+        if MINT.search(raw[path]) or SEAL.search(raw[path]):
+            found.append(f"{path.relative_to(base).as_posix()}: build code names the seal")
+        files, _ = _references(path, raw[path])
+        pending.extend(files)
     return found
 
 
@@ -390,6 +483,7 @@ def source_violations(root: Path) -> list[str]:
         base,
     )
     codes = {path: _blank_literals(code) for path, code in raw.items()}
+    found.extend(_build_script_violations(raw, base))
     for path, code in codes.items():
         relative = path.relative_to(base)
         name = relative.as_posix()

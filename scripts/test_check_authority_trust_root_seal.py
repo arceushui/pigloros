@@ -39,6 +39,7 @@ RETURNS = "returns the authority trust-root seal from a public fn"
 CONFIG = "enables authority-trust-root outside a manifest"
 DEFAULT = "default feature enables authority-trust-root"
 PINNED = "mints the authority trust-root seal outside its pinned mint sites"
+NON_LITERAL = "pulls in a file by a non-literal path"
 MINT_SITE_FILES = (
     "apps/piglor-gateway/src/local_principal.rs",
     "apps/pos-experiment/src/lib.rs",
@@ -158,6 +159,11 @@ ALLOWED_SOURCES = {
     "apps/pos-plugin-conformance-adapter/src/main.rs": "static ROOT: AuthorityTrustRootSealV1 = "
     + MINT,
     "apps/pos-plugin-conformance-adapter/src/runner/tests.rs": SEAL_USE,
+    "apps/pos-plugin-conformance-adapter/src/generated.rs": "include!(concat!("
+    + 'env!("OUT_DIR"), "/g.rs"));\n'
+    + 'const SCHEMA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/s.bin"));\n',
+    "apps/pos-plugin-conformance-adapter/build.rs": "fn main() {\n"
+    + '    println!("cargo:rerun-if-changed=x");\n}\n',
     "apps/pos-plugin-conformance-adapter/src/runner.rs": "#[cfg(test)]\nmod tests;\n"
     + "pub fn open(seal: &'static AuthorityTrustRootSealV1) {}\n",
     "crates/pos-store/src/community/attestation.rs": "static OWNER_SEAL: AuthorityTrustRootSealV1 = "
@@ -171,6 +177,8 @@ ALLOWED_SOURCES = {
     + "pub(crate) use pos_core as core_api;\n"
     + "pub use pos_core::authority_persistence::AuthorityViewV1;\n",
     "crates/pos-state/src/lib.rs": TEST_MODULE
+    + '    const CLOSE: &str = "}";\n'
+    + '    include!("generated.rs",);\n'
     + "    "
     + SEAL_USE
     + "}\n// pub use pos_core::AuthorityTrustRootSealV1;\n// "
@@ -221,6 +229,31 @@ REJECTED_REFERENCES = {
     "a file outside the repository included from src": (
         {"apps/piglor-gateway/src/http.rs": 'include!("/etc/passwd");\n'},
         "apps/piglor-gateway/src/http.rs: includes /etc/passwd",
+    ),
+    "an include hidden after a brace in a test-module literal": (
+        {
+            "apps/piglor-gateway/src/seal.in": SEAL_USE,
+            "apps/piglor-gateway/src/http.rs": TEST_MODULE
+            + '    const OPEN: &str = "{";\n}\n'
+            + 'include!("seal.in");\n',
+        },
+        "apps/piglor-gateway/src/seal.in: " + PINNED,
+    ),
+    "a crate-directory include": (
+        {
+            "apps/piglor-gateway/Cargo.toml": "[package]\nname = \"gateway\"\n",
+            "apps/piglor-gateway/tests/support/seal.rs": SEAL_USE,
+            "apps/piglor-gateway/src/http.rs": 'include!(concat!(env!("CARGO_MANIFEST_DIR"), '
+            + '"/tests/support/seal.rs"));\n',
+        },
+        "apps/piglor-gateway/tests/support/seal.rs: " + PINNED,
+    ),
+    "a file pulled into a build script": (
+        {
+            "apps/piglor-gateway/build.rs": '#[path = "src/emit.rs"]\nmod emit;\nfn main() {}\n',
+            "apps/piglor-gateway/src/emit.rs": 'const S: &str = "AuthorityTrustRootSealV1";\n',
+        },
+        "apps/piglor-gateway/src/emit.rs: build code names the seal",
     ),
     "a non-Rust file included from src": (
         {
@@ -510,6 +543,37 @@ REJECTED_SOURCES = {
         + MINT
         + "    };\n}\n",
         "expands the authority trust-root seal mint from a macro",
+    ),
+    "use rename in core": (
+        "crates/pos-core/src/store.rs",
+        "use crate::AuthorityTrustRootSealV1 as Root;\n",
+        "aliases the authority trust-root seal",
+    ),
+    "include with an env path": (
+        "apps/piglor-gateway/src/http.rs",
+        'include!(concat!(env!("SEAL_DIR"), "/seal.rs"));\n',
+        NON_LITERAL,
+    ),
+    "include with a trailing comma": (
+        "apps/piglor-gateway/src/http.rs",
+        'include!("seal.rs",);\n',
+        NON_LITERAL,
+    ),
+    "include with brackets": (
+        "apps/piglor-gateway/src/http.rs",
+        'include!["seal.rs"];\n',
+        NON_LITERAL,
+    ),
+    "spaced include": ("apps/piglor-gateway/src/http.rs", 'include ! ("seal.rs");\n', NON_LITERAL),
+    "cfg_attr path": (
+        "apps/piglor-gateway/src/http.rs",
+        '#[cfg_attr(not(test), path = "seal.rs")]\nmod real;\n',
+        NON_LITERAL,
+    ),
+    "build script naming the seal in a literal": (
+        "apps/piglor-gateway/build.rs",
+        'fn main() {\n    println!("{}", "AuthorityTrustRootSealV1::for_composition_root()");\n}\n',
+        "apps/piglor-gateway/build.rs: build code names the seal",
     ),
     "workflow": (".github/workflows/ci.yml", "run: " + FEATURES_FLAG, CONFIG),
     "Dockerfile": ("docker/Dockerfile", "RUN " + FEATURES_FLAG, CONFIG),
