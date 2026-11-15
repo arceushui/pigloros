@@ -311,7 +311,7 @@ impl Gateway {
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<(), GatewayAuthorizationError> {
-        match self.authority_record(authorization).await {
+        match self.source_record(authorization).await {
             Ok(Some(record)) if authorization.is_behind(&record) => {
                 self.refresh_with_consent_events(authorization, record)
                     .await
@@ -335,24 +335,31 @@ impl Gateway {
     }
 
     /// The authority record the store holds under the source leaf of the
-    /// authorizer, without the consent Timeline's Events; `None` for an
-    /// authorizer without a store source.
-    pub(crate) async fn authority_record(
+    /// authorizer; `None` for an authorizer without a store source.
+    pub(crate) async fn source_record(
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<Option<GatewayAuthorityRecordV1>, GatewayAuthorizationError> {
         let Some(leaf) = authorization.source_leaf() else {
             return Ok(None);
         };
+        self.authority_record(authorization, leaf).await.map(Some)
+    }
+
+    /// The authority record the store holds under the source leaf `leaf`
+    /// of the authorizer, without the consent Timeline's Events.
+    pub(crate) async fn authority_record(
+        &self,
+        authorization: &GatewayAuthorization,
+        leaf: Hash,
+    ) -> Result<GatewayAuthorityRecordV1, GatewayAuthorizationError> {
         let chain = self.store.load_authority(leaf).await;
         let consented = match authorization.consented_binding() {
             Some((leaves, timeline)) => Some(self.consent_record(&leaves, timeline).await),
             None => None,
         };
         match (chain, consented.transpose()) {
-            (Ok(Ok(chain)), Ok(consented)) => {
-                Ok(Some(GatewayAuthorityRecordV1 { chain, consented }))
-            }
+            (Ok(Ok(chain)), Ok(consented)) => Ok(GatewayAuthorityRecordV1 { chain, consented }),
             _ => Err(GatewayAuthorizationError::AuthorityUnavailable),
         }
     }

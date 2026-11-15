@@ -3470,6 +3470,7 @@ mod tests {
         let admitted = gateway
             .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
             .await?;
+        let authorization = gateway.authorization.clone().ok_or("an authorizer")?;
         let revoking = tokio::spawn({
             let app = app.clone();
             async move {
@@ -3479,7 +3480,17 @@ mod tests {
                     .ok()
             }
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The revocation has passed its own decision once it is queued for
+        // the exclusive fence behind the admitted operation.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !authorization.commit_fence_contended() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the revocation queues for the exclusive fence"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(authorization);
         assert!(
             !revoking.is_finished(),
             "the revocation waits for the admitted operation"
@@ -3502,6 +3513,15 @@ mod tests {
             drop(gateway);
         }
         drop((app, other_app));
+        // Nothing was recorded: a restarted host still holds it granted.
+        let (gateway, app) = serve_local(&path)?;
+        assert_eq!(
+            session_of(&app, actor).await?["consents"][0]["state"],
+            "granted"
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
         Ok(())
     }
 

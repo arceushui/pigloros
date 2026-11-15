@@ -265,12 +265,9 @@ impl Gateway {
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<(GatewayConsentsV1, [u8; 16]), GatewayError> {
-        let record = self
-            .authority_record(authorization)
-            .await
-            .and_then(|record| {
-                record.ok_or(super::GatewayAuthorizationError::AuthorityUnavailable)
-            });
+        let record = self.source_record(authorization).await.and_then(|record| {
+            record.ok_or(super::GatewayAuthorizationError::AuthorityUnavailable)
+        });
         let refreshed = self
             .with_consent_events(authorization, record)
             .await
