@@ -64,6 +64,13 @@ LOGIC = re.compile(r"\bcomposition_fallback_registry\s*::\s*(?:\{[^}]*\blogic\b|
 # (`<S as CompositionFallbackRegistryV1>::activate(..)`).
 CALL = re.compile(r"(?:\.|::)\s*(?:declare|activate|provision_fallback_registry)\s*\(")
 AWARE = re.compile(r"\b" + PORT + r"\b|\bcomposition_fallback_registry\s*::\s*\*")
+# Equivalence of the prefilter: comment stripping only removes text (each comment
+# becomes one space), so a token absent from the raw file is absent from the
+# stripped code, and every finding below needs one of these tokens to match.
+# Rule 1 names PORT or an OPAQUE_TYPES entry; rules 2 and 4 (outside the registry
+# modules) need `composition_fallback_registry`; rule 3 needs AWARE. Rule 4 rejects
+# any `target_os` in a registry module, so those files are never skipped.
+GUARDS = (PORT, *OPAQUE_TYPES, "composition_fallback_registry")
 
 
 def has_target_os_gate(lines: list[str], number: int) -> bool:
@@ -130,7 +137,10 @@ def violations(root: Path) -> list[str]:
         if relative_path.parts[0] in SKIPPED_PARTS:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        found.extend(file_findings(relative_path.as_posix(), strip_comments(text)))
+        relative = relative_path.as_posix()
+        if not REGISTRY_MODULE.match(relative) and not any(token in text for token in GUARDS):
+            continue
+        found.extend(file_findings(relative, strip_comments(text)))
     return found
 
 
