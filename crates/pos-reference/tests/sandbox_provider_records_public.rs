@@ -1,5 +1,3 @@
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-
 //! The provider runtime's SDY1 and SPE1 producers (ADR-069 R9 §5, R11 §7).
 //!
 //! Each record is self-digested by its encoder, signed over the message the
@@ -79,7 +77,7 @@ fn describe_fields() -> SandboxDescribeResponseFields {
     }
 }
 
-/// The SPE1 11 a refusal of `operation` carries: describe names no attempt.
+/// The SPE1 `11` refusal of `operation`; a describe refusal names no attempt.
 fn refusal(operation: u8) -> SandboxProviderErrorFields {
     SandboxProviderErrorFields {
         operation: Some(operation),
@@ -318,5 +316,69 @@ fn only_a_signature_under_the_admitted_key_becomes_a_record() -> TestResult {
         .signature_message()
         .starts_with(b"PiglorOS.SPE1.Signature.v1\0"));
     assert_eq!(error.key_id(), KEY_ID);
+    Ok(())
+}
+
+#[test]
+fn every_field_bound_holds_at_its_edge() -> TestResult {
+    // The longest detail and an execute payload timeout are accepted.
+    for fields in [
+        SandboxProviderErrorFields {
+            safe_detail: Some("d".repeat(256)),
+            ..refusal(1)
+        },
+        SandboxProviderErrorFields {
+            code: SandboxProviderErrorCode::PayloadTransferTimeout,
+            ..refusal(1)
+        },
+    ] {
+        let encoded = signed_error(fields)?.to_canonical_cbor()?;
+        SandboxProviderError::from_canonical_cbor(&encoded)?
+            .verify_signature(&signing_key().verifying_key())?;
+    }
+    for (fields, expected) in [
+        (
+            SandboxProviderErrorFields {
+                attempt_id: Some([0; 16]),
+                ..refusal(1)
+            },
+            SandboxProviderProtocolError::FieldOutOfBounds,
+        ),
+        (
+            SandboxProviderErrorFields {
+                request_digest: Some([0; 32]),
+                ..refusal(1)
+            },
+            SandboxProviderProtocolError::FieldOutOfBounds,
+        ),
+        (
+            SandboxProviderErrorFields {
+                request_id: None,
+                attempt_id: None,
+                ..refusal(0)
+            },
+            SandboxProviderProtocolError::InconsistentFields,
+        ),
+    ] {
+        assert_eq!(
+            SandboxProviderError::self_digested(fields).err(),
+            Some(expected)
+        );
+    }
+    for fields in [
+        SandboxDescribeResponseFields {
+            provider_binary_digest: [0; 32],
+            ..describe_fields()
+        },
+        SandboxDescribeResponseFields {
+            hcp1_digest: [0; 32],
+            ..describe_fields()
+        },
+    ] {
+        assert_eq!(
+            SandboxDescribeResponse::self_digested(fields).err(),
+            Some(SandboxProviderProtocolError::FieldOutOfBounds)
+        );
+    }
     Ok(())
 }
