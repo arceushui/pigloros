@@ -5,14 +5,19 @@
 //! started Gateway after a bind failure in exactly the same way.
 
 use std::{
+    future::Future,
     io::{self, Write as _},
     net::SocketAddr,
 };
 
+use axum::Router;
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 
-use crate::Gateway;
+use crate::{
+    mode_profile::{GatewayModeBindingV1, GatewayModeErrorV1},
+    Gateway,
+};
 
 /// Which Gateway store capability the recovered host must provide.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +65,55 @@ pub fn announce_listening(addr: SocketAddr) {
     ));
 }
 
+/// The router of a bound Gateway: after it answers a stale-binding refusal
+/// (`503`), the serve loop stops (ADR-134 §8).
+pub fn bound_router(router: Router, mode: &GatewayModeBindingV1) -> Router {
+    let signal = mode.stale_signal();
+    router.layer(axum::middleware::map_response(
+        move |response: axum::response::Response| {
+            let signal = std::sync::Arc::clone(&signal);
+            async move {
+                if response
+                    .extensions()
+                    .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
+                    .is_some()
+                {
+                    signal.fire();
+                }
+                response
+            }
+        },
+    ))
+}
+
+/// The graceful-shutdown future of a bound Gateway: the operator's
+/// `shutdown`, or a write that found the binding stale.
+pub fn shutdown_or_stale<S: Future<Output = ()> + Send + 'static>(
+    shutdown: S,
+    mode: &GatewayModeBindingV1,
+) -> impl Future<Output = ()> + Send + 'static + use<S> {
+    let signal = mode.stale_signal();
+    async move {
+        tokio::select! {
+            () = shutdown => {}
+            () = signal.wait() => {}
+        }
+    }
+}
+
+/// After the serve loop: a stale binding makes the process exit nonzero.
+///
+/// # Errors
+/// Returns [`GatewayModeErrorV1::Stale`] when a write found the
+/// binding stale.
+pub fn stale_binding_exit(mode: &GatewayModeBindingV1) -> Result<(), GatewayModeErrorV1> {
+    if mode.stale_signal().fired() {
+        Err(GatewayModeErrorV1::Stale)
+    } else {
+        Ok(())
+    }
+}
+
 /// Stop what a failed bind left started, then report the bind failure.
 ///
 /// # Errors
@@ -76,6 +130,20 @@ pub async fn stop_after_bind_failure(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stale_binding_ends_the_serve_loop_and_exits_nonzero() {
+        let mode = crate::mode_profile::test_binding(
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            [],
+        );
+        assert_eq!(stale_binding_exit(&mode), Ok(()));
+        shutdown_or_stale(async {}, &mode).await;
+        let waiting = shutdown_or_stale(std::future::pending(), &mode);
+        mode.stale_signal().fire();
+        waiting.await;
+        assert_eq!(stale_binding_exit(&mode), Err(GatewayModeErrorV1::Stale));
+    }
 
     #[test]
     fn startup_recovery_error_is_payload_free() -> Result<(), Box<dyn std::error::Error>> {

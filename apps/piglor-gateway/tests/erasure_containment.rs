@@ -482,12 +482,25 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
 
     assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
 
-    let owntracks_host = ErasureExecutionHostV1::open_gateway_verified_empty(
+    let mut owntracks_host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::SqliteInMemory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
+    let mode = piglor_gateway::mode_profile::bind_gateway_mode_v1(
+        piglor_gateway::mode_profile::GatewayModeProfileIdV1::Local,
+        piglor_gateway::mode_profile::GatewayServeCompositionV1 {
+            tcp_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
+            owntracks_owner_key: Some(owner_key_path),
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: std::collections::BTreeSet::from([
+                piglor_gateway::mode_profile::GatewayNetworkGrantV1::OwnTracks,
+            ]),
+        },
+        &mut owntracks_host,
+    )?;
     let owntracks_gateway =
-        piglor_gateway::local_principal::local_gateway(owntracks_host, Some(&owner_key))?;
+        piglor_gateway::local_principal::local_gateway(owntracks_host, Some(&owner_key), &mode)?;
     owntracks_gateway.shutdown().await?;
     drop(owntracks_gateway);
     Ok(())

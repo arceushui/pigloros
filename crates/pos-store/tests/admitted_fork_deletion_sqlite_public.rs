@@ -407,3 +407,59 @@ fn a_tampered_next_operation_is_refused_on_both_classified_paths() -> Fallible<(
     assert_eq!(database_rows_at(&world.path)?, before);
     Ok(())
 }
+
+/// ADR-134 §8: a handle whose mode binding another handle moved, and a handle
+/// that never attached, commit no FAC1, neither a Principal-to-Owner binding
+/// nor a Fork, and answer `ModeBindingStale`; an attached handle then admits
+/// the Fork.
+#[test]
+fn a_stale_or_unattached_handle_commits_no_fac1() -> Fallible<()> {
+    use pos_core::{
+        ForkAdmissionErrorV1, ForkAdmissionOperationResultV1, GatewayModeBindingHostV1,
+        GatewayModeBindingPortV1 as _, GatewayModeProfileRefV1,
+    };
+
+    let local = |byte: u8| GatewayModeProfileRefV1::try_new("gateway-mode-local-v1", [byte; 32]);
+    let directory = tempdir()?;
+    let path = directory.path().join("fac1.db");
+    let mut store = open(&path)?;
+    store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(local(1)?))?;
+    let authority = Authority::open(&mut store)?;
+    let parent = store.create_timeline("stale-parent")?.id();
+    store.append(parent, &[draft(1, "factual"), draft(2, "factual")])?;
+    let mut binder = open(&path)?;
+    binder.attach_mode_binding(&local(1)?)?;
+    binder
+        .rotate_mode(GatewayModeBindingHostV1::new().authorize_rotation(local(1)?, local(2)?)?)?;
+
+    let before = database_rows_at(&path)?;
+    assert_eq!(
+        authority.bind_owner(&mut store, 0xc1)?.err(),
+        Some(ForkAdmissionErrorV1::ModeBindingStale)
+    );
+    assert_eq!(
+        authority.fork(&mut store, parent, 0xc2)?.err(),
+        Some(ForkAdmissionErrorV1::ModeBindingStale)
+    );
+    assert_eq!(database_rows_at(&path)?, before);
+
+    let mut unattached = open(&path)?;
+    let fresh = Authority::reopen(&mut unattached)?;
+    let reopened = database_rows_at(&path)?;
+    assert_eq!(
+        fresh.bind_owner(&mut unattached, 0xc1)?.err(),
+        Some(ForkAdmissionErrorV1::ModeBindingStale)
+    );
+    assert_eq!(
+        fresh.fork(&mut unattached, parent, 0xc2)?.err(),
+        Some(ForkAdmissionErrorV1::ModeBindingStale)
+    );
+    assert_eq!(database_rows_at(&path)?, reopened);
+
+    unattached.attach_mode_binding(&local(2)?)?;
+    assert!(matches!(
+        fresh.fork(&mut unattached, parent, 0xc2)?,
+        Ok(ForkAdmissionOperationResultV1::Fork(_))
+    ));
+    Ok(())
+}

@@ -1341,3 +1341,31 @@ fn in_doubt_ticks_are_resolved_from_the_persisted_basis() {
         }
     }
 }
+
+#[test]
+fn backend_failures_map_onto_the_closed_port_errors() {
+    for (backend, port) in [
+        (
+            pos_core::CoreError::TimelineNotFound(TimelineId::new()),
+            CounterfactualStoreErrorV1::ForkNotFound,
+        ),
+        (
+            pos_core::CoreError::StorageOutcomeUnknown(String::new()),
+            CounterfactualStoreErrorV1::OutcomeUnknown,
+        ),
+        (
+            pos_core::CoreError::ModeBindingStale,
+            CounterfactualStoreErrorV1::ModeBindingStale,
+        ),
+        (
+            pos_core::CoreError::Storage(String::new()),
+            CounterfactualStoreErrorV1::StorageFailure,
+        ),
+        (
+            pos_core::CoreError::ErasureContainmentUnavailable,
+            CounterfactualStoreErrorV1::StorageFailure,
+        ),
+    ] {
+        assert_eq!(CounterfactualStoreErrorV1::from(&backend), port);
+    }
+}

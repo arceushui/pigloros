@@ -6359,13 +6359,21 @@ mod tests {
         let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = gated_registry();
         assert!(matches!(
-            registry.register_from_host_catalogue_entry(&selected, &configuration),
+            registry.register_from_host_catalogue_entry(
+                &selected,
+                &configuration,
+                Some("live-local-v1")
+            ),
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch
             ))
         ));
         assert!(matches!(
-            registry.register_host_catalogue_fixture(&selected, &configuration),
+            registry.register_host_catalogue_fixture(
+                &selected,
+                &configuration,
+                "deterministic-local-v1"
+            ),
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch
             ))
@@ -6376,12 +6384,40 @@ mod tests {
         assert_eq!(registry.projections.reducer_names().len(), 0);
     }
 
+    /// ADR-134 §7: a bound mode that selects no registration profile (the
+    /// Air-Gapped execution-mode profile field 9 until #1372) fails closed
+    /// before the factory runs or the registry changes.
+    #[test]
+    fn production_registration_follows_the_bound_mode_selection_and_fails_closed() {
+        let selected = fixture_catalogue_entry();
+        let configuration = catalogue_configuration(PluginId::new(), &[]);
+        let mut registry = gated_registry();
+        let unselected =
+            registry.register_from_host_catalogue_entry(&selected, &configuration, None);
+        assert_eq!(
+            unselected.err().map(|error| error.to_string()),
+            Some(
+                RuntimeError::OutputAdmission(crate::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "EPF1"
+                })
+                .to_string()
+            )
+        );
+        assert_eq!(configuration.builds.get(), 0);
+        assert!(registry.is_empty());
+        assert!(registry.approver_map.is_empty());
+    }
+
     #[test]
     fn catalogue_fixture_builds_once_without_pin_or_append_permission() {
         let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = PluginRegistry::new().without_erasure_gate();
         registry
-            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1",
+            )
             .test_ok();
         assert_eq!(configuration.builds.get(), 1);
         assert_eq!(registry.composition().plugins.len(), 1);
@@ -6410,7 +6446,11 @@ mod tests {
         };
         let mut registry = gated_registry();
         assert!(matches!(
-            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            registry.register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1"
+            ),
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::ArtifactInvalid {
                     kind: "configuration"
@@ -6448,6 +6488,7 @@ mod tests {
     fn catalogue_links_reject_each_broken_link() {
         let configuration = catalogue_configuration(PluginId::new(), b"frozen");
         let bundle = seal_catalogue_bundle(
+            "deterministic-local-v1",
             &fixture_catalogue_entry(),
             &configuration,
             CatalogueEvidenceV1::Generated,
@@ -6455,6 +6496,7 @@ mod tests {
         .test_ok();
         let foreign_configuration = catalogue_configuration(PluginId::new(), b"frozen");
         let foreign = seal_catalogue_bundle(
+            "deterministic-local-v1",
             &fixture_catalogue_entry(),
             &foreign_configuration,
             CatalogueEvidenceV1::Generated,
@@ -6573,7 +6615,11 @@ mod tests {
             .apply_event(timeline, &catalogue_event("first.output", entity, 1));
         let configuration = reducer_catalogue_configuration(true, true);
         registry
-            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1",
+            )
             .test_ok();
         let second_id = configuration.plugin_id;
         assert_eq!(
@@ -6618,6 +6664,7 @@ mod tests {
                 registry.register_host_catalogue_fixture(
                     &fixture_catalogue_entry(),
                     &reducer_catalogue_configuration(declares_reducer, supplies_reducer),
+                    "deterministic-local-v1",
                 ),
                 Err(RuntimeError::CapabilityMismatch { .. })
             ));
@@ -6664,7 +6711,11 @@ mod tests {
             .test_ok();
         let configuration = reducer_catalogue_configuration(true, true);
         registry
-            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1",
+            )
             .test_ok();
         let second_id = configuration.plugin_id;
         let entity = EntityId::new();
@@ -6680,7 +6731,11 @@ mod tests {
         let routes_before = registry.approver_map.clone();
         let revision_before = registry.registration_revision;
         assert!(matches!(
-            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            registry.register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1"
+            ),
             Err(RuntimeError::DuplicatePlugin { .. })
         ));
         assert_eq!(registry.len(), 2);
@@ -6709,7 +6764,11 @@ mod tests {
         let mut registry = gated_registry();
         let configuration = reducer_catalogue_configuration(true, true);
         registry
-            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1",
+            )
             .test_ok();
         let entity = EntityId::new();
         let timeline = TimelineId::new();
@@ -6721,7 +6780,11 @@ mod tests {
         let routes_before = registry.approver_map.clone();
         let revision_before = registry.registration_revision;
         assert!(matches!(
-            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            registry.register_host_catalogue_fixture(
+                &fixture_catalogue_entry(),
+                &configuration,
+                "deterministic-local-v1"
+            ),
             Err(RuntimeError::DuplicatePlugin { .. })
         ));
         assert_eq!(configuration.builds.get(), 2);
@@ -6748,6 +6811,7 @@ mod tests {
                 .register_host_catalogue_fixture(
                     &fixture_catalogue_entry(),
                     &catalogue_configuration(PluginId::new(), details),
+                    "deterministic-local-v1",
                 )
                 .test_ok();
             let entry = registry.plugins.values().next().test_ok();

@@ -40,6 +40,7 @@ pub mod fork_ancestry;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod fork_event_provenance;
+pub mod gateway_mode_binding;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -602,6 +603,12 @@ pub use fork_event_provenance::{
     MAX_FORK_EVENT_REGISTRAR_BYTES_V1, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1,
     MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
 };
+pub use gateway_mode_binding::{
+    commit_epoch_for_append_v1, GatewayModeBindPermitV1, GatewayModeBindingErrorV1,
+    GatewayModeBindingHistoryEntryV1, GatewayModeBindingHostV1, GatewayModeBindingKindV1,
+    GatewayModeBindingPortV1, GatewayModeBindingRecordV1, GatewayModeMigrationPermitV1,
+    GatewayModeProfileRefV1, GatewayModeRotationPermitV1, MAX_GATEWAY_MODE_PROFILE_ID_BYTES,
+};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
@@ -640,9 +647,10 @@ pub use pipeline::{
     pipeline_draft_vector_digest_v1, CommittedPipelineEventV1, PipelineAdmissionBasisDraftV1,
     PipelineAdmissionBasisV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, TentativePipelineResultV1,
-    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
+    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeKindV1, PipelineOutcomeV1,
+    PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    TentativePipelineResultV1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 pub use pipeline_admission::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,

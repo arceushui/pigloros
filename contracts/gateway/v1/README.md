@@ -8,6 +8,7 @@ crate or database.
 |------|------------|
 | [`openapi.json`](openapi.json) | The canonical description: OpenAPI 3.1.1 with the JSON Schema 2020-12 dialect. |
 | [`problem-types.json`](problem-types.json) | The open RFC 9457 problem-type registry: every failure `code`, its `type` URN, `title` and permitted HTTP statuses. A later v1 revision may add a problem type (rule 5). |
+| [`execution-mode-profiles.json`](execution-mode-profiles.json) | The reviewed GMD1 declaration of the two Gateway execution-mode profiles (ADR-134), from which a client recomputes every `mode_profile_digest`. Its closed schema is [`execution-mode-profiles.schema.json`](execution-mode-profiles.schema.json). |
 | [`examples/`](examples/) | Golden request and response pairs, positive and fail-closed, for every operation. |
 | [`compatibility/baseline.json`](compatibility/baseline.json) | The frozen v1 baseline: every served operation, the components it reaches and the problem registry as published. |
 | [`compatibility/examples/`](compatibility/examples/) | The frozen golden examples that stay valid for the whole compatibility window. |
@@ -32,8 +33,23 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 
 - Every component schema has a stable `$id` of the form `urn:pigloros:gateway:v1:schema:<name>`.
   Draft schemas carry `x-pigloros-maturity: draft`. Every Draft resource read composes the
-  resource envelope (schema ID, resource ID, revision or generation, provenance, execution
-  profile and capability-filtered availability).
+  resource envelope (schema ID, resource ID, revision or generation, provenance, `mode_profile`,
+  `execution_profile` and capability-filtered availability).
+- `mode_profile` is the Gateway execution-mode profile (GMP1, ADR-134) the resource was produced
+  under: its ID (`gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`), mode, digest and the
+  store `binding_epoch` recorded in the producing commit's evidence. Only `Session` reports the
+  current binding, with the operator's `network_grants` and the Principal's `network` (`absent`
+  in Air-Gapped mode; in Local mode `capability-granted` only for a Principal holding
+  `gateway.network.v1`, a capability that authorizes no operation in v1, otherwise `denied`). An
+  `Export` lists every produced-under binding in `produced_under_mode_profiles`. GMP1 profiles are
+  composition-verified, never installed or qualified, and carry no reproducibility claim. Their
+  public declaration is `execution-mode-profiles.json` (closed schema
+  `execution-mode-profiles.schema.json`); `mode_profile_digest` is
+  BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), and the checker
+  pins the golden digests the examples must name.
+- `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
+  its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
+  installs an EPF1, every Gateway resource reports `unavailable`.
 - A request body is `application/json` (`content-type: application/json`; any other type is
   `415 invalid-request`).
 - A success body is `application/json`; every failure, including unknown paths (`404`), unserved
@@ -125,7 +141,21 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    `descriptor.schema_version: 2`) is `400 unsupported-version`, with no upcast and no fallback.
 3. **Incompatible profiles fail closed.** A request that binds an execution or conformance
    profile the deployment cannot serve is `409 incompatible-profile`; a Local deployment never
-   claims an Air-Gapped profile.
+   reports or serves an Air-Gapped profile. The servable sets are Local {`replay-v1`,
+   `deterministic-local-v1`, `live-local-v1`} and Air-Gapped {`replay-v1`,
+   `deterministic-air-gapped-v1`, plus the live Air-Gapped family once #1372 is accepted}; they
+   also constrain an `installed` `execution_profile.profile_id` at envelope level. A profile in
+   the set is served only once its EPF1 is installed (ADR-134 §5):
+
+   | Requested ADR-058 profile | Local | Air-Gapped | Served when |
+   |---|---|---|---|
+   | `replay-v1` | 409 | 409 | #1364 delivers its EPF1 |
+   | `deterministic-local-v1` | 409 | 409 always (not servable) | Local: #1364 |
+   | `deterministic-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #1364 |
+   | `live-local-v1` | 409 | 409 always (not servable) | Local: #461 |
+   | live Air-Gapped family | n/a | 409 | Air-Gapped: #1372, then #461 |
+
+   The positive Draft examples that bind a profile show the answer once that profile is served.
 4. **Unknown members are handled as each schema declares.** An open request object (no
    `additionalProperties: false`) ignores unknown members; a closed one rejects them. A
    schema-less value such as `EventView.payload` is preserved verbatim. Response schemas are
@@ -164,7 +194,8 @@ contract. `servers` and `info.version` are not frozen: a client must not hard-co
 URL, and the description's revision label is not part of the wire contract. The golden examples
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
 `unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
-`draft-decision-preview-incompatible-profile`, `draft-replay-incompatible-profile` and
+`draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
+`draft-replay-incompatible-profile` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
 
 ## Changing the contract
