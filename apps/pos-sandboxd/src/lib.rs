@@ -39,6 +39,8 @@ mod namespace_network;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
 #[cfg(target_os = "linux")]
+mod provider_installation;
+#[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
@@ -343,6 +345,8 @@ pub use provider_barrier::{
     fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
     ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
 };
+#[cfg(target_os = "linux")]
+pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
 #[cfg(target_os = "linux")]
 pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
