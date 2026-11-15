@@ -174,7 +174,7 @@ impl SystemdProviderLifecycle {
         }
         for family in ProviderUnitFamily::ALL {
             let remaining = self.observe(family).await;
-            if remaining.map(|units| units.is_empty()) != Ok(true) {
+            if !remaining.is_ok_and(|units| units.is_empty()) {
                 return Err(ProviderLifecycleError::ResidualResource);
             }
         }
