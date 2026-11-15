@@ -54,7 +54,7 @@ fn fixed_array<const N: usize>(value: &Value) -> Result<&[Value; N], ErasureErro
 }
 
 /// The fields of one record `[tag, 1, …]` of exactly `N` elements.
-fn open<const N: usize>(value: &Value, tag: &str) -> Result<&[Value; N], ErasureErrorV1> {
+fn open<'a, const N: usize>(value: &'a Value, tag: &str) -> Result<&'a [Value; N], ErasureErrorV1> {
     fixed_array::<N>(value).and_then(|fields| header(fields, tag).map(|()| fields))
 }
 
