@@ -334,6 +334,18 @@ impl RequestedConfiguration for String {
 /// The device and inode every fake cgroup reports.
 const FAKE_CGROUP: (u64, u64) = (0x63, 0x67);
 
+impl FakeHost {
+    /// The fake's verified start: its unit name, or empty, which is the
+    /// fake's invalid RQE1.
+    fn started(&self, unit_name: &TransientServiceUnitName) -> String {
+        if self.faulty(Fault::RequestedConfiguration) {
+            String::new()
+        } else {
+            unit_name.as_str().to_owned()
+        }
+    }
+}
+
 impl UnitHost for FakeHost {
     type Started = String;
     type Cgroup = FakeCgroup;
@@ -360,12 +372,7 @@ impl UnitHost for FakeHost {
             if let Some(adapter_end) = adapter_end {
                 self.drive(adapter_end);
             }
-            // An empty start is the fake's invalid RQE1.
-            Ok(if self.faulty(Fault::RequestedConfiguration) {
-                String::new()
-            } else {
-                unit_name.as_str().to_owned()
-            })
+            Ok(self.started(&unit_name))
         };
         let hang = self.faulty(Fault::HangStart);
         async move {
@@ -489,6 +496,13 @@ struct FakeBarrier {
 }
 
 impl FakeBarrier {
+    /// Record the RQE1 digest a release was handed.
+    fn hand(&self, attempt: &ActiveAttempt) {
+        if let Ok(mut requested) = self.requested.lock() {
+            requested.push(attempt.requested_configuration_evidence());
+        }
+    }
+
     fn new(log: &Log) -> Self {
         Self {
             log: Arc::clone(log),
@@ -528,9 +542,7 @@ impl LaunchBarrier for FakeBarrier {
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
         assert_eq!(cgroup.identity(), FAKE_CGROUP);
-        if let Ok(mut requested) = self.requested.lock() {
-            requested.push(attempt.requested_configuration_evidence());
-        }
+        self.hand(attempt);
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
@@ -946,18 +958,21 @@ async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
     let _outcome = scenario
         .run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
         .await?;
-    let unit = TransientServiceUnitName::from_attempt_id(ATTEMPT)?;
-    let expected = unit
-        .as_str()
-        .to_owned()
-        .requested_configuration_evidence(ATTEMPT, crate::test_fixtures::GRANT_DIGEST)?
+    let expected = TransientServiceUnitName::from_attempt_id(ATTEMPT)
+        .map_err(|error| error.to_string())
+        .and_then(|unit| {
+            unit.as_str()
+                .to_owned()
+                .requested_configuration_evidence(ATTEMPT, crate::test_fixtures::GRANT_DIGEST)
+                .map_err(|error| error.to_string())
+        })?
         .digest();
     let requested = scenario
         .barrier
         .requested
         .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+        .map(|requested| requested.clone())
+        .map_err(|error| error.to_string())?;
     assert_eq!(requested, vec![expected]);
     Ok(())
 }

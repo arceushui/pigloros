@@ -196,9 +196,12 @@ where
     if fields.runtime_attestation_key_id != admitted.key_id {
         return Err(RuntimeSignerError::KeyIdMismatch);
     }
-    let record = ExecutionRelease::self_digested(fields)?;
-    sign_verified(signer, admitted, &record)
-        .and_then(|signature| ExecutionRelease::new(record, signature).map_err(Into::into))
+    ExecutionRelease::self_digested(fields)
+        .map_err(RuntimeSignerError::from)
+        .and_then(|record| {
+            sign_verified(signer, admitted, &record)
+                .and_then(|signature| ExecutionRelease::new(record, signature).map_err(Into::into))
+        })
 }
 
 #[cfg(test)]

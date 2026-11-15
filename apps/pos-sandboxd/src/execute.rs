@@ -694,26 +694,8 @@ where
         deadline: Instant::now() + watchdog,
         call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
-    let (started, mut cgroup, evidence, anchored) =
+    let (started, mut cgroup, evidence, anchored, requested) =
         submit_anchored(host, &attempt, request, bounds, watchdog, guard).await?;
-    let requested = match started
-        .requested_configuration_evidence(attempt.attempt_id(), attempt.grant_digest())
-    {
-        Ok(requested) => requested.digest(),
-        Err(error) => {
-            let error = ExecuteError::RequestedConfiguration(error);
-            let aborted = abort(
-                host,
-                &unit,
-                Some(cgroup),
-                error,
-                Submission::Confirmed,
-                anchored.bounds,
-            )
-            .await;
-            return Err(reached(aborted, started, Some(evidence)));
-        }
-    };
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, anchored.release, requested);
     let bound = bind_planned(planned);
@@ -777,6 +759,16 @@ struct Anchored {
 /// Submit the claimed attempt and bind its cgroup, then read the unit's
 /// activation and the cgroup's pre-release evidence. A failure of the read
 /// kills the unit.
+/// A verified, anchored start: the start, its cgroup, its pre-release
+/// evidence, its deadlines and its RQE1 digest.
+type Submitted<H> = (
+    <H as UnitHost>::Started,
+    <H as UnitHost>::Cgroup,
+    <H as UnitHost>::Evidence,
+    Anchored,
+    [u8; 32],
+);
+
 async fn submit_anchored<H>(
     host: &H,
     attempt: &AdmittedAttempt,
@@ -784,7 +776,7 @@ async fn submit_anchored<H>(
     bounds: Bounds,
     watchdog: Duration,
     guard: &mut SubmissionGuard<H::Killer>,
-) -> Result<(H::Started, H::Cgroup, H::Evidence, Anchored), Failure<H>>
+) -> Result<Submitted<H>, Failure<H>>
 where
     H: UnitHost + Sync,
 {
@@ -795,9 +787,16 @@ where
         .and_then(|read| read.map_err(|error| ExecuteError::Evidence(Box::new(error))))
         .and_then(|(activated, evidence)| {
             anchor(activated, watchdog, bounds.call).map(|anchored| (evidence, anchored))
+        })
+        .and_then(|(evidence, anchored)| {
+            // The verified start, recorded as the attempt's RQE1.
+            started
+                .requested_configuration_evidence(attempt.attempt_id(), attempt.grant_digest())
+                .map(|requested| (evidence, anchored, requested.digest()))
+                .map_err(ExecuteError::RequestedConfiguration)
         });
     match anchored {
-        Ok((evidence, anchored)) => Ok((started, cgroup, evidence, anchored)),
+        Ok((evidence, anchored, requested)) => Ok((started, cgroup, evidence, anchored, requested)),
         Err(error) => {
             let unit = attempt.unit_name();
             let cgroup = Some(cgroup);
