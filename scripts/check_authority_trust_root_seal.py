@@ -6,17 +6,12 @@
 installed by `pos_store::community::CommunityMetadataAuthorityV1::new`. Its constructor exists
 only with `pos-core`'s `authority-trust-root` feature, so:
 
-- only `apps/piglor-gateway`, `crates/pos-store` and `apps/pos-experiment` may enable
-  `authority-trust-root` in a deployable dependency table or forward it from a feature;
-  `crates/pos-runtime` may forward it only from its `local-admission-host` feature; every
-  manifest may enable it from `[dev-dependencies]`;
-- `local-admission-host` therefore carries the seal minter to every crate that enables it.
-  `scripts/check_fixture_instant_confinement.py` (rule 5) confines its deployable enablers to
-  `apps/pos-experiment` and `apps/pos-plugin-conformance-adapter`, plus features named
-  `test-support` (which `scripts/check_test_support_features.py` keeps out of deployable graphs).
-  This checker pins that list: it fails if the other checker's list changes, so widening it is
-  also a change to this seal's boundary. The adapter compiles the minter through `pos-runtime`
-  and never calls it; the source rules below apply to it;
+- only `apps/piglor-gateway`, `crates/pos-store`, `apps/pos-experiment` and
+  `apps/pos-plugin-conformance-adapter` (each a trusted composition root, or for `pos-store` the
+  owner reserved for #560) may enable `authority-trust-root` in a deployable dependency table or
+  forward it from a feature; every manifest may enable it from `[dev-dependencies]`;
+- no feature named `local-admission-host` forwards it, in any manifest: the local
+  scheduled-admission host takes the seal from its caller and never mints it;
 - no `default` feature closure reaches `authority-trust-root` or a feature that forwards it, and
   no `pos-core` feature forwards it;
 - outside `crates/pos-core/` and the crates' top-level `tests` directories, no source re-exports
@@ -51,7 +46,6 @@ from check_counterfactual_adapter_seal import (
     _in_crate_tests,
     _kept,
 )
-from check_fixture_instant_confinement import ADMISSION_MANIFESTS
 from check_test_support_features import default_closure
 from check_trusted_clock_port_impls import strip_comments
 
@@ -71,16 +65,13 @@ SEAL_RETURN = re.compile(
 PUBLIC_BODY = re.compile(r"\bpub\s+(trait|enum)\b[^{;]*\{")
 BODY_RETURN = re.compile(rf"\bfn\b[^{{;]*?->[^{{;]*\b{SEAL_NAME}\b")
 ALIAS = re.compile(rf"\btype\s+\w+(?:<[^>]*>)?\s*=[^;]*\b{SEAL_NAME}\b")
-ADMISSION_HOLDERS = (
-    "apps/pos-experiment/Cargo.toml",
-    "apps/pos-plugin-conformance-adapter/Cargo.toml",
-)
 ENABLING_MANIFESTS = (
     "apps/piglor-gateway/Cargo.toml",
     "crates/pos-store/Cargo.toml",
     "apps/pos-experiment/Cargo.toml",
+    "apps/pos-plugin-conformance-adapter/Cargo.toml",
 )
-FORWARDING_FEATURES = {"crates/pos-runtime/Cargo.toml": "local-admission-host"}
+ADMISSION_FEATURE = "local-admission-host"
 CORE_SOURCES = "crates/pos-core/"
 
 
@@ -96,7 +87,7 @@ def _default_violations(name: str, features: dict[str, list[str]]) -> list[str]:
 
 
 def _forwarding_allowed(name: str, feature: str) -> bool:
-    return name in ENABLING_MANIFESTS or FORWARDING_FEATURES.get(name) == feature
+    return name in ENABLING_MANIFESTS and feature != ADMISSION_FEATURE
 
 
 def manifest_violations(root: Path) -> list[str]:
@@ -176,16 +167,6 @@ def source_violations(root: Path) -> list[str]:
     return found
 
 
-def holder_violations(admission_manifests: tuple[str, ...]) -> list[str]:
-    if tuple(sorted(admission_manifests)) == tuple(sorted(ADMISSION_HOLDERS)):
-        return []
-    return [
-        "scripts/check_fixture_instant_confinement.py: local-admission-host enablers "
-        f"{sorted(admission_manifests)} differ from the seal's pinned holders "
-        f"{sorted(ADMISSION_HOLDERS)}"
-    ]
-
-
 def config_violations(root: Path) -> list[str]:
     return [
         f"{path.relative_to(root).as_posix()}: enables {FEATURE} outside a manifest"
@@ -199,7 +180,6 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     root = parser.parse_args().root.resolve()
     found = [
-        *holder_violations(ADMISSION_MANIFESTS),
         *manifest_violations(root),
         *source_violations(root),
         *config_violations(root),

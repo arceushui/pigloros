@@ -469,9 +469,11 @@ fn register_participant(
 
 /// Host admission inputs for a port that never commits.
 fn admission() -> ScheduledPassAdmissionV1 {
-    let grant = LocalScheduledAdmissionHostV1::shared()
-        .test_ok()
-        .authority_grant();
+    let grant = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok()
+    .authority_grant();
     ScheduledPassAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([1; 16]).test_ok(),
         idempotency: AppendIdentity::new(

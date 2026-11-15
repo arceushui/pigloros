@@ -15,7 +15,6 @@ publish.workspace = true
 # the Linux-only G-OPS capture adapters (slice N3), which run a WAT guest through
 # the community Plugin supervisor and worker.
 test-support = [
-  "pos-core/authority-trust-root",
   "pos-core/test-support",
   "pos-runtime/test-support",
   "dep:pos-plugin-supervisor",
@@ -82,7 +81,11 @@ required-features = ["test-support"]
 
 [dependencies]
 zeroize = { workspace = true, optional = true }
-pos-core = { path = "../../crates/pos-core" }
+# The local experiment composition root mints the trust-root seal (ADR-129 A5.9,
+# #1374; scripts/check_authority_trust_root_seal.py).
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+] }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }

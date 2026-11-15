@@ -14,11 +14,12 @@
 //! `AuthorityTrustRootSealV1::for_composition_root`, which exists only with
 //! this crate's `authority-trust-root` cargo feature. Only the trusted
 //! composition roots and the authentication adapters they install
-//! (`piglor-gateway`, `pos-store`, `pos-experiment`, and `pos-runtime`
-//! through `local-admission-host`, which reaches that feature's confined
-//! enablers) enable that feature outside dev-dependencies, and no crate but
-//! this one may re-export or return the seal; CI enforces both with
-//! `scripts/check_authority_trust_root_seal.py`.
+//! (`piglor-gateway`, `pos-store`, `pos-experiment` and
+//! `pos-plugin-conformance-adapter`) enable that feature outside
+//! dev-dependencies, and no crate but this one may re-export or return the
+//! seal; CI enforces both with `scripts/check_authority_trust_root_seal.py`.
+//! Hosts below them, such as the local scheduled-admission host, take the seal
+//! from their caller.
 //!
 //! The seal cannot be forged, copied or defaulted:
 //!
@@ -26,14 +27,14 @@
 //! let _seal = pos_core::AuthorityTrustRootSealV1(());
 //! ```
 //!
-//! ```compile_fail,E0599
-//! let _seal = pos_core::AuthorityTrustRootSealV1::default();
+//! ```compile_fail,E0277
+//! fn requires_default<T: Default>() {}
+//! requires_default::<pos_core::AuthorityTrustRootSealV1>();
 //! ```
 //!
-//! ```compile_fail,E0599
-//! fn copy(seal: &pos_core::AuthorityTrustRootSealV1) -> pos_core::AuthorityTrustRootSealV1 {
-//!     pos_core::AuthorityTrustRootSealV1::clone(seal)
-//! }
+//! ```compile_fail,E0277
+//! fn requires_clone<T: Clone>() {}
+//! requires_clone::<pos_core::AuthorityTrustRootSealV1>();
 //! ```
 //!
 //! Neither trust root can be built without it:

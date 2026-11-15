@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -11,13 +10,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_authority_trust_root_seal.py"
-sys.path.insert(0, str(CHECKER.parent))
-SPEC = importlib.util.spec_from_file_location("check_authority_trust_root_seal", CHECKER)
-assert SPEC is not None and SPEC.loader is not None
-POLICY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(POLICY)
-ADMISSION_HOLDERS = POLICY.ADMISSION_HOLDERS
-holder_violations = POLICY.holder_violations
 
 ENABLING = 'pos-core = { path = "../pos-core", features = ["authority-trust-root"] }\n'
 DEV_ONLY = "[dev-dependencies]\n" + ENABLING
@@ -33,9 +25,8 @@ ALLOWED_MANIFESTS = {
     + 'test-support = ["pos-core?/authority-trust-root"]\n'
     + "[build-dependencies]\n"
     + ENABLING,
-    "crates/pos-runtime/Cargo.toml": "[features]\n"
-    + 'local-admission-host = ["pos-core/authority-trust-root"]\n'
-    + DEV_ONLY,
+    "crates/pos-runtime/Cargo.toml": "[features]\nlocal-admission-host = []\n" + DEV_ONLY,
+    "apps/pos-plugin-conformance-adapter/Cargo.toml": "[dependencies]\n" + ENABLING,
     "crates/pos-state/Cargo.toml": DEV_ONLY,
     "crates/pos-core/Cargo.toml": "[features]\nauthority-trust-root = []\n",
 }
@@ -86,6 +77,22 @@ REJECTED_MANIFESTS = {
         "crates/pos-runtime/Cargo.toml",
         '[features]\ntest-support = ["pos-core/authority-trust-root"]\n',
         "feature test-support forwards authority-trust-root",
+    ),
+    "runtime local admission host forwarding": (
+        "crates/pos-runtime/Cargo.toml",
+        '[features]\nlocal-admission-host = ["pos-core/authority-trust-root"]\n',
+        "feature local-admission-host forwards authority-trust-root",
+    ),
+    "allowed crate local admission host forwarding": (
+        "apps/pos-experiment/Cargo.toml",
+        '[features]\nlocal-admission-host = ["pos-core?/authority-trust-root"]\n',
+        "feature local-admission-host forwards authority-trust-root",
+    ),
+    "adapter forwarding from local admission host": (
+        "apps/pos-plugin-conformance-adapter/Cargo.toml",
+        '[features]\nlocal-admission-host = ["pos-runtime/local-admission-host", '
+        + '"pos-core/authority-trust-root"]\n',
+        "feature local-admission-host forwards authority-trust-root",
     ),
     "core forwarding feature": (
         "crates/pos-core/Cargo.toml",
@@ -301,14 +308,6 @@ def main() -> None:
     for case, (relative, text, reason) in REJECTED_SOURCES.items():
         result = with_files({**CRATE_MANIFEST, relative: text})
         expect_rejected(f"the seal in a {case}", result, reason)
-    if holder_violations(tuple(reversed(ADMISSION_HOLDERS))):
-        raise SystemExit("checker rejected the pinned local-admission-host holders")
-    for widened in (
-        (*ADMISSION_HOLDERS, "apps/fixture/Cargo.toml"),
-        ADMISSION_HOLDERS[:1],
-    ):
-        if not holder_violations(widened):
-            raise SystemExit(f"checker accepted local-admission-host holders {widened}")
 
 
 if __name__ == "__main__":

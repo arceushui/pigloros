@@ -211,7 +211,11 @@ impl Rig {
         let mut publisher = World::new()?;
         let material = trust_material(&publisher, &publisher.material()?);
         let address = publisher.publish(Shape::first())?.address().clone();
-        let eval = CommunityEvaluationWorldV1::open(&material).map_err(|e| format!("{e:?}"))?;
+        let eval = CommunityEvaluationWorldV1::open(
+            &material,
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
         Ok(Self {
             publisher,
             material,

@@ -32,6 +32,12 @@ use pos_core::{
     ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ManifestPluginRosterV1,
     PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
+/// The composition-root seal of the local experiment host (ADR-129 A5.9, #1374): this crate
+/// is the trusted composition root of its sessions and the only place it is minted. Private to
+/// the crate; it is passed only by reference.
+const AUTHORITY_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
+
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ManifestRegistrationErrorV1, PluginExecutionModeV1,
     PluginRegistry, ScheduledAdmissionStoreV1,
@@ -210,19 +216,7 @@ fn ensure_registry_erasure_gate(
 }
 
 fn hosted_store_error(error: pos_core::ErasureHostErrorV1) -> ExperimentError {
-    let error = match error {
-        pos_core::ErasureHostErrorV1::AccessFrozen => pos_core::CoreError::ErasureAccessFrozen,
-        pos_core::ErasureHostErrorV1::RecoveryUnavailable
-        | pos_core::ErasureHostErrorV1::StaleGeneration => {
-            pos_core::CoreError::ErasureContainmentUnavailable
-        }
-        pos_core::ErasureHostErrorV1::AuthorizationDenied
-        | pos_core::ErasureHostErrorV1::Conflict
-        | pos_core::ErasureHostErrorV1::AdapterFailure => {
-            pos_core::CoreError::Storage("erasure host rejected experiment startup".to_owned())
-        }
-    };
-    ExperimentError::Store(error)
+    ExperimentError::Store(host_error(error))
 }
 
 fn bind_fork_registry_erasure_gate(
@@ -977,7 +971,7 @@ fn observe_scheduled_admission(
     registry: &PluginRegistry,
     timeline_id: pos_core::ids::TimelineId,
 ) -> Result<PipelineSecurityRevisionsV1, ExperimentError> {
-    LocalScheduledAdmissionHostV1::shared()
+    LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
         .and_then(|host| host.observe(registry, store, timeline_id))
         .map_err(map_runtime_error)
 }
@@ -1008,7 +1002,7 @@ fn admit_scheduled_pass_receipt(
     commit_head: pos_core::clock::Seq,
     commit_now_secs: u64,
 ) -> Result<Option<pos_core::PipelineCommitReceiptV1>, ExperimentError> {
-    LocalScheduledAdmissionHostV1::shared()
+    LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
         .and_then(|host| host.admit(registry, store, revisions, commit_head, commit_now_secs))
         .map_err(map_runtime_error)
 }
@@ -1075,7 +1069,7 @@ fn admit_human_action(
                 .map_err(ExperimentError::from)
         })
         .and_then(|(revisions, head)| {
-            LocalScheduledAdmissionHostV1::shared()
+            LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
                 .map_err(map_runtime_error)
                 .and_then(|host| {
                     host.admit_action(registry, store, proposal, revisions, (timeline_id, head))
@@ -9446,6 +9440,7 @@ mod coverage_entrypoints {
             pos_core::ErasureHostErrorV1::AuthorizationDenied,
             pos_core::ErasureHostErrorV1::Conflict,
             pos_core::ErasureHostErrorV1::AdapterFailure,
+            pos_core::ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(matches!(
                 hosted_store_error(error),

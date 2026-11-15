@@ -1179,7 +1179,9 @@ fn local_host_publishes_admits_and_refreshes_the_session_fence() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("local-admission")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let log = Log::default();
         let mut registry = PluginRegistry::new().with_erasure_gate(gate);
         register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
@@ -1242,7 +1244,9 @@ fn local_host_fails_closed_for_a_store_bound_to_another_authority_host() {
     for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 10);
         let unfenced = ok(store.create_timeline("unfenced")).id();
-        let local = ok(LocalScheduledAdmissionHostV1::shared());
+        let local = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let error = err(local.observe(&host.registry(), store.as_mut(), unfenced));
         assert!(
             matches!(
@@ -1450,7 +1454,9 @@ fn local_host_reports_a_fence_publication_failure_as_a_store_error() {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     ok(store.bind_erasure_gate(Arc::clone(&gate)));
     let timeline = ok(store.create_timeline("fence-publication-failure")).id();
-    let host = ok(LocalScheduledAdmissionHostV1::shared());
+    let host = ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ));
     let registry = PluginRegistry::new().with_erasure_gate(gate);
 
     let error = err(host.observe(
@@ -1556,7 +1562,9 @@ fn local_host_rejects_another_plugins_event_type_and_commits_nothing() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("local-foreign-draft")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         let log = Log::default();
         let mut registry = PluginRegistry::new().with_erasure_gate(gate);
         register(&mut registry, driver("first", vec![b"a1"], &log));
@@ -2546,7 +2554,9 @@ fn observe_refuses_an_exhausted_timeline_before_any_driver_steps() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("observe-exhausted")).id();
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         for payloads in &payload_sets {
             let log = Log::default();
             let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());

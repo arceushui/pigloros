@@ -260,7 +260,7 @@ fn scan_step(sources: &[&str], marker: &str) -> Value {
 }
 
 fn runner_for(program: &str) -> Result<SupervisorRunnerV1, BoxError> {
-    Ok(SupervisorRunnerV1::with_program(program).ok_or("relative program")?)
+    Ok(SupervisorRunnerV1::with_program(program, &TEST_TRUST_ROOT).ok_or("relative program")?)
 }
 
 fn refused_expect(basis: &str) -> Value {
@@ -332,8 +332,8 @@ fn the_whole_attempt_through_run_with_is_unavailable_when_the_worker_crashes() -
 
 #[test]
 fn a_relative_worker_path_is_refused() {
-    assert!(SupervisorRunnerV1::with_program("pos-plugin-worker").is_none());
-    assert!(SupervisorRunnerV1::with_program("/bin/false").is_some());
+    assert!(SupervisorRunnerV1::with_program("pos-plugin-worker", &TEST_TRUST_ROOT).is_none());
+    assert!(SupervisorRunnerV1::with_program("/bin/false", &TEST_TRUST_ROOT).is_some());
 }
 
 #[test]
@@ -549,8 +549,11 @@ struct Gates {
 impl Gates {
     fn new() -> Result<Self, BoxError> {
         let real = Real::new()?;
-        let world =
-            CommunityEvaluationWorldV1::open(&real.material).map_err(|e| format!("{e:?}"))?;
+        let world = CommunityEvaluationWorldV1::open(
+            &real.material,
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
         Ok(Self { real, world })
     }
 
@@ -655,6 +658,7 @@ fn a_port_is_a_world_port_over_the_program_it_was_given() {
         WorkerProgramV1::new(PathBuf::from("/bin/false")).unwrap_or_else(|| {
             std::panic::resume_unwind(Box::new("relative"));
         }),
+        &TEST_TRUST_ROOT,
     );
     assert_eq!(port.outcome_bytes(), Vec::<u8>::new());
     assert_eq!(port.worker_launches(), 0, "no world, no Driver, no launch");
@@ -676,3 +680,7 @@ fn a_pass_that_reports_another_number_of_members_is_a_wiring_fault() {
     assert_eq!(assemble_all(&[], &[], 5, mode), Ok(Vec::new()));
     assert_eq!(assemble_all(&[entry], &[], 5, mode), Err(WIRING));
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
