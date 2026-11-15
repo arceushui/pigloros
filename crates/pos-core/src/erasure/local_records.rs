@@ -1012,27 +1012,23 @@ impl LocalRecordV1 for LocalErasureLineageRuleV1 {
 
 local_record_api!(LocalErasureLineageRuleV1);
 
-/// The ERC1 elements an ERCB1 body leaves out: the receipt digest and the
-/// receipt signature, which ERCB1's signature itself produces.
-const RECEIPT_SELF_BINDING_FIELDS: std::ops::Range<usize> = 16..18;
-
 /// ERCB1, the purpose-2 signing preimage of one receipt: `["ERCB1", 1,
 /// erc1_body]`, where `erc1_body` is the canonical ERC1 array without its
 /// `receipt_digest` and `signature` elements, every other element kept in
 /// ERC1 order. It is acyclic: the ELS1 over it is what ERC1's signature
 /// names.
 ///
+/// The input receipt's `signature` and `receipt_digest` are ignored, so a
+/// signer can pass placeholders for both before the ELS1 exists.
+///
 /// # Errors
 /// Returns the canonical encoding error.
 pub fn local_erasure_receipt_body_v1(
     receipt: &super::ErasureReceiptV1,
 ) -> Result<Vec<u8>, ErasureErrorV1> {
-    let body = super::evidence::receipt_fields(&receipt.0)
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| !RECEIPT_SELF_BINDING_FIELDS.contains(index))
-        .map(|(_, field)| field)
-        .collect();
+    let mut body = super::evidence::receipt_fields(&receipt.0);
+    body.remove(super::evidence::RECEIPT_SIGNATURE_FIELD);
+    body.remove(super::evidence::RECEIPT_DIGEST_FIELD);
     encode_limited(
         &record("ERCB1", vec![Value::Array(body)]),
         super::ERASURE_RECEIPT_MAX_BYTES,
