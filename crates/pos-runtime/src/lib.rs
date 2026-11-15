@@ -79,10 +79,12 @@ pub use erasure_host::{
 };
 #[cfg(target_os = "linux")]
 pub use erasure_local_authority::{
-    compiled_local_erasure_policy_reference_v1, compiled_local_erasure_policy_v1,
+    compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
     LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1,
-    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
-    LOCAL_ERASURE_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
+    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;

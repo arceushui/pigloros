@@ -1301,6 +1301,17 @@ fn the_submission_values_are_domain_tagged_digests_of_their_inputs() -> TestResu
         pos_core::local_erasure_body_digest_v1(pos_core::ErasureScopeV1::ConsentedSharedData)?,
         content_address("ELBODY1", &[0x81, 0x01])
     );
+    // A retained-only scope forms no body.
+    for retained in [
+        pos_core::ErasureScopeV1::PublicRecord,
+        pos_core::ErasureScopeV1::Aggregate,
+        pos_core::ErasureScopeV1::StructuralAuditMetadata,
+    ] {
+        assert_eq!(
+            pos_core::local_erasure_body_digest_v1(retained),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
 
     let elid1 = [vec![0x83], bstr32(principal), bstr16(actor), bstr32(key)].concat();
     let mut prefix = [0; 16];

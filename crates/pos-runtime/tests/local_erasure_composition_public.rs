@@ -24,9 +24,10 @@ use pos_core::{
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
-    compiled_local_erasure_policy_reference_v1, compiled_local_erasure_policy_v1,
-    ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
-    ErasureExecutionHostV1, LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1,
+    compiled_local_erasure_policy_v1, ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalErasureCompositionErrorV1,
+    LocalErasureCompositionInputsV1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
+    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -122,8 +123,7 @@ fn bundle() -> LocalErasureBundleV1 {
         store_identity: ErasureReferenceV1::from_digest(STORE_IDENTITY),
         authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
         host_timelines: Vec::new(),
-        policy: compiled_local_erasure_policy_reference_v1()
-            .unwrap_or(ErasureReferenceV1::from_digest([0; 32])),
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
         owners: Vec::new(),
         execution_binding: execution_binding(),
         signer_identity: LocalErasureSignerIdentityV1 {
@@ -757,7 +757,6 @@ fn the_compiled_policy_carries_the_owner_constants() -> TestResult {
             pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
         ]
     );
-    assert!(policy.classification.is_empty());
     assert_eq!(
         (
             policy.auto_retry_max,
@@ -777,9 +776,73 @@ fn the_compiled_policy_carries_the_owner_constants() -> TestResult {
         fields.get(4),
         Some(&ciborium::value::Value::Integer(16_386.into()))
     );
-    assert_eq!(
-        compiled_local_erasure_policy_reference_v1()?,
-        policy.reference()?
-    );
+    // The pinned digest is the content address of exactly this policy.
+    assert_eq!(policy.reference()?, LOCAL_ERASURE_POLICY_REFERENCE_V1);
+    Ok(())
+}
+
+/// The owner's 48-row table (decisions D1-a to D5 of 2026-11-16 on #1403),
+/// as `[artifact_class, data_class, category, ack_class]` codes, written
+/// independently of the compiled constant.
+const OWNER_CLASSIFICATION: &str = "\
+    0,0,0,artifact-store 0,0,0,client-cache-signal 0,0,0,timeline-payload \
+    0,0,1,key-registry 0,0,2,local-replica 0,0,3,local-backup-inventory \
+    0,1,0,artifact-store 0,1,0,client-cache-signal 0,1,1,key-registry \
+    0,1,2,local-replica 0,1,3,local-backup-inventory \
+    1,0,0,artifact-store 1,0,1,key-registry 1,0,3,local-backup-inventory \
+    1,1,0,artifact-store 1,1,1,key-registry 1,1,3,local-backup-inventory \
+    2,0,0,artifact-store 2,0,1,key-registry 2,0,3,local-backup-inventory \
+    2,1,0,artifact-store 2,1,1,key-registry 2,1,3,local-backup-inventory \
+    3,0,0,managed-report 3,0,1,key-registry 3,0,3,local-backup-inventory \
+    3,1,0,managed-report 3,1,1,key-registry 3,1,3,local-backup-inventory \
+    4,0,0,artifact-store 4,0,1,key-registry 4,0,3,local-backup-inventory \
+    4,1,0,artifact-store 4,1,0,export-recipient 4,1,1,key-registry \
+    4,1,3,local-backup-inventory \
+    5,0,0,artifact-store 5,0,1,key-registry 5,0,3,local-backup-inventory \
+    5,1,0,artifact-store 5,1,1,key-registry 5,1,3,local-backup-inventory \
+    6,0,0,managed-report 6,0,1,key-registry 6,0,3,local-backup-inventory \
+    6,1,0,managed-report 6,1,1,key-registry 6,1,3,local-backup-inventory";
+
+const ACK_CLASSES: [&str; 8] = [
+    "artifact-store",
+    "client-cache-signal",
+    "export-recipient",
+    "key-registry",
+    "local-backup-inventory",
+    "local-replica",
+    "managed-report",
+    "timeline-payload",
+];
+
+#[test]
+fn the_classification_is_exactly_the_owner_table() -> TestResult {
+    let owner: Vec<&str> = OWNER_CLASSIFICATION.split_whitespace().collect();
+    assert_eq!(owner.len(), 48);
+    assert_eq!(LOCAL_ERASURE_CLASSIFICATION_COUNT_V1, 48);
+    let rows = compiled_local_erasure_policy_v1().classification;
+    assert_eq!(rows.len(), LOCAL_ERASURE_CLASSIFICATION_V1.len());
+    // Every combination of the seven artifact classes, five data classes,
+    // four categories and eight acknowledgement classes is permitted
+    // exactly when the owner table lists it.
+    let mut permitted = 0;
+    for artifact_class in 0..7_u64 {
+        for data_class in 0..5_u64 {
+            for category in 0..4_u64 {
+                for ack_class in ACK_CLASSES {
+                    let key = format!("{artifact_class},{data_class},{category},{ack_class}");
+                    let listed = owner.contains(&key.as_str());
+                    let compiled = rows.iter().any(|row| {
+                        row.artifact_class == artifact_class
+                            && u64::from(row.data_class) == data_class
+                            && row.category == category
+                            && row.ack_class == ack_class
+                    });
+                    assert_eq!(compiled, listed, "{key}");
+                    permitted += usize::from(compiled);
+                }
+            }
+        }
+    }
+    assert_eq!(permitted, 48);
     Ok(())
 }

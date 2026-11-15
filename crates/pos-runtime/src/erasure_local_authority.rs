@@ -23,9 +23,11 @@ use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustP
 use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1};
 
 pub use policy::{
-    compiled_local_erasure_policy_reference_v1, compiled_local_erasure_policy_v1,
-    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
-    LOCAL_ERASURE_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+    compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
+    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_CLASSIFICATION_COUNT_V1,
+    LOCAL_ERASURE_CLASSIFICATION_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    LOCAL_ERASURE_POLICY_REFERENCE_V1, LOCAL_ERASURE_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
 };
 
 /// The record tag of retained TPS1 evidence in the erasure object store.
@@ -106,10 +108,9 @@ impl ErasureCoordinatorCompositionV1 {
     /// signer may be revoked; its policy must be
     /// [`compiled_local_erasure_policy_v1`]; its Local Principal registry
     /// digest, execution binding and store identity must equal this
-    /// deployment's;
-    /// and the key registry must hold its role-2 signer key live, not
-    /// destroyed. When the store holds any erasure request, every retained
-    /// TPS1 must verify under the pinned operator key.
+    /// deployment's; and the key registry must hold its role-2 signer key
+    /// live, not destroyed. When the store holds any erasure request, every
+    /// retained TPS1 must verify under the pinned operator key.
     ///
     /// A composition only admits new work: recovery of committed evidence
     /// verifies against the retained ELB1 and TPS1, never this check.
@@ -182,8 +183,7 @@ fn verified_bundle(
         .and_then(|bundle| {
             let binds_deployment = bundle.authority_registry_digest
                 == inputs.authority_registry_digest
-                && compiled_local_erasure_policy_reference_v1()
-                    .is_ok_and(|policy| bundle.policy == policy)
+                && bundle.policy == LOCAL_ERASURE_POLICY_REFERENCE_V1
                 && inputs
                     .execution_binding
                     .is_none_or(|binding| *binding == bundle.execution_binding);

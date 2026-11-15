@@ -2112,6 +2112,13 @@ impl ErasureArtifactClassV1 {
     }
 }
 
+impl From<ErasureArtifactClassV1> for u64 {
+    /// The stable ADR-060 V1 artifact-class code.
+    fn from(value: ErasureArtifactClassV1) -> Self {
+        value.code()
+    }
+}
+
 /// Closed role of a key recorded by ERC1.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ErasureKeyRoleV1 {
@@ -2220,6 +2227,13 @@ impl ErasureInventoryCategoryV1 {
             3 => Ok(Self::Backup),
             _ => Err(ErasureErrorV1::InvalidEncoding),
         }
+    }
+}
+
+impl From<ErasureInventoryCategoryV1> for u64 {
+    /// The stable ADR-060 V1 inventory-category code.
+    fn from(value: ErasureInventoryCategoryV1) -> Self {
+        value.code()
     }
 }
 

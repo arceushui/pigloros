@@ -81,6 +81,11 @@ fn command_effect_panic_poisons_the_public_host() -> Result<(), Box<dyn Error + 
     }));
     assert!(result.is_err());
     assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Poisoned);
+    // A host that is not ready builds no authority view.
+    assert_eq!(
+        host.authority_view().err(),
+        Some(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
+    );
     Ok(())
 }
 

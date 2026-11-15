@@ -328,12 +328,20 @@ pub fn local_erasure_requester_v1(
 /// request body (ADR-136 §4). `impact_acknowledged` is the constant `true`,
 /// so the scope class is the whole body.
 ///
+/// Only the two destruction-eligible classes form a body: a retained-only
+/// scope is refused before any ERQ1 exists (ADR-136 Q4).
+///
 /// # Errors
-/// Returns the canonical encoding error.
+/// Returns [`ErasureErrorV1::ScopeInvalid`] for an always-retained scope
+/// class, or the canonical encoding error.
 pub fn local_erasure_body_digest_v1(
     scope: ErasureScopeV1,
 ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-    tagged("ELBODY1", vec![uint(scope.code())])
+    require(matches!(
+        scope,
+        ErasureScopeV1::PrivateSubjectData | ErasureScopeV1::ConsentedSharedData
+    ))
+    .and_then(|()| tagged("ELBODY1", vec![uint(scope.code())]))
 }
 
 /// The `erasure_id` of one submission: the 128-bit prefix of
@@ -364,6 +372,9 @@ pub fn local_erasure_id_v1(
 
 /// `CA("ERQ1-ID", [erasure_id])`, the ERQ1 request reference of one
 /// `erasure_id` (ADR-136 §4).
+///
+/// The `erasure_id` is encoded as a 16-byte byte string of the ULID's bytes,
+/// as ERAZ1 encodes entity and Timeline ids.
 ///
 /// # Errors
 /// Returns the canonical encoding error.
