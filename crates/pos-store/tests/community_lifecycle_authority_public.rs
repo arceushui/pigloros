@@ -1093,8 +1093,12 @@ fn a_call_is_refused_by_another_authority_and_for_an_unknown_leaf() -> TestResul
             .err(),
         Some(Error::EvidenceUnavailable)
     );
-    // A second, legitimate domain holding the same attested grant is not
-    // the domain this authority was installed for.
+    // The binding is to the composition's incarnation label, not to a store
+    // identity: another domain object presenting the installed label is
+    // accepted on purpose, and its evidence still comes from its own store
+    // and must verify against the attested snapshot. A second, legitimate
+    // domain under another incarnation is not the domain this authority was
+    // installed for.
     let other_domain = World::new(std::slice::from_ref(&leaf))?.domain;
     let mut second = MemoryStore::new();
     let host = AuthorityPersistenceHostV1::new(&snapshot(&[&leaf])?);

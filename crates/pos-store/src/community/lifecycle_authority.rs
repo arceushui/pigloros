@@ -281,6 +281,12 @@ pub struct CommunityLifecycleAuthorityInputV1 {
     /// audience of every in-operation member request; 1..128 bytes.
     pub member_recipient: String,
     /// The nonzero incarnation of the one domain this authority serves.
+    ///
+    /// This binds the authority to the trusted composition's incarnation
+    /// label, not to a store identity: a domain presenting the installed
+    /// label is accepted by design. Its evidence still comes from that
+    /// domain's own store, and every chain grant must verify against the
+    /// installed attestation snapshot.
     pub store_incarnation: [u8; 16],
 }
 
@@ -452,9 +458,9 @@ impl CommunityLifecycleAuthorityV1 {
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a call another authority issued, a
-    /// domain other than the installed one, a missing or foreign leaf, a leaf that binds consent references, a
-    /// chain grant not attested as issued, or a decision that is not
-    /// `Active`.
+    /// domain other than the installed one, a missing or foreign leaf, a
+    /// leaf that binds consent references, a chain grant not attested as
+    /// issued, or a decision that is not `Active`.
     pub fn authorize_administrative(
         &self,
         call: &CommunityAuthorityCallV1,
