@@ -184,7 +184,7 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-const PROTECTED_ROUTES: [(&str, &str); 10] = [
+const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
@@ -1158,7 +1158,7 @@ mod tests {
             ledger_write: LedgerWriteMode::Disabled,
         });
         let timeline = TimelineId::new().to_string();
-        for (method, route) in PROTECTED_ROUTES {
+        for &(method, route) in PROTECTED_ROUTES {
             // Each request is one its handler would refuse first with `400`:
             // a malformed body, or for the read a page limit of zero.
             let query = if method == "GET" { "?limit=0" } else { "" };

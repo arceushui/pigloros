@@ -288,9 +288,13 @@ fn change_in_transaction(
 }
 
 /// Commit a successful step, roll back any other.
+///
+/// A `COMMIT` that fails, for example on a deferred constraint, leaves the
+/// transaction open, so it is rolled back before the failure is returned.
 fn finish_binding_transaction<T>(conn: &Connection, step: BindingStep<T>) -> BindingStep<T> {
     let commit = step.as_ref().is_ok_and(Result::is_ok);
     conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })
+        .inspect_err(|_| drop(conn.execute_batch("ROLLBACK")))
         .and(step)
 }
 

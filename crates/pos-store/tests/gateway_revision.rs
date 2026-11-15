@@ -11,6 +11,7 @@ use pos_core::{
     GatewayRevisionCommitV1, GatewayRevisionDraftV1, GatewayRevisionErasureHostV1,
     GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1, GatewayRevisionKeyV1,
     GatewayRevisionKindV1, GatewayRevisionPortV1, GatewayRevisionStateV1,
+    ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -215,6 +216,15 @@ fn erasure_keeps_only_a_tombstone_and_fences_the_revision() {
             Ok(GatewayRevisionCommitV1::Replayed(erased)),
             "{name}"
         );
+        // Erasure cleared the request digest the record kept, so a retry
+        // with any request under the key answers the tombstone.
+        assert_eq!(
+            store.commit_gateway_revision(draft(1, None, subject, 1, 9)),
+            Ok(GatewayRevisionCommitV1::Replayed(
+                GatewayRevisionStateV1::Erased(tombstone)
+            )),
+            "{name}"
+        );
         assert_eq!(
             store.commit_gateway_revision(draft(1, Some(1), subject, 2, 2)),
             Err(GatewayRevisionErrorV1::ParentUnavailable),
@@ -300,6 +310,73 @@ fn sqlite_revisions_survive_a_reopen_and_their_erasure_destroys_the_row() {
         |row| row.get(0),
     ));
     assert_eq!(tombstones, 1);
+    // No byte derived from the erased content survives: the idempotency
+    // record keeps the constant digest, and no row holds the content.
+    let kept: Vec<u8> = ok(connection.query_row(
+        "SELECT request_digest FROM gateway_revision_requests",
+        [],
+        |row| row.get(0),
+    ));
+    assert_eq!(kept, ERASED_GATEWAY_REVISION_REQUEST_DIGEST);
+    let content_rows: i64 = ok(connection.query_row(
+        "SELECT COUNT(*) FROM gateway_revision_requests WHERE request_digest = ?1",
+        [vec![1_u8; 32]],
+        |row| row.get(0),
+    ));
+    assert_eq!(content_rows, 0);
+}
+
+/// A trigger that makes the next `COMMIT` fail on a deferred foreign key
+/// once a row is inserted into `table`.
+fn fail_commit_after_insert(path: &Path, table: &str) {
+    execute(
+        path,
+        &format!(
+            "CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE commit_child (parent_id INTEGER REFERENCES commit_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_commit AFTER INSERT ON {table}
+             BEGIN INSERT INTO commit_child (parent_id) VALUES (1); END;"
+        ),
+    );
+}
+
+#[test]
+fn sqlite_a_failed_commit_rolls_the_revision_back_and_closes_the_transaction() {
+    let directory = ok(tempdir());
+    let path = directory.path().join("commit.db");
+    let subject = EntityId::new();
+    let mut store = open_file(&path);
+    bind(&mut store);
+    fail_commit_after_insert(&path, "gateway_revision_requests");
+    assert_eq!(
+        store.commit_gateway_revision(draft(1, None, subject, 1, 1)),
+        Err(GatewayRevisionErrorV1::Unavailable)
+    );
+    assert_eq!(ok(store.load_gateway_revision(key(1, 1))), None);
+    // The transaction was closed: another connection can change the schema
+    // and this one commits the same request afterwards.
+    execute(&path, "DROP TRIGGER fail_commit");
+    committed(ok(
+        store.commit_gateway_revision(draft(1, None, subject, 1, 1))
+    ));
+}
+
+#[test]
+fn sqlite_a_failed_binding_commit_rolls_back_and_closes_the_transaction() {
+    let directory = ok(tempdir());
+    let path = directory.path().join("binding.db");
+    let mut store = open_file(&path);
+    fail_commit_after_insert(&path, "gateway_mode_binding_history");
+    let profile = ok(GatewayModeProfileRefV1::try_new(LOCAL, [7; 32]));
+    assert_eq!(
+        store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile)),
+        Err(pos_core::GatewayModeBindingErrorV1::Unavailable)
+    );
+    assert_eq!(ok(store.load_mode_binding()), None);
+    execute(&path, "DROP TRIGGER fail_commit");
+    bind(&mut store);
+    assert_eq!(ok(store.load_mode_binding()), Some(binding()));
 }
 
 #[test]

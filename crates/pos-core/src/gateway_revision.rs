@@ -445,6 +445,39 @@ pub fn admit_gateway_revision_v1(
     }
 }
 
+/// The request digest an idempotency record keeps once its revision is
+/// erased: no byte derived from the erased content survives in it.
+pub const ERASED_GATEWAY_REVISION_REQUEST_DIGEST: [u8; 32] = [0; 32];
+
+/// The answer to a retry under a recorded idempotency identity, given the
+/// state of the revision it committed and the request digest it kept.
+///
+/// An erased revision answers its tombstone to every retry under the key,
+/// because erasure rewrote the kept digest to
+/// [`ERASED_GATEWAY_REVISION_REQUEST_DIGEST`]; a stored one answers the same
+/// request and refuses another.
+///
+/// # Errors
+/// Returns [`GatewayRevisionErrorV1::IdempotencyConflict`] for another
+/// request and [`GatewayRevisionErrorV1::InvalidRecord`] when the recorded
+/// revision has no state.
+pub fn replay_gateway_revision_v1(
+    state: Option<GatewayRevisionStateV1>,
+    kept_request_digest: [u8; 32],
+    draft: &GatewayRevisionDraftV1,
+) -> Result<GatewayRevisionCommitV1, GatewayRevisionErrorV1> {
+    match state {
+        Some(GatewayRevisionStateV1::Present(_))
+            if kept_request_digest != draft.idempotency().request_digest() =>
+        {
+            Err(GatewayRevisionErrorV1::IdempotencyConflict)
+        }
+        state => state
+            .map(GatewayRevisionCommitV1::Replayed)
+            .ok_or(GatewayRevisionErrorV1::InvalidRecord),
+    }
+}
+
 /// Opaque capability to erase one revision.
 #[derive(Debug)]
 pub struct GatewayRevisionErasurePermitV1 {
@@ -503,9 +536,8 @@ pub trait GatewayRevisionPortV1 {
     /// Admit `draft` in one transaction with its idempotency record and the
     /// mode binding it is produced under.
     ///
-    /// An earlier request with the same idempotency identity and request
-    /// digest is [`GatewayRevisionCommitV1::Replayed`]; with another request
-    /// digest it is a conflict. Otherwise the draft is admitted by
+    /// A retry under a recorded idempotency identity is answered by
+    /// [`replay_gateway_revision_v1`]. Otherwise the draft is admitted by
     /// [`admit_gateway_revision_v1`] under [`gateway_revision_mode_v1`].
     ///
     /// # Errors
@@ -526,9 +558,11 @@ pub trait GatewayRevisionPortV1 {
         key: GatewayRevisionKeyV1,
     ) -> Result<Option<GatewayRevisionStateV1>, GatewayRevisionErrorV1>;
 
-    /// Erase the permit's revision: delete its row and content and keep its
-    /// tombstone. Erasing an erased revision returns its tombstone again; an
-    /// unknown revision is `None`.
+    /// Erase the permit's revision: delete its row and content, keep its
+    /// tombstone, and rewrite the request digest of its idempotency record to
+    /// [`ERASED_GATEWAY_REVISION_REQUEST_DIGEST`] in the same transaction.
+    /// Erasing an erased revision returns its tombstone again; an unknown
+    /// revision is `None`.
     ///
     /// # Errors
     /// Returns a closed invalid-record or unavailable error.
@@ -696,6 +730,35 @@ mod tests {
                 Err(GatewayRevisionErrorV1::ParentUnavailable)
             );
         }
+    }
+
+    #[test]
+    fn a_retry_replays_its_revision_or_the_tombstone_erasure_left() {
+        let subject = EntityId::new();
+        let draft = draft(None, subject);
+        let present = GatewayRevisionStateV1::Present(draft.to_record(mode(1)));
+        let erased = GatewayRevisionStateV1::Erased(*present.tombstone());
+        let digest = draft.idempotency().request_digest();
+        assert_eq!(
+            replay_gateway_revision_v1(Some(present.clone()), digest, &draft),
+            Ok(GatewayRevisionCommitV1::Replayed(present.clone()))
+        );
+        assert_eq!(
+            replay_gateway_revision_v1(Some(present), [9; 32], &draft),
+            Err(GatewayRevisionErrorV1::IdempotencyConflict)
+        );
+        assert_eq!(
+            replay_gateway_revision_v1(
+                Some(erased.clone()),
+                ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
+                &draft
+            ),
+            Ok(GatewayRevisionCommitV1::Replayed(erased))
+        );
+        assert_eq!(
+            replay_gateway_revision_v1(None, digest, &draft),
+            Err(GatewayRevisionErrorV1::InvalidRecord)
+        );
     }
 
     #[test]

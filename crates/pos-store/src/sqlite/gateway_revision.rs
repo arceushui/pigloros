@@ -9,17 +9,20 @@
 //!
 //! Erasure deletes the revision row in one such transaction under
 //! `secure_delete`, so `SQLite` overwrites the freed content, inserts the
-//! tombstone, and then asks for a truncating WAL checkpoint so no committed
-//! page image of the content stays in the write-ahead log. Its completion
+//! tombstone and rewrites the request digest of its idempotency record, which
+//! is derived from the content, to a constant; the connection's earlier
+//! `secure_delete` setting is restored afterwards. It then asks for a
+//! truncating WAL checkpoint so no committed page image of the content stays
+//! in the write-ahead log. Its completion
 //! evidence and erasure-inventory registration belong to the subject erasure
 //! workflow (#309).
 
 use pos_core::{
-    admit_gateway_revision_v1, gateway_revision_mode_v1, EntityId, GatewayModeBindingRecordV1,
-    GatewayModeProfileRefV1, GatewayRevisionCommitV1, GatewayRevisionDraftV1,
-    GatewayRevisionErasurePermitV1, GatewayRevisionErrorV1, GatewayRevisionKeyV1,
-    GatewayRevisionPortV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
-    GatewayRevisionTombstoneV1,
+    admit_gateway_revision_v1, gateway_revision_mode_v1, replay_gateway_revision_v1, EntityId,
+    GatewayModeBindingRecordV1, GatewayModeProfileRefV1, GatewayRevisionCommitV1,
+    GatewayRevisionDraftV1, GatewayRevisionErasurePermitV1, GatewayRevisionErrorV1,
+    GatewayRevisionKeyV1, GatewayRevisionPortV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
+    GatewayRevisionTombstoneV1, ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::num::NonZeroU64;
@@ -260,18 +263,10 @@ fn replay(
     draft: &GatewayRevisionDraftV1,
 ) -> RevisionStep<GatewayRevisionCommitV1> {
     let (resource_id, revision, request_digest) = stored;
-    if request_digest == draft.idempotency().request_digest() {
-        let key = GatewayRevisionKeyV1::new(draft.idempotency().kind(), resource_id, revision.0);
-        read_state(conn, key).map(|state| {
-            state.and_then(|state| {
-                state
-                    .map(GatewayRevisionCommitV1::Replayed)
-                    .ok_or(GatewayRevisionErrorV1::InvalidRecord)
-            })
-        })
-    } else {
-        Ok(Err(GatewayRevisionErrorV1::IdempotencyConflict))
-    }
+    let key = GatewayRevisionKeyV1::new(draft.idempotency().kind(), resource_id, revision.0);
+    read_state(conn, key).map(|state| {
+        state.and_then(|state| replay_gateway_revision_v1(state, request_digest, draft))
+    })
 }
 
 fn insert_record(
@@ -390,6 +385,18 @@ fn erase_in_transaction(
                     ],
                 )
             })
+            .and_then(|_| {
+                conn.execute(
+                    "UPDATE gateway_revision_requests SET request_digest = ?4
+                     WHERE kind = ?1 AND resource_id = ?2 AND revision = ?3",
+                    params![
+                        kind,
+                        resource_id,
+                        revision,
+                        ERASED_GATEWAY_REVISION_REQUEST_DIGEST
+                    ],
+                )
+            })
             .map(|_| Ok(Some(tombstone)))
         }
         other => Ok(other.map(|state| state.map(|state| *state.tombstone()))),
@@ -397,9 +404,13 @@ fn erase_in_transaction(
 }
 
 /// Commit a successful step, roll back any other.
+///
+/// A `COMMIT` that fails, for example on a deferred constraint, leaves the
+/// transaction open, so it is rolled back before the failure is returned.
 fn finish<T>(conn: &Connection, step: RevisionStep<T>) -> RevisionStep<T> {
     let commit = step.as_ref().is_ok_and(Result::is_ok);
     conn.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" })
+        .inspect_err(|_| drop(conn.execute_batch("ROLLBACK")))
         .and(step)
 }
 
@@ -451,6 +462,10 @@ impl GatewayRevisionPortV1 for SqliteStore {
         &mut self,
         permit: GatewayRevisionErasurePermitV1,
     ) -> Result<Option<GatewayRevisionTombstoneV1>, GatewayRevisionErrorV1> {
+        let previous = self
+            .conn
+            .query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0);
         let erased = revision_transaction(&self.conn, "PRAGMA secure_delete=ON", |conn| {
             erase_in_transaction(conn, permit.key())
         });
@@ -458,6 +473,38 @@ impl GatewayRevisionPortV1 for SqliteStore {
             self.conn
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
         );
+        drop(
+            self.conn
+                .execute_batch(&format!("PRAGMA secure_delete={previous}")),
+        );
         erased
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_core::{GatewayRevisionErasureHostV1, GatewayRevisionKindV1};
+
+    #[test]
+    fn erasure_restores_the_connection_secure_delete_setting() {
+        let mut store = SqliteStore::open_in_memory()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        let setting = |store: &SqliteStore| {
+            store
+                .conn
+                .query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(-1)
+        };
+        let before = setting(&store);
+        let key =
+            GatewayRevisionKeyV1::new(GatewayRevisionKindV1::Preference, [1; 16], NonZeroU64::MIN);
+        assert_eq!(
+            store
+                .erase_gateway_revision(GatewayRevisionErasureHostV1::new().authorize_erasure(key)),
+            Ok(None)
+        );
+        assert_eq!(setting(&store), before);
     }
 }

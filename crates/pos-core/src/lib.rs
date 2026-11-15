@@ -611,11 +611,12 @@ pub use gateway_mode_binding::{
     GatewayModeProfileRefV1, GatewayModeRotationPermitV1, MAX_GATEWAY_MODE_PROFILE_ID_BYTES,
 };
 pub use gateway_revision::{
-    admit_gateway_revision_v1, gateway_revision_mode_v1, GatewayRevisionCommitV1,
-    GatewayRevisionDraftV1, GatewayRevisionErasureHostV1, GatewayRevisionErasurePermitV1,
-    GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1, GatewayRevisionKeyV1,
-    GatewayRevisionKindV1, GatewayRevisionPortV1, GatewayRevisionRecordV1, GatewayRevisionStateV1,
-    GatewayRevisionTombstoneV1, MAX_GATEWAY_REVISION_CONTENT_BYTES,
+    admit_gateway_revision_v1, gateway_revision_mode_v1, replay_gateway_revision_v1,
+    GatewayRevisionCommitV1, GatewayRevisionDraftV1, GatewayRevisionErasureHostV1,
+    GatewayRevisionErasurePermitV1, GatewayRevisionErrorV1, GatewayRevisionIdempotencyV1,
+    GatewayRevisionKeyV1, GatewayRevisionKindV1, GatewayRevisionPortV1, GatewayRevisionRecordV1,
+    GatewayRevisionStateV1, GatewayRevisionTombstoneV1, ERASED_GATEWAY_REVISION_REQUEST_DIGEST,
+    MAX_GATEWAY_REVISION_CONTENT_BYTES,
 };
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};

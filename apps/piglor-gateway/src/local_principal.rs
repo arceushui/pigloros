@@ -1661,7 +1661,7 @@ mod tests {
             ("POST", "/v1/option-specs".to_owned(), Some(options)),
             (
                 "GET",
-                format!("/v1/option-specs/{}/revisions/1", Ulid::new()),
+                format!("/v1/option-specs/{}/revisions/1", EntityId::new().inner()),
                 None,
             ),
         ] {

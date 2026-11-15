@@ -331,7 +331,7 @@ async fn a_revision_is_immutable_and_answered_only_to_its_subject() -> TestResul
             (status, code(&problem)),
             (StatusCode::NOT_FOUND, "not-found-or-unavailable")
         );
-        let unknown = format!("{collection}/{}/revisions/1", Ulid::new());
+        let unknown = format!("{collection}/{}/revisions/1", EntityId::new().inner());
         assert_eq!(
             get(&served, &unknown, SUBJECT).await?.0,
             StatusCode::NOT_FOUND
@@ -405,7 +405,7 @@ async fn a_revision_names_the_head_of_its_own_subject_as_parent() -> TestResult 
             (status, code(&problem)),
             (StatusCode::NOT_FOUND, "not-found-or-unavailable")
         );
-        let unknown = json!({"id": Ulid::new().to_string(), "revision": 1});
+        let unknown = json!({"id": EntityId::new().inner().to_string(), "revision": 1});
         let (status, _) = post(
             &served,
             collection,
@@ -469,6 +469,11 @@ async fn erasure_leaves_a_tombstone_answered_deleted_only_to_its_subject() -> Te
         ),
         "deleted"
     );
+    // Erasure kept no digest of the erased request, so any request under
+    // that key answers the same tombstone.
+    let other = preference(json!([{"dimension": "cost", "weight_micro": 9}]));
+    let (status, problem) = post(&served, PREFERENCES, SUBJECT, "erase-1", &other).await?;
+    assert_eq!((status, code(&problem)), (StatusCode::GONE, "deleted"));
     let (status, _) = post(
         &served,
         PREFERENCES,
@@ -526,6 +531,9 @@ async fn an_unsupported_schema_version_or_a_malformed_preference_fails_before_co
         (preference(json!(too_many)), "invalid-request"),
         (preference(json!([weight("Nature", 1)])), "invalid-request"),
         (preference(json!([weight("", 1)])), "invalid-request"),
+        (preference(json!([weight("0a", 1)])), "invalid-request"),
+        (preference(json!([weight("_a", 1)])), "invalid-request"),
+        (preference(json!([weight("a b", 1)])), "invalid-request"),
         (
             preference(json!([weight(&"a".repeat(129), 1)])),
             "invalid-request",
@@ -549,17 +557,17 @@ async fn an_unsupported_schema_version_or_a_malformed_preference_fails_before_co
         ),
         (
             json!({"schema_version": 1, "weights": [weight("nature", 1)],
-                   "parent": {"id": Ulid::new().to_string().to_lowercase(), "revision": 1}}),
+                   "parent": {"id": EntityId::new().inner().to_string().to_lowercase(), "revision": 1}}),
             "invalid-request",
         ),
         (
             json!({"schema_version": 1, "weights": [weight("nature", 1)],
-                   "parent": {"id": Ulid::new().to_string(), "revision": 0}}),
+                   "parent": {"id": EntityId::new().inner().to_string(), "revision": 0}}),
             "invalid-request",
         ),
         (
             json!({"schema_version": 1, "weights": [weight("nature", 1)],
-                   "parent": {"id": Ulid::new().to_string(), "revision": 9_007_199_254_740_992_u64}}),
+                   "parent": {"id": EntityId::new().inner().to_string(), "revision": 9_007_199_254_740_992_u64}}),
             "invalid-request",
         ),
     ] {
@@ -704,7 +712,7 @@ async fn extreme_values_pass_and_a_missing_key_or_a_bad_path_fails() -> TestResu
     );
     for uri in [
         format!("{PREFERENCES}/not-a-ulid/revisions/1"),
-        format!("{OPTION_SPECS}/{}/revisions/0", Ulid::new()),
+        format!("{OPTION_SPECS}/{}/revisions/0", EntityId::new().inner()),
     ] {
         let (status, problem) = get(&served, &uri, SUBJECT).await?;
         assert_eq!(
@@ -724,12 +732,12 @@ async fn every_operation_needs_its_own_grant() -> TestResult {
         ("POST", OPTION_SPECS.to_owned(), Some(two_options())),
         (
             "GET",
-            format!("{PREFERENCES}/{}/revisions/1", Ulid::new()),
+            format!("{PREFERENCES}/{}/revisions/1", EntityId::new().inner()),
             None,
         ),
         (
             "GET",
-            format!("{OPTION_SPECS}/{}/revisions/1", Ulid::new()),
+            format!("{OPTION_SPECS}/{}/revisions/1", EntityId::new().inner()),
             None,
         ),
     ] {
@@ -777,7 +785,7 @@ async fn a_composition_without_a_principal_or_a_store_fails_closed() -> TestResu
         ("POST", PREFERENCES.to_owned(), Some(&body)),
         (
             "GET",
-            format!("{PREFERENCES}/{}/revisions/1", Ulid::new()),
+            format!("{PREFERENCES}/{}/revisions/1", EntityId::new().inner()),
             None,
         ),
     ] {
@@ -804,35 +812,157 @@ async fn a_composition_without_a_principal_or_a_store_fails_closed() -> TestResu
     Ok(())
 }
 
-#[test]
-fn every_store_failure_has_its_public_answer() {
-    for (error, status) in [
-        (
-            GatewayRevisionErrorV1::IdempotencyConflict,
-            StatusCode::CONFLICT,
-        ),
-        (GatewayRevisionErrorV1::ParentNotHead, StatusCode::CONFLICT),
-        (
-            GatewayRevisionErrorV1::ParentUnavailable,
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            GatewayRevisionErrorV1::ModeBindingStale,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
-        (
-            GatewayRevisionErrorV1::InvalidRecord,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ),
-        (
-            GatewayRevisionErrorV1::Unavailable,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
-    ] {
-        assert_eq!(store_failure(error).status(), status, "{error:?}");
+/// Run `sql` on the served store through a separate connection, as a
+/// faulty or foreign writer would.
+fn corrupt(served: &Served, sql: &str) -> TestResult {
+    let connection = rusqlite::Connection::open(store_path(&served.directory)?)?;
+    connection.execute_batch(sql)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_revision_this_gateway_cannot_trust_fails_closed() -> TestResult {
+    let served = served(ALL_REVISION_OPERATIONS)?;
+    let body = |weight_micro: i64| {
+        preference(json!([{"dimension": "nature", "weight_micro": weight_micro}]))
+    };
+    let mut uris = Vec::new();
+    for (index, sql) in [
+        // Content that is not canonical CBOR.
+        "UPDATE gateway_revisions SET content = x'ff' WHERE revision = 1 AND content = ?",
+        // A canonical mode profile this Gateway does not know.
+        "UPDATE gateway_revisions SET mode_profile_id = 'gateway-mode-other-v1' WHERE content = ?",
+        // A mode profile reference that is not canonical.
+        "UPDATE gateway_revisions SET mode_profile_id = 'Not Canonical' WHERE content = ?",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("untrusted-{index}");
+        let weight = i64::try_from(index)? + 1;
+        let (status, created) = post(&served, PREFERENCES, SUBJECT, &key, &body(weight)).await?;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = Ulid::from_string(created["id"].as_str().ok_or("created id")?)?;
+        let content = content_bytes::<PreferenceFamily>(
+            id,
+            NonZeroU64::MIN,
+            None,
+            entity(SUBJECT)?,
+            vec![WeightV1("nature".to_owned(), weight)],
+        );
+        let connection = rusqlite::Connection::open(store_path(&served.directory)?)?;
+        assert_eq!(connection.execute(sql, [content])?, 1, "{sql}");
+        uris.push(revision_uri(PREFERENCES, &created));
     }
-    // A store command that never ran answers as every other Gateway
-    // operation does.
+    for uri in &uris {
+        let (status, problem) = get(&served, uri, SUBJECT).await?;
+        assert_eq!(
+            (status, code(&problem)),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal-safe-failure"),
+            "{uri}"
+        );
+    }
+    // A store that lost its tombstones is temporarily unavailable.
+    corrupt(&served, "DROP TABLE gateway_revision_tombstones")?;
+    let unknown = format!("{PREFERENCES}/{}/revisions/1", EntityId::new().inner());
+    let (status, problem) = get(&served, &unknown, SUBJECT).await?;
+    assert_eq!(
+        (status, code(&problem), problem["retryable"].clone()),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily-unavailable",
+            json!(true)
+        )
+    );
+    finish(served).await
+}
+
+#[tokio::test]
+async fn a_writer_whose_binding_moved_commits_nothing_and_stops() -> TestResult {
+    let served = served(ALL_REVISION_OPERATIONS)?;
+    // Another process migrated the store: its persisted epoch moved on.
+    corrupt(
+        &served,
+        "UPDATE gateway_mode_binding SET binding_epoch = 2;
+         INSERT INTO gateway_mode_binding_history (binding_epoch, profile_id, profile_digest, kind)
+         SELECT 2, profile_id, profile_digest, 3 FROM gateway_mode_binding_history
+         WHERE binding_epoch = 1;",
+    )?;
+    let body = preference(json!([{"dimension": "nature", "weight_micro": 1}]));
+    let response = served
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PREFERENCES)
+                .header("content-type", "application/json")
+                .header(ACTOR_ENTITY_HEADER, SUBJECT)
+                .header("idempotency-key", "stale")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response
+        .extensions()
+        .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
+        .is_some());
+    let connection = rusqlite::Connection::open(store_path(&served.directory)?)?;
+    let rows: i64 = connection.query_row("SELECT COUNT(*) FROM gateway_revisions", [], |row| {
+        row.get(0)
+    })?;
+    assert_eq!(rows, 0);
+    finish(served).await
+}
+
+#[tokio::test]
+async fn each_operation_records_the_denial_of_an_uncovered_actor() -> TestResult {
+    use pos_core::AuthorityPersistencePortV1 as _;
+    let served = served(ALL_REVISION_OPERATIONS)?;
+    let path = store_path(&served.directory)?;
+    let recorded = || -> TestResult<usize> {
+        Ok(SqliteStore::open(&path)?
+            .load_authorization_denials(0, 64)
+            .map_err(|error| format!("{error:?}"))?
+            .len())
+    };
+    assert_eq!(recorded()?, 0);
+    let stranger = EntityId::new().to_string();
+    let body = preference(json!([{"dimension": "nature", "weight_micro": 1}]));
+    let unknown = EntityId::new().inner();
+    for (index, (method, uri, payload)) in [
+        ("POST", PREFERENCES.to_owned(), Some(body)),
+        ("GET", format!("{PREFERENCES}/{unknown}/revisions/1"), None),
+        ("POST", OPTION_SPECS.to_owned(), Some(two_options())),
+        ("GET", format!("{OPTION_SPECS}/{unknown}/revisions/1"), None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, problem) = send(
+            &served.app,
+            method,
+            &uri,
+            Some(stranger.as_str()),
+            Some("stranger"),
+            payload.as_ref(),
+        )
+        .await?;
+        assert_eq!(
+            (status, code(&problem)),
+            (StatusCode::FORBIDDEN, "unauthorized"),
+            "{uri}"
+        );
+        // The denial was durably recorded before it was answered.
+        assert_eq!(recorded()?, index + 1, "{uri}");
+    }
+    finish(served).await
+}
+
+#[test]
+fn a_store_command_that_never_ran_answers_as_every_gateway_operation() {
+    // Not reachable over HTTP: a closed store fails the authority read that
+    // precedes every revision command.
     for (error, status) in [
         (StoreExecutorError::Saturated, StatusCode::TOO_MANY_REQUESTS),
         (StoreExecutorError::Closed, StatusCode::SERVICE_UNAVAILABLE),
@@ -848,70 +978,4 @@ fn every_store_failure_has_its_public_answer() {
             .map_err(|response| response.status()),
         Err(StatusCode::SERVICE_UNAVAILABLE)
     );
-    // A stale binding marks the response, so the serve loop stops.
-    assert!(store_failure(GatewayRevisionErrorV1::ModeBindingStale)
-        .extensions()
-        .get::<crate::mode_profile::ModeBindingStaleResponseV1>()
-        .is_some());
-}
-
-#[test]
-fn a_record_this_gateway_cannot_decode_is_an_internal_failure() -> TestResult {
-    let tombstone = GatewayRevisionTombstoneV1::new(
-        GatewayRevisionKeyV1::new(PreferenceFamily::KIND, [1; 16], NonZeroU64::MIN),
-        entity(SUBJECT)?,
-        [2; 32],
-    );
-    let undecodable = GatewayRevisionRecordV1::new(tombstone, [3; 16], local_mode(1)?, vec![0xff]);
-    let unknown_mode = GatewayRevisionRecordV1::new(
-        tombstone,
-        [3; 16],
-        GatewayModeBindingRecordV1::new(
-            GatewayModeProfileRefV1::try_new("gateway-mode-other-v1", [4; 32])?,
-            NonZeroU64::MIN,
-        ),
-        content_bytes::<PreferenceFamily>(
-            Ulid::new(),
-            NonZeroU64::MIN,
-            None,
-            entity(SUBJECT)?,
-            vec![WeightV1("nature".to_owned(), 1)],
-        ),
-    );
-    for record in [undecodable, unknown_mode] {
-        assert_eq!(
-            render::<PreferenceFamily>(&record).map_err(|problem| problem.status()),
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        );
-        assert_eq!(
-            answer::<PreferenceFamily>(StatusCode::OK, &record).status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn keys_labels_and_identifiers_follow_the_contract_patterns() {
-    assert!(domain_key("a"));
-    assert!(domain_key("a0_.-z"));
-    assert!(domain_key(&"a".repeat(128)));
-    for invalid in ["", "0a", "_a", "aB", "a b", "a/b"] {
-        assert!(!domain_key(invalid), "{invalid}");
-    }
-    assert!(!domain_key(&"a".repeat(129)));
-    assert!(label("Move to the coast"));
-    assert!(label(&"a".repeat(128)));
-    assert!(!label(&"a".repeat(129)));
-    assert!(!label("\u{0}"));
-    assert!(label("\u{80}"));
-    assert!(unique(["a", "b"].into_iter()));
-    assert!(!unique(["b", "a", "b"].into_iter()));
-    let id = Ulid::new();
-    assert_eq!(canonical_ulid(&id.to_string()), Some(id));
-    assert_eq!(canonical_ulid(&id.to_string().to_lowercase()), None);
-    assert_eq!(revision_number(0), None);
-    assert_eq!(revision_number(1), Some(NonZeroU64::MIN));
-    assert!(revision_number(9_007_199_254_740_991).is_some());
-    assert_eq!(revision_number(9_007_199_254_740_992), None);
 }

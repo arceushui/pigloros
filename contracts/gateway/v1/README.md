@@ -95,6 +95,9 @@ Principal's grant must cover, and the operations need the grants `preference.cre
   otherwise). A stored revision never changes. Identical content is never deduplicated: an exact
   retry under the same `Idempotency-Key` returns the original revision (`200`), the same key with
   another request is `409 idempotency-conflict`.
+- **Erasure.** Erasing a revision also rewrites the request digest its idempotency record kept,
+  which is derived from the content, to a constant, so no byte derived from the erased values
+  survives. A retry under that `Idempotency-Key`, with any request, then answers `410 deleted`.
 - **Views.** A revision is answered only to its subject; any other caller, and an unknown or
   foreign parent, gets `404 not-found-or-unavailable`. A revision its subject erased answers
   `410 deleted` to that subject from a payload-free tombstone (resource, revision, subject and
@@ -104,8 +107,11 @@ Principal's grant must cover, and the operations need the grants `preference.cre
 - **Digests.** `digest` is BLAKE3 of the ASCII domain tag
   `PiglorOS.GatewayPreferenceRevision.v1` or `PiglorOS.GatewayOptionSpecRevision.v1`, a 0x00
   byte, and the revision's canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array
-  `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, entries]`, IDs as
-  canonical ULID text and `parent_revision` null for revision 1. A Preference entry is
+  `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, entries]`, where
+  `schema_id` is the literal `$id` URN of the revision schema
+  (`urn:pigloros:gateway:v1:schema:preference-revision` or
+  `urn:pigloros:gateway:v1:schema:option-spec-revision`), IDs are canonical ULID text and
+  `parent_revision` is null for revision 1. A Preference entry is
   `[dimension, weight_micro]`, ordered by `dimension`; an OptionSpec entry is
   `[key, label, tags, lean_hint_micro, coordinates]` in the authored order, `tags` in byte
   order, an absent `lean_hint_micro` or `coordinates` null and `coordinates` the array

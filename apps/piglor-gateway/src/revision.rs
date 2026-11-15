@@ -630,6 +630,12 @@ fn request<F: GatewayRevisionFamilyV1>(body: Value) -> Result<F::Request, Proble
     serde_json::from_value(body).map_err(|_| invalid("the request does not match its schema"))
 }
 
+/// A fresh resource ID from the pos-core monotonic ULID generator, which
+/// every Gateway identifier uses.
+fn fresh_resource_id() -> Ulid {
+    EntityId::new().inner()
+}
+
 /// The draft of one admitted request by `actor` for `principal_id`.
 fn draft<F: GatewayRevisionFamilyV1>(
     principal_id: [u8; 16],
@@ -651,7 +657,9 @@ fn draft<F: GatewayRevisionFamilyV1>(
             &entries,
         )),
     );
-    let id = parent.as_ref().map_or_else(Ulid::new, |parent| parent.id);
+    let id = parent
+        .as_ref()
+        .map_or_else(fresh_resource_id, |parent| parent.id);
     let parent_revision = parent.map(|parent| parent.revision);
     let revision = parent_revision.map_or(NonZeroU64::MIN, |parent| parent.saturating_add(1));
     let content = content_bytes::<F>(id, revision, parent_revision, actor, entries);

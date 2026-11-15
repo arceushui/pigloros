@@ -309,7 +309,7 @@ impl GatewayOperationV1 {
         Self::new("option-spec.read", "option-spec.revision", "read", "read");
     /// Every operation this Gateway serves and the network capability, in
     /// name order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: &[Self] = &[
         Self::NETWORK,
         Self::CREATE_PREDICTION,
         Self::CREATE_OPTION_SPEC,
@@ -367,7 +367,8 @@ impl GatewayOperationV1 {
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|operation| operation.name == name)
     }
 }
@@ -2334,19 +2335,27 @@ mod tests {
 
     #[test]
     fn served_operations_are_closed_and_keyed_by_resource_and_action() {
-        let names = GatewayOperationV1::ALL.map(GatewayOperationV1::name);
-        let mut sorted = names;
+        let names = GatewayOperationV1::ALL
+            .iter()
+            .copied()
+            .map(GatewayOperationV1::name)
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         // Strictly sorted: no two entries share a name, nor a resource.
         assert!(names.windows(2).all(|pair| pair[0] < pair[1]), "{names:?}");
-        let mut resources = GatewayOperationV1::ALL.map(GatewayOperationV1::resource);
+        let mut resources = GatewayOperationV1::ALL
+            .iter()
+            .copied()
+            .map(GatewayOperationV1::resource)
+            .collect::<Vec<_>>();
         resources.sort_unstable();
         assert!(
             resources.windows(2).all(|pair| pair[0] < pair[1]),
             "{resources:?}"
         );
-        for operation in GatewayOperationV1::ALL {
+        for &operation in GatewayOperationV1::ALL {
             assert_eq!(GatewayOperationV1::named(operation.name()), Some(operation));
         }
         assert_eq!(GatewayOperationV1::named("timeline.delete"), None);
