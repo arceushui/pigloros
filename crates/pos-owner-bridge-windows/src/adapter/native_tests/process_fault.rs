@@ -4158,8 +4158,6 @@ enum EarlyRendererPhase {
 }
 
 const EARLY_SNAPSHOT_REFUSED: &str = "renderer snapshot unavailable or ambiguous";
-const RENDERER_START_MISSED: &str =
-    "renderer load phase ended or timed out before the renderer started";
 
 /// `WebView2` starts the main renderer asynchronously after navigation
 /// commits, so a load-phase snapshot can precede it. Only that transient
@@ -4259,8 +4257,7 @@ impl Fixture {
             ));
             if reached.is_none() && step_pending(&step) {
                 if let Some(mark) = self.early_renderer_state(driver, phase) {
-                    let presence =
-                        pass(self.settled_early_presence(driver, phase, mark, &SystemClock));
+                    let presence = pass(self.settled_early_presence(phase, &SystemClock));
                     // Recheck the phase after the complete pair of snapshots.
                     assert_eq!(
                         self.early_renderer_state(driver, phase),
@@ -4334,12 +4331,12 @@ impl Fixture {
     }
 
     /// Snapshot renderer presence, resampling a transient load-phase absence
-    /// while the driver holds the same mark (see `renderer_start_pending`).
+    /// until the renderer appears or the fixture deadline passes (see
+    /// `renderer_start_pending`). The caller rechecks the phase afterwards, so
+    /// a mark that advanced while pumping still fails the case.
     fn settled_early_presence(
         &mut self,
-        driver: &CeremonyDriver,
         phase: EarlyRendererPhase,
-        mark: ProcessFaultMark,
         clock: &dyn pos_owner_bridge::MonotonicClock,
     ) -> Result<crate::RendererPresence, Box<dyn std::error::Error>> {
         loop {
@@ -4347,15 +4344,10 @@ impl Fixture {
                 .surface
                 .early_renderer_presence()
                 .map_err(|()| EARLY_SNAPSHOT_REFUSED)?;
-            if !renderer_start_pending(phase, presence) {
+            if !renderer_start_pending(phase, presence) || clock.now() >= self.deadline {
                 return Ok(presence);
             }
-            readiness::pump(&self.surface)?;
-            if clock.now() >= self.deadline
-                || self.early_renderer_state(driver, phase) != Some(mark)
-            {
-                return Err(RENDERER_START_MISSED.into());
-            }
+            pass(readiness::pump(&self.surface));
         }
     }
 

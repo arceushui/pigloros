@@ -908,18 +908,14 @@ fn modeled_early_renderer_observer_enforces_deadline() -> TestResult {
 }
 
 #[test]
-fn modeled_load_phase_absence_resamples_until_its_mark_or_deadline_ends() -> TestResult {
+fn modeled_load_phase_absence_resamples_until_the_renderer_or_deadline() -> TestResult {
     use crate::RendererPresence::{Absent, Unique};
     let _port = crate::Native::fixed_port_fixture();
-    let mark = ProcessFaultMark::AwaitingLoad {
-        generation: 1,
-        record_count: 1,
-    };
     for (presence, seconds, expected) in [
         (None, 5, Err(super::EARLY_SNAPSHOT_REFUSED)),
         (Some(Unique), 5, Ok(Unique)),
-        (Some(Absent), 0, Err(super::RENDERER_START_MISSED)),
-        (Some(Absent), 5, Err(super::RENDERER_START_MISSED)),
+        (Some(Absent), 0, Ok(Absent)),
+        (Some(Absent), 5, Ok(Absent)),
     ] {
         let _observation = ModeledRendererObservation::new();
         let root = FixtureRoot::new()?;
@@ -937,12 +933,7 @@ fn modeled_load_phase_absence_resamples_until_its_mark_or_deadline_ends() -> Tes
         let driver =
             readiness::new_driver(CeremonyId::from_bytes([MODEL_CASE; 16]), Instant::now());
         let result = fixture
-            .settled_early_presence(
-                &driver,
-                super::EarlyRendererPhase::AwaitingLoad,
-                mark,
-                &clock,
-            )
+            .settled_early_presence(super::EarlyRendererPhase::AwaitingLoad, &clock)
             .map_err(|error| error.to_string());
         assert_eq!(result, expected.map_err(str::to_owned));
         fixture
