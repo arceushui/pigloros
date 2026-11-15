@@ -32,9 +32,9 @@ use pos_core::{
     pipeline_draft_vector_digest_v1, pipeline_erasure_revision_v1, AppendDedupKey,
     AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
-    EventDraft, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    AuthorityTrustRootSealV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, EntityId, EventDraft, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1,
+    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineObservationAnchorV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
     PrincipalRefV1, ProposedAction, Seq, TimelineId,
 };
@@ -48,6 +48,10 @@ use crate::{
 
 const TRUST_DOMAIN: &str = "local.experiment";
 const DOMAIN: &[u8] = b"PiglorOS.LocalScheduledAdmission.v1\0";
+/// The composition-root seal the local session root builds its registry
+/// snapshot with (ADR-129 A5.9, #1374); private to this host.
+const AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
+    AuthorityTrustRootSealV1::for_composition_root();
 /// The local session root's actor, principal, and authority Timeline identity.
 const LOCAL_ROOT: u128 = 1;
 /// Label of the local policy revision, shared by the session grant and the
@@ -315,6 +319,7 @@ impl LocalScheduledAdmissionHostV1 {
                     .binding_digest()
                     .and_then(|binding| {
                         AuthorityRegistrySnapshotV1::try_new(
+                            &AUTHORITY_TRUST_ROOT,
                             registry_digest,
                             vec![keyed(b"authentication", &[])],
                             vec![binding],

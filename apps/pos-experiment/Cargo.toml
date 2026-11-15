@@ -15,6 +15,7 @@ publish.workspace = true
 # the Linux-only G-OPS capture adapters (slice N3), which run a WAT guest through
 # the community Plugin supervisor and worker.
 test-support = [
+  "pos-core/authority-trust-root",
   "pos-core/test-support",
   "pos-runtime/test-support",
   "dep:pos-plugin-supervisor",
@@ -111,7 +112,10 @@ tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 
 [dev-dependencies]
-pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 # `test-support` gives the replay provider-dispatch vectors (ADR-062 Revision 8, #1296) the signed
 # in-memory CFB1 corpus builder of `pos-reference`'s public tests.

@@ -176,6 +176,7 @@ fn root_grant() -> CapabilityGrantV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn authority_host() -> AuthorityPersistenceHostV1 {
     AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(200)],
         vec![ok(root_grant().binding_digest())],

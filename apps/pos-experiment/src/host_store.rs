@@ -978,6 +978,7 @@ mod host_store_tests {
                 authority_registry_digest: admission_hash(7),
             })?;
         let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             admission_hash(7),
             vec![admission_hash(200)],
             vec![grant.binding_digest()?],

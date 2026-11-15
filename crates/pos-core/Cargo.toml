@@ -20,6 +20,13 @@ counterfactual-adapter = []
 # the Plugin-conformance adapter may enable it, in `[dependencies]`;
 # scripts/check_fixture_instant_confinement.py enforces that in CI.
 fixture-instant = []
+# Mints `AuthorityTrustRootSealV1`, which builds the authenticated-principal
+# results and registry snapshots the authority evaluator trusts (ADR-129 A5.9,
+# #1374). Only the trusted composition roots (`piglor-gateway`, `pos-store`,
+# `pos-experiment`, and `pos-runtime` through `local-admission-host`) may enable
+# it outside dev-dependencies; scripts/check_authority_trust_root_seal.py
+# enforces that in CI.
+authority-trust-root = []
 
 [dependencies]
 blake3 = { workspace = true }
@@ -37,12 +44,24 @@ proptest = { workspace = true }
 sha2 = { workspace = true }
 
 [[test]]
+name = "authority_public"
+required-features = ["authority-trust-root"]
+
+[[test]]
 name = "fork_ancestry_public"
 required-features = ["test-support"]
 
 [[test]]
+name = "knowledge_public"
+required-features = ["authority-trust-root"]
+
+[[test]]
 name = "local_cut_world_closure_public"
 required-features = ["test-support"]
+
+[[test]]
+name = "trusted_clock_public"
+required-features = ["authority-trust-root"]
 
 [[test]]
 name = "world_key_evidence_public"

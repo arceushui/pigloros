@@ -8539,6 +8539,7 @@ mod coverage_entrypoints {
         let timeline = ok(store.create_timeline("foreign-authority-host"));
         let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
             pos_core::AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
                 pos_core::Hash::from_bytes([3; 32]),
                 vec![pos_core::Hash::from_bytes([4; 32])],
                 Vec::new(),
@@ -8595,6 +8596,7 @@ mod coverage_entrypoints {
         .start());
         let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
             pos_core::AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
                 pos_core::Hash::from_bytes([5; 32]),
                 vec![pos_core::Hash::from_bytes([6; 32])],
                 Vec::new(),

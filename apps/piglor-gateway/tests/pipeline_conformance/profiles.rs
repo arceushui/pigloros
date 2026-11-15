@@ -155,16 +155,18 @@ fn consent_grant(ids: &Ids) -> ConsentGrantRefV1 {
 }
 
 fn authorization_request(ids: &Ids, consent: ConsentGrantRefV1) -> AuthorizationRequestV1 {
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: ids.principal.clone(),
             adapter_id: "test-adapter".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok(),
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(100),
             binding_digest: digest(5),
-        })
-        .test_ok();
+        },
+    )
+    .test_ok();
     AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated,
         actor_entity_id: ids.actor_id,
@@ -260,6 +262,7 @@ pub(super) fn participant_on(timeline_id: TimelineId) -> Participant {
     let grant = capability_grant(&ids);
     let request = authorization_request(&ids, consent.clone());
     let authority_registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         digest(6),
         vec![request.authenticated().registry_binding_digest()],
         vec![grant.binding_digest().test_ok()],
