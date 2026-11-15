@@ -261,7 +261,7 @@ impl ScenarioRoomCatalogueV1 {
     }
 
     /// The `capability_set_hash` of the one bundled Plugin `plugin` names.
-    fn resolve(&self, plugin: &RoomPluginRefV1) -> Result<Hash, ScenarioRoomErrorV1> {
+    pub(crate) fn resolve(&self, plugin: &RoomPluginRefV1) -> Result<Hash, ScenarioRoomErrorV1> {
         let mut matches = self.plugins.iter().filter(|bundled| {
             bundled.name == plugin.plugin_id && bundled.version == plugin.version
         });
