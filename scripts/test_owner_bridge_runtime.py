@@ -2,6 +2,7 @@
 """Public runtime-manifest and extracted-tree security contracts (no downloads)."""
 
 import hashlib
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,24 @@ def row(name, content=b"runtime"):
 
 
 class RuntimeManifestTests(unittest.TestCase):
+    def test_compiled_windows_inventory_is_exactly_the_retained_manifest(self):
+        source = (MANIFEST.parent / "src/adapter/runtime/manifest.rs").read_text(encoding="utf-8")
+        blocks = re.findall(
+            r'RuntimeFile\s*\{\s*path:\s*"([^"]+)",\s*size:\s*([\d_]+),'
+            r'\s*sha256:\s*\[([^]]+)\],?\s*\}', source, re.S,
+        )
+        compiled = [(name, (int(size.replace("_", "")),
+                            bytes(int(value.strip(), 16) for value in digest.split(",")
+                                  if value.strip()).hex()))
+                    for name, size, digest in blocks]
+        original = MANIFEST.read_bytes()
+        self.assertEqual(compiled, list(parse_manifest(original.decode("utf-8")).items()))
+        digest = re.search(r"const DIGEST: \[u8; 32\] = \[([^]]+)\]", source, re.S)
+        self.assertIsNotNone(digest)
+        compiled_digest = bytes(int(value.strip(), 16) for value in digest.group(1).split(",")
+                                if value.strip())
+        self.assertEqual(compiled_digest, hashlib.sha256(original).digest())
+
     def test_retained_inventory_matches_the_accepted_cab_evidence(self):
         entries = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(len(entries), 257)

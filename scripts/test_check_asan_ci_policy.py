@@ -444,14 +444,14 @@ class AsanCiPolicyTests(unittest.TestCase):
             )
         )
 
-    def test_archive_build_must_require_cargo_crap_success(self) -> None:
-        def drop_cargo_crap_condition(workflow: dict) -> None:
+    def test_archive_build_must_require_core_gate_success(self) -> None:
+        def drop_core_gate_condition(workflow: dict) -> None:
             job = workflow["jobs"]["asan-build"]
             job["if"] = job["if"].replace(
-                "needs.cargo-crap.result == 'success' && ", ""
+                "needs.core-gate.result == 'success' && ", ""
             )
 
-        self.assert_rejected(drop_cargo_crap_condition)
+        self.assert_rejected(drop_core_gate_condition)
 
     def test_archive_build_requires_instrumented_complete_scope(self) -> None:
         for fragment in (
