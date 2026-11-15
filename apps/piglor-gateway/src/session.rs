@@ -38,22 +38,22 @@ const CONTRACT_VERSION: &str = "1.0.0-draft";
 const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.GatewaySession.v1\0";
 
 /// One Principal's Session, derived by the host under the read's permit.
-pub struct GatewaySessionV1 {
+pub(crate) struct GatewaySessionV1 {
     /// The Principal the decision authenticated.
-    pub principal: PrincipalRefV1,
+    pub(crate) principal: PrincipalRefV1,
     /// The actors of the Principal's leaf grant.
-    pub entity_ids: Vec<EntityId>,
+    pub(crate) entity_ids: Vec<EntityId>,
     /// The served operations and capabilities the grant covers, sorted.
-    pub grants: Vec<&'static str>,
+    pub(crate) grants: Vec<&'static str>,
     /// The head position of the pinned authority chain.
-    pub authority_head: Seq,
+    pub(crate) authority_head: Seq,
     /// The current execution mode of the serving store.
-    pub mode: GatewaySessionModeV1,
+    pub(crate) mode: GatewaySessionModeV1,
 }
 
 impl GatewaySessionV1 {
     /// The `Session` resource of the Gateway v1 contract.
-    pub fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         let id = ulid::Ulid::from_bytes(*self.principal.principal_id()).to_string();
         // The consent Timeline head term of D8 is 0: no Local Principal grant
         // binds a consent Timeline.
