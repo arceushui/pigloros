@@ -369,9 +369,10 @@ mod tests {
 
     /// An address the evidence path already holds is never marked as a
     /// sweep candidate when the same bytes are retained again, so a startup
-    /// sweep cannot delete committed evidence. No current writer keys
-    /// committed evidence by the full-bytes content address, so the
-    /// evidence row is seeded directly.
+    /// sweep cannot delete committed evidence. The coordinator CAS does key
+    /// ERSEH1 and ERAH1 evidence by that address; the public guard is in
+    /// `tests/erasure_persistence.rs`, and this seeded case is a cheap
+    /// mutation guard for the adapter branch alone.
     #[test]
     fn retaining_bytes_the_evidence_path_wrote_first_never_marks_them(
     ) -> Result<(), Box<dyn std::error::Error>> {
