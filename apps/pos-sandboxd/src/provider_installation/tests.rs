@@ -174,7 +174,7 @@ fn spi1_a_decodes_to_its_values() -> TestResult {
 }
 
 #[test]
-fn spi1_b_and_spi1_c_pass_the_digest_and_are_then_rejected() -> TestResult {
+fn spi1_b_and_spi1_c_pass_the_digest_and_are_then_rejected() {
     let mut b = hex(SPI1_B_UNSIGNED);
     b.insert(0, 0x82);
     b.extend([0x58, 0x20]);
@@ -191,7 +191,6 @@ fn spi1_b_and_spi1_c_pass_the_digest_and_are_then_rejected() -> TestResult {
         codec::decode(&c).err(),
         Some(ProviderInstallationError::CleanupBudget)
     );
-    Ok(())
 }
 
 #[test]
@@ -554,6 +553,11 @@ fn a_valid_file_yields_its_validated_values() -> TestResult {
         }
     );
     assert_eq!(installation.runtime_key_file(), KEY_FILE);
+    // The budget is the one SPI1-A's phases built: the identical value.
+    assert_eq!(
+        format!("{:?}", installation.cleanup_budget()),
+        format!("{:?}", installation.cleanup_budget)
+    );
     Ok(())
 }
 
