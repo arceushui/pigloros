@@ -30,7 +30,9 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
+use super::payload::{
+    CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, TIMELINE_SLOT,
+};
 use super::ACTOR_ENTITY_ID;
 use crate::observation_v1;
 
@@ -352,7 +354,9 @@ async fn exchange_all(
     let mut present = false;
     for exchange in &subcase.exchanges {
         let route = exchange.route();
-        let observation = if capabilities.iter().any(|held| held == route.capability()) {
+        let held =
+            route.is_some_and(|route| capabilities.iter().any(|held| held == route.capability()));
+        let observation = if held {
             let service = match exchange.router {
                 RouterV2::Loopback => loopback.clone(),
                 RouterV2::Spectator => spectator.clone(),
@@ -366,7 +370,7 @@ async fn exchange_all(
                 .unwrap_or_default();
             run.steps += 1;
             run.output_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            run.events += u64::from(status == 201 && route.commits());
+            run.events += u64::from(status == 201 && route.is_some_and(RouteV2::commits));
             if exchange.router == RouterV2::Spectator {
                 present |= subcase
                     .canary

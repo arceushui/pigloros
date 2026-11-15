@@ -560,6 +560,11 @@ impl GatewaySessionModeV1 {
         })
     }
 
+    /// Whether the bound profile allows network (ADR-134 §2 field 5).
+    pub(crate) const fn network_allowed(&self) -> bool {
+        self.network_allowed
+    }
+
     /// The disclosed digest and binding epoch the Session provenance binds.
     pub(crate) const fn provenance_fields(&self) -> (&str, u64) {
         (self.digest_hex.as_str(), self.binding_epoch.get())

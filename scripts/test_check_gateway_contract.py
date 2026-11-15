@@ -370,37 +370,44 @@ class CheckGatewayContractTest(unittest.TestCase):
         ):
             self.assertTrue(subject.schema_errors(invalid, schema), invalid)
 
-    def test_local_mode_never_claims_an_air_gapped_profile(self) -> None:
+    def test_profile_identifiers_are_open_but_namespaced(self) -> None:
+        """The servable sets of README rule 3 are a server invariant, not a schema rule: the
+        identifiers are open so a later family (#1372) stays within v1, but the Gateway mode
+        and ADR-058 namespaces stay disjoint and a known mode profile keeps its mode."""
         subject = contract()
         schema = {"$ref": "#/components/schemas/PreferenceRevision"}
         body = example("draft-preference-get")["response"]["body"]
         self.assertEqual(body["mode_profile"]["mode"], "local")
         self.assertEqual(subject.schema_errors(body, schema), [])
         installed = {"profile_kind": "epf1", "state": "installed", "profile_digest": "0" * 64}
-        for profile_id in ("replay-v1", "deterministic-local-v1", "live-local-v1"):
+        for profile_id in ("replay-v1", "deterministic-local-v1", "live-local-v1",
+                           "deterministic-air-gapped-v1", "live-air-gapped-v1"):
             served = {**body, "execution_profile": {**installed, "profile_id": profile_id}}
-            self.assertEqual(subject.schema_errors(served, schema), [])
-        air_profile = {**installed, "profile_id": "deterministic-air-gapped-v1"}
-        self.assertTrue(subject.schema_errors({**body, "execution_profile": air_profile}, schema))
-        air_mode = {
-            **body["mode_profile"],
-            "mode": "air-gapped",
-            "mode_profile_id": "gateway-mode-air-gapped-v1",
-            "mode_profile_digest": checker.GOLDEN_MODE_PROFILE_DIGESTS[
-                "gateway-mode-air-gapped-v1"
-            ],
-        }
-        self.assertEqual(subject.schema_errors({**body, "mode_profile": air_mode}, schema), [])
-        self.assertEqual(
-            subject.schema_errors({**body, "mode_profile": air_mode,
-                                   "execution_profile": air_profile}, schema),
-            [],
-        )
-        local_only = {**installed, "profile_id": "live-local-v1"}
-        self.assertTrue(subject.schema_errors({**body, "mode_profile": air_mode,
-                                               "execution_profile": local_only}, schema))
+            self.assertEqual(subject.schema_errors(served, schema), [], profile_id)
+        for profile_id in ("gateway-mode-local-v1", "Live-local-v1", "live-local", "live-v0",
+                           "a" * 62 + "-v1"):
+            served = {**body, "execution_profile": {**installed, "profile_id": profile_id}}
+            self.assertTrue(subject.schema_errors(served, schema), profile_id)
+        reason = {"profile_kind": "epf1", "state": "unavailable", "reason": "not-qualified"}
+        self.assertEqual(subject.schema_errors({**body, "execution_profile": reason}, schema), [])
         self.assertTrue(subject.schema_errors(
-            {**body, "mode_profile": {**body["mode_profile"], "mode": "air-gapped"}}, schema))
+            {**body, "execution_profile": {**reason, "reason": "Not Installed"}}, schema))
+        mode = body["mode_profile"]
+        self.assertTrue(subject.schema_errors(
+            {**body, "mode_profile": {**mode, "mode": "air-gapped"}}, schema))
+        self.assertTrue(subject.schema_errors(
+            {**body, "mode_profile": {**mode, "mode_profile_id": "deterministic-local-v1"}},
+            schema))
+        future = {**mode, "mode_profile_id": "gateway-mode-edge-v1", "mode": "edge"}
+        self.assertEqual(subject.schema_errors({**body, "mode_profile": future}, schema), [])
+        self.assertTrue(checker.mode_profile_errors({**body, "mode_profile": future}))
+
+    def test_the_closed_sets_say_so(self) -> None:
+        schemas = DOCUMENT["components"]["schemas"]
+        for schema in (schemas["ExecutionProfile"]["properties"]["state"],
+                       schemas["ProvenanceReference"]["properties"]["origin"]):
+            self.assertIn("enum", schema)
+            self.assertIn("deliberately closed in v1", schema["description"])
 
     def test_a_resource_discloses_its_produced_under_mode_profile(self) -> None:
         subject = contract()
@@ -433,7 +440,8 @@ class CheckGatewayContractTest(unittest.TestCase):
         self.assertEqual(subject.schema_errors({**local, "mode_profile": granted}, schema), [])
         for invalid in (
             {**local["mode_profile"], "network": "absent"},
-            {**local["mode_profile"], "network_grants": ["ledger"]},
+            {**local["mode_profile"], "network_grants": ["Ledger"]},
+            {**local["mode_profile"], "network_grants": [f"grant-{n}" for n in range(17)]},
             {**local["mode_profile"], "network_grants": ["owntracks", "owntracks"]},
             {key: value for key, value in local["mode_profile"].items() if key != "network"},
         ):
