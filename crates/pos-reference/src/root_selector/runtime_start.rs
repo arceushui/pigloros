@@ -245,7 +245,7 @@ fn require_refused(path: &Path) -> Result<(), SelectorBoundaryError> {
             socket_with(
                 AddressFamily::UNIX,
                 SocketType::STREAM,
-                SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+                SocketFlags::CLOEXEC.union(SocketFlags::NONBLOCK),
                 None,
             )
             .map_err(io_error)
