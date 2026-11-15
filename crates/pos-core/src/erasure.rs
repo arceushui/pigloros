@@ -3823,14 +3823,16 @@ pub use authority_snapshot::{
     LOCAL_OWNER_EFFECT_MAX_BYTES_V1, LOCAL_OWNER_RESULT_MAX_BYTES_V1,
 };
 pub use local_records::{
-    local_erasure_bundle_signing_message_v1, local_erasure_signature_message_v1,
-    local_erasure_signer_key_id_v1, LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1,
-    LocalErasureBundleV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
-    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
-    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
-    LocalErasureRejectionV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
-    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1,
-    ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    local_erasure_bundle_signing_message_v1, local_erasure_owner_ref_v1,
+    local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
+    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
+    LocalErasureTrustAnchorV1, ERASURE_BUNDLE_ROOT_PREFIX_V1, ERASURE_SIGNER_KEY_PREFIX_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 mod receipt;
 pub use receipt::target_closure_digest;

@@ -10,7 +10,7 @@ use ciborium::value::Value;
 
 use super::{
     array, bytes32, decode_limited, digest, domain_digest, encode_limited, evidence::string,
-    exact_array, header, strictly_increasing, text, uint, unsigned, ErasureArtifactClassV1,
+    header, strictly_increasing, text, uint, unsigned, ArtifactDataClassV1, ErasureArtifactClassV1,
     ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1,
     ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
@@ -25,6 +25,12 @@ pub const ERASURE_SIGNER_KEY_PREFIX_V1: &str = "erasure-signer/";
 /// The ELP1 attempt window: two protocol positions plus 16,384 obligations.
 pub const LOCAL_ERASURE_ATTEMPT_WINDOW_V1: u64 = 2 + 16_384;
 
+/// The largest ELP1 lifetime attempt quota (ADR-136 §4).
+pub const LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1: u64 = 4_096;
+
+/// The largest ELP1 store-wide request reserve: the store's request-head cap.
+pub const LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1: u64 = super::ERASURE_MAX_INVENTORY_REQUESTS as u64;
+
 const KIB: usize = 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_EXECUTOR_ID_BYTES: usize = 64;
@@ -34,68 +40,35 @@ const MAX_BUNDLE_LIST: usize = 64;
 const MAX_CLASSIFICATION_ROWS: usize = 256;
 const MAX_AUTO_RETRY: u64 = 16;
 const SIGNER_ROLE: u64 = 2;
-const RETAINED_CLASS_CODES: std::ops::RangeInclusive<u64> = 2..=4;
-const MAX_DATA_CLASS_CODE: u64 = 4;
 
-/// Sequential reader over the fields of one decoded record.
-struct Fields<'a>(std::slice::Iter<'a, Value>);
-
-impl<'a> Fields<'a> {
-    fn open(value: &'a Value, tag: &str, count: usize) -> Result<Self, ErasureErrorV1> {
-        exact_array(value, count).and_then(|fields| {
-            header(fields, tag).map(|()| Self(fields.get(2..).unwrap_or_default().iter()))
-        })
-    }
-
-    fn next(&mut self) -> Result<&'a Value, ErasureErrorV1> {
-        self.0.next().ok_or(ErasureErrorV1::InvalidEncoding)
-    }
-
-    fn digest(&mut self) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        self.next().and_then(bytes32)
-    }
-
-    fn uint(&mut self) -> Result<u64, ErasureErrorV1> {
-        self.next().and_then(unsigned)
-    }
-
-    fn text(&mut self, max: usize) -> Result<String, ErasureErrorV1> {
-        self.next().and_then(|value| bounded_text(value, max))
-    }
-
-    fn bytes(&mut self, min: usize, max: usize) -> Result<Vec<u8>, ErasureErrorV1> {
-        self.next().and_then(|value| bounded_bytes(value, min, max))
-    }
-
-    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], ErasureErrorV1> {
-        self.next().and_then(fixed)
-    }
-
-    fn truth(&mut self) -> Result<bool, ErasureErrorV1> {
-        self.next().and_then(|value| match value {
-            Value::Bool(value) => Ok(*value),
-            _ => Err(ErasureErrorV1::InvalidEncoding),
-        })
-    }
-
-    fn array(&mut self, max: usize) -> Result<&'a [Value], ErasureErrorV1> {
-        self.next().and_then(|value| array(value, max))
-    }
-}
-
-fn bounded_text(value: &Value, max: usize) -> Result<String, ErasureErrorV1> {
-    string(value).and_then(|text| {
-        if text.len() <= max {
-            Ok(text.to_owned())
-        } else {
-            Err(ErasureErrorV1::ScopeInvalid)
-        }
-    })
-}
-
-fn bounded_bytes(value: &Value, min: usize, max: usize) -> Result<Vec<u8>, ErasureErrorV1> {
+/// The fields of one fixed-shape array, length-checked once.
+fn fixed_array<const N: usize>(value: &Value) -> Result<&[Value; N], ErasureErrorV1> {
     match value {
-        Value::Bytes(bytes) if (min..=max).contains(&bytes.len()) => Ok(bytes.clone()),
+        Value::Array(items) => items
+            .as_slice()
+            .try_into()
+            .ok()
+            .ok_or(ErasureErrorV1::InvalidEncoding),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+
+/// The fields of one record `[tag, 1, …]` of exactly `N` elements.
+fn open<const N: usize>(value: &Value, tag: &str) -> Result<&[Value; N], ErasureErrorV1> {
+    fixed_array::<N>(value).and_then(|fields| header(fields, tag).map(|()| fields))
+}
+
+fn list(value: &Value) -> Result<&[Value], ErasureErrorV1> {
+    array(value, usize::MAX)
+}
+
+fn owned_text(value: &Value) -> Result<String, ErasureErrorV1> {
+    string(value).map(str::to_owned)
+}
+
+fn owned_bytes(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes.clone()),
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
@@ -105,9 +78,21 @@ fn fixed<const N: usize>(value: &Value) -> Result<[u8; N], ErasureErrorV1> {
         Value::Bytes(bytes) => bytes
             .as_slice()
             .try_into()
-            .map_err(|_| ErasureErrorV1::InvalidEncoding),
+            .ok()
+            .ok_or(ErasureErrorV1::InvalidEncoding),
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
+}
+
+fn truth(value: &Value) -> Result<bool, ErasureErrorV1> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+
+fn timeline_id(value: &Value) -> Result<TimelineId, ErasureErrorV1> {
+    fixed(value).map(|bytes| TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
 }
 
 fn bytes_value(bytes: &[u8]) -> Value {
@@ -139,14 +124,26 @@ fn is_ack_class(class: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
+/// A TPS1 key id: lowercase letters, digits and `. _ / -`, starting with a
+/// letter or digit, at most 128 bytes.
+fn is_tps1_key_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=MAX_IDENTIFIER_BYTES).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+}
+
 /// One canonical record codec.
 trait LocalRecordV1: Sized {
     const TAG: &'static str;
     const MAX_BYTES: usize;
 
     fn fields(&self) -> Vec<Value>;
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1>;
-    fn field_count() -> usize;
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1>;
 
     /// The record's own value rules, checked on both encode and decode.
     fn validate(&self) -> Result<(), ErasureErrorV1> {
@@ -162,18 +159,17 @@ fn encode_record<R: LocalRecordV1>(record_value: &R) -> Result<Vec<u8>, ErasureE
 
 fn decode_record<R: LocalRecordV1>(bytes: &[u8]) -> Result<R, ErasureErrorV1> {
     decode_limited(bytes, R::MAX_BYTES, ERASURE_MAX_OBLIGATIONS_PER_CATEGORY).and_then(|value| {
-        Fields::open(&value, R::TAG, R::field_count() + 2)
-            .and_then(|mut fields| R::read(&mut fields))
-            .and_then(|decoded| {
-                // Only the exact canonical bytes the encoder writes decode.
-                encode_record(&decoded).and_then(|canonical| {
-                    if canonical == bytes {
-                        Ok(decoded)
-                    } else {
-                        Err(ErasureErrorV1::InvalidEncoding)
-                    }
-                })
+        R::read(&value).and_then(|decoded| {
+            // Only the exact canonical bytes the encoder writes decode, and the
+            // encoder applies every record rule.
+            encode_record(&decoded).and_then(|canonical| {
+                if canonical == bytes {
+                    Ok(decoded)
+                } else {
+                    Err(ErasureErrorV1::InvalidEncoding)
+                }
             })
+        })
     })
 }
 
@@ -219,7 +215,7 @@ macro_rules! local_record_api {
 /// A `KeyIdentityV1` of the role-2 erasure signer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalErasureSignerIdentityV1 {
-    /// The key-registry owner id, at most 128 bytes.
+    /// The key-registry owner id, 1 to 128 bytes.
     pub owner_id: Vec<u8>,
     /// The key epoch, at least 1.
     pub epoch: u64,
@@ -235,13 +231,16 @@ impl LocalErasureSignerIdentityV1 {
     }
 
     fn read(value: &Value) -> Result<Self, ErasureErrorV1> {
-        exact_array(value, 3).and_then(|fields| {
-            let mut fields = Fields(fields.iter());
-            let owner_id = fields.bytes(1, MAX_IDENTIFIER_BYTES)?;
-            let role = fields.uint()?;
-            let epoch = fields.uint()?;
-            require(role == SIGNER_ROLE && epoch >= 1).map(|()| Self { owner_id, epoch })
+        fixed_array::<3>(value).and_then(|[owner_id, role, epoch]| {
+            let owner_id = owned_bytes(owner_id)?;
+            let role = unsigned(role)?;
+            let epoch = unsigned(epoch)?;
+            require(role == SIGNER_ROLE).map(|()| Self { owner_id, epoch })
         })
+    }
+
+    fn is_valid(&self) -> bool {
+        (1..=MAX_IDENTIFIER_BYTES).contains(&self.owner_id.len()) && self.epoch >= 1
     }
 }
 
@@ -249,14 +248,31 @@ impl LocalErasureSignerIdentityV1 {
 /// hex characters of its Ed25519 public key.
 #[must_use]
 pub fn local_erasure_signer_key_id_v1(public_key: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut id = String::with_capacity(ERASURE_SIGNER_KEY_PREFIX_V1.len() + 64);
     id.push_str(ERASURE_SIGNER_KEY_PREFIX_V1);
-    for byte in public_key {
-        id.push(char::from(HEX[usize::from(byte >> 4)]));
-        id.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
+    crate::lower_hex::append_hex(&mut id, public_key);
     id
+}
+
+/// `CA("ELOWN1", [store_identity, category, ack_class])`, the owner of one
+/// acknowledgement class on one store.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_owner_ref_v1(
+    store_identity: ErasureReferenceV1,
+    category: u64,
+    ack_class: &str,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    encode_limited(
+        &Value::Array(vec![
+            digest(store_identity),
+            uint(category),
+            text(ack_class),
+        ]),
+        KIB,
+    )
+    .map(|bytes| ErasureReferenceV1::from_digest(domain_digest("ELOWN1", &bytes)))
 }
 
 /// One ELB1 owner row: an acknowledgement class served by one owner.
@@ -266,14 +282,14 @@ pub struct LocalErasureOwnerRowV1 {
     pub category: u64,
     /// The acknowledgement class.
     pub ack_class: String,
-    /// `CA("ELOWN1", [store_identity, category, ack_class])`.
+    /// [`local_erasure_owner_ref_v1`] of the bundle's store, category and class.
     pub owner_ref: ErasureReferenceV1,
 }
 
 /// The deployment-owned executor an ELB1 bundle permits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalErasureExecutionBindingV1 {
-    /// The executor identifier, at most 64 bytes.
+    /// The executor identifier, 1 to 64 bytes.
     pub executor_id: String,
     /// The digest of the executor version.
     pub executor_version_digest: ErasureReferenceV1,
@@ -292,7 +308,8 @@ pub struct LocalErasureBundleV1 {
     pub host_timelines: Vec<TimelineId>,
     /// `CA(ELP1)`.
     pub policy: ErasureReferenceV1,
-    /// Owner rows, strictly increasing, at most 64.
+    /// Owner rows, strictly increasing, at most 64, each owner reference
+    /// derived from this bundle's store identity.
     pub owners: Vec<LocalErasureOwnerRowV1>,
     /// The permitted executor.
     pub execution_binding: LocalErasureExecutionBindingV1,
@@ -308,13 +325,18 @@ pub struct LocalErasureBundleV1 {
     pub expiry: u64,
 }
 
+impl LocalErasureBundleV1 {
+    fn owner_is_valid(&self, owner: &LocalErasureOwnerRowV1) -> bool {
+        ErasureInventoryCategoryV1::from_code(owner.category).is_ok()
+            && is_ack_class(&owner.ack_class)
+            && local_erasure_owner_ref_v1(self.store_identity, owner.category, &owner.ack_class)
+                == Ok(owner.owner_ref)
+    }
+}
+
 impl LocalRecordV1 for LocalErasureBundleV1 {
     const TAG: &'static str = "ELB1";
     const MAX_BYTES: usize = 64 * KIB;
-
-    fn field_count() -> usize {
-        12
-    }
 
     fn fields(&self) -> Vec<Value> {
         vec![
@@ -352,53 +374,40 @@ impl LocalRecordV1 for LocalErasureBundleV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let tps1 = fields.digest()?;
-        let store_identity = fields.digest()?;
-        let authority_registry_digest = fields.digest()?;
-        let host_timelines = fields
-            .array(MAX_BUNDLE_LIST)?
-            .iter()
-            .map(|value| {
-                fixed(value).map(|bytes| TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let policy = fields.digest()?;
-        let owners = fields
-            .array(MAX_BUNDLE_LIST)?
-            .iter()
-            .map(|value| {
-                exact_array(value, 3).and_then(|row| {
-                    let mut row = Fields(row.iter());
-                    Ok(LocalErasureOwnerRowV1 {
-                        category: row.uint()?,
-                        ack_class: row.text(MAX_ACK_CLASS_BYTES)?,
-                        owner_ref: row.digest()?,
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, tps1, store_identity, registry, host_timelines, policy, owners, binding, signer_identity, signer_public_key, signer_key_id, issued_by, expiry] =
+            open::<14>(record, Self::TAG)?;
+        let [executor_id, executor_version_digest] = fixed_array::<2>(binding)?;
+        Ok(Self {
+            tps1: bytes32(tps1)?,
+            store_identity: bytes32(store_identity)?,
+            authority_registry_digest: bytes32(registry)?,
+            host_timelines: list(host_timelines)?
+                .iter()
+                .map(timeline_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            policy: bytes32(policy)?,
+            owners: list(owners)?
+                .iter()
+                .map(|value| {
+                    fixed_array::<3>(value).and_then(|[category, ack_class, owner_ref]| {
+                        Ok(LocalErasureOwnerRowV1 {
+                            category: unsigned(category)?,
+                            ack_class: owned_text(ack_class)?,
+                            owner_ref: bytes32(owner_ref)?,
+                        })
                     })
                 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let binding = exact_array(fields.next()?, 2)?;
-        let mut binding = Fields(binding.iter());
-        let execution_binding = LocalErasureExecutionBindingV1 {
-            executor_id: binding.text(MAX_EXECUTOR_ID_BYTES)?,
-            executor_version_digest: binding.digest()?,
-        };
-        let signer_identity = LocalErasureSignerIdentityV1::read(fields.next()?)?;
-        let signer_public_key = fields.fixed()?;
-        Ok(Self {
-            tps1,
-            store_identity,
-            authority_registry_digest,
-            host_timelines,
-            policy,
-            owners,
-            execution_binding,
-            signer_identity,
-            signer_public_key,
-            signer_key_id: fields.text(MAX_IDENTIFIER_BYTES)?,
-            issued_by: fields.text(MAX_IDENTIFIER_BYTES)?,
-            expiry: fields.uint()?,
+                .collect::<Result<Vec<_>, _>>()?,
+            execution_binding: LocalErasureExecutionBindingV1 {
+                executor_id: owned_text(executor_id)?,
+                executor_version_digest: bytes32(executor_version_digest)?,
+            },
+            signer_identity: LocalErasureSignerIdentityV1::read(signer_identity)?,
+            signer_public_key: fixed(signer_public_key)?,
+            signer_key_id: owned_text(signer_key_id)?,
+            issued_by: owned_text(issued_by)?,
+            expiry: unsigned(expiry)?,
         })
     }
 
@@ -408,17 +417,12 @@ impl LocalRecordV1 for LocalErasureBundleV1 {
                 && strictly_increasing(&self.host_timelines)
                 && self.owners.len() <= MAX_BUNDLE_LIST
                 && strictly_increasing(&self.owners)
-                && self.owners.iter().all(|owner| {
-                    ErasureInventoryCategoryV1::from_code(owner.category).is_ok()
-                        && is_ack_class(&owner.ack_class)
-                })
-                && !self.execution_binding.executor_id.is_empty()
-                && self.execution_binding.executor_id.len() <= MAX_EXECUTOR_ID_BYTES
-                && !self.signer_identity.owner_id.is_empty()
-                && self.signer_identity.owner_id.len() <= MAX_IDENTIFIER_BYTES
-                && self.signer_identity.epoch >= 1
+                && self.owners.iter().all(|owner| self.owner_is_valid(owner))
+                && (1..=MAX_EXECUTOR_ID_BYTES).contains(&self.execution_binding.executor_id.len())
+                && self.signer_identity.is_valid()
                 && self.signer_key_id == local_erasure_signer_key_id_v1(&self.signer_public_key)
-                && self.issued_by.len() <= MAX_IDENTIFIER_BYTES
+                && is_tps1_key_id(&self.signer_key_id)
+                && is_tps1_key_id(&self.issued_by)
                 && self.issued_by.len() > ERASURE_BUNDLE_ROOT_PREFIX_V1.len()
                 && self.issued_by.starts_with(ERASURE_BUNDLE_ROOT_PREFIX_V1),
         )
@@ -440,18 +444,15 @@ impl LocalRecordV1 for LocalErasureBundleSignatureV1 {
     const TAG: &'static str = "ELB1S";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        2
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![digest(self.bundle), bytes_value(&self.admin_signature)]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, bundle, admin_signature] = open::<4>(record, Self::TAG)?;
         Ok(Self {
-            bundle: fields.digest()?,
-            admin_signature: fields.fixed()?,
+            bundle: bytes32(bundle)?,
+            admin_signature: fixed(admin_signature)?,
         })
     }
 }
@@ -484,18 +485,16 @@ impl LocalRecordV1 for LocalErasureRejectionV1 {
     const TAG: &'static str = "ELREJ1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        2
-    }
-
     fn fields(&self) -> Vec<Value> {
-        vec![digest(self.request), uint(self.error as u64)]
+        vec![digest(self.request), uint(self.error.code())]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let request = fields.digest()?;
-        let error = ErasureErrorV1::from_code(fields.uint()?)?;
-        Ok(Self { request, error })
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, error] = open::<4>(record, Self::TAG)?;
+        Ok(Self {
+            request: bytes32(request)?,
+            error: ErasureErrorV1::from_code(unsigned(error)?)?,
+        })
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
@@ -515,7 +514,7 @@ local_record_api!(LocalErasureRejectionV1);
 pub struct LocalErasureTrustAnchorV1 {
     /// The digest of the TPS1 snapshot.
     pub tps1: ErasureReferenceV1,
-    /// The operator key id, at most 128 bytes.
+    /// The operator key id, a TPS1 key id.
     pub operator_key_id: String,
     /// The operator's Ed25519 public key.
     pub operator_public_key: [u8; 32],
@@ -525,10 +524,6 @@ impl LocalRecordV1 for LocalErasureTrustAnchorV1 {
     const TAG: &'static str = "ELTA1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        3
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
             digest(self.tps1),
@@ -537,16 +532,17 @@ impl LocalRecordV1 for LocalErasureTrustAnchorV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, tps1, operator_key_id, operator_public_key] = open::<5>(record, Self::TAG)?;
         Ok(Self {
-            tps1: fields.digest()?,
-            operator_key_id: fields.text(MAX_IDENTIFIER_BYTES)?,
-            operator_public_key: fields.fixed()?,
+            tps1: bytes32(tps1)?,
+            operator_key_id: owned_text(operator_key_id)?,
+            operator_public_key: fixed(operator_public_key)?,
         })
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
-        require(!self.operator_key_id.is_empty())
+        require(is_tps1_key_id(&self.operator_key_id))
     }
 }
 
@@ -557,8 +553,8 @@ local_record_api!(LocalErasureTrustAnchorV1);
 pub struct LocalErasureClassificationV1 {
     /// The ADR-060 artifact class code.
     pub artifact_class: u64,
-    /// The ADR-060 data class code, 0 to 4.
-    pub data_class: u64,
+    /// The ADR-060 data class.
+    pub data_class: ArtifactDataClassV1,
     /// The ADR-060 inventory category code.
     pub category: u64,
     /// The acknowledgement class.
@@ -568,38 +564,44 @@ pub struct LocalErasureClassificationV1 {
 /// ELP1, the pinned Local erasure policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalErasurePolicyV1 {
-    /// Always-retained data class codes, a strictly increasing subset of 2..=4.
-    pub retained_classes: Vec<u64>,
+    /// Always-retained data classes, strictly increasing.
+    pub retained_classes: Vec<ArtifactDataClassV1>,
     /// Classification rows, strictly increasing, at most 256.
     pub classification: Vec<LocalErasureClassificationV1>,
     /// Automatic retries of a transient result, at most 16.
     pub auto_retry_max: u64,
-    /// Lifetime attempt quota, at most 4,096.
+    /// Lifetime attempt quota, at most [`LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1`].
     pub quota_attempts: u64,
-    /// Request heads reserved store-wide.
+    /// Request heads reserved store-wide, at most
+    /// [`LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1`].
     pub store_request_reserve: u64,
     /// Re-prepares per lifecycle step.
     pub max_reprepare: u64,
+}
+
+fn data_class(value: &Value) -> Result<ArtifactDataClassV1, ErasureErrorV1> {
+    unsigned(value).and_then(ArtifactDataClassV1::from_code)
 }
 
 impl LocalRecordV1 for LocalErasurePolicyV1 {
     const TAG: &'static str = "ELP1";
     const MAX_BYTES: usize = 64 * KIB;
 
-    fn field_count() -> usize {
-        7
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
-            Value::Array(self.retained_classes.iter().copied().map(uint).collect()),
+            Value::Array(
+                self.retained_classes
+                    .iter()
+                    .map(|class| uint(u64::from(*class)))
+                    .collect(),
+            ),
             Value::Array(
                 self.classification
                     .iter()
                     .map(|row| {
                         Value::Array(vec![
                             uint(row.artifact_class),
-                            uint(row.data_class),
+                            uint(u64::from(row.data_class)),
                             uint(row.category),
                             text(&row.ack_class),
                         ])
@@ -614,35 +616,34 @@ impl LocalRecordV1 for LocalErasurePolicyV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let retained_classes = fields
-            .array(3)?
-            .iter()
-            .map(unsigned)
-            .collect::<Result<Vec<_>, _>>()?;
-        let classification = fields
-            .array(MAX_CLASSIFICATION_ROWS)?
-            .iter()
-            .map(|value| {
-                exact_array(value, 4).and_then(|row| {
-                    let mut row = Fields(row.iter());
-                    Ok(LocalErasureClassificationV1 {
-                        artifact_class: row.uint()?,
-                        data_class: row.uint()?,
-                        category: row.uint()?,
-                        ack_class: row.text(MAX_ACK_CLASS_BYTES)?,
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        require(fields.uint()? == LOCAL_ERASURE_ATTEMPT_WINDOW_V1)?;
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, retained, classification, window, auto_retry_max, quota_attempts, store_request_reserve, max_reprepare] =
+            open::<9>(record, Self::TAG)?;
+        require(unsigned(window)? == LOCAL_ERASURE_ATTEMPT_WINDOW_V1)?;
         Ok(Self {
-            retained_classes,
-            classification,
-            auto_retry_max: fields.uint()?,
-            quota_attempts: fields.uint()?,
-            store_request_reserve: fields.uint()?,
-            max_reprepare: fields.uint()?,
+            retained_classes: list(retained)?
+                .iter()
+                .map(data_class)
+                .collect::<Result<Vec<_>, _>>()?,
+            classification: list(classification)?
+                .iter()
+                .map(|value| {
+                    fixed_array::<4>(value).and_then(
+                        |[artifact_class, row_data_class, category, ack_class]| {
+                            Ok(LocalErasureClassificationV1 {
+                                artifact_class: unsigned(artifact_class)?,
+                                data_class: data_class(row_data_class)?,
+                                category: unsigned(category)?,
+                                ack_class: owned_text(ack_class)?,
+                            })
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            auto_retry_max: unsigned(auto_retry_max)?,
+            quota_attempts: unsigned(quota_attempts)?,
+            store_request_reserve: unsigned(store_request_reserve)?,
+            max_reprepare: unsigned(max_reprepare)?,
         })
     }
 
@@ -652,17 +653,17 @@ impl LocalRecordV1 for LocalErasurePolicyV1 {
                 && self
                     .retained_classes
                     .iter()
-                    .all(|class| RETAINED_CLASS_CODES.contains(class))
+                    .all(|class| class.is_always_retained())
                 && self.classification.len() <= MAX_CLASSIFICATION_ROWS
                 && strictly_increasing(&self.classification)
                 && self.classification.iter().all(|row| {
                     ErasureArtifactClassV1::from_code(row.artifact_class).is_ok()
-                        && row.data_class <= MAX_DATA_CLASS_CODE
                         && ErasureInventoryCategoryV1::from_code(row.category).is_ok()
                         && is_ack_class(&row.ack_class)
                 })
                 && self.auto_retry_max <= MAX_AUTO_RETRY
-                && self.quota_attempts <= ERASURE_MAX_OBLIGATIONS_PER_CATEGORY as u64,
+                && self.quota_attempts <= LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1
+                && self.store_request_reserve <= LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
         )
     }
 }
@@ -676,7 +677,7 @@ pub struct LocalErasureAuthorizationV1 {
     pub principal_ref: ErasureReferenceV1,
     /// The acting entity.
     pub actor_entity: EntityId,
-    /// The Gateway operation name, at most 64 bytes.
+    /// The Gateway operation name, 1 to 64 bytes.
     pub operation: String,
     /// The Local Principal authority registry digest.
     pub authority_registry_digest: ErasureReferenceV1,
@@ -694,10 +695,6 @@ impl LocalRecordV1 for LocalErasureAuthorizationV1 {
     const TAG: &'static str = "ERAZ1";
     const MAX_BYTES: usize = 4 * KIB;
 
-    fn field_count() -> usize {
-        8
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
             digest(self.principal_ref),
@@ -711,21 +708,23 @@ impl LocalRecordV1 for LocalErasureAuthorizationV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, principal_ref, actor_entity, operation, registry, authority_chain, chain_head_position, revocation_epoch, erq1_request] =
+            open::<10>(record, Self::TAG)?;
         Ok(Self {
-            principal_ref: fields.digest()?,
-            actor_entity: EntityId::from_ulid(ulid::Ulid::from_bytes(fields.fixed()?)),
-            operation: fields.text(MAX_OPERATION_BYTES)?,
-            authority_registry_digest: fields.digest()?,
-            authority_chain: TimelineId::from_ulid(ulid::Ulid::from_bytes(fields.fixed()?)),
-            chain_head_position: fields.uint()?,
-            revocation_epoch: fields.uint()?,
-            erq1_request: fields.digest()?,
+            principal_ref: bytes32(principal_ref)?,
+            actor_entity: EntityId::from_ulid(ulid::Ulid::from_bytes(fixed(actor_entity)?)),
+            operation: owned_text(operation)?,
+            authority_registry_digest: bytes32(registry)?,
+            authority_chain: timeline_id(authority_chain)?,
+            chain_head_position: unsigned(chain_head_position)?,
+            revocation_epoch: unsigned(revocation_epoch)?,
+            erq1_request: bytes32(erq1_request)?,
         })
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
-        require(!self.operation.is_empty() && self.operation.len() <= MAX_OPERATION_BYTES)
+        require((1..=MAX_OPERATION_BYTES).contains(&self.operation.len()))
     }
 }
 
@@ -743,10 +742,6 @@ impl LocalRecordV1 for LocalErasureSelectorV1 {
     const TAG: &'static str = "ELSEL1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        4
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
             digest(self.subject),
@@ -756,12 +751,11 @@ impl LocalRecordV1 for LocalErasureSelectorV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let subject = fields.digest()?;
-        let rule = fields.uint()?;
-        let descendants = fields.truth()?;
-        let future_forks = fields.truth()?;
-        require(rule == 0 && descendants && future_forks).map(|()| Self { subject })
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, subject, rule, descendants, future_forks] = open::<6>(record, Self::TAG)?;
+        let subject = bytes32(subject)?;
+        require(unsigned(rule)? == 0 && truth(descendants)? && truth(future_forks)?)
+            .map(|()| Self { subject })
     }
 }
 
@@ -780,10 +774,6 @@ impl LocalRecordV1 for LocalErasureIdempotencyV1 {
     const TAG: &'static str = "ELIDEM1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        2
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
             digest(self.idempotency_key_digest),
@@ -791,10 +781,11 @@ impl LocalRecordV1 for LocalErasureIdempotencyV1 {
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, idempotency_key_digest, body_digest] = open::<4>(record, Self::TAG)?;
         Ok(Self {
-            idempotency_key_digest: fields.digest()?,
-            body_digest: fields.digest()?,
+            idempotency_key_digest: bytes32(idempotency_key_digest)?,
+            body_digest: bytes32(body_digest)?,
         })
     }
 }
@@ -820,13 +811,20 @@ pub struct LocalErasureOwnerResultV1 {
     pub effect_digest: ErasureReferenceV1,
 }
 
+fn owner_result_error(
+    outcome: &Value,
+    error: &Value,
+) -> Result<Option<ErasureErrorV1>, ErasureErrorV1> {
+    match (unsigned(outcome)?, error) {
+        (0, Value::Null) => Ok(None),
+        (1, code) => unsigned(code).and_then(ErasureErrorV1::from_code).map(Some),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+
 impl LocalRecordV1 for LocalErasureOwnerResultV1 {
     const TAG: &'static str = "ELO1";
     const MAX_BYTES: usize = 4 * KIB;
-
-    fn field_count() -> usize {
-        8
-    }
 
     fn fields(&self) -> Vec<Value> {
         vec![
@@ -836,31 +834,22 @@ impl LocalRecordV1 for LocalErasureOwnerResultV1 {
             digest(self.command),
             digest(self.owner_ref),
             uint(u64::from(self.error.is_some())),
-            self.error.map_or(Value::Null, |error| uint(error as u64)),
+            self.error.map_or(Value::Null, |error| uint(error.code())),
             digest(self.effect_digest),
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let request = fields.digest()?;
-        let attempt = fields.digest()?;
-        let obligation = fields.digest()?;
-        let command = fields.digest()?;
-        let owner_ref = fields.digest()?;
-        let outcome = fields.uint()?;
-        let error = match (outcome, fields.next()?) {
-            (0, Value::Null) => None,
-            (1, code) => Some(ErasureErrorV1::from_code(unsigned(code)?)?),
-            _ => return Err(ErasureErrorV1::InvalidEncoding),
-        };
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, request, attempt, obligation, command, owner_ref, outcome, error, effect_digest] =
+            open::<10>(record, Self::TAG)?;
         Ok(Self {
-            request,
-            attempt,
-            obligation,
-            command,
-            owner_ref,
-            error,
-            effect_digest: fields.digest()?,
+            request: bytes32(request)?,
+            attempt: bytes32(attempt)?,
+            obligation: bytes32(obligation)?,
+            command: bytes32(command)?,
+            owner_ref: bytes32(owner_ref)?,
+            error: owner_result_error(outcome, error)?,
+            effect_digest: bytes32(effect_digest)?,
         })
     }
 }
@@ -878,16 +867,22 @@ pub enum LocalErasureSignaturePurposeV1 {
     ReceiptBody,
 }
 
-impl LocalErasureSignaturePurposeV1 {
-    const fn code(self) -> u64 {
-        match self {
-            Self::FreezeAuthorization => 0,
-            Self::OwnerResult => 1,
-            Self::ReceiptBody => 2,
+impl From<LocalErasureSignaturePurposeV1> for u64 {
+    fn from(purpose: LocalErasureSignaturePurposeV1) -> Self {
+        match purpose {
+            LocalErasureSignaturePurposeV1::FreezeAuthorization => 0,
+            LocalErasureSignaturePurposeV1::OwnerResult => 1,
+            LocalErasureSignaturePurposeV1::ReceiptBody => 2,
         }
     }
+}
 
-    const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+impl LocalErasureSignaturePurposeV1 {
+    /// Decode one ELS1 purpose code.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::InvalidEncoding`] for an unknown code.
+    pub const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
         match code {
             0 => Ok(Self::FreezeAuthorization),
             1 => Ok(Self::OwnerResult),
@@ -914,37 +909,28 @@ impl LocalRecordV1 for LocalErasureSignatureV1 {
     const TAG: &'static str = "ELS1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        4
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![
-            uint(self.purpose.code()),
+            uint(u64::from(self.purpose)),
             digest(self.signed_digest),
             self.signer_identity.value(),
             bytes_value(&self.signature),
         ]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let purpose = LocalErasureSignaturePurposeV1::from_code(fields.uint()?)?;
-        let signed_digest = fields.digest()?;
-        let signer_identity = LocalErasureSignerIdentityV1::read(fields.next()?)?;
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, purpose, signed_digest, signer_identity, signature] =
+            open::<6>(record, Self::TAG)?;
         Ok(Self {
-            purpose,
-            signed_digest,
-            signer_identity,
-            signature: fields.fixed()?,
+            purpose: unsigned(purpose).and_then(LocalErasureSignaturePurposeV1::from_code)?,
+            signed_digest: bytes32(signed_digest)?,
+            signer_identity: LocalErasureSignerIdentityV1::read(signer_identity)?,
+            signature: fixed(signature)?,
         })
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
-        require(
-            !self.signer_identity.owner_id.is_empty()
-                && self.signer_identity.owner_id.len() <= MAX_IDENTIFIER_BYTES
-                && self.signer_identity.epoch >= 1,
-        )
+        require(self.signer_identity.is_valid())
     }
 }
 
@@ -963,7 +949,7 @@ pub fn local_erasure_signature_message_v1(
         &Value::Array(vec![
             text("ELS1-SIG"),
             uint(1),
-            uint(purpose.code()),
+            uint(u64::from(purpose)),
             digest(signed_digest),
         ]),
         KIB,
@@ -983,18 +969,15 @@ impl LocalRecordV1 for LocalErasureDisclosureV1 {
     const TAG: &'static str = "ELD1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        2
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![text(&self.ack_class), digest(self.policy)]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, ack_class, policy] = open::<4>(record, Self::TAG)?;
         Ok(Self {
-            ack_class: fields.text(MAX_ACK_CLASS_BYTES)?,
-            policy: fields.digest()?,
+            ack_class: owned_text(ack_class)?,
+            policy: bytes32(policy)?,
         })
     }
 
@@ -1017,17 +1000,14 @@ impl LocalRecordV1 for LocalErasureLineageRuleV1 {
     const TAG: &'static str = "ELLR1";
     const MAX_BYTES: usize = KIB;
 
-    fn field_count() -> usize {
-        2
-    }
-
     fn fields(&self) -> Vec<Value> {
         vec![digest(self.subject), uint(0)]
     }
 
-    fn read(fields: &mut Fields<'_>) -> Result<Self, ErasureErrorV1> {
-        let subject = fields.digest()?;
-        require(fields.uint()? == 0).map(|()| Self { subject })
+    fn read(record: &Value) -> Result<Self, ErasureErrorV1> {
+        let [_, _, subject, rule] = open::<4>(record, Self::TAG)?;
+        let subject = bytes32(subject)?;
+        require(unsigned(rule)? == 0).map(|()| Self { subject })
     }
 }
 

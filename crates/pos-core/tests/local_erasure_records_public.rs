@@ -3,15 +3,17 @@
 
 use ciborium::value::Value;
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, local_erasure_signature_message_v1,
-    local_erasure_signer_key_id_v1, EntityId, ErasureErrorV1, ErasureReferenceV1,
-    ErasureRetainedObjectV1, LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1,
-    LocalErasureBundleV1, LocalErasureClassificationV1, LocalErasureDisclosureV1,
-    LocalErasureExecutionBindingV1, LocalErasureIdempotencyV1, LocalErasureLineageRuleV1,
-    LocalErasureOwnerResultV1, LocalErasureOwnerRowV1, LocalErasurePolicyV1,
-    LocalErasureRejectionV1, LocalErasureSelectorV1, LocalErasureSignaturePurposeV1,
-    LocalErasureSignatureV1, LocalErasureSignerIdentityV1, LocalErasureTrustAnchorV1, TimelineId,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    local_erasure_bundle_signing_message_v1, local_erasure_owner_ref_v1,
+    local_erasure_signature_message_v1, local_erasure_signer_key_id_v1, ArtifactDataClassV1,
+    EntityId, ErasureErrorV1, ErasureReferenceV1, ErasureRetainedObjectV1,
+    LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
+    LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
+    LocalErasureOwnerRowV1, LocalErasurePolicyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
+    LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, LocalErasureSignerIdentityV1,
+    LocalErasureTrustAnchorV1, TimelineId, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 use ulid::Ulid;
 
@@ -118,6 +120,15 @@ fn signer() -> LocalErasureSignerIdentityV1 {
     }
 }
 
+fn owner(category: u64, ack_class: &str) -> LocalErasureOwnerRowV1 {
+    LocalErasureOwnerRowV1 {
+        category,
+        ack_class: ack_class.to_owned(),
+        owner_ref: local_erasure_owner_ref_v1(reference(2), category, ack_class)
+            .unwrap_or(reference(0)),
+    }
+}
+
 fn bundle() -> LocalErasureBundleV1 {
     let signer_public_key = [9; 32];
     LocalErasureBundleV1 {
@@ -126,18 +137,7 @@ fn bundle() -> LocalErasureBundleV1 {
         authority_registry_digest: reference(3),
         host_timelines: vec![timeline(1), timeline(2)],
         policy: reference(4),
-        owners: vec![
-            LocalErasureOwnerRowV1 {
-                category: 0,
-                ack_class: "artifact-store".to_owned(),
-                owner_ref: reference(5),
-            },
-            LocalErasureOwnerRowV1 {
-                category: 1,
-                ack_class: "key-registry".to_owned(),
-                owner_ref: reference(6),
-            },
-        ],
+        owners: vec![owner(0, "artifact-store"), owner(1, "key-registry")],
         execution_binding: LocalErasureExecutionBindingV1 {
             executor_id: "local-erasure-executor".to_owned(),
             executor_version_digest: reference(7),
@@ -146,23 +146,27 @@ fn bundle() -> LocalErasureBundleV1 {
         signer_public_key,
         signer_key_id: local_erasure_signer_key_id_v1(&signer_public_key),
         issued_by: "erasure-bundle/root-1".to_owned(),
-        expiry: 0,
+        expiry: 0x1234_5678,
     }
 }
 
 fn policy() -> LocalErasurePolicyV1 {
     LocalErasurePolicyV1 {
-        retained_classes: vec![2, 3, 4],
+        retained_classes: vec![
+            ArtifactDataClassV1::PublicRecord,
+            ArtifactDataClassV1::AggregateData,
+            ArtifactDataClassV1::StructuralAuditMetadata,
+        ],
         classification: vec![
             LocalErasureClassificationV1 {
                 artifact_class: 0,
-                data_class: 0,
+                data_class: ArtifactDataClassV1::PrivateSubjectData,
                 category: 0,
                 ack_class: "timeline-payload".to_owned(),
             },
             LocalErasureClassificationV1 {
                 artifact_class: 4,
-                data_class: 1,
+                data_class: ArtifactDataClassV1::ConsentedSharedData,
                 category: 0,
                 ack_class: "export-recipient".to_owned(),
             },
@@ -216,13 +220,18 @@ fn bundle_rules_are_enforced() {
     cases.push(too_many_timelines);
     let mut too_many_owners = bundle();
     too_many_owners.owners = (0..65)
-        .map(|seed| LocalErasureOwnerRowV1 {
-            category: 0,
-            ack_class: "artifact-store".to_owned(),
-            owner_ref: reference(seed),
-        })
+        .map(|index| owner(0, &format!("c{index:03}")))
         .collect();
     cases.push(too_many_owners);
+    let mut foreign_owner = bundle();
+    foreign_owner.owners[0].owner_ref = reference(5);
+    cases.push(foreign_owner);
+    let mut uppercase_issuer = bundle();
+    uppercase_issuer.issued_by = "erasure-bundle/Root".to_owned();
+    cases.push(uppercase_issuer);
+    let mut colon_issuer = bundle();
+    colon_issuer.issued_by = "erasure-bundle:root".to_owned();
+    cases.push(colon_issuer);
     let mut bad_category = bundle();
     bad_category.owners[0].category = 9;
     cases.push(bad_category);
@@ -263,9 +272,21 @@ fn bundle_rules_are_enforced() {
             "{case:?}"
         );
     }
-    let mut longest_issuer = bundle();
-    longest_issuer.issued_by = format!("erasure-bundle/{}", "r".repeat(113));
-    assert!(longest_issuer.to_canonical_cbor().is_ok());
+    let mut longest = bundle();
+    longest.issued_by = format!("erasure-bundle/{}", "r".repeat(113));
+    longest.host_timelines = (0..64).map(timeline).collect();
+    longest.owners = (0..64)
+        .map(|index| owner(0, &format!("s3-cache{index:02}")))
+        .collect();
+    longest.execution_binding.executor_id = "e".repeat(64);
+    longest.signer_identity.owner_id = vec![1; 128];
+    assert!(longest.to_canonical_cbor().is_ok());
+    let mut duplicate_pair = bundle();
+    duplicate_pair.owners = vec![owner(0, "artifact-store"), owner(0, "artifact-store")];
+    assert_eq!(
+        duplicate_pair.to_canonical_cbor(),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
 }
 
 #[test]
@@ -325,6 +346,25 @@ fn trust_policy_and_rejection_records_round_trip() -> TestResult {
         .to_canonical_cbor(),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    for operator_key_id in ["Operator", "operator:1", "-operator", &"o".repeat(129)] {
+        assert_eq!(
+            LocalErasureTrustAnchorV1 {
+                tps1: reference(1),
+                operator_key_id: operator_key_id.to_owned(),
+                operator_public_key: [2; 32],
+            }
+            .to_canonical_cbor(),
+            Err(ErasureErrorV1::ScopeInvalid),
+            "{operator_key_id}"
+        );
+    }
+    assert!(LocalErasureTrustAnchorV1 {
+        tps1: reference(1),
+        operator_key_id: format!("9.op_{}", "o".repeat(123)),
+        operator_public_key: [2; 32],
+    }
+    .to_canonical_cbor()
+    .is_ok());
     assert_codec(
         &policy(),
         LocalErasurePolicyV1::to_canonical_cbor,
@@ -357,38 +397,41 @@ fn trust_policy_and_rejection_records_round_trip() -> TestResult {
     Ok(())
 }
 
+fn rows(count: usize) -> Vec<LocalErasureClassificationV1> {
+    (0..count)
+        .map(|index| LocalErasureClassificationV1 {
+            artifact_class: 0,
+            data_class: ArtifactDataClassV1::PrivateSubjectData,
+            category: 0,
+            ack_class: format!("c{index:03}"),
+        })
+        .collect()
+}
+
 #[test]
 fn policy_rules_are_enforced() -> TestResult {
     let mut cases = Vec::new();
     let mut unsorted_retained = policy();
-    unsorted_retained.retained_classes = vec![3, 2];
+    unsorted_retained.retained_classes.reverse();
     cases.push(unsorted_retained);
-    let mut low_retained = policy();
-    low_retained.retained_classes = vec![1];
-    cases.push(low_retained);
-    let mut high_retained = policy();
-    high_retained.retained_classes = vec![5];
-    cases.push(high_retained);
+    for eligible in [
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactDataClassV1::ConsentedSharedData,
+    ] {
+        let mut retained_eligible = policy();
+        retained_eligible.retained_classes = vec![eligible];
+        cases.push(retained_eligible);
+    }
     let mut unsorted_rows = policy();
     unsorted_rows.classification.reverse();
     cases.push(unsorted_rows);
     let mut too_many_rows = policy();
-    too_many_rows.classification = (0..257)
-        .map(|index| LocalErasureClassificationV1 {
-            artifact_class: 0,
-            data_class: 0,
-            category: 0,
-            ack_class: format!("c{index:03}"),
-        })
-        .collect();
+    too_many_rows.classification = rows(257);
     too_many_rows.classification.sort_unstable();
     cases.push(too_many_rows);
     let mut bad_artifact = policy();
     bad_artifact.classification[0].artifact_class = 99;
     cases.push(bad_artifact);
-    let mut bad_data = policy();
-    bad_data.classification[0].data_class = 5;
-    cases.push(bad_data);
     let mut bad_category = policy();
     bad_category.classification[0].category = 4;
     cases.push(bad_category);
@@ -399,8 +442,11 @@ fn policy_rules_are_enforced() -> TestResult {
     retries.auto_retry_max = 17;
     cases.push(retries);
     let mut quota = policy();
-    quota.quota_attempts = 4_097;
+    quota.quota_attempts = LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1 + 1;
     cases.push(quota);
+    let mut reserve = policy();
+    reserve.store_request_reserve = LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1 + 1;
+    cases.push(reserve);
     for case in cases {
         assert_eq!(
             case.to_canonical_cbor(),
@@ -409,9 +455,13 @@ fn policy_rules_are_enforced() -> TestResult {
         );
     }
     let mut boundary = policy();
-    boundary.classification[0].data_class = 4;
     boundary.classification[0].ack_class = "a".repeat(48);
     assert!(boundary.to_canonical_cbor().is_ok());
+    let mut widest = policy();
+    widest.classification = rows(256);
+    widest.store_request_reserve = LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1;
+    widest.quota_attempts = LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1;
+    assert!(widest.to_canonical_cbor().is_ok());
     boundary.classification[0].ack_class = "a".repeat(49);
     assert_eq!(
         boundary.to_canonical_cbor(),
@@ -419,6 +469,13 @@ fn policy_rules_are_enforced() -> TestResult {
     );
 
     let value: Value = ciborium::from_reader(policy().to_canonical_cbor()?.as_slice())?;
+    for code in [0_u64, 5] {
+        let mut retained = value.clone();
+        if let Value::Array(items) = &mut retained {
+            items[2] = Value::Array(vec![Value::Integer(code.into())]);
+        }
+        assert!(LocalErasurePolicyV1::from_canonical_cbor(&encode(&retained)?).is_err());
+    }
     let mut window = value;
     if let Value::Array(items) = &mut window {
         items[4] = Value::Integer((LOCAL_ERASURE_ATTEMPT_WINDOW_V1 - 1).into());
@@ -448,6 +505,9 @@ fn request_binding_records_round_trip() -> TestResult {
         LocalErasureAuthorizationV1::from_canonical_cbor,
         LocalErasureAuthorizationV1::reference,
     )?;
+    let mut longest = authorization.clone();
+    longest.operation = "o".repeat(64);
+    assert!(longest.to_canonical_cbor().is_ok());
     for operation in [String::new(), "o".repeat(65)] {
         let mut invalid = authorization.clone();
         invalid.operation = operation;
@@ -627,6 +687,12 @@ fn owner_result_signature_and_disclosure_records_round_trip() -> TestResult {
         LocalErasureDisclosureV1::from_canonical_cbor,
         LocalErasureDisclosureV1::reference,
     )?;
+    assert!(LocalErasureDisclosureV1 {
+        ack_class: "s3-cache2".to_owned(),
+        policy: reference(1),
+    }
+    .to_canonical_cbor()
+    .is_ok());
     for class in ["", "Backup", "9backup", "back_up"] {
         assert_eq!(
             LocalErasureDisclosureV1 {
@@ -638,5 +704,412 @@ fn owner_result_signature_and_disclosure_records_round_trip() -> TestResult {
             "{class}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn data_class_codes_are_one_closed_mapping() {
+    let classes = [
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactDataClassV1::ConsentedSharedData,
+        ArtifactDataClassV1::PublicRecord,
+        ArtifactDataClassV1::AggregateData,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+    ];
+    // Successor walk: every code up to one past the last decodes iff it
+    // names a class, and decoding inverts encoding.
+    for code in 0..=u64::try_from(classes.len()).unwrap_or(u64::MAX) {
+        let decoded = ArtifactDataClassV1::from_code(code);
+        assert_eq!(decoded.is_ok(), code < 5, "{code}");
+        assert_eq!(decoded.map(u64::from).unwrap_or(code), code);
+    }
+    for (code, class) in (0_u64..).zip(classes) {
+        assert_eq!(u64::from(class), code);
+        assert_eq!(ArtifactDataClassV1::from_code(code), Ok(class));
+        assert_eq!(class.is_always_retained(), code >= 2);
+    }
+}
+
+/// An encoder independent of the codecs under test.
+#[derive(Default)]
+struct Cbor(Vec<u8>);
+
+impl Cbor {
+    fn head(mut self, major: u8, value: u64) -> Self {
+        let tag = major << 5;
+        match value {
+            0..=23 => self.0.push(tag | u8::try_from(value).unwrap_or(0)),
+            24..=0xff => self.0.extend([tag | 24, u8::try_from(value).unwrap_or(0)]),
+            0x100..=0xffff => {
+                self.0.push(tag | 25);
+                self.0
+                    .extend(u16::try_from(value).unwrap_or(0).to_be_bytes());
+            }
+            0x1_0000..=0xffff_ffff => {
+                self.0.push(tag | 26);
+                self.0
+                    .extend(u32::try_from(value).unwrap_or(0).to_be_bytes());
+            }
+            _ => {
+                self.0.push(tag | 27);
+                self.0.extend(value.to_be_bytes());
+            }
+        }
+        self
+    }
+    fn uint(self, value: u64) -> Self {
+        self.head(0, value)
+    }
+    fn bytes(mut self, value: &[u8]) -> Self {
+        self = self.head(2, u64::try_from(value.len()).unwrap_or(0));
+        self.0.extend_from_slice(value);
+        self
+    }
+    fn text(mut self, value: &str) -> Self {
+        self = self.head(3, u64::try_from(value.len()).unwrap_or(0));
+        self.0.extend_from_slice(value.as_bytes());
+        self
+    }
+    fn array(self, length: u64) -> Self {
+        self.head(4, length)
+    }
+    fn record(self, tag: &str, fields: u64) -> Self {
+        self.array(fields + 2).text(tag).uint(1)
+    }
+    fn truth(mut self, value: bool) -> Self {
+        self.0.push(if value { 0xf5 } else { 0xf4 });
+        self
+    }
+    fn null(mut self) -> Self {
+        self.0.push(0xf6);
+        self
+    }
+}
+
+fn assert_golden<R: PartialEq + std::fmt::Debug>(
+    record: &R,
+    tag: &str,
+    golden: &[u8],
+    to_bytes: fn(&R) -> Result<Vec<u8>, ErasureErrorV1>,
+    from_bytes: fn(&[u8]) -> Result<R, ErasureErrorV1>,
+    address: fn(&R) -> Result<ErasureReferenceV1, ErasureErrorV1>,
+) -> TestResult {
+    assert_eq!(to_bytes(record)?, golden, "{tag}");
+    assert_eq!(&from_bytes(golden)?, record);
+    let mut domain = tag.as_bytes().to_vec();
+    domain.push(0);
+    domain.extend_from_slice(golden);
+    assert_eq!(
+        address(record)?,
+        ErasureReferenceV1::from_digest(*blake3::hash(&domain).as_bytes())
+    );
+    Ok(())
+}
+
+#[test]
+fn records_match_hand_written_golden_vectors() -> TestResult {
+    let bundle = bundle();
+    let golden = Cbor::default()
+        .record("ELB1", 12)
+        .bytes(&[1; 32])
+        .bytes(&[2; 32])
+        .bytes(&[3; 32])
+        .array(2)
+        .bytes(&[1; 16])
+        .bytes(&[2; 16])
+        .bytes(&[4; 32])
+        .array(2)
+        .array(3)
+        .uint(0)
+        .text("artifact-store")
+        .bytes(&bundle.owners[0].owner_ref.digest())
+        .array(3)
+        .uint(1)
+        .text("key-registry")
+        .bytes(&bundle.owners[1].owner_ref.digest())
+        .array(2)
+        .text("local-erasure-executor")
+        .bytes(&[7; 32])
+        .array(3)
+        .bytes(b"local")
+        .uint(2)
+        .uint(1)
+        .bytes(&[9; 32])
+        .text(&local_erasure_signer_key_id_v1(&[9; 32]))
+        .text("erasure-bundle/root-1")
+        .uint(0x1234_5678);
+    assert_golden(
+        &bundle,
+        "ELB1",
+        &golden.0,
+        LocalErasureBundleV1::to_canonical_cbor,
+        LocalErasureBundleV1::from_canonical_cbor,
+        LocalErasureBundleV1::reference,
+    )?;
+    let owner_ref_preimage = Cbor::default()
+        .array(3)
+        .bytes(&[2; 32])
+        .uint(0)
+        .text("artifact-store");
+    let mut domain = b"ELOWN1\0".to_vec();
+    domain.extend_from_slice(&owner_ref_preimage.0);
+    assert_eq!(
+        bundle.owners[0].owner_ref,
+        ErasureReferenceV1::from_digest(*blake3::hash(&domain).as_bytes())
+    );
+
+    assert_golden(
+        &LocalErasureBundleSignatureV1 {
+            bundle: reference(11),
+            admin_signature: [12; 64],
+        },
+        "ELB1S",
+        &Cbor::default()
+            .record("ELB1S", 2)
+            .bytes(&[11; 32])
+            .bytes(&[12; 64])
+            .0,
+        LocalErasureBundleSignatureV1::to_canonical_cbor,
+        LocalErasureBundleSignatureV1::from_canonical_cbor,
+        LocalErasureBundleSignatureV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureRejectionV1 {
+            request: reference(13),
+            error: ErasureErrorV1::PolicyConflict,
+        },
+        "ELREJ1",
+        &Cbor::default()
+            .record("ELREJ1", 2)
+            .bytes(&[13; 32])
+            .uint(4)
+            .0,
+        LocalErasureRejectionV1::to_canonical_cbor,
+        LocalErasureRejectionV1::from_canonical_cbor,
+        LocalErasureRejectionV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureTrustAnchorV1 {
+            tps1: reference(14),
+            operator_key_id: "deployment-operator/2".to_owned(),
+            operator_public_key: [15; 32],
+        },
+        "ELTA1",
+        &Cbor::default()
+            .record("ELTA1", 3)
+            .bytes(&[14; 32])
+            .text("deployment-operator/2")
+            .bytes(&[15; 32])
+            .0,
+        LocalErasureTrustAnchorV1::to_canonical_cbor,
+        LocalErasureTrustAnchorV1::from_canonical_cbor,
+        LocalErasureTrustAnchorV1::reference,
+    )?;
+    let policy = LocalErasurePolicyV1 {
+        retained_classes: vec![ArtifactDataClassV1::AggregateData],
+        classification: vec![LocalErasureClassificationV1 {
+            artifact_class: 6,
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            category: 3,
+            ack_class: "local-backup-inventory".to_owned(),
+        }],
+        auto_retry_max: 5,
+        quota_attempts: 300,
+        store_request_reserve: 512,
+        max_reprepare: 7,
+    };
+    assert_golden(
+        &policy,
+        "ELP1",
+        &Cbor::default()
+            .record("ELP1", 7)
+            .array(1)
+            .uint(3)
+            .array(1)
+            .array(4)
+            .uint(6)
+            .uint(4)
+            .uint(3)
+            .text("local-backup-inventory")
+            .uint(16_386)
+            .uint(5)
+            .uint(300)
+            .uint(512)
+            .uint(7)
+            .0,
+        LocalErasurePolicyV1::to_canonical_cbor,
+        LocalErasurePolicyV1::from_canonical_cbor,
+        LocalErasurePolicyV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureAuthorizationV1 {
+            principal_ref: reference(16),
+            actor_entity: EntityId::from_ulid(Ulid::from_bytes([17; 16])),
+            operation: "erasure.request".to_owned(),
+            authority_registry_digest: reference(18),
+            authority_chain: timeline(19),
+            chain_head_position: 20,
+            revocation_epoch: 21,
+            erq1_request: reference(22),
+        },
+        "ERAZ1",
+        &Cbor::default()
+            .record("ERAZ1", 8)
+            .bytes(&[16; 32])
+            .bytes(&[17; 16])
+            .text("erasure.request")
+            .bytes(&[18; 32])
+            .bytes(&[19; 16])
+            .uint(20)
+            .uint(21)
+            .bytes(&[22; 32])
+            .0,
+        LocalErasureAuthorizationV1::to_canonical_cbor,
+        LocalErasureAuthorizationV1::from_canonical_cbor,
+        LocalErasureAuthorizationV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureSelectorV1 {
+            subject: reference(23),
+        },
+        "ELSEL1",
+        &Cbor::default()
+            .record("ELSEL1", 4)
+            .bytes(&[23; 32])
+            .uint(0)
+            .truth(true)
+            .truth(true)
+            .0,
+        LocalErasureSelectorV1::to_canonical_cbor,
+        LocalErasureSelectorV1::from_canonical_cbor,
+        LocalErasureSelectorV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureIdempotencyV1 {
+            idempotency_key_digest: reference(24),
+            body_digest: reference(25),
+        },
+        "ELIDEM1",
+        &Cbor::default()
+            .record("ELIDEM1", 2)
+            .bytes(&[24; 32])
+            .bytes(&[25; 32])
+            .0,
+        LocalErasureIdempotencyV1::to_canonical_cbor,
+        LocalErasureIdempotencyV1::from_canonical_cbor,
+        LocalErasureIdempotencyV1::reference,
+    )?;
+    for (error, golden) in [
+        (
+            None,
+            Cbor::default()
+                .record("ELO1", 8)
+                .bytes(&[26; 32])
+                .bytes(&[27; 32])
+                .bytes(&[28; 32])
+                .bytes(&[29; 32])
+                .bytes(&[30; 32])
+                .uint(0)
+                .null()
+                .bytes(&[31; 32]),
+        ),
+        (
+            Some(ErasureErrorV1::BackupInventoryIncomplete),
+            Cbor::default()
+                .record("ELO1", 8)
+                .bytes(&[26; 32])
+                .bytes(&[27; 32])
+                .bytes(&[28; 32])
+                .bytes(&[29; 32])
+                .bytes(&[30; 32])
+                .uint(1)
+                .uint(11)
+                .bytes(&[31; 32]),
+        ),
+    ] {
+        assert_golden(
+            &LocalErasureOwnerResultV1 {
+                request: reference(26),
+                attempt: reference(27),
+                obligation: reference(28),
+                command: reference(29),
+                owner_ref: reference(30),
+                error,
+                effect_digest: reference(31),
+            },
+            "ELO1",
+            &golden.0,
+            LocalErasureOwnerResultV1::to_canonical_cbor,
+            LocalErasureOwnerResultV1::from_canonical_cbor,
+            LocalErasureOwnerResultV1::reference,
+        )?;
+    }
+    assert_golden(
+        &LocalErasureSignatureV1 {
+            purpose: LocalErasureSignaturePurposeV1::ReceiptBody,
+            signed_digest: reference(32),
+            signer_identity: LocalErasureSignerIdentityV1 {
+                owner_id: b"signer".to_vec(),
+                epoch: 33,
+            },
+            signature: [34; 64],
+        },
+        "ELS1",
+        &Cbor::default()
+            .record("ELS1", 4)
+            .uint(2)
+            .bytes(&[32; 32])
+            .array(3)
+            .bytes(b"signer")
+            .uint(2)
+            .uint(33)
+            .bytes(&[34; 64])
+            .0,
+        LocalErasureSignatureV1::to_canonical_cbor,
+        LocalErasureSignatureV1::from_canonical_cbor,
+        LocalErasureSignatureV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureDisclosureV1 {
+            ack_class: "timeline-payload".to_owned(),
+            policy: reference(35),
+        },
+        "ELD1",
+        &Cbor::default()
+            .record("ELD1", 2)
+            .text("timeline-payload")
+            .bytes(&[35; 32])
+            .0,
+        LocalErasureDisclosureV1::to_canonical_cbor,
+        LocalErasureDisclosureV1::from_canonical_cbor,
+        LocalErasureDisclosureV1::reference,
+    )?;
+    assert_golden(
+        &LocalErasureLineageRuleV1 {
+            subject: reference(36),
+        },
+        "ELLR1",
+        &Cbor::default()
+            .record("ELLR1", 2)
+            .bytes(&[36; 32])
+            .uint(0)
+            .0,
+        LocalErasureLineageRuleV1::to_canonical_cbor,
+        LocalErasureLineageRuleV1::from_canonical_cbor,
+        LocalErasureLineageRuleV1::reference,
+    )?;
+    assert_eq!(
+        local_erasure_signature_message_v1(
+            LocalErasureSignaturePurposeV1::OwnerResult,
+            reference(37)
+        )?,
+        Cbor::default()
+            .array(4)
+            .text("ELS1-SIG")
+            .uint(1)
+            .uint(1)
+            .bytes(&[37; 32])
+            .0
+    );
     Ok(())
 }

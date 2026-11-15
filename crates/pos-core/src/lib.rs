@@ -31,6 +31,7 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod factual_dependency;
+mod lower_hex;
 pub use canonical_length::CanonicalLengthErrorV1;
 
 pub mod fork_admission;
@@ -422,7 +423,7 @@ pub use erasure::{
     erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
     extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
     inspect_artifact_registration_graph_v1, local_erasure_bundle_signing_message_v1,
-    local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    local_erasure_owner_ref_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     prepare_artifact_registration_batch_v1, selected_obligations_reference,
     validate_artifact_registration_catalog_graph_v1, AdapterArtifactRegistrationErrorV1,
     ArtifactChildEdgeV1, ArtifactClaimInputV1, ArtifactDataClassV1,
@@ -506,7 +507,8 @@ pub use erasure::{
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, ERASURE_SIGNER_KEY_PREFIX_V1,
-    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1, LOCAL_ERASURE_MAX_QUOTA_ATTEMPTS_V1,
+    LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
     LOCAL_OWNER_RESULT_MAX_BYTES_V1, MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1,
     MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
     MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
