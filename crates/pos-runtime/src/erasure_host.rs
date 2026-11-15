@@ -3396,8 +3396,9 @@ impl ErasureCommandSenderV1<'_> {
     /// complete inventory this sender's generation installed lists every
     /// durable Timeline and Fork, whatever its erasure classification.
     ///
-    /// The lookup is a bounded search of that inventory; it reads no
-    /// Timeline and exposes nothing about one a fence would refuse.
+    /// The lookup is a bounded search of that inventory. It reveals only
+    /// whether the identity exists, also for a Timeline a fence would refuse
+    /// to read, and reads nothing of any Timeline.
     ///
     /// # Errors
     /// Returns a payload-free host error for a stale sender or an
@@ -3405,7 +3406,7 @@ impl ErasureCommandSenderV1<'_> {
     pub fn records_timeline(&mut self, id: TimelineId) -> Result<bool, ErasureHostErrorV1> {
         self.host
             .ensure_generation_with_inventory(self.generation)
-            .map(|inventory| inventory.topology().binary_search(&id).is_ok())
+            .map(|inventory| inventory.records_timeline(id))
     }
 
     /// Open the root Timeline `id`: create it, named `name`, when the store
