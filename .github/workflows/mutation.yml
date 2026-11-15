@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mutation-777-${{ inputs.package }}-${{ inputs.files }}-${{ inputs.re }}
+  group: mutation-777-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
