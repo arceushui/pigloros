@@ -497,7 +497,7 @@ pub enum BarrierError {
 
 impl BarrierError {
     /// The TME1 `barrier-failure` this failure records (ADR-069 R9 §4.6.1;
-    /// R9 §11 O5 classes channel faults, among them "ReadyV1 unavailable",
+    /// R9 §11 O5 classes channel faults, among them "`ReadyV1` unavailable",
     /// as code 9 and content faults, among them "recheck expiry", as 10).
     ///
     /// Before any `ReadyV1` was received, the barrier could not read the
