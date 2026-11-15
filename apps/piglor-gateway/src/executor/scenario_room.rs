@@ -677,7 +677,7 @@ fn find_root(host: &mut ErasureExecutionHostV1, name: &str) -> RoomResult<Option
     host_timelines(host).map(|timelines| {
         timelines
             .into_iter()
-            .find(|timeline| timeline.meta.name == name)
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
     })
 }
 

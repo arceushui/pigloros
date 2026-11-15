@@ -436,8 +436,7 @@ fn root_grant(
         resources: sorted_set(
             operations
                 .iter()
-                .copied()
-                .map(GatewayOperationV1::resource)
+                .map(|operation| operation.resource())
                 .chain(governance.as_deref()),
         ),
         actions: sorted_set(operations.iter().copied().map(GatewayOperationV1::action)),
