@@ -330,7 +330,10 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
         }
         pos_core::ErasureHostErrorV1::AuthorizationDenied
         | pos_core::ErasureHostErrorV1::Conflict
-        | pos_core::ErasureHostErrorV1::AdapterFailure => pos_core::CoreError::ArtifactUnavailable,
+        | pos_core::ErasureHostErrorV1::AdapterFailure
+        | pos_core::ErasureHostErrorV1::ModeBindingStale => {
+            pos_core::CoreError::ArtifactUnavailable
+        }
     }
 }
 
@@ -978,6 +981,7 @@ mod tests {
             ErasureHostErrorV1::AuthorizationDenied,
             ErasureHostErrorV1::Conflict,
             ErasureHostErrorV1::AdapterFailure,
+            ErasureHostErrorV1::ModeBindingStale,
         ] {
             assert!(matches!(
                 host_error_to_core(host),

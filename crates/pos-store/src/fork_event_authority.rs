@@ -27,22 +27,44 @@ use crate::ForkAdmissionAuthoritySessionV1;
 pub enum ForkEventAuthorityErrorV1 {
     /// The host request cannot produce a valid canonical record.
     #[error("invalid Fork Event authority request")]
-    InvalidRequest,
+    InvalidRequest = 0,
     /// The live session or its host-issued source scope is unavailable.
     #[error("Fork Event authority is unauthenticated")]
-    Unauthenticated,
+    Unauthenticated = 1,
     /// The host-resolved source is absent from the child's admitted classifier.
     #[error("Fork Event source is rejected by the admitted classifier")]
-    ClassifierRejected,
+    ClassifierRejected = 2,
     /// A stable operation ID was reused with unequal durable inputs.
     #[error("Fork Event authority conflicts with a committed operation")]
-    Conflict,
+    Conflict = 3,
     /// The immutable FAR1/classifier/provenance graph is incomplete or unequal.
     #[error("Fork Event authority is corrupt")]
-    CorruptAuthority,
+    CorruptAuthority = 4,
     /// The adapter cannot determine whether its transaction committed.
     #[error("Fork Event authority storage outcome is indeterminate")]
-    StorageIndeterminate,
+    StorageIndeterminate = 5,
+    /// The adapter's attached Gateway mode-binding epoch is stale (ADR-134
+    /// §8); the append committed nothing.
+    #[error("Fork Event append found the Gateway mode binding stale")]
+    ModeBindingStale = 6,
+}
+
+impl ForkEventAuthorityErrorV1 {
+    /// The number of authority errors, the length of a table indexed by the
+    /// error's explicit, append-only discriminant: the last variant's plus one.
+    pub const COUNT: usize = Self::ModeBindingStale as usize + 1;
+}
+
+/// The authority error of a failed classified-append write step: a stale
+/// mode binding committed nothing and keeps its own error; any other step
+/// failure leaves the outcome indeterminate.
+impl From<&pos_core::CoreError> for ForkEventAuthorityErrorV1 {
+    fn from(error: &pos_core::CoreError) -> Self {
+        match error {
+            pos_core::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::StorageIndeterminate,
+        }
+    }
 }
 
 /// Closed ADR-099 revision 12 provenance rejections of a classified
@@ -84,28 +106,35 @@ impl From<CounterfactualStoreErrorV1> for ClassifiedCounterfactualErrorV1 {
 }
 
 /// The total ADR-099 revision 12 mapping of a classified-append authority
-/// error. `ClassifierRejected` and `Conflict` cannot follow a host-internal
-/// source and a fresh operation, so they can only mean corrupt authority; an
-/// indeterminate step inside the counterfactual transaction is a known
-/// rollback.
+/// error, indexed by its discriminant. `ClassifierRejected` and `Conflict`
+/// cannot follow a host-internal source and a fresh operation, so they can
+/// only mean corrupt authority; an indeterminate step inside the
+/// counterfactual transaction is a known rollback, and a stale mode binding
+/// keeps its own error. The oracle test
+/// `every_authority_error_routes_through_the_classified_table` fails to
+/// compile until a new error is routed here.
+const CLASSIFIED_AUTHORITY_ERRORS: [ClassifiedCounterfactualErrorV1;
+    ForkEventAuthorityErrorV1::COUNT] = [
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority),
+    ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::StorageFailure),
+    ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::ModeBindingStale),
+];
+
+const _: () = assert!(CLASSIFIED_AUTHORITY_ERRORS.len() == ForkEventAuthorityErrorV1::COUNT);
+
+/// An authority error past the table fails closed as corrupt authority.
 impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
     fn from(error: ForkEventAuthorityErrorV1) -> Self {
-        match error {
-            ForkEventAuthorityErrorV1::InvalidRequest => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest)
-            }
-            ForkEventAuthorityErrorV1::Unauthenticated => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated)
-            }
-            ForkEventAuthorityErrorV1::ClassifierRejected
-            | ForkEventAuthorityErrorV1::Conflict
-            | ForkEventAuthorityErrorV1::CorruptAuthority => {
-                Self::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority)
-            }
-            ForkEventAuthorityErrorV1::StorageIndeterminate => {
-                Self::Store(CounterfactualStoreErrorV1::StorageFailure)
-            }
-        }
+        CLASSIFIED_AUTHORITY_ERRORS
+            .get(error as usize)
+            .copied()
+            .unwrap_or(Self::Provenance(
+                ClassifiedProvenanceErrorV1::CorruptAuthority,
+            ))
     }
 }
 
@@ -5145,6 +5174,58 @@ mod classified_counterfactual_tests {
         ForkEventAuthorityErrorV1 as Authority,
     };
 
+    /// The exhaustive oracle of the classified table: a new authority error
+    /// fails to compile here until it is routed.
+    const fn oracle_classified(error: Authority) -> Classified {
+        match error {
+            Authority::InvalidRequest => Classified::Provenance(Provenance::InvalidRequest),
+            Authority::Unauthenticated => Classified::Provenance(Provenance::Unauthenticated),
+            Authority::ClassifierRejected | Authority::Conflict | Authority::CorruptAuthority => {
+                Classified::Provenance(Provenance::CorruptAuthority)
+            }
+            Authority::StorageIndeterminate => {
+                Classified::Store(CounterfactualStoreErrorV1::StorageFailure)
+            }
+            Authority::ModeBindingStale => {
+                Classified::Store(CounterfactualStoreErrorV1::ModeBindingStale)
+            }
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_authority_error(variant: Authority) -> Option<Authority> {
+        match variant {
+            Authority::InvalidRequest => Some(Authority::Unauthenticated),
+            Authority::Unauthenticated => Some(Authority::ClassifierRejected),
+            Authority::ClassifierRejected => Some(Authority::Conflict),
+            Authority::Conflict => Some(Authority::CorruptAuthority),
+            Authority::CorruptAuthority => Some(Authority::StorageIndeterminate),
+            Authority::StorageIndeterminate => Some(Authority::ModeBindingStale),
+            Authority::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_authority_error_routes_through_the_classified_table() {
+        let mut walked = 0;
+        let mut last = Authority::InvalidRequest;
+        let mut current = Some(Authority::InvalidRequest);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                Classified::from(variant),
+                oracle_classified(variant),
+                "{variant:?}"
+            );
+            last = variant;
+            walked += 1;
+            current = next_authority_error(variant);
+        }
+        assert_eq!(walked, Authority::COUNT);
+        assert_eq!(last as usize, Authority::COUNT - 1);
+    }
+
     #[test]
     fn every_authority_error_maps_onto_one_closed_classified_error() {
         let cases = [
@@ -5172,10 +5253,22 @@ mod classified_counterfactual_tests {
                 Authority::StorageIndeterminate,
                 Classified::Store(CounterfactualStoreErrorV1::StorageFailure),
             ),
+            (
+                Authority::ModeBindingStale,
+                Classified::Store(CounterfactualStoreErrorV1::ModeBindingStale),
+            ),
         ];
         for (error, expected) in cases {
             assert_eq!(Classified::from(error), expected, "{error:?}");
         }
+        assert_eq!(
+            Authority::from(&pos_core::CoreError::ModeBindingStale),
+            Authority::ModeBindingStale
+        );
+        assert_eq!(
+            Authority::from(&pos_core::CoreError::Storage(String::new())),
+            Authority::StorageIndeterminate
+        );
         for error in [
             CounterfactualStoreErrorV1::OutcomeUnknown,
             CounterfactualStoreErrorV1::ForkNotFound,
