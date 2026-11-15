@@ -923,6 +923,7 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let mut barrier = FakeBarrier::new(&log);
     let active = crate::test_fixtures::active()?;
     let released = Arc::clone(&barrier.released);
+    let handed = Arc::clone(&barrier.requested);
     assert_eq!(active.attempt_id(), ATTEMPT);
     let directory = File::open("/")?;
     let _release = barrier.release(&active, CgroupView::new(directory.as_fd(), FAKE_CGROUP));
