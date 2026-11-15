@@ -37,9 +37,13 @@ lint:
 actions:
   enabled:
     - trunk-upgrade-available
-  # Trunk's git-hook actions rewrite core.hooksPath to a Trunk cache directory.
-  # The versioned .githooks/pre-commit is the repository hook (enable it with
-  # `git config core.hooksPath .githooks`); it runs `trunk check` itself.
+  # Trunk's git-hook actions rewrite core.hooksPath to a Trunk cache directory,
+  # so the versioned hooks in .githooks replace them (enable them with
+  # `git config core.hooksPath .githooks`):
+  # - pre-commit runs `trunk check --index --upstream=HEAD --no-fix` on staged
+  #   files (every enabled linter and formatter, check-only, no auto-format);
+  # - pre-push runs `trunk check --commit-ref-from-pre-push <stdin> --no-fix`
+  #   over the pushed commits.
   disabled:
     - trunk-announce
     - trunk-fmt-pre-commit

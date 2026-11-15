@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# PiglorOS pre-push hook — full Trunk check over the commits being pushed.
+# Install: git config core.hooksPath .githooks
+set -euo pipefail
+
+if ! command -v trunk >/dev/null 2>&1; then
+    echo "pre-push: Trunk is required for the pushed-range check; install it before pushing" >&2
+    exit 1
+fi
+
+# Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on
+# stdin; Trunk derives the pushed range from that file.
+pushed_refs=$(mktemp)
+trap 'rm -f "$pushed_refs"' EXIT
+cat >"$pushed_refs"
+
+echo "pre-push: trunk check (all enabled linters and formatters, pushed commits, no fixes)"
+trunk check --commit-ref-from-pre-push "$pushed_refs" --no-fix --no-progress
+
+echo "pre-push: OK"

@@ -7,12 +7,12 @@ echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
 if ! command -v trunk >/dev/null 2>&1; then
-    echo "pre-commit: Trunk is required for rust-test-policy; install it before committing" >&2
+    echo "pre-commit: Trunk is required for the staged-file check; install it before committing" >&2
     exit 1
 fi
 
-echo "pre-commit: trunk rust-test-policy (staged files)"
-trunk check --filter rust-test-policy --index --no-fix --no-progress
+echo "pre-commit: trunk check (all enabled linters and formatters, staged files, no fixes)"
+trunk check --index --upstream=HEAD --no-fix --no-progress
 
 changed_files=$(git diff --cached --name-only --diff-filter=ACMRTD)
 deleted_files=$(git diff --cached --name-only --diff-filter=D)
