@@ -599,7 +599,7 @@ fn signed(fields: ExecutionReleaseFields) -> Result<Vec<u8>, Box<dyn Error>> {
                 ed25519_dalek::Signer::sign(&key, &record.signature_message()).to_bytes();
             record.verify(signature, &key.verifying_key())
         })
-        .map(ExecutionRelease::new)
+        .and_then(|verified| ExecutionRelease::new(verified, &key.verifying_key()))
         .and_then(|release| release.to_canonical_cbor())?)
 }
 

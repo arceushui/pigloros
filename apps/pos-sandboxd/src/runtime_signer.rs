@@ -182,7 +182,8 @@ impl RuntimeAttestationSigner for KeyFileRuntimeSigner {
 /// Build, sign and verify one `ReleaseV1` under the admitted key.
 ///
 /// # Errors
-/// `Protocol` for invalid fields, `KeyIdMismatch` if the fields or the
+/// `Protocol` for invalid fields or for a signature that verified under
+/// another key than the admitted one, `KeyIdMismatch` if the fields or the
 /// signer name another key than the admitted one, and `Unverified` for a
 /// signature that does not verify.
 pub fn issue_release<S>(
