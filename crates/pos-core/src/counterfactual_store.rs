@@ -220,6 +220,27 @@ pub enum CounterfactualStoreErrorV1 {
     /// the module's outcome-unknown recovery protocol).
     #[error("counterfactual storage outcome is unknown")]
     OutcomeUnknown,
+    /// The adapter's attached Gateway mode-binding epoch is stale (ADR-134
+    /// §8); the write committed nothing.
+    #[error("counterfactual write found the Gateway mode binding stale")]
+    ModeBindingStale,
+}
+
+/// The closed counterfactual port error of a backend failure.
+///
+/// A missing Timeline is `ForkNotFound`, a write whose commit may or may not
+/// have landed is `OutcomeUnknown`, a stale mode binding keeps its own error,
+/// and every other backend failure is `StorageFailure`, which committed
+/// nothing.
+impl From<&crate::CoreError> for CounterfactualStoreErrorV1 {
+    fn from(error: &crate::CoreError) -> Self {
+        match error {
+            crate::CoreError::TimelineNotFound(_) => Self::ForkNotFound,
+            crate::CoreError::StorageOutcomeUnknown(_) => Self::OutcomeUnknown,
+            crate::CoreError::ModeBindingStale => Self::ModeBindingStale,
+            _ => Self::StorageFailure,
+        }
+    }
 }
 
 /// Capability held only by [`CounterfactualStorePortV1`] adapters.
