@@ -9,6 +9,7 @@
 # scripts/check_qemu_closure_evidence.py judges the result between boot and
 # seal. This script records; it decides nothing beyond its own preconditions.
 set -euo pipefail
+shopt -s extglob
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flake="${root}/deploy/nixos"
@@ -53,7 +54,7 @@ build() {
     >"${out}/host/store-paths.json"
   vm="$(store_path vm "${out}")"
   built="$(nix build --no-update-lock-file --no-link --print-build-logs --print-out-paths \
-    "${flake}#nixosConfigurations.qemu-evidence-${architecture}.config.system.build.vm")"
+    "${flake}#nixosConfigurations.qemu-evidence-${architecture}.config.system.build.piglorQemuEvidenceVm")"
   if [[ "${built}" != "${vm}" ]]; then
     printf 'built %s, expected %s\n' "${built}" "${vm}" >&2
     exit 1
@@ -117,11 +118,11 @@ boot() {
     </dev/null >"${out}/host/serial-console.log" 2>&1 &
   local launcher=$!
   # The launcher shell writes its own PID, then execs the VM runner, which
-  # execs QEMU: the same process becomes QEMU. Its /proc entries are read as
-  # root because the process changed credentials on its way from sudo.
+  # execs QEMU: the same process becomes QEMU. nixpkgs wraps qemu-system-*
+  # with wrapGApp, so the running image is bin/.qemu-system-<arch>-wrapped.
   for _ in $(seq 120); do
     pid="$(cat "${work}/qemu.pid" 2>/dev/null || true)"
-    if [[ ${pid} =~ ^[0-9]+$ && "$(sudo readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/qemu-system-* ]]; then
+    if [[ ${pid} =~ ^[0-9]+$ && "$(sudo readlink "/proc/${pid}/exe" 2>/dev/null || true)" == */bin/?(.)qemu-system-* ]]; then
       qemu_pid="${pid}"
       break
     fi
@@ -132,6 +133,8 @@ boot() {
     sudo readlink "/proc/${qemu_pid}/exe" >"${out}/host/qemu-exe"
     # The interfaces of QEMU's own network namespace.
     sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
+    # The accelerator QEMU itself reports (ADR-069 R13 §2.3).
+    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json" || true
   else
     # Say why, so the next run names the cause rather than a timeout.
     {
@@ -150,11 +153,50 @@ boot() {
   if [[ -d "${work}/xchg/guest" ]]; then
     cp -R -- "${work}/xchg/guest" "${out}/guest"
   fi
+  # Stop the exact QEMU process and remove every disposable object before
+  # any evidence is accepted (ADR-069 R13 §4).
+  if [[ -n ${qemu_pid} ]] && sudo kill -0 "${qemu_pid}" 2>/dev/null; then
+    sudo kill -KILL "${qemu_pid}" || true
+  fi
   rm -rf -- "${work}"
+  {
+    if [[ -n ${qemu_pid} && ! -e "/proc/${qemu_pid}" ]]; then
+      printf 'qemu-process\texited\n'
+    else
+      printf 'qemu-process\tunobserved-or-running\n'
+    fi
+    if [[ ! -e ${work} ]]; then
+      printf 'work-directory\tremoved\n'
+    else
+      printf 'work-directory\tpresent\n'
+    fi
+  } >"${out}/host/vm-cleanup"
   if [[ -z ${qemu_pid} || ${status} -ne 0 ]]; then
     printf 'VM observation failed (QEMU PID %s, exit status %s)\n' "${qemu_pid:-none}" "${status}" >&2
     exit 1
   fi
+}
+
+# One QMP exchange: capabilities, then query-kvm. Prints the query reply.
+query_qmp() {
+  python3 -I - "$1" <<'PYTHON'
+import json, socket, sys
+client = socket.socket(socket.AF_UNIX)
+client.settimeout(10)
+client.connect(sys.argv[1])
+stream = client.makefile("rw")
+def reply():
+    while True:
+        message = json.loads(stream.readline())
+        if "event" not in message:
+            return message
+reply()  # greeting
+for command in ("qmp_capabilities", "query-kvm"):
+    stream.write(json.dumps({"execute": command}) + "\n")
+    stream.flush()
+    answer = reply()
+print(json.dumps(answer, sort_keys=True))
+PYTHON
 }
 
 seal() {

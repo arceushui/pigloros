@@ -57,6 +57,14 @@ CMDLINE = (
     f"init={PATHS['toplevel']}/init loglevel=4 lsm=landlock,yama,bpf "
     "systemd.allow_userspace_verity=0 console=ttyS0\n"
 )
+MOUNTINFO = (
+    "22 1 0:21 / / rw,relatime shared:1 - tmpfs tmpfs rw,mode=755\n"
+    "23 22 0:5 / /dev rw,nosuid shared:2 - devtmpfs devtmpfs rw,size=4096k\n"
+    "30 22 0:30 / /nix/.ro-store rw,relatime shared:9 - 9p nix-store rw,cache=loose,trans=virtio\n"
+    "31 22 0:31 / /nix/.rw-store rw,relatime shared:10 - tmpfs tmpfs rw,mode=755\n"
+    "32 22 0:32 / /nix/store ro,relatime shared:11 - overlay overlay rw,lowerdir=/nix/.ro-store\n"
+    "40 22 0:40 / /tmp/xchg rw,relatime shared:20 - 9p xchg rw,trans=virtio\n"
+)
 NET_DEV = (
     "Inter-|   Receive                            |  Transmit\n"
     " face |bytes    packets errs drop fifo frame compressed multicast|bytes\n"
@@ -84,13 +92,14 @@ def with_paths(files: dict, **changes: str) -> dict[str, str]:
 
 
 def qemu_argv(architecture: str, *extra: str) -> bytes:
-    machine = {"x86_64": "accel=kvm:tcg", "aarch64": "virt,gic-version=max,accel=kvm:tcg"}
-    argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", "-machine", machine[architecture],
-            "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
+    # The derived runner: qemu-vm's -machine without its kvm:tcg list, then -accel tcg.
+    machine = {"x86_64": [], "aarch64": ["-machine", "virt,gic-version=max"]}
+    argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", *machine[architecture],
+            "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
             "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,mount_tag=nix-store",
             "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
             "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
-            "-machine", "accel=tcg", "-nic", "none", "-no-reboot", *extra]
+            "-nic", "none", "-no-reboot", "-qmp", "unix:qmp.sock,server=on,wait=off", *extra]
     return b"".join(argument.encode() + b"\0" for argument in argv)
 
 
@@ -104,11 +113,16 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "host/provenance": PROVENANCE,
         "host/system-trusted-keys.pem": CERTIFICATE,
         "host/runner": f"uname\tLinux 6.11.0-1018-azure #18 SMP {architecture}\ndev-kvm\tabsent\n",
-        "host/serial-console.log": "[    0.000000] Booting Linux\n",
+        "host/serial-console.log": "[    0.000000] Booting Linux\n"
+                                   "\x1b]3008;start=1;bootid=5f431e7d06ad4bf8a0985e35ceb5569a;pid=1\x1b\\\n",
         "host/qemu-argv": qemu_argv(architecture),
         "host/qemu-exe": f"{PATHS['qemu']}/bin/qemu-system-{architecture}\n",
         "host/qemu-net-dev": NET_DEV,
         "host/vm-exit-status": "0\n",
+        "host/qemu-query-kvm.json": '{"return": {"enabled": false, "present": true}}\n',
+        "host/vm-cleanup": "qemu-process\texited\nwork-directory\tremoved\n",
+        "guest/boot-id": "5f431e7d-06ad-4bf8-a098-5e35ceb5569a\n",
+        "guest/mountinfo": MOUNTINFO,
         "guest/status": "complete\n",
         "guest/collector": f"{PATHS['collector']}/bin/piglor-qemu-evidence\n",
         "guest/uname-machine": f"{architecture}\n",
@@ -462,6 +476,27 @@ class EvidenceTests(unittest.TestCase):
                 self.refuses(change)
         self.verdict(change=lambda f: f.update({"host/kernel-config": "# comment\n" + f["host/kernel-config"]}))
 
+    def test_the_wrapped_emulator_image_is_accepted(self):
+        wrapped = f"{PATHS['qemu']}/bin/.qemu-system-x86_64-wrapped\n"
+        self.verdict(change=lambda f: f.update({"host/qemu-exe": wrapped}))
+
+    def test_boot_nonce_disks_and_overlays_are_recorded(self):
+        verdict = self.verdict()["guest_storage"]
+        self.assertEqual(verdict["boot_id"], "5f431e7d-06ad-4bf8-a098-5e35ceb5569a")
+        self.assertEqual(verdict["mounts"]["/nix/store"]["fstype"], "overlay")
+        changes = [
+            lambda f: f.update({"guest/boot-id": "not-a-uuid\n"}),
+            lambda f: f.update({"guest/boot-id": "00000000-06ad-4bf8-a098-5e35ceb5569a\n"}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace("- tmpfs tmpfs rw,mode=755\n", "- ext4 /dev/vda rw\n", 1)}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO + "50 22 254:0 / /mnt rw - ext4 /dev/vdb rw\n"}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace(" - overlay overlay", " - 9p nix-store")}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace("/nix/.rw-store", "/nix/.other")}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO + "garbage\n"}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+
     def test_kernel_release_series_is_pinned(self):
         def kernel(release: str):
             def change(files):
@@ -493,6 +528,15 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/vm-exit-status": "124\n"}),
             lambda f: f.update({"guest/status": "partial\n"}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "accel=kvm:tcg")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "accel=tcg")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-accel\0tcg\0", b"")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-drive", "file=disk.qcow2")}),
+            lambda f: f.update({"host/qemu-query-kvm.json": '{"return": {"enabled": true, "present": true}}'}),
+            lambda f: f.update({"host/qemu-query-kvm.json": '{"error": {"class": "GenericError"}}'}),
+            lambda f: f.update({"host/qemu-query-kvm.json": ""}),
+            lambda f: f.update({"host/vm-cleanup": "qemu-process\tunobserved-or-running\nwork-directory\tremoved\n"}),
+            lambda f: f.update({"host/vm-cleanup": "qemu-process\texited\nwork-directory\tpresent\n"}),
+            lambda f: f.update({"host/vm-cleanup": "qemu-process\texited\n"}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-enable-kvm")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-accel", "kvm")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "--accel", "tcg")}),
@@ -510,11 +554,13 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-net-dev": NET_DEV.replace("lo:", "eth0:")}),
             lambda f: f.update({"host/runner": f["host/runner"] + "dev-kvm\tcrw-rw-rw- root kvm\n"}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-net-pci,netdev=n0")}),
-            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "accel=tcg,,kvm")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-M", "accel=kvm")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64")[:-1]}),
             lambda f: f.update({"host/qemu-argv": b"\0"}),
-            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"accel=tcg", b"accel=kvm")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-accel\0tcg", b"-accel\0kvm")}),
             lambda f: f.update({"host/qemu-exe": "/usr/bin/qemu-system-x86_64\n"}),
+            lambda f: f.update({"host/qemu-exe": f"{PATHS['qemu']}/bin/.qemu-system-aarch64-wrapped\n"}),
+            lambda f: f.update({"host/qemu-exe": f"{store('qemu-other')}/bin/.qemu-system-x86_64-wrapped\n"}),
             lambda f: f.update({"guest/detect-virt-vm": "kvm\n"}),
         ]
         for change in changes:

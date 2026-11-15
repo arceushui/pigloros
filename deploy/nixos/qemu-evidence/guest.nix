@@ -29,6 +29,30 @@ let
     ];
     text = builtins.readFile ./collect-evidence.sh;
   };
+
+  # ADR-069 R13 §2.3 and §4: QEMU is started with `-accel tcg` only. The
+  # qemu-vm runner hard-codes the `kvm:tcg` fallback list in its -machine
+  # option, so derive a runner whose only change is that accelerator. The
+  # replacement fails the build if the upstream text changes.
+  runner = "run-${config.system.name}-vm";
+  accelerator =
+    if pkgs.stdenv.hostPlatform.isAarch64 then
+      {
+        from = "-machine virt,gic-version=max,accel=kvm:tcg";
+        to = "-machine virt,gic-version=max -accel tcg";
+      }
+    else
+      {
+        from = "-machine accel=kvm:tcg";
+        to = "-accel tcg";
+      };
+  tcgVm = pkgs.runCommand "piglor-qemu-evidence-vm-tcg" { } ''
+    mkdir -p "$out/bin"
+    cp ${config.system.build.vm}/bin/${runner} "$out/bin/${runner}"
+    chmod u+w "$out/bin/${runner}"
+    substituteInPlace "$out/bin/${runner}" \
+      --replace-fail ${lib.escapeShellArg accelerator.from} ${lib.escapeShellArg accelerator.to}
+  '';
 in
 {
   imports = [ "${modulesPath}/virtualisation/qemu-vm.nix" ];
@@ -40,6 +64,7 @@ in
 
   # Recorded by the host so the checker can find the collector in the closure.
   system.build.piglorQemuEvidenceCollector = collector;
+  system.build.piglorQemuEvidenceVm = tcgVm;
 
   system.stateVersion = "26.05";
   networking.hostName = "piglor-qemu-evidence";
@@ -52,13 +77,14 @@ in
     cores = 2;
     graphics = false;
     qemu.networkingOptions = lib.mkForce [ ];
-    # TCG only: the later -machine accel= replaces the default kvm:tcg list.
-    # -no-reboot turns a guest reboot or panic into a QEMU exit.
     # -nic none: without it QEMU adds its default user-mode NIC.
+    # -no-reboot turns a guest reboot or panic into a QEMU exit.
+    # The QMP socket in the runner's working directory lets the host read
+    # the accelerator QEMU reports.
     qemu.options = [
-      "-machine accel=tcg"
       "-nic none"
       "-no-reboot"
+      "-qmp unix:qmp.sock,server=on,wait=off"
     ];
   };
 

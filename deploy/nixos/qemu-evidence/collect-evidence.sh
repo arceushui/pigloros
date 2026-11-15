@@ -27,6 +27,10 @@ for marker in /run/systemd/container /run/host/container-manager; do
   fi
 done >container-markers
 
+# Boot nonce, and the guest's disks and overlays (ADR-069 R13 §4).
+cat /proc/sys/kernel/random/boot_id >boot-id
+cat /proc/self/mountinfo >mountinfo
+
 # Kernel command line, configuration and log.
 cat /proc/cmdline >proc-cmdline
 zcat /proc/config.gz >kernel-config

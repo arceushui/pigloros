@@ -35,13 +35,13 @@ PRODUCER_SHA256 = {
     "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
-    "scripts/qemu-closure-evidence.sh": "767138a94bcd88a408564c9c0ef1a81d716a0244a7684abd9f0b379593dae631",
-    "scripts/check_qemu_closure_evidence.py": "5ccc7c1d476df43ae9ae09bd3b732d9692d9b5ac6b33f155f6874c1e026071b9",
-    "deploy/nixos/flake.nix": "4f18580a4fafc8bcba70c61e01f076b1d85b1f40fa487cd952c7b77e9617e0c6",
+    "scripts/qemu-closure-evidence.sh": "bfbce52b6955a90ffb8c603f6ed8bfd40e4f228a6b1d6df12a871a3ed1c818c6",
+    "scripts/check_qemu_closure_evidence.py": "2dc608ecb3d84c361d63d117bb34aac8006226c82a26d6ac9807913ebc106b4d",
+    "deploy/nixos/flake.nix": "2cae6e9528ffb99aab13d20dc4730fffd4f144a2dc917a446fea0763c5dd206d",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
-    "deploy/nixos/qemu-evidence/guest.nix": "978bf161e0fc6847bdec39fbdcd665e4dd1bbbcdea814d9d6add871c0d7dcb5a",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "e3f4e5c47c249b6e78bd4e0e39dc3e8fafffb673c66df16d2ee288dbd189d090",
+    "deploy/nixos/qemu-evidence/guest.nix": "4b4105786ce137ac28e5833fabc0c8143615aaed4159acbc5b87a5b8fa18bfa3",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "ab95ae1f830aa49bd7130d7eaaad46379a1fb407389761e7bba6caba487945a2",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "d755a5f97a8c7865bc3f5f73b731098df03382577f02ae7087a3596ef8f5a5a7",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}

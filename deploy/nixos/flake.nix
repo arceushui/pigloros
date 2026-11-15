@@ -42,7 +42,7 @@
           inherit (guest) config;
         in
         {
-          vm = "${config.system.build.vm}";
+          vm = "${config.system.build.piglorQemuEvidenceVm}";
           toplevel = "${config.system.build.toplevel}";
           kernel = "${config.boot.kernelPackages.kernel}";
           systemd = "${config.systemd.package}";

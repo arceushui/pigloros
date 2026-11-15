@@ -73,7 +73,10 @@ VERITY_FALLBACKS = (
 CONTEXT_OPTIONS = ("SECONDARY_TRUSTED_KEYRING", "INTEGRITY_PLATFORM_KEYRING", "MODULE_SIG")
 USERSPACE_VERITY_KEYS = {"systemd.allow_userspace_verity", "rd.systemd.allow_userspace_verity"}
 REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
-FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "accel", "net", "netdev"}
+# The guest has no disk image (tmpfs root) and no network: any disk or
+# network option is foreign to the reviewed runner.
+FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "hda", "hdb",
+                          "cdrom", "snapshot"}
 # The workflow writes these beside guest/ and host/ after the check.
 SEAL_FILES = {"checker-verdict.json", "SHA256SUMS"}
 FORBIDDEN_EXACT = {"SYSTEMD_PROC_CMDLINE", "SYSTEMD_VERITY_SHARING"}
@@ -83,10 +86,11 @@ CONTAINER_MARKERS = ("/run/systemd/container", "/run/host/container-manager")
 HOST_FILES = {
     "flake-metadata.json", "store-paths.json", "path-info.json", "toplevel-closure.json",
     "system-trusted-keys.pem", "runner", "serial-console.log", "qemu-argv", "qemu-exe",
-    "qemu-net-dev", "vm-exit-status", "provenance", "kernel-config",
+    "qemu-net-dev", "vm-exit-status", "provenance", "kernel-config", "qemu-query-kvm.json",
+    "vm-cleanup",
 }
 GUEST_FILES = {
-    "status", "collector", "uname-machine", "uname-release", "systemctl-version", "current-system",
+    "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
     "booted-system", "booted-kernel", "systemd-package", "detect-virt-vm",
     "detect-virt-container", "container-markers", "proc-cmdline", "kernel-config",
     "kernel-log", "proc-keys", "builtin-trusted-keys", "verity-d", "mountfsd-units",
@@ -366,31 +370,38 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     if argv[-1] != b"" or len(argv) < 2:
         raise EvidenceError("qemu-argv is not a NUL-terminated argument vector")
     argv = [argument.decode("utf-8") for argument in argv[:-1]]
+    # nixpkgs wraps the emulator with wrapGApp: argv[0] keeps the public
+    # name, and the running image is the wrapped binary beside it.
     executable = f"{paths['qemu']}/bin/qemu-system-{architecture}"
-    if evidence.line("host/qemu-exe") != executable or argv[0] != executable:
+    images = (executable, f"{paths['qemu']}/bin/.qemu-system-{architecture}-wrapped")
+    if evidence.line("host/qemu-exe") not in images or argv[0] != executable:
         raise EvidenceError("the running QEMU is not the recorded package's system emulator")
-    accelerator, nics, kernels, appends = None, [], [], []
+    accelerators, nics, kernels, appends, shares = [], [], [], [], []
     for index, flag in enumerate(argv[1:], start=1):
         value = argv[index + 1] if index + 1 < len(argv) else ""
         if flag.lstrip("-") in FORBIDDEN_QEMU_OPTIONS and flag.startswith("-"):
             raise EvidenceError(f"QEMU option {flag} is not allowed in the evidence boot")
         if flag in ("-nic", "--nic"):
             nics.append(value)
+        if flag in ("-accel", "--accel"):
+            accelerators.append(value)
+        if flag in ("-virtfs", "--virtfs"):
+            shares.append(value)
         if flag in ("-kernel", "--kernel"):
             kernels.append(value)
         if flag in ("-append", "--append"):
             appends.append(value)
         if flag in ("-device", "--device") and value.split(",", 1)[0].startswith("virtio-net"):
             raise EvidenceError("the evidence guest must have no network device")
-        if flag in ("-machine", "--machine", "-M"):
-            if ",," in value:
-                raise EvidenceError("escaped commas in -machine are not interpreted")
-            for option in value.split(","):
-                if option.startswith("accel="):
-                    accelerator = option.removeprefix("accel=")
-    # QEMU merges repeated -machine options; the last accel= wins.
-    if accelerator != "tcg":
-        raise EvidenceError(f"QEMU's effective accelerator is {accelerator!r}, not tcg")
+        if flag in ("-machine", "--machine", "-M") and "accel" in value:
+            raise EvidenceError("the accelerator must come from -accel, not -machine")
+    # ADR-069 R13 §2.3: started with `-accel tcg` only, and QEMU reports no KVM.
+    if accelerators != ["tcg"]:
+        raise EvidenceError(f"QEMU must be started with exactly -accel tcg, not {accelerators}")
+    reported = evidence.json("host/qemu-query-kvm.json")
+    if not isinstance(reported, dict) or not isinstance(reported.get("return"), dict) \
+            or reported["return"].get("enabled") is not False:
+        raise EvidenceError("QEMU does not report KVM as disabled")
     if nics != ["none"]:
         raise EvidenceError("QEMU must run with exactly one -nic none")
     init = f"init={paths['toplevel']}/init"
@@ -402,7 +413,37 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
         raise EvidenceError(f"QEMU's network namespace has interfaces {interfaces}, not only lo")
     if evidence.line("guest/detect-virt-vm") != "qemu":
         raise EvidenceError("the guest does not detect TCG QEMU virtualization")
-    return {"accelerator": accelerator, "virtualization": "qemu", "runner": runner}
+    cleanup = tab_map(evidence.text("host/vm-cleanup"), "vm-cleanup")
+    if cleanup != {"qemu-process": "exited", "work-directory": "removed"}:
+        raise EvidenceError(f"the run did not stop QEMU and remove its disposable state: {cleanup}")
+    return {"accelerator": "tcg", "qemu_reports": reported["return"], "virtualization": "qemu",
+            "runner": runner, "virtfs": shares, "cleanup": cleanup}
+
+
+def check_guest_storage(evidence: Evidence) -> dict:
+    """ADR-069 R13 §4: the boot nonce, and the guest's disks and overlays."""
+    boot_id = evidence.line("guest/boot-id")
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", boot_id):
+        raise EvidenceError("guest/boot-id is not a boot UUID")
+    # systemd announces the boot ID on the serial console that the host captured.
+    if f"bootid={boot_id.replace('-', '')}".encode() not in evidence.raw("host/serial-console.log"):
+        raise EvidenceError("the host's serial console did not show the recorded guest boot")
+    mounts = {}
+    for line in evidence.text("guest/mountinfo").splitlines():
+        left, separator, right = line.partition(" - ")
+        fields, tail = left.split(), right.split()
+        if not separator or len(fields) < 6 or len(tail) < 2:
+            raise EvidenceError(f"malformed mountinfo line: {line!r}")
+        mounts[fields[4]] = {"fstype": tail[0], "source": tail[1], "options": fields[5]}
+    # qemu-vm with no disk image: a tmpfs root, the host store over 9p, and a
+    # tmpfs-backed overlay as the writable /nix/store. No block device.
+    expected = {"/": "tmpfs", "/nix/.ro-store": "9p", "/nix/.rw-store": "tmpfs", "/nix/store": "overlay"}
+    if any(mounts.get(path, {}).get("fstype") != fstype for path, fstype in expected.items()):
+        raise EvidenceError("the guest root and store are not tmpfs, 9p and a tmpfs overlay")
+    disks = sorted(path for path, mount in mounts.items() if mount["source"].startswith("/dev/"))
+    if disks:
+        raise EvidenceError(f"the guest mounts block devices: {disks}")
+    return {"boot_id": boot_id, "mounts": {path: mounts[path] for path in expected}}
 
 
 def check_command_line(evidence: Evidence, toplevel: str) -> str:
@@ -628,6 +669,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "provenance": provenance,
         **identity,
         **check_runner(evidence, architecture, paths),
+        "guest_storage": check_guest_storage(evidence),
         "kernel_command_line": check_command_line(evidence, paths["toplevel"]),
         "kernel_config": check_kernel_config(evidence, paths["trustedCertificate"]),
         "certificate_key_description": description,
