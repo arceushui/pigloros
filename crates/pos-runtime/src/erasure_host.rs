@@ -5144,6 +5144,15 @@ mod tests {
         ErasureReferenceV1::from_digest([seed; 32])
     }
 
+    fn empty_authority_view() -> ErasureAuthoritySnapshotViewV1 {
+        ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+            .and_then(|inventory| {
+                pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None)
+            })
+            .map(ErasureAuthoritySnapshotViewV1::new)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
     fn verified_empty_inventory(
         snapshot: ErasurePersistenceInventorySnapshotV1,
         maximum_requests: usize,
@@ -8236,6 +8245,7 @@ mod tests {
         assert_eq!(
             ErasureCoordinatorAuthorityV1::verified_topology_observation_for_candidate(
                 &UnusedCoordinatorAuthorityV1::rejecting(),
+                &empty_authority_view(),
                 reference(1),
                 reference(2),
                 &TimelineMeta::root("candidate"),
@@ -10729,7 +10739,11 @@ mod tests {
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(&changed_input, &recovered),
+            ErasureExecutionHostV1::recover_identified_fork(
+                &empty_authority_view(),
+                &changed_input,
+                &recovered,
+            ),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -10758,7 +10772,11 @@ mod tests {
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(&missing_inventory_input, &recovered),
+            ErasureExecutionHostV1::recover_identified_fork(
+                &empty_authority_view(),
+                &missing_inventory_input,
+                &recovered,
+            ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
@@ -10786,7 +10804,8 @@ mod tests {
         let gate = Arc::clone(&host.gate);
         let mut transition_failure = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            let result = host.prepare_identified_fork(&prepare_input, permit);
+            let result =
+                host.prepare_identified_fork(&empty_authority_view(), &prepare_input, permit);
             if let Err(error) = &result {
                 transition_failure = Some(*error);
             }
