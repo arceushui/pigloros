@@ -505,7 +505,9 @@ fn consented_grants(
 /// Returns [`LocalPrincipalErrorV1::Conflict`] when the consent Timeline
 /// holds other consents, including any for a provisioning that binds none,
 /// and [`LocalPrincipalErrorV1::Unavailable`] when the host cannot open,
-/// read or append it.
+/// read or append it, including a consent Timeline the store records but
+/// its erasure fence refuses to read (contained, erased or unclassified):
+/// nothing is written then.
 pub fn provision_local_consents(
     host: &mut ErasureExecutionHostV1,
     provision: &LocalPrincipalProvisionV1,
@@ -516,12 +518,12 @@ pub fn provision_local_consents(
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
-    // A Timeline outside the verified topology is fenced from a direct
-    // lookup, so the consent Timeline's existence is read from the listing.
+    // Whether the store records the consent Timeline at all, whatever its
+    // erasure classification; one it records is read under its fence, so a
+    // contained or unclassified consent Timeline is refused as unavailable.
     let existing = host
-        .read_sender()
-        .and_then(|mut reads| reads.timelines())
-        .map(|timelines| timelines.iter().any(|known| known.id() == timeline))
+        .command_sender()
+        .and_then(|mut sender| sender.records_timeline(timeline))
         .map_err(|_| LocalPrincipalErrorV1::Unavailable);
     let recorded = match existing {
         Ok(true) => host
@@ -3524,8 +3526,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let mut host = sqlite_host(path)?;
         let timeline = local_principal_consent_timeline();
-        let listed = host.read_sender()?.timelines()?;
-        let events = if listed.iter().any(|known| known.id() == timeline) {
+        let events = if host.command_sender()?.records_timeline(timeline)? {
             host.read_sender()?
                 .read_bounded(timeline, SeqRange::all(), consent_bounds())?
                 .into_iter()
@@ -3940,6 +3941,26 @@ mod tests {
             drop((gateway, app));
             assert_eq!(recorded_state(&path)?, before, "{actions_consented}");
         }
+        Ok(())
+    }
+
+    /// L1: a consent Timeline the store records but its erasure fence
+    /// refuses to read is never treated as absent: provisioning, with or
+    /// without consents, is refused as unavailable before it appends.
+    #[test]
+    fn a_consent_timeline_the_fence_refuses_is_never_absent() -> TestResult {
+        let mut host = memory_host()?;
+        provision_local_consents(&mut host, &consented_provision()?)?;
+        let timeline = local_principal_consent_timeline();
+        assert!(host.command_sender()?.records_timeline(timeline)?);
+        host.freeze_timeline_for_test(timeline);
+        for provision in [consented_provision()?, served_provision()?] {
+            assert_eq!(
+                provision_local_consents(&mut host, &provision),
+                Err(LocalPrincipalErrorV1::Unavailable)
+            );
+        }
+        assert!(host.command_sender()?.records_timeline(timeline)?);
         Ok(())
     }
 }
