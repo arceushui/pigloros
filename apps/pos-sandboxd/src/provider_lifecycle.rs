@@ -188,8 +188,10 @@ impl ProviderLifecyclePort for SystemdProviderLifecycle {
         deadline: std::time::Instant,
     ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
         let deadline = Instant::from_std(deadline);
+        // The timer is created inside the runtime: a Tokio timer needs its
+        // time driver in context.
         self.runtime
-            .block_on(timeout_at(deadline, self.terminate_stale(deadline)))
+            .block_on(async { timeout_at(deadline, self.terminate_stale(deadline)).await })
             .unwrap_or(Err(ProviderLifecycleError::DeadlineExceeded))
             .map(|stopped| StaleUnitsObservation::new(challenge, stopped))
     }
@@ -211,10 +213,13 @@ impl ProviderLifecyclePort for SystemdProviderLifecycle {
         .map_err(|_| ProviderLifecycleError::Contradiction)?;
         let started = self
             .runtime
-            .block_on(timeout_at(
-                Instant::from_std(deadline),
-                self.transport.start_provider_runtime_unit(&name, &request),
-            ))
+            .block_on(async {
+                timeout_at(
+                    Instant::from_std(deadline),
+                    self.transport.start_provider_runtime_unit(&name, &request),
+                )
+                .await
+            })
             .map_err(|_| ProviderLifecycleError::DeadlineExceeded)?
             .map_err(|error| start_failure(&error))?;
         let main_pid = NonZeroU64::new(u64::from(started.main_pid))
