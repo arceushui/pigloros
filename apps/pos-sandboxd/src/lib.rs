@@ -41,8 +41,12 @@ mod local_network;
 mod namespace_network;
 #[cfg(target_os = "linux")]
 mod provider_barrier;
+// Public module reachability keeps crate-only sibling access (the provider
+// unit types `system_bus` shares with the lifecycle adapter) compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
 #[cfg(target_os = "linux")]
-mod provider_lifecycle;
+#[doc(hidden)]
+pub mod provider_lifecycle;
 #[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]

@@ -2793,8 +2793,10 @@ mod tests {
         fn finish(&self) -> TestResult {
             self.stop_running()
                 .map_err(|error| format!("provider threads: {error}"))?;
-            let outcomes = self.outcomes.lock().map_err(|_| "outcomes poisoned")?;
-            let errors: Vec<_> = outcomes
+            let errors: Vec<_> = self
+                .outcomes
+                .lock()
+                .map_err(|_| "outcomes poisoned")?
                 .iter()
                 .filter_map(|outcome| outcome.clone().err())
                 .collect();
@@ -3855,30 +3857,6 @@ mod tests {
         let update_fixture = crate::selector::installation::tests::updates::UpdateFixture::at(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
-        let control_fixture =
-            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let execute_fixture =
-            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let requirement = request
-            .sandbox_requirement
-            .as_ref()
-            .ok_or("sandbox requirement missing")?;
-        let (image, launch) =
-            selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
-        let commitment = admitted.provider().derive_selector_grant_commitment(
-            &image.image,
-            &launch,
-            &request,
-            resolved.attempt(),
-            &[],
-        )?;
-        let current_epochs = [
-            admitted.bootstrap().trust().trust_epoch(),
-            admitted.bootstrap().revocation().revocation_epoch(),
-            admitted.bootstrap().policy().policy_epoch(),
-        ];
-        let execute_provider_identity = admitted.provider().clone();
-
         // A crash-stale, refusing execute leaf: the selector removes it (R11
         // §5.0 step 3) before the started runtime binds the same path.
         drop(UnixListener::bind("/run/pigloros/provider-execute.sock")?);
@@ -3887,46 +3865,10 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let (started, started_runtime) = std::sync::mpsc::channel();
-        let first: RuntimeStart = Box::new(move || {
-            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
-            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
-            let execute_provider = std::thread::spawn(move || {
-                serve_describe_response(
-                    &execute_listener,
-                    &control_fixture,
-                    &execute_provider_identity,
-                )
-                .map_err(|error| error.to_string())?;
-                serve_execution_responses(
-                    &execute_listener,
-                    &execute_fixture,
-                    &execute_provider_identity,
-                    &commitment,
-                    &[(current_epochs, false), (current_epochs, true)],
-                )
-                .map_err(|error| error.to_string())
-            });
-            started
-                .send(control_listener)
-                .map_err(|_| "runtime start channel closed")?;
-            Ok(vec![execute_provider])
-        });
-        // R11 §8.6: after the live update the fenced runtime is never
-        // described again. The port stops it (joining its threads, which
-        // leaves both leaves refusing), the selector removes the leaves, and a
-        // fresh runtime under a new slot answers the successor's describe.
-        let successor_fixture =
-            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let replacement: RuntimeStart = Box::new(move || {
-            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
-            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
-            Ok(vec![std::thread::spawn(move || {
-                let _control = control_listener;
-                serve_installed_describe_response(&execute_listener, &successor_fixture)
-                    .map_err(|error| error.to_string())
-            })])
-        });
-        let port = Arc::new(InProcessProviderPort::starting(vec![first, replacement]));
+        let port = Arc::new(InProcessProviderPort::starting(vec![
+            initial_runtime(&admitted, &request, &resolved, started)?,
+            replacement_runtime()?,
+        ]));
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let mut runtime = activate_in_process(Arc::clone(&port))?;
@@ -3971,6 +3913,82 @@ mod tests {
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))?;
         Ok(listener)
+    }
+
+    /// The first runtime's provider thread answers activation's `describe`
+    /// and two executions. Its control listener goes to the test, which
+    /// serves the live update on it.
+    fn initial_runtime(
+        admitted: &AdmittedSelectorProvider,
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        resolved: &crate::selector::installation::ResolvedInstalledCase,
+        started: std::sync::mpsc::Sender<UnixListener>,
+    ) -> TestResult<RuntimeStart> {
+        let control_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execute_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("sandbox requirement missing")?;
+        let (image, launch) =
+            selected_image_and_launch(admitted, requirement, FIXTURE_ADMISSION_TIME)?;
+        let commitment = admitted.provider().derive_selector_grant_commitment(
+            &image.image,
+            &launch,
+            request,
+            resolved.attempt(),
+            &[],
+        )?;
+        let current_epochs = [
+            admitted.bootstrap().trust().trust_epoch(),
+            admitted.bootstrap().revocation().revocation_epoch(),
+            admitted.bootstrap().policy().policy_epoch(),
+        ];
+        let execute_provider_identity = admitted.provider().clone();
+        Ok(Box::new(move || {
+            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
+            let execute_provider = std::thread::spawn(move || {
+                serve_describe_response(
+                    &execute_listener,
+                    &control_fixture,
+                    &execute_provider_identity,
+                )
+                .map_err(|error| error.to_string())?;
+                serve_execution_responses(
+                    &execute_listener,
+                    &execute_fixture,
+                    &execute_provider_identity,
+                    &commitment,
+                    &[(current_epochs, false), (current_epochs, true)],
+                )
+                .map_err(|error| error.to_string())
+            });
+            started
+                .send(control_listener)
+                .map_err(|_| "runtime start channel closed")?;
+            Ok(vec![execute_provider])
+        }))
+    }
+
+    /// R11 §8.6: after the live update the fenced runtime is never described
+    /// again. The port stops it (joining its threads, which leaves both leaves
+    /// refusing), the selector removes the leaves, and this fresh runtime
+    /// under a new slot answers the successor's `describe`.
+    fn replacement_runtime() -> TestResult<RuntimeStart> {
+        let successor_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        Ok(Box::new(move || {
+            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
+            Ok(vec![std::thread::spawn(move || {
+                let _control = control_listener;
+                serve_installed_describe_response(&execute_listener, &successor_fixture)
+                    .map_err(|error| error.to_string())
+            })])
+        }))
     }
 
     /// Installs the fixed composition with sanitizer-proof provider headroom.
@@ -4443,15 +4461,7 @@ mod tests {
             let closed = closed_rx.recv_timeout(Duration::from_secs(1))??;
             assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
             let successor_lease = if reopen_with_successor {
-                let (_, successor, _) =
-                    crate::selector::installation::tests::root_selector_fixture()?;
-                let runtime = successor_runtime(&successor)?;
-                admission.admit_successor(
-                    &closed.admitted,
-                    successor,
-                    runtime,
-                    &closed.live_attempt_ids,
-                )?;
+                reopen_with_fresh_runtime(&admission, &closed)?;
                 Some(admission.acquire([1; 16])?)
             } else {
                 None
@@ -4583,6 +4593,21 @@ mod tests {
         );
         assert!(!Arc::ptr_eq(&admission.current()?, &closed.admitted));
         assert!(admission.reopen_previous(&closed.admitted).is_err());
+        Ok(())
+    }
+
+    fn reopen_with_fresh_runtime(
+        admission: &SelectorAdmission,
+        closed: &ClosedSelectorAdmission,
+    ) -> TestResult {
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let runtime = successor_runtime(&successor)?;
+        admission.admit_successor(
+            &closed.admitted,
+            successor,
+            runtime,
+            &closed.live_attempt_ids,
+        )?;
         Ok(())
     }
 

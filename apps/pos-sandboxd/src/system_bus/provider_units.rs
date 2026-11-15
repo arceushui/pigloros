@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use futures_util::StreamExt;
 use tokio::time::Instant;
-use zbus::{proxy::CacheProperties, OwnedObjectPath};
+use zbus::proxy::CacheProperties;
 use zbus_systemd::systemd1::ServiceProxy;
 
 use super::{
@@ -14,10 +14,10 @@ use super::{
     SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
     START_JOB_MODE, UNIT_SUFFIX,
 };
+use crate::provider_lifecycle::ProviderRuntimeUnitRequest;
 use crate::provider_lifecycle::{
     CgroupRootSource, ProviderUnit, ProviderUnitFamily, StartedProviderUnit,
 };
-use crate::transient_unit::ProviderRuntimeUnitRequest;
 use crate::{AttemptShutdownDeadlines, SystemdAttemptUnitTeardownError};
 use pos_reference::selector::runtime_lifecycle::ProviderLifecycleError;
 
