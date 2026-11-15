@@ -934,10 +934,7 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
     assert!(seen[0].1 > Instant::now());
-    let requested = barrier
-        .requested
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let requested = handed.lock().map_err(|error| error.to_string())?;
     assert_eq!(*requested, vec![crate::test_fixtures::RQE1_DIGEST]);
     Ok(())
 }
