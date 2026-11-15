@@ -47,9 +47,16 @@ impl<F: InstalledPluginFactoryV1> HostCatalogueEntryV1<F> {
     /// registration. It never registers, admits or runs the product, so it
     /// needs no installed EPF1.
     ///
+    /// Like registration, it builds the factory's product before the link
+    /// checks, so a foreign factory's `build` runs and is then refused.
+    ///
     /// # Errors
     /// Returns the registration's link error when the built Plugin or
-    /// approver is not the entry's reviewed product.
+    /// approver is not the entry's reviewed product. Only the Gateway entry
+    /// has a reviewed spec today, and its Plugin and approver types live in
+    /// the Gateway crate, so an accepted Plugin with a refused approver
+    /// (`CallbackMismatch`) cannot be built in this crate's tests; the
+    /// Gateway exercises the accepted pair.
     pub fn scenario_room_catalogue_v1(
         &self,
         frozen_configuration: &F::Configuration,
