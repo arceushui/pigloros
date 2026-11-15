@@ -96,7 +96,9 @@ def qemu_argv(architecture: str, *extra: str) -> bytes:
     machine = {"x86_64": [], "aarch64": ["-machine", "virt,gic-version=max"]}
     argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", *machine[architecture],
             "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
-            "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,mount_tag=nix-store",
+            "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,security_model=none,mount_tag=nix-store",
+            "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=xchg",
+            "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=shared",
             "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
             "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
             "-nic", "none", "-no-reboot", "-qmp", "unix:qmp.sock,server=on,wait=off", *extra]
@@ -492,6 +494,8 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace(" - overlay overlay", " - 9p nix-store")}),
             lambda f: f.update({"guest/mountinfo": MOUNTINFO.replace("/nix/.rw-store", "/nix/.other")}),
             lambda f: f.update({"guest/mountinfo": MOUNTINFO + "garbage\n"}),
+            lambda f: f.update({"guest/mountinfo": MOUNTINFO + "60 22 254:0 / /srv rw - ext4 /dev/vdc rw\n"
+                                                              "61 22 0:61 / /srv rw - tmpfs tmpfs rw\n"}),
         ]
         for change in changes:
             with self.subTest(change=change):
@@ -531,6 +535,11 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "accel=tcg")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-accel\0tcg\0", b"")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-drive", "file=disk.qcow2")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-fsdev", "local,id=f,path=/")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-blk-pci,drive=d")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home,mount_tag=home")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"mount_tag=shared", b"mount_tag=home")}),
             lambda f: f.update({"host/qemu-query-kvm.json": '{"return": {"enabled": true, "present": true}}'}),
             lambda f: f.update({"host/qemu-query-kvm.json": '{"error": {"class": "GenericError"}}'}),
             lambda f: f.update({"host/qemu-query-kvm.json": ""}),

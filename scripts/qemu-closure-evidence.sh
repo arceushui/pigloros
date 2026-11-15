@@ -134,7 +134,7 @@ boot() {
     # The interfaces of QEMU's own network namespace.
     sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
     # The accelerator QEMU itself reports (ADR-069 R13 §2.3).
-    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json" || true
+    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json"
   else
     # Say why, so the next run names the cause rather than a timeout.
     {
@@ -154,7 +154,8 @@ boot() {
     cp -R -- "${work}/xchg/guest" "${out}/guest"
   fi
   # Stop the exact QEMU process and remove every disposable object before
-  # any evidence is accepted (ADR-069 R13 §4).
+  # any evidence is accepted (ADR-069 R13 §4). After a normal exit the wait
+  # above has already reaped QEMU, so the kill only acts on a stuck process.
   if [[ -n ${qemu_pid} ]] && sudo kill -0 "${qemu_pid}" 2>/dev/null; then
     sudo kill -KILL "${qemu_pid}" || true
   fi
@@ -181,9 +182,19 @@ boot() {
 query_qmp() {
   python3 -I - "$1" <<'PYTHON'
 import json, socket, sys
-client = socket.socket(socket.AF_UNIX)
-client.settimeout(10)
-client.connect(sys.argv[1])
+import time
+# QEMU creates the listening socket shortly after its exec; retry briefly.
+for attempt in range(60):
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(10)
+    try:
+        client.connect(sys.argv[1])
+        break
+    except (FileNotFoundError, ConnectionRefusedError):
+        client.close()
+        time.sleep(0.5)
+else:
+    sys.exit("QMP socket never accepted a connection")
 stream = client.makefile("rw")
 def reply():
     while True:

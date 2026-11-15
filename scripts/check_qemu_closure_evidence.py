@@ -76,7 +76,10 @@ REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
 # The guest has no disk image (tmpfs root) and no network: any disk or
 # network option is foreign to the reviewed runner.
 FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "hda", "hdb",
-                          "cdrom", "snapshot"}
+                          "cdrom", "snapshot", "fsdev"}
+FORBIDDEN_DEVICE_PREFIXES = ("virtio-net", "virtio-blk", "nvme", "scsi-hd", "ide-hd", "usb-storage")
+# qemu-vm's shared directories for this guest (useHostCerts is off).
+VIRTFS_TAGS = ["nix-store", "shared", "xchg"]
 # The workflow writes these beside guest/ and host/ after the check.
 SEAL_FILES = {"checker-verdict.json", "SHA256SUMS"}
 FORBIDDEN_EXACT = {"SYSTEMD_PROC_CMDLINE", "SYSTEMD_VERITY_SHARING"}
@@ -391,8 +394,8 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
             kernels.append(value)
         if flag in ("-append", "--append"):
             appends.append(value)
-        if flag in ("-device", "--device") and value.split(",", 1)[0].startswith("virtio-net"):
-            raise EvidenceError("the evidence guest must have no network device")
+        if flag in ("-device", "--device") and value.split(",", 1)[0].startswith(FORBIDDEN_DEVICE_PREFIXES):
+            raise EvidenceError(f"the evidence guest must have no network or disk device: {value}")
         if flag in ("-machine", "--machine", "-M") and "accel" in value:
             raise EvidenceError("the accelerator must come from -accel, not -machine")
     # ADR-069 R13 §2.3: started with `-accel tcg` only, and QEMU reports no KVM.
@@ -413,6 +416,10 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
         raise EvidenceError(f"QEMU's network namespace has interfaces {interfaces}, not only lo")
     if evidence.line("guest/detect-virt-vm") != "qemu":
         raise EvidenceError("the guest does not detect TCG QEMU virtualization")
+    tags = sorted(option.removeprefix("mount_tag=") for share in shares
+                  for option in share.split(",") if option.startswith("mount_tag="))
+    if len(tags) != len(shares) or tags != VIRTFS_TAGS:
+        raise EvidenceError(f"QEMU shares {tags}, not exactly {VIRTFS_TAGS}")
     cleanup = tab_map(evidence.text("host/vm-cleanup"), "vm-cleanup")
     if cleanup != {"qemu-process": "exited", "work-directory": "removed"}:
         raise EvidenceError(f"the run did not stop QEMU and remove its disposable state: {cleanup}")
@@ -428,19 +435,20 @@ def check_guest_storage(evidence: Evidence) -> dict:
     # systemd announces the boot ID on the serial console that the host captured.
     if f"bootid={boot_id.replace('-', '')}".encode() not in evidence.raw("host/serial-console.log"):
         raise EvidenceError("the host's serial console did not show the recorded guest boot")
-    mounts = {}
+    mounts, disks = {}, []
     for line in evidence.text("guest/mountinfo").splitlines():
         left, separator, right = line.partition(" - ")
         fields, tail = left.split(), right.split()
         if not separator or len(fields) < 6 or len(tail) < 2:
             raise EvidenceError(f"malformed mountinfo line: {line!r}")
         mounts[fields[4]] = {"fstype": tail[0], "source": tail[1], "options": fields[5]}
+        if tail[1].startswith("/dev/"):
+            disks.append(fields[4])
     # qemu-vm with no disk image: a tmpfs root, the host store over 9p, and a
     # tmpfs-backed overlay as the writable /nix/store. No block device.
     expected = {"/": "tmpfs", "/nix/.ro-store": "9p", "/nix/.rw-store": "tmpfs", "/nix/store": "overlay"}
     if any(mounts.get(path, {}).get("fstype") != fstype for path, fstype in expected.items()):
         raise EvidenceError("the guest root and store are not tmpfs, 9p and a tmpfs overlay")
-    disks = sorted(path for path, mount in mounts.items() if mount["source"].startswith("/dev/"))
     if disks:
         raise EvidenceError(f"the guest mounts block devices: {disks}")
     return {"boot_id": boot_id, "mounts": {path: mounts[path] for path in expected}}
