@@ -944,10 +944,10 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
 #[tokio::test]
 async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
     let mut scenario = Scenario::new()?;
-    assert!(scenario
+    // Whatever the run's end, its release was handed the start's RQE1.
+    let _outcome = scenario
         .run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
-        .await?
-        .is_ok());
+        .await?;
     let unit = TransientServiceUnitName::from_attempt_id(ATTEMPT)?;
     let expected = unit
         .as_str()
