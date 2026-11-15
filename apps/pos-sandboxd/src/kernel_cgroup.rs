@@ -170,7 +170,9 @@ impl CgroupRoot {
         match openat2(
             &self.0,
             relative,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            OFlags::RDONLY
+                .union(OFlags::DIRECTORY)
+                .union(OFlags::CLOEXEC),
             Mode::empty(),
             RESOLVE_CHILD,
         ) {

@@ -620,13 +620,19 @@ impl ProviderTransport {
         main_pid: u64,
         main_start_time_ticks: u64,
     ) -> Result<Self, SelectorBoundaryError> {
-        Self::from_admitted(admitted).map(|transport| Self {
+        Self::from_admitted(admitted)
+            .map(|transport| transport.expecting(main_pid, main_start_time_ticks))
+    }
+
+    /// The same endpoints, answering only for the given main process.
+    fn expecting(self, main_pid: u64, main_start_time_ticks: u64) -> Self {
+        Self {
             admitted_process: Mutex::new(Some(ProviderProcessIdentity {
                 pid: main_pid,
                 start_time_ticks: main_start_time_ticks,
             })),
-            ..transport
-        })
+            ..self
+        }
     }
 
     /// Prove that the selected provider has activated the exact admitted policy.
@@ -1846,6 +1852,24 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         assert_process_stat_boundaries(observed)?;
+
+        // A started runtime's transport accepts exactly its main process.
+        let expecting = provider_transport(
+            transport.execute_endpoint.clone(),
+            transport.control_endpoint.clone(),
+        )
+        .expecting(observed.pid, observed.start_time_ticks.saturating_add(1));
+        assert_eq!(
+            expecting.bind_admitted_process(observed),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            expecting.bind_admitted_process(ProviderProcessIdentity {
+                start_time_ticks: observed.start_time_ticks.saturating_add(1),
+                ..observed
+            }),
+            Ok(())
+        );
 
         let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
