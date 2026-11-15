@@ -65,6 +65,12 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `execution-mode-profiles.schema.json`); `mode_profile_digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), and the checker
   pins the golden digests the examples must name.
+- A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
+  BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
+  `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
+  Crockford base32 ULID). The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
+  hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
+  Plugins and cannot be recomputed by a client.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
   its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
   installs an EPF1, every Gateway resource reports `unavailable`.

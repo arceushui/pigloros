@@ -4623,7 +4623,7 @@
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
         "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`.",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID).",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
