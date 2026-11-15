@@ -2,6 +2,8 @@
 //! per sub-case, its exchanges sent as raw HTTP requests through the public `router` and
 //! `spectator_router` of that Gateway, with no socket.
 
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,6 +12,9 @@ use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
 use piglor_gateway::local_principal::{
     local_gateway, provision_local_principal, LocalPrincipalProvisionV1,
+};
+use piglor_gateway::mode_profile::{
+    bind_gateway_mode_v1, GatewayModeBindingV1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
 };
 use piglor_gateway::startup::{open_recovered_erasure_host, GatewayHostStoreV1};
 use piglor_gateway::{
@@ -149,35 +154,63 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// it has one.
 ///
 /// `open` is the unprotected in-process harness Gateway. `authorized` is the production serve
-/// composition (#1361): a fixture Local Principal document is provisioned into a fresh `SQLite`
-/// store with the production `provision_local_principal`, and the Gateway is composed over that
-/// store by `local_gateway`, which requires the recorded Principal for every protected
-/// operation.
+/// composition (#1361, #1360): the first `serve` binds a fresh `SQLite` store to the Local
+/// execution mode, a fixture Local Principal document is provisioned into it with the production
+/// `provision_local_principal`, and the Gateway is composed over that store by `local_gateway`
+/// under that binding, which requires the recorded Principal for every protected operation.
 fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
     match composition {
         CompositionV2::Open => host()
             .and_then(|host| Gateway::unprotected_for_harness(host).ok())
             .map(|gateway| (gateway, None)),
-        CompositionV2::Authorized => provisioned_store().and_then(|store| {
-            open_recovered_erasure_host(
-                StoreConfig::Sqlite {
-                    path: store.path_text(),
-                },
-                GatewayHostStoreV1::Standard,
-                &ErasureCoordinatorCompositionV1::closed(),
-            )
-            .and_then(|host| local_gateway(host, None))
-            .ok()
-            .map(|gateway| (gateway, Some(store)))
-        }),
+        CompositionV2::Authorized => {
+            let store = ScratchStore::new();
+            store_host(&store)
+                .and_then(|mut host| bind_local_mode(&mut host))
+                .and_then(|_| provision_store(&store))
+                .and_then(|()| store_host(&store))
+                .and_then(|mut host| {
+                    bind_local_mode(&mut host)
+                        .and_then(|mode| local_gateway(host, None, &mode).ok())
+                })
+                .map(|gateway| (gateway, Some(store)))
+        }
     }
 }
 
-/// A fresh `SQLite` store holding the fixture Local Principal of the `authorized` composition:
-/// it may create Timelines and read their Events as the fixture actor, and holds no action or
-/// signal grant. Only its document is fixture data.
-fn provisioned_store() -> Option<ScratchStore> {
-    let store = ScratchStore::new();
+/// The recovered production host of `store`.
+fn store_host(store: &ScratchStore) -> Option<ErasureExecutionHostV1> {
+    open_recovered_erasure_host(
+        StoreConfig::Sqlite {
+            path: store.path_text(),
+        },
+        GatewayHostStoreV1::Standard,
+        &ErasureCoordinatorCompositionV1::closed(),
+    )
+    .ok()
+}
+
+/// Bind the store of `host` to the Local execution mode over a loopback composition, as every
+/// `serve` does: the first binds the empty store, a later one attaches to that binding.
+fn bind_local_mode(host: &mut ErasureExecutionHostV1) -> Option<GatewayModeBindingV1> {
+    bind_gateway_mode_v1(
+        GatewayModeProfileIdV1::Local,
+        GatewayServeCompositionV1 {
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            owntracks_owner_key: None,
+            fork_admission_socket: None,
+            ledger_source: None,
+            network_grants: BTreeSet::new(),
+        },
+        host,
+    )
+    .ok()
+}
+
+/// Provision the fixture Local Principal of the `authorized` composition into `store`: it may
+/// create Timelines and read their Events as the fixture actor, and holds no action or signal
+/// grant. Only its document is fixture data.
+fn provision_store(store: &ScratchStore) -> Option<()> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
@@ -197,7 +230,7 @@ fn provisioned_store() -> Option<ScratchStore> {
                 .ok()
                 .and_then(|mut opened| provision_local_principal(&mut opened, &provision).ok())
         })
-        .map(|_| store)
+        .map(drop)
 }
 
 /// One sub-case's `SQLite` file in the temporary directory, removed with its journal files when

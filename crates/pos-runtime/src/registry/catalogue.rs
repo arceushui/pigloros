@@ -28,9 +28,6 @@ use crate::{
     output_admission::{OutputPolicyBindingV1, OutputPolicySourceV1},
 };
 
-/// Executable profile selected by every reviewed host catalogue entry.
-const CATALOGUE_PROFILE_ID_V1: &str = "deterministic-local-v1";
-
 /// Factory compiled into one application composition root for its reviewed
 /// host catalogue entry.
 ///
@@ -326,6 +323,7 @@ fn first_broken_link<const N: usize>(
 /// the binding varies. Installed evidence resolves the host-verified EPF1,
 /// which is absent in Wave 8, so production sealing fails closed there.
 pub(super) fn seal_catalogue_bundle<F: InstalledPluginFactoryV1>(
+    profile_id: &str,
     entry: &HostCatalogueEntryV1<F>,
     frozen_configuration: &F::Configuration,
     evidence: CatalogueEvidenceV1,
@@ -352,7 +350,7 @@ pub(super) fn seal_catalogue_bundle<F: InstalledPluginFactoryV1>(
         })
     })
     .and_then(|configuration| {
-        OutputPolicyBindingV1::from_source(&*plugin, source, &details, CATALOGUE_PROFILE_ID_V1)
+        OutputPolicyBindingV1::from_source(&*plugin, source, &details, profile_id)
             .map(|binding| (configuration, binding))
     })
     .map_err(RuntimeError::from)
@@ -386,31 +384,47 @@ impl PluginRegistry {
     /// Register the product of one selected host catalogue entry.
     ///
     /// This is the sole production Plugin registration operation. The
-    /// trusted composition root selects `entry` and passes a frozen
-    /// configuration; runtime invokes the entry's factory once, checks the
-    /// actual Plugin and approver against the reviewed specification, freezes
-    /// CFG1, resolves the host-verified EPF1, checks every retained link, and
-    /// commits atomically. No installed Gateway EPF1 exists in Wave 8, so
-    /// registration fails closed before any registry mutation; positive
-    /// installed registration arrives with Wave 9 (#460/#462/#461).
+    /// trusted composition root selects `entry`, passes a frozen
+    /// configuration, and passes the ADR-058 profile its bound Gateway
+    /// execution mode selects for registration (ADR-134 §7, execution-mode profile field 9).
+    /// The selection never authorizes: runtime invokes the entry's factory
+    /// once, checks the actual Plugin and approver against the reviewed
+    /// specification, freezes CFG1, resolves the host-verified EPF1 of the
+    /// selected profile, checks every retained link, and commits atomically.
+    /// A mode that selects no profile (`None`) and a profile with no installed
+    /// EPF1 both fail closed before any registry mutation; positive installed
+    /// registration arrives with #461 (and #1372 for Air-Gapped).
     ///
     /// # Errors
-    /// Rejects a foreign Plugin or approver, invalid configuration, an
-    /// unavailable installed EPF1, a broken artifact link, or a registration
-    /// conflict, without changing the registry.
+    /// Rejects an absent profile selection, a foreign Plugin or approver,
+    /// invalid configuration, an unavailable installed EPF1, a broken artifact
+    /// link, or a registration conflict, without changing the registry.
     pub fn register_from_host_catalogue_entry<F: InstalledPluginFactoryV1>(
         &mut self,
         entry: &HostCatalogueEntryV1<F>,
         frozen_configuration: &F::Configuration,
+        registration_profile_id: Option<&str>,
     ) -> Result<(), RuntimeError> {
-        self.register_catalogue_entry(entry, frozen_configuration, CatalogueEvidenceV1::Installed)
+        registration_profile_id
+            .ok_or(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" },
+            ))
+            .and_then(|profile_id| {
+                self.register_catalogue_entry(
+                    entry,
+                    frozen_configuration,
+                    CatalogueEvidenceV1::Installed,
+                    profile_id,
+                )
+            })
     }
 
     /// Register a selected catalogue entry with nonproduction evidence.
     ///
     /// The factory, reviewed specification checks, link checks and atomic
     /// commit are those of [`Self::register_from_host_catalogue_entry`]; only
-    /// the evidence differs. Generated source and draft EPF1 bytes never
+    /// the evidence differs, and the fixture names the Draft profile whose
+    /// generated EPF1 it uses. Generated source and draft EPF1 bytes never
     /// yield a registration pin, admitted composition, or append permission.
     ///
     /// # Errors
@@ -421,8 +435,14 @@ impl PluginRegistry {
         &mut self,
         entry: &HostCatalogueEntryV1<F>,
         frozen_configuration: &F::Configuration,
+        draft_profile_id: &str,
     ) -> Result<(), RuntimeError> {
-        self.register_catalogue_entry(entry, frozen_configuration, CatalogueEvidenceV1::Generated)
+        self.register_catalogue_entry(
+            entry,
+            frozen_configuration,
+            CatalogueEvidenceV1::Generated,
+            draft_profile_id,
+        )
     }
 
     fn register_catalogue_entry<F: InstalledPluginFactoryV1>(
@@ -430,8 +450,9 @@ impl PluginRegistry {
         entry: &HostCatalogueEntryV1<F>,
         frozen_configuration: &F::Configuration,
         evidence: CatalogueEvidenceV1,
+        profile_id: &str,
     ) -> Result<(), RuntimeError> {
-        seal_catalogue_bundle(entry, frozen_configuration, evidence)
+        seal_catalogue_bundle(profile_id, entry, frozen_configuration, evidence)
             .and_then(|bundle| self.commit_catalogue_bundle(bundle))
     }
 
