@@ -87,8 +87,9 @@ the final filename itself is protected atomically with create-new semantics.
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 
 ```bash
-# One-time per clone — enable the versioned pre-commit hook
-# (fmt, rust-test-policy, lockfile generation, and targeted Clippy):
+# One-time per clone — enable the versioned pre-commit and pre-push hooks
+# (pre-commit: cargo fmt, full staged Trunk check, lockfile check, targeted
+# Clippy; pre-push: full Trunk check over the pushed commits):
 git config core.hooksPath .githooks
 ```
 
@@ -196,7 +197,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 | Gate | Tool | What it bans / enforces |
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
-| Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
+| Local git hooks | Versioned `.githooks/pre-commit` and `.githooks/pre-push` running the full **Trunk check** | Block a commit or push that adds an issue from any enabled Trunk linter or formatter (check-only, nothing rewritten) |
 | Runtime `#[ignore]` | CI `cargo nextest run --run-ignored all` (local `cargo test -- --include-ignored`) + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report no ignored or skipped test |
 | Change risk | pinned **cargo-crap** + `scripts/check_cargo_crap_report.py` | Existing scores cannot regress; new functions must score ≤30 |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
@@ -204,17 +205,21 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 #### Git hooks (local)
 
 Git does not activate repository hooks automatically on clone. Enable the
-versioned pre-commit hook once:
+versioned hooks once:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook fails closed if Trunk is unavailable, then runs `rust-test-policy` on
-the staged files before its Cargo checks:
+Both hooks fail closed if Trunk is unavailable whenever there is something to
+check. Trunk's own git-hook actions are disabled in `.trunk/trunk.yaml` so that
+Trunk never repoints `core.hooksPath`.
 
-- **pre-commit:** `cargo fmt`, Trunk `rust-test-policy`, `Cargo.lock`
-  regeneration/staging after manifest changes, and targeted Clippy.
+- **pre-commit:** `cargo fmt --check`, the full Trunk check of the staged
+  changes (every enabled linter and formatter, check-only), a staged
+  `Cargo.lock` check after manifest changes, and targeted Clippy.
+- **pre-push:** the full Trunk check over the commits being pushed (check-only);
+  branch deletions and pushes with no new commits are skipped.
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
 and code inside `#[cfg(test)]` modules. CI requires **at least 99% lines and 99% regions**.
