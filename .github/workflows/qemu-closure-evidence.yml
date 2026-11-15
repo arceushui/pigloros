@@ -1,0 +1,124 @@
+name: qemu-closure-evidence
+
+# #444 part (a), ADR-087 gate 5: boot the pinned NixOS 26.05 closure once per
+# architecture under QEMU TCG on GitHub-hosted runners and record its packaged
+# kernel, keyring and mountfsd state. CI uses the public dev/test trust domain;
+# the release signing key stays offline (ADR-087 Part C.4).
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/qemu-closure-evidence.yml
+      - deploy/nixos/**
+      - scripts/check_qemu_closure_evidence.py
+      - scripts/test_check_qemu_closure_evidence.py
+      - scripts/check_qemu_closure_workflow_policy.py
+      - scripts/test_check_qemu_closure_workflow_policy.py
+      - scripts/check_asan_ci_policy.py
+      - scripts/check_owner_runtime_custody_policy.py
+      - scripts/install-pinned-nix.sh
+      - scripts/qemu-closure-evidence.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-closure-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce the evidence workflow and producer pins
+        run: python scripts/check_qemu_closure_workflow_policy.py
+      - name: Test the evidence workflow policy
+        run: python scripts/test_check_qemu_closure_workflow_policy.py
+      - name: Test the evidence checker
+        run: python scripts/test_check_qemu_closure_evidence.py
+
+  evidence:
+    name: evidence (${{ matrix.architecture }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # The packaged kernel is rebuilt from source with the dev/test certificate.
+    timeout-minutes: 345
+    env:
+      EVIDENCE_ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reclaim unused SDK headroom
+        if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          printf 'CI SDK headroom before (bytes)\n'
+          df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+          printf 'CI SDK headroom before (inodes)\n'
+          df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+          ci_root_device="$(stat -c '%d' -- /)"
+          for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+            if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then
+              printf 'CI SDK absent: %s\n' "${ci_sdk_path}"
+              continue
+            fi
+            printf 'CI SDK candidate: %s\n' "${ci_sdk_path}"
+            test -d "${ci_sdk_path}"
+            test ! -L "${ci_sdk_path}"
+            test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"
+            ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
+            printf 'CI SDK device: %s root=%s sdk=%s\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
+            test "${ci_sdk_device}" = "${ci_root_device}"
+            sudo du -sx -B1 -- "${ci_sdk_path}"
+            sudo rm -rf --one-file-system -- "${ci_sdk_path}"
+            printf 'CI SDK removed: %s\n' "${ci_sdk_path}"
+          done
+          printf 'CI SDK headroom after (bytes)\n'
+          df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+          printf 'CI SDK headroom after (inodes)\n'
+          df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+      - name: Install the hash-pinned Nix release
+        run: bash scripts/install-pinned-nix.sh
+      - name: Build the pinned guest and record its store identities
+        run: bash scripts/qemu-closure-evidence.sh build "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-closure-evidence"
+      - name: Boot the guest under QEMU TCG without network
+        run: bash scripts/qemu-closure-evidence.sh boot "${EVIDENCE_ARCHITECTURE}" "${RUNNER_TEMP}/qemu-closure-evidence"
+      - name: Check the recorded evidence
+        run: >
+          python scripts/check_qemu_closure_evidence.py
+          --architecture "${EVIDENCE_ARCHITECTURE}"
+          --certificate deploy/nixos/dev-trust/root-hash-dev-test.crt
+          --flake-lock deploy/nixos/flake.lock
+          --verdict "${RUNNER_TEMP}/qemu-closure-evidence/checker-verdict.json"
+          "${RUNNER_TEMP}/qemu-closure-evidence"
+      - name: Hash every evidence file
+        run: bash scripts/qemu-closure-evidence.sh seal "${RUNNER_TEMP}/qemu-closure-evidence"
+      - name: Publish the hashed evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qemu-closure-evidence-${{ matrix.architecture }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/qemu-closure-evidence/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain failed-run diagnostics, which are not evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qemu-closure-diagnostics-${{ matrix.architecture }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/qemu-closure-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
