@@ -276,6 +276,12 @@ mod served {
             "361f956939882f237b9bedde8cfb696bafed4edc7102abc753100eeea2b28842"
         );
         assert_eq!(created["parent_revision"], Value::Null);
+        // Revision 1 is the room Timeline's first Event; its cursor observes
+        // the next one.
+        assert_eq!(created["commit"]["seq"], 1);
+        assert!(created["commit"]["next_cursor"]
+            .as_str()
+            .is_some_and(|cursor| cursor.ends_with(".2")));
         assert_eq!(
             created["mode_profile"]["mode_profile_id"],
             "gateway-mode-local-v1"
@@ -340,6 +346,14 @@ mod served {
             (status, &derived["revision"], &derived["parent_revision"]),
             (StatusCode::CREATED, &json!(2), &json!(1))
         );
+        // A derive claims on the room Timeline, so revision 2 is its third
+        // Event, as the frozen golden example shows.
+        let golden_derive = golden("scenario-room-derive")?;
+        assert_eq!(derived["commit"]["seq"], golden_derive["commit"]["seq"]);
+        assert_eq!(derived["commit"]["seq"], 3);
+        assert!(derived["commit"]["next_cursor"]
+            .as_str()
+            .is_some_and(|cursor| cursor.ends_with(".4")));
         assert_eq!(shape(&derived), shape(&golden("scenario-room-derive")?));
         let (status, duplicate) = post(app, &revisions, Some("k-3"), &derive).await?;
         assert_eq!((status, &duplicate), (StatusCode::OK, &derived));
@@ -637,6 +651,19 @@ mod served {
             .await;
         assert!(matches!(admitted, Ok(RoomOutcomeV1::Committed(_))));
         assert_eq!(revocation.await??, StatusCode::CREATED);
+        // Fail-closed: even an exact retry of the first create is refused
+        // once its consent is revoked.
+        let (status, problem) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("held"),
+            &json!({"descriptor": served.descriptor(1)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
         let (status, problem) = post(
             &served.app,
             "/v1/scenario-rooms",
@@ -674,6 +701,7 @@ mod served {
             [
                 AuthorizationOutcomeV1::ConsentMissing,
                 AuthorizationOutcomeV1::ConsentMissing,
+                AuthorizationOutcomeV1::RevokedAtFence,
                 AuthorizationOutcomeV1::RevokedAtFence,
                 AuthorizationOutcomeV1::RevokedAtFence,
             ]

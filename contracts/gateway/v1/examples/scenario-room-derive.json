@@ -130,9 +130,9 @@
         "schema_id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
         "timeline_id": "01JC0GATEWAYW90T1ME11NE001",
         "event_id": "01JC0GATEWAYW9EVENT0000002",
-        "seq": 2,
+        "seq": 3,
         "event_schema_id": "room.revision.v1",
-        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.3"
+        "next_cursor": "v1.0505050505050505050505050505050505050505050505050505050505050505.01JC0GATEWAYW90T1ME11NE001.4"
       }
     }
   }

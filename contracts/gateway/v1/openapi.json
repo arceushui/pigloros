@@ -894,7 +894,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal).",
+            "description": "`unauthorized` (including a `persona` participant the Principal's grant does not cover), `revoked` or `consent-invalid` (a `privacy_export_ref` that names no consent granted to the Principal). The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -924,7 +924,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, 64 rooms), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota. A room's creation claims on the host's request Timeline, which the root-Timeline ceiling keeps far below its own Event ceiling.",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1036,7 +1036,7 @@
             }
           },
           "403": {
-            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`.",
+            "description": "`unauthorized`, `revoked` or `consent-invalid`, as for `createScenarioRoom`. The consent is checked before an exact retry is answered, so a retry after the consent was revoked is `403 revoked` (fail-closed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1066,7 +1066,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, 64 rooms), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota. A room's creation claims on the host's request Timeline, which the root-Timeline ceiling keeps far below its own Event ceiling.",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, shared by every root Timeline: rooms, the request Timeline and ordinary Timelines), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota.",
             "content": {
               "application/problem+json": {
                 "schema": {

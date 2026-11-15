@@ -84,7 +84,13 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   and the revision's `commit` is its `room.revision.v1` Event. `privacy_export_ref` must name a consent the
   acting Principal holds (the `consent_ref` of its `consent.granted.v1` Event): one it does not
   hold is `403 consent-invalid` and a revoked one `403 revoked`, checked under the operation's
-  permit, so a revocation takes effect from the next room operation.
+  permit, so a revocation takes effect from the next room operation. The check precedes the
+  Idempotency-Key lookup, so even an exact retry after the consent was revoked is `403 revoked`:
+  a revoked consent stops all protected work on the room, replays included. Under decision 2a the
+  consent need not match the room's purpose or data categories; a later #309 consent scope may
+  narrow that. A room's Timeline is an ordinary root Timeline: it shares the root-Timeline
+  ceiling and its `room.revision.v1` and `room.request.v1` Events are readable through
+  `GET /v1/timelines/{timeline_id}/events` with the `timeline.events.read` grant.
 - A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
   `400 invalid-request` before the authority decision and before any lookup; every other
   answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
