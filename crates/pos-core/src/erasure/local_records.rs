@@ -250,7 +250,7 @@ impl LocalErasureSignerIdentityV1 {
 pub fn local_erasure_signer_key_id_v1(public_key: &[u8; 32]) -> String {
     let mut id = String::with_capacity(ERASURE_SIGNER_KEY_PREFIX_V1.len() + 64);
     id.push_str(ERASURE_SIGNER_KEY_PREFIX_V1);
-    crate::lower_hex::append_hex(&mut id, public_key);
+    crate::append_hex(&mut id, public_key);
     id
 }
 

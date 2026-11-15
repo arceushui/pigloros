@@ -103,7 +103,9 @@ fn trust_under(operator: &SigningKey, revoked: &[&str]) -> TestResult<CurrentTru
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("trust.db");
     DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &release(), &genesis)?;
-    Ok(DeploymentTrustPolicyRegistryV1::open_current(&path, release())?.current_trust_policy()?)
+    let registry = DeploymentTrustPolicyRegistryV1::open_current(&path, release())?;
+    let current = registry.current_trust_policy()?;
+    Ok(current)
 }
 
 fn execution_binding() -> LocalErasureExecutionBindingV1 {
