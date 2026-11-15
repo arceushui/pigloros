@@ -1254,3 +1254,35 @@ fn retire_and_reset_calls_admit_no_member_request() -> TestResult {
     }
     Ok(())
 }
+
+/// R6.2(3): a credential that fails verification or its nonce consumes no
+/// trusted wall sample, so one sample still serves the next valid call.
+#[test]
+fn a_refused_credential_consumes_no_wall_sample() -> TestResult {
+    let leaf = grant(1, 1, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let world = World::new(std::slice::from_ref(&leaf))?;
+    let attestation = snapshot(&[&leaf])?;
+    let mut authority = install(
+        CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?,
+        attestation,
+        &[NOW],
+    )?;
+    let request = Request::derive(&initialize())?;
+    let wrong_nonce = sign(
+        AuthenticatedPrincipalRecordV1 {
+            operation_nonce: [0x5a; 32],
+            ..world.record(&initialize())?
+        },
+        SEED,
+    )?;
+    for refused in [wrong_nonce, sign(world.record(&initialize())?, [9; 32])?] {
+        assert_eq!(
+            authority.authenticate(&refused, request).err(),
+            Some(Error::EvidenceUnavailable)
+        );
+    }
+    assert!(authority
+        .authenticate(&world.credential(&initialize())?, request)
+        .is_ok());
+    Ok(())
+}
