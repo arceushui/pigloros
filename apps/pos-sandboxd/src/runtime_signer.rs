@@ -25,7 +25,7 @@ use std::os::unix::fs::MetadataExt;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use pos_reference::sandbox_provider_protocol::{
     ExecutionRelease, ExecutionReleaseFields, RuntimeSigned, SandboxProviderProtocolError,
-    SelfDigested,
+    SelfDigested, Verified,
 };
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 use zeroize::Zeroizing;
@@ -63,7 +63,7 @@ impl<'a> AdmittedRuntimeKey<'a> {
 
     /// The admitted key ID.
     #[must_use]
-    pub const fn key_id(&self) -> &'a str {
+    pub(crate) const fn key_id(&self) -> &'a str {
         self.key_id
     }
 }
@@ -89,28 +89,28 @@ pub enum RuntimeSignerError {
     Io(#[from] io::Error),
 }
 
-/// Sign `record` with `signer`, and return the signature only once it
+/// Sign `record` with `signer`, and return it signed only once the signature
 /// verified under the admitted key (R9 §5, "verify before emission").
 ///
 /// # Errors
-/// `KeyIdMismatch` when the signer holds another key, and `Unverified` when
-/// the signature does not verify.
+/// `KeyIdMismatch` when the signer or the record names another key than the
+/// admitted one, and `Unverified` when the signature does not verify.
 pub fn sign_verified<S, M>(
     signer: &S,
     admitted: AdmittedRuntimeKey<'_>,
-    record: &SelfDigested<M>,
-) -> Result<[u8; 64], RuntimeSignerError>
+    record: SelfDigested<M>,
+) -> Result<Verified<M>, RuntimeSignerError>
 where
     S: RuntimeAttestationSigner,
     M: RuntimeSigned,
 {
-    if signer.runtime_attestation_key_id() != admitted.key_id {
+    if signer.runtime_attestation_key_id() != admitted.key_id || record.key_id() != admitted.key_id
+    {
         return Err(RuntimeSignerError::KeyIdMismatch);
     }
-    let signature = signer.sign(record);
+    let signature = signer.sign(&record);
     record
-        .verify(&signature, admitted.key)
-        .map(|()| signature)
+        .verify(signature, admitted.key)
         .map_err(|_| RuntimeSignerError::Unverified)
 }
 
@@ -182,8 +182,8 @@ impl RuntimeAttestationSigner for KeyFileRuntimeSigner {
 /// Build, sign and verify one `ReleaseV1` under the admitted key.
 ///
 /// # Errors
-/// `KeyIdMismatch` if the fields or the signer name another key than the
-/// admitted one, `Protocol` for invalid fields, and `Unverified` for a
+/// `Protocol` for invalid fields, `KeyIdMismatch` if the fields or the
+/// signer name another key than the admitted one, and `Unverified` for a
 /// signature that does not verify.
 pub fn issue_release<S>(
     signer: &S,
@@ -193,15 +193,10 @@ pub fn issue_release<S>(
 where
     S: RuntimeAttestationSigner,
 {
-    if fields.runtime_attestation_key_id != admitted.key_id {
-        return Err(RuntimeSignerError::KeyIdMismatch);
-    }
     ExecutionRelease::self_digested(fields)
         .map_err(RuntimeSignerError::from)
-        .and_then(|record| {
-            sign_verified(signer, admitted, &record)
-                .and_then(|signature| ExecutionRelease::new(record, signature).map_err(Into::into))
-        })
+        .and_then(|record| sign_verified(signer, admitted, record))
+        .map(ExecutionRelease::new)
 }
 
 #[cfg(test)]
@@ -340,16 +335,18 @@ mod tests {
         ));
         let record = ExecutionRelease::self_digested(fields("runtime"))?;
         assert!(matches!(
-            sign_verified(&signer, admitted, &record),
+            sign_verified(&signer, admitted, record.clone()),
             Err(RuntimeSignerError::Unverified)
         ));
         let public = SigningKey::from_bytes(&[42; 32]).verifying_key();
-        let signature = sign_verified(
-            &signer,
-            AdmittedRuntimeKey::new("runtime", &public),
-            &record,
-        )?;
-        record.verify(&signature, &public)?;
+        // A record naming another key is not signed for the admitted one.
+        let other = ExecutionRelease::self_digested(fields("other"))?;
+        assert!(matches!(
+            sign_verified(&signer, AdmittedRuntimeKey::new("runtime", &public), other),
+            Err(RuntimeSignerError::KeyIdMismatch)
+        ));
+        let verified = sign_verified(&signer, AdmittedRuntimeKey::new("runtime", &public), record)?;
+        ExecutionRelease::new(verified).verify_signature(&public)?;
         Ok(())
     }
 }

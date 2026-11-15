@@ -35,12 +35,12 @@ mod cases {
         let cancel = AttemptCancel::new();
         let signal = cancel.signal();
         assert_eq!(cancel.source(), None);
-        assert!(!cancel.is_requested());
+        assert!(cancel.source().is_none());
         assert!(!signal.is_requested());
         cancel.cancel(CancelSource::Revocation);
         cancel.cancel(CancelSource::CancelRequest);
         assert_eq!(cancel.source(), Some(CancelSource::Revocation));
-        assert!(cancel.is_requested());
+        assert!(cancel.source().is_some());
         assert!(signal.is_requested());
         let other = AttemptCancel::default();
         other.cancel(CancelSource::CancelRequest);
@@ -54,7 +54,7 @@ mod cases {
         scenario
             .cancel
             .cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
-        assert!(scenario.cancel.is_requested());
+        assert!(scenario.cancel.source().is_some());
         let failed = scenario.fails().await?;
         assert!(matches!(failed.error, ExecuteError::Cancelled));
         assert_eq!(failed.unit, UnitState::Killed);
@@ -147,7 +147,7 @@ mod cases {
         let recheck = root_for(&scenario.log, &job.attempt);
         let execution = scenario.run_on(&LoopbackNetwork, job, recheck).await?;
         assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
-        assert!(!scenario.cancel.is_requested());
+        assert!(scenario.cancel.source().is_none());
         Ok(())
     }
 

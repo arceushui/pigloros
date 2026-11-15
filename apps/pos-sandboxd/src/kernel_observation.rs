@@ -566,6 +566,10 @@ pub enum KernelObservationError {
     /// The manager's `MainPID` or `InvocationID` could not be read.
     #[error("the unit identity could not be read")]
     Identity,
+    /// The attempt deadline passed while the manager's `MainPID` or
+    /// `InvocationID` was read.
+    #[error("the attempt deadline passed during the unit identity read")]
+    IdentityExpired,
     /// The unit has no main process.
     #[error("the unit has no main process")]
     NoMainProcess,

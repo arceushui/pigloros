@@ -27,6 +27,9 @@ pub trait RuntimeSigned: runtime_signed_sealed::Sealed {
     const MAGIC: &'static str;
     /// The validated unsigned fields of a record of this kind.
     type Body;
+
+    /// The runtime-attestation key ID the record names.
+    fn key_id(body: &Self::Body) -> &str;
 }
 
 /// RLS1, `ReleaseV1`.
@@ -38,6 +41,10 @@ impl runtime_signed_sealed::Sealed for Rls1 {}
 impl RuntimeSigned for Rls1 {
     const MAGIC: &'static str = "RLS1";
     type Body = ExecutionReleaseFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
 }
 
 /// One complete, validated record of kind `M` and its self-digest.
@@ -72,20 +79,57 @@ impl<M: RuntimeSigned> SelfDigested<M> {
         signature_message(M::MAGIC, &self.digest)
     }
 
-    /// Verify `signature` over this record's message under `key`, strictly.
+    /// The runtime-attestation key ID the record names.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        M::key_id(&self.body)
+    }
+
+    /// Verify `signature` over this record's message under `key`, strictly:
+    /// the only way to a [`Verified`] record.
     ///
     /// # Errors
     /// `SignatureInvalid` when it does not verify.
     pub fn verify(
-        &self,
-        signature: &[u8; 64],
+        self,
+        signature: [u8; 64],
         key: &VerifyingKey,
-    ) -> Result<(), SandboxProviderProtocolError> {
-        key.verify_strict(&self.signature_message(), &Signature::from_bytes(signature))
-            .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)
+    ) -> Result<Verified<M>, SandboxProviderProtocolError> {
+        key.verify_strict(
+            &self.signature_message(),
+            &Signature::from_bytes(&signature),
+        )
+        .map(|()| Verified {
+            record: self,
+            signature,
+        })
+        .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)
+    }
+}
+
+/// A self-digested record with a signature that verified under the key it
+/// was checked against. Only [`SelfDigested::verify`] constructs one, so no
+/// signed record can be assembled from an unverified signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Verified<M: RuntimeSigned> {
+    record: SelfDigested<M>,
+    signature: [u8; 64],
+}
+
+impl<M: RuntimeSigned> Verified<M> {
+    /// The verified record.
+    #[must_use]
+    pub const fn record(&self) -> &SelfDigested<M> {
+        &self.record
     }
 
-    pub(super) fn into_body(self) -> M::Body {
-        self.body
+    /// The verified signature.
+    #[must_use]
+    pub const fn signature(&self) -> [u8; 64] {
+        self.signature
+    }
+
+    pub(super) fn into_parts(self) -> (M::Body, [u8; 32], [u8; 64]) {
+        (self.record.body, self.record.digest, self.signature)
     }
 }

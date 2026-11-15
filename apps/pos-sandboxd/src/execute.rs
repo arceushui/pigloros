@@ -283,12 +283,6 @@ impl AttemptCancel {
         });
     }
 
-    /// Whether cancellation was requested.
-    #[must_use]
-    pub fn is_requested(&self) -> bool {
-        self.0.borrow().is_some()
-    }
-
     /// The source of the first cancellation request, if one was made.
     #[must_use]
     pub fn source(&self) -> Option<CancelSource> {
@@ -756,9 +750,6 @@ struct Anchored {
     bounds: Bounds,
 }
 
-/// Submit the claimed attempt and bind its cgroup, then read the unit's
-/// activation and the cgroup's pre-release evidence. A failure of the read
-/// kills the unit.
 /// A verified, anchored start: the start, its cgroup, its pre-release
 /// evidence, its deadlines and its RQE1 digest.
 type Submitted<H> = (
@@ -769,6 +760,9 @@ type Submitted<H> = (
     [u8; 32],
 );
 
+/// Submit the claimed attempt and bind its cgroup, then read the unit's
+/// activation and the cgroup's pre-release evidence and record the start as
+/// RQE1. A failure of the read or of the record kills the unit.
 async fn submit_anchored<H>(
     host: &H,
     attempt: &AdmittedAttempt,

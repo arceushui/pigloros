@@ -6,7 +6,8 @@
 //! transient unit's current `MainPID` and every launcher-derived binding equals
 //! held or independently observed evidence. It then rechecks current authority
 //! through the [`ReleaseRecheck`] port and sends exactly one `ReleaseV1`,
-//! signed through the [`ReleaseSigner`] port. Neither message is retried.
+//! signed through the [`crate::RuntimeAttestationSigner`] port and verified
+//! under the admitted key first. Neither message is retried.
 //!
 //! Current RVS1/APT1/TRS1 digests and epochs come from the held-image
 //! authority (PR 2); the composition (PR 4) supplies them behind

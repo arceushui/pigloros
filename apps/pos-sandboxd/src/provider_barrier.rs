@@ -227,6 +227,28 @@ where
     }
 }
 
+/// The observation error of an identity read the recheck refused: a read
+/// cut off at the attempt deadline is an expiry, and any other a failed
+/// manager read.
+const fn identity_error(refusal: &RecheckRefusal) -> KernelObservationError {
+    if matches!(refusal, RecheckRefusal::Expired) {
+        KernelObservationError::IdentityExpired
+    } else {
+        KernelObservationError::Identity
+    }
+}
+
+/// Why the recheck's observation failed (ADR-069 R9 §4.6.1): its manager
+/// read failed (8), the deadline passed during that read (10), or the
+/// observation itself could not be made (6).
+fn recheck_observation(unavailable: ObservedReadbackUnavailable) -> RecheckRefusal {
+    match unavailable.0 {
+        KernelObservationError::Identity => RecheckRefusal::Identity(Box::new(unavailable)),
+        KernelObservationError::IdentityExpired => RecheckRefusal::Expired,
+        _ => RecheckRefusal::RecheckObservation(unavailable),
+    }
+}
+
 /// What the unit looked like when `ReadyV1` was verified against it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UnitSnapshot {
@@ -370,9 +392,7 @@ where
     /// Observe again, by the same procedure, and require the frozen
     /// observation: then its KOE1 digest.
     fn observed_again(&self, root: &CheckedRoot) -> Result<[u8; 32], RecheckRefusal> {
-        let again = self
-            .observe(root)
-            .map_err(RecheckRefusal::RecheckObservation)?;
+        let again = self.observe(root).map_err(recheck_observation)?;
         // Bound to a local so the `RefCell` borrow ends before `again` drops
         // (the tail-expression drop order that Rust 2024 changes).
         let digest = self
@@ -395,7 +415,7 @@ where
                     self.read_again(&handle, self.identity.invocation_id(self.unit_name))
                         .map(|invocation| (main_pid, invocation))
                 })
-                .map_err(|_| KernelObservationError::Identity)
+                .map_err(|refusal| identity_error(&refusal))
         };
         let context = ObservationContext::new(
             self.observing.cgroup,
@@ -453,7 +473,7 @@ pub enum BarrierError {
     /// `/proc/<MainPID>/exe` could not be observed.
     #[error("the launcher executable could not be observed")]
     LauncherIdentity,
-    /// The attempt deadline passed before the release could start.
+    /// The attempt deadline passed before any `ReadyV1` was received.
     #[error("the attempt deadline passed before the release")]
     Expired,
     /// The bounded receive could not be armed.
@@ -469,25 +489,33 @@ pub enum BarrierError {
     /// use and never retried.
     #[error("a release was already attempted")]
     AlreadyAttempted,
+    /// `ReleaseV1` was sent, and the attempt deadline passed before the
+    /// barrier returned.
+    #[error("the attempt deadline passed after the release")]
+    ExpiredAfterRelease,
 }
 
 impl BarrierError {
-    /// The TME1 `barrier-failure` this failure records (ADR-069 R9 §4.6.1,
-    /// with the owner readings of 2026-11-15).
+    /// The TME1 `barrier-failure` this failure records (ADR-069 R9 §4.6.1;
+    /// R9 §11 O5 classes channel faults, among them "ReadyV1 unavailable",
+    /// as code 9 and content faults, among them "recheck expiry", as 10).
     ///
-    /// `None` is recorded where R9 names no barrier failure: a cancellation
-    /// (TME1 `cancel-source` records it), a first observation that failed
-    /// (KOE1 status 2 records it), a signature that did not verify under the
-    /// admitted key (a provider fault), and the failures that precede the
-    /// release itself. Each leaves the classifier's fail-closed fallback or
-    /// another candidate to decide the terminal code.
+    /// Before any `ReadyV1` was received, the barrier could not read the
+    /// unit, hold its launcher, arm the receive or meet the deadline: no
+    /// `ReadyV1` became available, which is `0 ReadyUnavailable`. After
+    /// `ReleaseV1` was sent the attempt has progress 2, where R9 §4.6.3
+    /// requires a null `barrier-failure`. `None` is also recorded for a
+    /// cancellation (TME1 `cancel-source` records it), a first observation
+    /// that failed (KOE1 status 2 records it), a signature that did not
+    /// verify under the admitted key (a provider fault), and the failures
+    /// that precede the launch; the classifier's fallback or another
+    /// candidate decides the terminal code.
     #[must_use]
     pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
-            Self::Identity(_) | Self::LauncherIdentity | Self::Timeout(_) => {
+            Self::Identity(_) | Self::LauncherIdentity | Self::Timeout(_) | Self::Expired => {
                 Some(BarrierFailure::ReadyUnavailable)
             }
-            Self::Expired => Some(BarrierFailure::RecheckExpired),
             Self::Release(release) => release_failure(release),
             Self::Refused(refusal) => refusal.barrier_failure(),
             Self::AttemptMismatch
@@ -495,7 +523,8 @@ impl BarrierError {
             | Self::Channel(_)
             | Self::UnitEndTaken
             | Self::RuntimeFlavor
-            | Self::AlreadyAttempted => None,
+            | Self::AlreadyAttempted
+            | Self::ExpiredAfterRelease => None,
         }
     }
 }
@@ -516,7 +545,7 @@ const fn release_failure(release: &ReleaseBarrierError) -> Option<BarrierFailure
 }
 
 impl RecheckRefusal {
-    /// The TME1 `barrier-failure` this refusal records.
+    /// The TME1 `barrier-failure` this refusal records (ADR-069 R9 §4.6.1).
     #[must_use]
     pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
@@ -758,6 +787,13 @@ fn release_window_at(
         .ok_or(BarrierError::Expired)
 }
 
+/// The release was sent: the attempt deadline must not have passed since.
+fn released_by(deadline: Instant) -> Result<(), BarrierError> {
+    remaining_until(deadline)
+        .map(|_| ())
+        .map_err(|_| BarrierError::ExpiredAfterRelease)
+}
+
 fn remaining_until(deadline: Instant) -> Result<Duration, BarrierError> {
     deadline
         .checked_duration_since(Instant::now())
@@ -898,7 +934,7 @@ where
         let release = released
             .map_err(|error| bounded.refusal.take().map_or(error, BarrierError::Refused))?;
         self.sent = Some(release);
-        remaining_until(attempt.deadline()).map(|_| ())
+        released_by(attempt.deadline())
     }
 
     const fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {

@@ -115,7 +115,7 @@ pub use operations::{
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
     SandboxReconcileResponse,
 };
-pub use signing::{Rls1, RuntimeSigned, SelfDigested};
+pub use signing::{Rls1, RuntimeSigned, SelfDigested, Verified};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,

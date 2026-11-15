@@ -106,8 +106,9 @@ fn release() -> Result<ExecutionRelease, Box<dyn Error>> {
     let key = signing_key();
     let record = ExecutionRelease::self_digested(release_fields()?)?;
     let signature = key.sign(&record.signature_message()).to_bytes();
-    record.verify(&signature, &key.verifying_key())?;
-    Ok(ExecutionRelease::new(record, signature)?)
+    Ok(ExecutionRelease::new(
+        record.verify(signature, &key.verifying_key())?,
+    ))
 }
 
 #[test]
@@ -278,15 +279,32 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
             Err(SandboxProviderProtocolError::FieldOutOfBounds)
         );
     }
+    // Only a signature that verifies under the key yields a signed RLS1.
     let record = ExecutionRelease::self_digested(release_fields()?)?;
-    assert_eq!(
-        ExecutionRelease::new(record.clone(), [0; 64]),
-        Err(SandboxProviderProtocolError::SignatureInvalid)
-    );
-    assert_eq!(
-        record.verify(&[1; 64], &signing_key().verifying_key()),
-        Err(SandboxProviderProtocolError::SignatureInvalid)
-    );
+    let key = signing_key();
+    for signature in [
+        [0; 64],
+        [1; 64],
+        SigningKey::from_bytes(&[43; 32])
+            .sign(&record.signature_message())
+            .to_bytes(),
+    ] {
+        assert_eq!(
+            record
+                .clone()
+                .verify(signature, &key.verifying_key())
+                .map(|_| ()),
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        );
+    }
+    let signature = key.sign(&record.signature_message()).to_bytes();
+    let verified = record.clone().verify(signature, &key.verifying_key())?;
+    assert_eq!(verified.record(), &record);
+    assert_eq!(verified.signature(), signature);
+    assert_eq!(record.key_id(), "runtime-key");
+    let release = ExecutionRelease::new(verified);
+    assert_eq!(release.digest, record.digest());
+    release.verify_signature(&key.verifying_key())?;
     Ok(())
 }
 

@@ -1429,7 +1429,7 @@ mod kernel_observation {
 }
 
 /// Every barrier failure records its R9 `barrier-failure` code (ADR-069 R9
-/// §4.6.1 and the owner readings of 2026-11-15).
+/// §4.6.1, §4.6.3 and §11 O5).
 #[test]
 fn every_barrier_failure_records_its_r9_code() {
     use BarrierFailure as Code;
@@ -1445,7 +1445,8 @@ fn every_barrier_failure_records_its_r9_code() {
             BarrierError::Timeout(io::Error::other("timeout")),
             Some(Code::ReadyUnavailable),
         ),
-        (BarrierError::Expired, Some(Code::RecheckExpired)),
+        (BarrierError::Expired, Some(Code::ReadyUnavailable)),
+        (BarrierError::ExpiredAfterRelease, None),
         (
             BarrierError::Release(ReleaseBarrierError::ReadyUnavailable),
             Some(Code::ReadyUnavailable),
@@ -1520,4 +1521,42 @@ fn every_barrier_failure_records_its_r9_code() {
     for (error, code) in cases {
         assert_eq!(error.barrier_failure(), code, "{error:?}");
     }
+}
+
+/// A recheck's identity read that failed is barrier failure 8, one cut off
+/// at the deadline is 10, and any other unavailable observation is 6.
+#[test]
+fn a_recheck_observation_keeps_the_cause_of_its_identity_read() {
+    let unavailable = ObservedReadbackUnavailable;
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::Identity)),
+        RecheckRefusal::Identity(_)
+    ));
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::IdentityExpired)),
+        RecheckRefusal::Expired
+    ));
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::Exited)),
+        RecheckRefusal::RecheckObservation(_)
+    ));
+    assert_eq!(
+        identity_error(&RecheckRefusal::Expired),
+        KernelObservationError::IdentityExpired
+    );
+    assert_eq!(
+        identity_error(&RecheckRefusal::Identity(Box::new(IdentityDown))),
+        KernelObservationError::Identity
+    );
+}
+
+/// A release sent after the deadline passed is no barrier failure: the
+/// attempt has progress 2 (ADR-069 R9 §4.6.3).
+#[test]
+fn a_release_that_ends_past_the_deadline_is_no_barrier_failure() {
+    assert!(matches!(
+        released_by(Instant::now()),
+        Err(BarrierError::ExpiredAfterRelease)
+    ));
+    assert!(released_by(Instant::now() + Duration::from_secs(60)).is_ok());
 }

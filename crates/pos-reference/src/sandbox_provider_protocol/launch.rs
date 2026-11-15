@@ -15,7 +15,7 @@ use super::codec::{
     key_id, normalized_absolute_path, record_digest, require_signature, self_digested, signed,
     text_value, uint, uint_value, valid_key_id, verify_digest, verify_signature,
 };
-use super::{Rls1, SandboxExecutionMode, SandboxProviderProtocolError, SelfDigested};
+use super::{Rls1, SandboxExecutionMode, SandboxProviderProtocolError, SelfDigested, Verified};
 
 /// LPV1 is limited to 64 KiB before the provider-private hexadecimal encoding.
 const MAX_LAUNCH_PARAMETER_BYTES: usize = 64 * 1024;
@@ -432,25 +432,15 @@ impl ExecutionRelease {
             .map(|(digest, _)| SelfDigested::sealed(fields, digest))
     }
 
-    /// The signed record: `record` and the signature over its message.
-    ///
-    /// The caller verifies the signature under the admitted runtime key
-    /// before the record leaves the provider.
-    ///
-    /// # Errors
-    /// Rejects a zero signature.
-    pub fn new(
-        record: SelfDigested<Rls1>,
-        signature: [u8; 64],
-    ) -> Result<Self, SandboxProviderProtocolError> {
-        require_signature(&signature).map(|()| {
-            let digest = record.digest();
-            Self {
-                fields: record.into_body(),
-                digest,
-                signature,
-            }
-        })
+    /// The signed record of a verified signature.
+    #[must_use]
+    pub fn new(verified: Verified<Rls1>) -> Self {
+        let (fields, digest, signature) = verified.into_parts();
+        Self {
+            fields,
+            digest,
+            signature,
+        }
     }
 
     /// Exact canonical `RLS1` bytes.

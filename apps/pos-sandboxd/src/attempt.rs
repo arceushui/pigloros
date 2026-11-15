@@ -169,7 +169,7 @@ impl AdmittedAttempt {
 
     /// The self-digest of the AGR1 the attempt was admitted under.
     #[must_use]
-    pub const fn grant_digest(&self) -> [u8; 32] {
+    pub(crate) const fn grant_digest(&self) -> [u8; 32] {
         self.grant_digest
     }
 
