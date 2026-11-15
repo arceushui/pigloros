@@ -241,5 +241,4 @@ pub(super) fn rejects_malformed_encodings(
             "{case}"
         );
     }
-    Ok(())
 }
