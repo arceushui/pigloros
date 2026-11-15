@@ -1241,10 +1241,9 @@ struct PluginEntry {
     name: String,
     version: String,
     owned_event_types: Vec<Kind>,
-    /// The Plugin's declared capability, retained for the ADR-041 room
-    /// catalogue; `None` for an entry `register_driver` added, which has no
-    /// Plugin.
-    capability: Option<Capability>,
+    /// Whether the entry was registered from a Plugin, so an ADR-041 room
+    /// may name it; an entry `register_driver` added has no Plugin.
+    from_plugin: bool,
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     last_tick: Option<u128>,
@@ -4108,7 +4107,7 @@ impl PluginRegistry {
                 name,
                 version: plugin_version,
                 owned_event_types,
-                capability: None,
+                from_plugin: false,
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -4162,7 +4161,7 @@ impl PluginRegistry {
                 name,
                 version: "0.1.0".to_owned(),
                 owned_event_types: Vec::new(),
-                capability: None,
+                from_plugin: false,
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -4208,7 +4207,7 @@ impl PluginRegistry {
                 name,
                 version: plugin_version.to_owned(),
                 owned_event_types,
-                capability: None,
+                from_plugin: false,
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -5024,7 +5023,7 @@ mod tests {
                 name: "no-approver".to_owned(),
                 version: "test".to_owned(),
                 owned_event_types: Vec::new(),
-                capability: None,
+                from_plugin: false,
                 driver: None,
                 approver: None,
                 last_tick: None,
@@ -5052,7 +5051,7 @@ mod tests {
                 name: "missing-policy".to_owned(),
                 version: "test".to_owned(),
                 owned_event_types: Vec::new(),
-                capability: None,
+                from_plugin: false,
                 driver: None,
                 approver: Some(Box::new(MockActionApprover)),
                 last_tick: None,
@@ -8059,7 +8058,7 @@ mod tests {
                 name: "event-filter".to_owned(),
                 version: "0.1.0".to_owned(),
                 owned_event_types: Vec::new(),
-                capability: None,
+                from_plugin: false,
                 driver: Some(Box::new(EventDriver {
                     subscriptions: subscriptions.clone(),
                     observed: Arc::clone(&observed),
