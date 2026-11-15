@@ -1231,8 +1231,10 @@ impl AdmittedSandboxProvider {
         &self.syscall_set
     }
 
+    /// The selected BHC1 hard caps, one per limit ID in ID order.
     #[cfg(target_os = "linux")]
-    pub(crate) fn broker_hard_caps(&self) -> &[SandboxLimit] {
+    #[must_use]
+    pub fn broker_hard_caps(&self) -> &[SandboxLimit] {
         &self.broker_hard_caps
     }
 

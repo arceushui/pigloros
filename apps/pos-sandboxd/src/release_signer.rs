@@ -66,6 +66,12 @@ pub struct KeyFileReleaseSigner {
 }
 
 impl KeyFileReleaseSigner {
+    /// The signer of `key`, which the R11 §4.4 key file held, for the
+    /// SPM1-admitted `key_id`.
+    pub(crate) const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
+        Self { key, key_id }
+    }
+
     /// Load the seed from `file_name` beneath the held `directory`.
     ///
     /// # Errors
