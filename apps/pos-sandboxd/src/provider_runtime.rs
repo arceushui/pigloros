@@ -16,8 +16,8 @@
 //!    `min(BHC1 limit 13, 256)` slots.
 //! 6. **Key.** The SPI1 key file's public key must be the TRS1
 //!    runtime-attestation key that the SPM1 key ID names and the current
-//!    RVS1 does not revoke, as admission resolved it. It becomes the one R9 runtime-attestation
-//!    signer.
+//!    RVS1 does not revoke, as admission resolved it. It becomes the one
+//!    R9 runtime-attestation signer.
 //!
 //! The authority never changes afterwards (R11 D9): no step is repeated.
 
@@ -29,6 +29,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use ed25519_dalek::VerifyingKey;
+use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
@@ -103,7 +104,9 @@ impl ProviderRuntimeAuthority {
             return Err(ProviderStartupError::SelfBinding);
         }
         let installation = open_installation()?;
-        if installation.attempt_range().slots() < u128::from(required_slots(&admitted)) {
+        if installation.attempt_range().slots()
+            < u128::from(required_slots(admitted.provider().broker_hard_caps()))
+        {
             return Err(ProviderStartupError::SlotCount);
         }
         let key_id = admitted
@@ -167,10 +170,8 @@ fn runs_admitted_binary(admitted: &AdmittedSelectorProvider, executable: &Path) 
 }
 
 /// `min(BHC1 limit 13, 256)`.
-fn required_slots(admitted: &AdmittedSelectorProvider) -> u64 {
-    admitted
-        .provider()
-        .broker_hard_caps()
+fn required_slots(broker_hard_caps: &[SandboxLimit]) -> u64 {
+    broker_hard_caps
         .iter()
         .filter(|limit| limit.limit_id == ATTEMPT_LIMIT_ID)
         .map(|limit| limit.value)

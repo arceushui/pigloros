@@ -15,7 +15,9 @@ use pos_reference::selector::installation::{
 };
 use pos_reference::selector::SelectorBoundaryError;
 
-use super::{ProviderRuntimeAuthority, ProviderStartupError};
+use pos_reference::sandbox_provider_protocol::SandboxLimit;
+
+use super::{required_slots, ProviderRuntimeAuthority, ProviderStartupError};
 use crate::{ProviderInstallation, ProviderInstallationError, ReleaseSigner};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -233,4 +235,18 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
         assert_eq!(error.to_string(), text);
     }
     Ok(())
+}
+
+#[test]
+fn the_slot_requirement_is_bhc1_limit_13_capped_at_256() {
+    let limit = |limit_id, value| SandboxLimit { limit_id, value };
+    for (caps, expected) in [
+        (vec![limit(12, 1), limit(13, 300)], 256),
+        (vec![limit(12, 1), limit(13, 100), limit(14, 1)], 100),
+        (vec![limit(13, 256)], 256),
+        (vec![limit(1, 2000)], 256),
+        (Vec::new(), 256),
+    ] {
+        assert_eq!(required_slots(&caps), expected);
+    }
 }
