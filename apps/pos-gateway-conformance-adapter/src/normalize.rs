@@ -1,10 +1,10 @@
 //! The response normalization of the requirements text (section 4).
 //!
 //! The contract fixes neither Timeline and Event IDs, nor cursors, nor problem detail text, so
-//! they are permitted nondeterministic operational fields: an `id` member that is a ULID, a
-//! `next_cursor` member that is a well-formed cursor and every problem `detail` text member are
-//! replaced by placeholders, and every ULID segment of a problem `instance` path becomes
-//! `<ulid>`. Every other value stays as it is, so a malformed ID or cursor cannot match.
+//! they are permitted nondeterministic operational fields: an `id` or `consent_ref` member that
+//! is a ULID, a `next_cursor` member that is a well-formed cursor and every problem `detail` text
+//! member are replaced by placeholders, and every ULID segment of a problem `instance` path
+//! becomes `<ulid>`. Every other value stays as it is, so a malformed ID or cursor cannot match.
 
 use serde_json::{json, Value};
 
@@ -52,15 +52,16 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
 
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
-        Some("id" | "instance") => normalize_ulid_segments(&text),
+        Some("id" | "instance" | "consent_ref") => normalize_ulid_segments(&text),
         Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
         Some("detail") => "<message>".to_owned(),
         _ => text,
     }
 }
 
-/// Every `/`-separated segment of an `id` or a problem `instance` that is a ULID becomes
-/// `<ulid>`; an `id` that is one ULID becomes `<ulid>`, any other value keeps its other bytes.
+/// Every `/`-separated segment of an `id`, a `consent_ref` or a problem `instance` that is a
+/// ULID becomes `<ulid>`; an `id` that is one ULID becomes `<ulid>`, any other value keeps its
+/// other bytes.
 fn normalize_ulid_segments(path: &str) -> String {
     path.split('/')
         .map(|segment| if is_ulid(segment) { "<ulid>" } else { segment })

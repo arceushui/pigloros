@@ -43,6 +43,15 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   request. It requires the `session.read` grant like any protected operation.
   `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on;
   a client accepts both.
+- `POST /v1/me/consent-revocations` is served (#309): the acting Principal revokes one of the
+  consents its `Session` lists, named by `consent_ref`, under the `consent.revoke` grant. The
+  revocation is a `consent.revoked.v1` Event on the Principal's consent Timeline whose sequence
+  is the ADR-039 fence; it takes effect before the next decision. From then on every operation
+  the consent governs is `403 revoked`; the operations no consent governs (reading the Session,
+  revoking a consent, the network capability and World actions) stay available. A consent the
+  Principal does not hold, or whose subject or grantee is not the acting entity, is
+  `404 not-found-or-unavailable`. Revocation stops future protected work and deletes nothing;
+  erasure is a separate operation.
 - Open identifiers and server invariants. Frozen with Session, `ExecutionProfileId`,
   `GatewayModeProfileId`, `mode`, `execution_profile.reason` and `network_grants` are bounded,
   pattern-checked strings rather than enumerations, so a later v1 revision can add a profile,
@@ -123,7 +132,10 @@ a denial is `503 temporarily-unavailable` instead.
 
 A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 visible ASCII
 characters (schema `idempotency-key`); every Draft mutation requires one, and of the served
-routes `POST /v1/timelines/{timeline_id}/actions` does. Without it the request is
+routes `POST /v1/timelines/{timeline_id}/actions` and `POST /v1/me/consent-revocations` do. A
+consent revocation is monotonic: revoking a revoked consent returns its original revocation
+(`200`) whatever its key, and the serving process keeps each recent revocation key bound to the
+consent it named, so reusing it for another consent is `409 idempotency-conflict`. Without it the request is
 `400 invalid-request`. Repeating the key with the same request returns the original result
 (`200` with the original committed Event for an action) without re-running approval; reusing
 it with a different request is `409 idempotency-conflict`. A rejected action is never retried by

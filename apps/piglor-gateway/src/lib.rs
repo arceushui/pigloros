@@ -39,11 +39,13 @@ pub mod startup;
 pub use authorization::{
     AirGappedAuthenticationAdapter, DenialEvidenceBatch, DenialEvidenceReceipt,
     GatewayAuthenticationAdapter, GatewayAuthenticationError, GatewayAuthenticationRequest,
-    GatewayAuthorityDenial, GatewayAuthoritySourceV1, GatewayAuthorization,
-    GatewayAuthorizationAudit, GatewayAuthorizationDecision, GatewayAuthorizationError,
-    GatewayAuthorizationRequest, GatewayAuthorizationTarget, GatewayOperationV1,
-    LocalAuthenticationAdapter, PendingAuthorityDenial, RecordedAuthorityDenial,
-    MAX_DENIAL_RECORDS_PER_MINUTE, MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
+    GatewayAuthorityDenial, GatewayAuthorityRecordV1, GatewayAuthoritySourceV1,
+    GatewayAuthorization, GatewayAuthorizationAudit, GatewayAuthorizationDecision,
+    GatewayAuthorizationError, GatewayAuthorizationRequest, GatewayAuthorizationTarget,
+    GatewayConsentRecordV1, GatewayConsentV1, GatewayConsentedAuthorityV1, GatewayConsentsV1,
+    GatewayOperationV1, GatewayPinnedAuthorityV1, LocalAuthenticationAdapter,
+    PendingAuthorityDenial, RecordedAuthorityDenial, MAX_DENIAL_RECORDS_PER_MINUTE,
+    MAX_DENIAL_RECORDS_PER_PRINCIPAL_PER_MINUTE,
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};

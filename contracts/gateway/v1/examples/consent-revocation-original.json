@@ -1,10 +1,11 @@
 {
-  "name": "draft-consent-revoked",
+  "name": "consent-revocation-original",
   "operation_id": "revokeConsent",
   "request": {
     "headers": {
-      "Idempotency-Key": "client-1-19",
-      "content-type": "application/json"
+      "Idempotency-Key": "client-1-21",
+      "content-type": "application/json",
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
     },
     "body": {
       "consent_ref": "01JC0GATEWAYW90C0NSENT0001"
@@ -12,14 +13,14 @@
   },
   "request_valid": true,
   "response": {
-    "status": 201,
+    "status": 200,
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
-      "id": "01JC0GATEWAYW90C0NSENT0001",
+      "id": "01JC0GATEWAYW90REV0KE00001",
       "generation": 4,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
-        "origin": "principal-authored"
+        "digest": "e7a2d96f33c540987b4df7546e56ccef6e93cf3c2c9b49f3bb40251b8e164fee",
+        "origin": "host-derived"
       },
       "mode_profile": {
         "profile_kind": "gateway-mode-v1",

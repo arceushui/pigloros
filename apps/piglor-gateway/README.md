@@ -16,8 +16,9 @@ implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, a
 and revocation state. A host without a provisioned Local Principal answers every protected
 operation `401 unauthenticated`. The other Wave 9 resource
 families (Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections, ensembles,
-Replays, evidence, exports, consent revocation and erasure) are Draft operations of the contract
-that their owner tickets (#303 to #309) will serve. WebSocket streaming remains deferred.
+Replays, evidence, exports and erasure) are Draft operations of the contract that their owner
+tickets (#303 to #309) will serve; consent revocation is served (#309, see
+[Consents](#consents)). WebSocket streaming remains deferred.
 
 ## Run
 
@@ -83,8 +84,9 @@ actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
 operations = ["session.read", "timeline.create", "timeline.events.read", "timeline.signals.append"]
 ```
 
-The grantable operations are `session.read`, `timeline.create`, `timeline.events.read`,
-`timeline.signals.append`, `ledger.predictions.create` and `world.action.v1.submit`, plus the
+The grantable operations are `consent.revoke`, `session.read`, `timeline.create`,
+`timeline.events.read`, `timeline.signals.append`, `ledger.predictions.create` and
+`world.action.v1.submit`, plus the
 Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
 and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
 Fork-admission credentials and provision:
@@ -105,18 +107,56 @@ authority from the record, so the next request is answered `403 revoked`. A sign
 must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
 host answers every protected route `401` before reading the request body.
 
+### Consents
+
+The document may also bind consents (#309, ADR-039) to some of its operations with a `[consent]`
+table: the subject who consents and the actor the consents grant (both listed actors), the
+consented operations, and one `[[consent.grants]]` entry per consent:
+
+```toml
+operations = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
+
+[consent]
+subject_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+grantee_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+operations = ["timeline.create"]
+
+[[consent.grants]]
+purpose = "local decision preview"
+export_permitted = false
+```
+
+Provisioning records each consent as one `consent.granted.v1` Event on the Principal's consent
+Timeline, a root Timeline under a fixed identity no client can create, and splits the
+Principal's grant in two: a root grant of the unconsented operations and a consent-bound grant of
+the consented ones, which names the subject and references every consent. The ADR-059 evaluator
+decides a consented operation on the consent-bound grant and requires every consent to be active
+and to be the acting entity's, so all consents of one document govern the same operations. No
+consent may govern `session.read`, `consent.revoke`, `gateway.network.v1` or
+`world.action.v1.submit`, and at least one operation stays unconsented. An exact retry records
+nothing; a document with other consents is refused.
+
+`POST /v1/me/consent-revocations` revokes one consent the Session lists, named by its
+`consent_ref`, under the `consent.revoke` grant. The host appends its `consent.revoked.v1` Event
+while it holds the authority commit fence exclusively, after every operation admitted before has
+completed, and recomposes its consents before the next decision; from then on every consented
+operation is `403 revoked`, while the unconsented ones stay available. Revoking a revoked consent
+returns the original revocation (`200`). The host reads the consent Timeline head before every
+decision, so a restarted host recomposes the revocation from the Timeline.
+
 ### Session
 
 `GET /v1/session` (#1362) is a protected read like every other operation: the request names its
 actor, and the Principal's grant must cover that actor and `session.read`. The answer is derived
 by the host alone: the Principal's ID and the actors of its grant, the names of every grantable
 operation and capability its recorded grant covers for that actor (decided by the same evaluator
-as every request, recording nothing), its consents (none: a Local Principal grant binds no
-consent), the current execution mode with the operator's `--network-grant` values and the
+as every request, recording nothing), its consents (each named by the `EventId` of its
+`consent.granted.v1` Event, `granted` or `revoked`), the current execution mode with the operator's `--network-grant` values and the
 Principal's network posture (`absent` in Air-Gapped mode; `capability-granted` in Local mode only
 with `gateway.network.v1`, otherwise `denied`), and the EPF1 `execution_profile`, `unavailable`
-until #461. `generation` is the head position of the recorded authority chain, so it advances with
-every grant or revocation. The contract's `Session` schema states the provenance digest.
+until #461. `generation` is the head position of the recorded authority (both grants when it
+binds consents) plus the consent Timeline head, so it advances with every grant, consent or
+revocation. The contract's `Session` schema states the provenance digest.
 
 **One Principal per database.** A database holds exactly one Local Principal, and rotation or a
 changed grant is not supported yet. Provisioning a different document is refused with

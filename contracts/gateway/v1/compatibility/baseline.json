@@ -807,6 +807,156 @@
           }
         }
       }
+    },
+    "/v1/me/consent-revocations": {
+      "post": {
+        "operationId": "revokeConsent",
+        "x-pigloros-status": "served",
+        "x-pigloros-listeners": [
+          "loopback"
+        ],
+        "tags": [
+          "consent"
+        ],
+        "description": "Revoke one of the acting Principal's own consents (#309, ADR-039), named by the `EventId` of its `consent.granted.v1` Event (`consent_ref`, D7), as the Principal's `Session` lists it. The revocation is one `consent.revoked.v1` Event on the Principal's consent Timeline; its sequence is the ADR-039 fence. It is recorded after every protected operation admitted before it completes and takes effect before the next decision: from then on every operation the consent governs is `403 revoked`, while the operations no consent governs (among them reading the Session and revoking a consent) stay available. Revocation stops future protected work; it is distinct from erasure and deletes nothing. It is monotonic: revoking a revoked consent returns its original revocation (`200`). The operation itself requires the `consent.revoke` grant like any protected operation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and it must be the consent's subject or grantee. Without it the revocation is `401 unauthenticated`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentRevocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The revocation this request recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The consent was already revoked: its original revocation. An exact retry after a recorded revocation answers this way.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRevocation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid-request`, including a missing or malformed `Idempotency-Key`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`unauthorized` (no grant covers the actor and `consent.revoke`) or `revoked` (the Principal's grant was revoked or expired).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not-found-or-unavailable`: the Principal holds no such consent, or the acting entity is neither its subject nor its grantee; it never enumerates.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency-conflict`: the `Idempotency-Key` already named another consent.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`resource-limit-exceeded`: the request body exceeds the Gateway body bound.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state, read its consents or record the denial evidence.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1890,6 +2040,56 @@
         "maxLength": 64,
         "pattern": "^gateway-mode-[a-z0-9]+(-[a-z0-9]+)*-v[1-9][0-9]*$",
         "description": "A Gateway execution-mode profile (GMP1, ADR-134 §1). Its `gateway-mode-` namespace is disjoint from the ADR-058 `ExecutionProfileId`: neither is ever accepted where the other is expected. The profiles are composition-verified, never installed, qualified or a reproducibility claim; their public declaration is `execution-mode-profiles.json`. The set is open, so an ADR-134 amendment may add a profile within v1. Server invariant in v1: the Gateway serves only `gateway-mode-local-v1` and `gateway-mode-air-gapped-v1`."
+      },
+      "ConsentRevocation": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+        "type": "object",
+        "description": "A recorded consent revocation (#309). `id` is the `EventId` of its `consent.revoked.v1` Event and `generation` the authority generation (D8) from which it is effective: the head of the Principal's recorded authority plus the revocation's fence on its consent Timeline. It stops future protected work the consent governs and is distinct from erasure. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayConsentRevocation.v1` || 0x00 || the 16 bytes of the 128-bit big-endian value of the Principal's ID (its `Session` `id`) decoded as a Crockford base32 ULID || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. `mode_profile` is the binding current when the revocation is answered.",
+        "allOf": [
+          {
+            "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
+          }
+        ],
+        "required": [
+          "schema_id",
+          "id",
+          "generation",
+          "provenance",
+          "mode_profile",
+          "execution_profile",
+          "availability",
+          "consent_ref",
+          "state",
+          "future_protected_work"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "urn:pigloros:gateway:v1:schema:consent-revocation"
+          },
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          },
+          "state": {
+            "const": "revoked"
+          },
+          "future_protected_work": {
+            "const": "denied"
+          }
+        },
+        "unevaluatedProperties": false
+      },
+      "ConsentRevocationRequest": {
+        "$id": "urn:pigloros:gateway:v1:schema:consent-revocation-request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "consent_ref"
+        ],
+        "properties": {
+          "consent_ref": {
+            "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+          }
+        }
       }
     },
     "parameters": {

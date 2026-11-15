@@ -560,6 +560,18 @@ impl GatewaySessionModeV1 {
         })
     }
 
+    /// The `ModeProfile` of a resource computed under this binding: its
+    /// identity alone, without the operator's network grants (ADR-134 §5).
+    pub(crate) fn produced_under(&self) -> serde_json::Value {
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": self.id.as_str(),
+            "mode": self.id.mode(),
+            "mode_profile_digest": self.digest_hex,
+            "binding_epoch": self.binding_epoch.get(),
+        })
+    }
+
     /// Whether the bound profile allows network (ADR-134 §2 field 5).
     pub(crate) const fn network_allowed(&self) -> bool {
         self.network_allowed

@@ -6,13 +6,23 @@
 //! offline, with `piglor-gateway provision-local-principal <sqlite-path>`
 //! under its systemd unit (D4). The unit's one credential,
 //! [`LOCAL_PRINCIPAL_CREDENTIAL_NAME`], is a TOML document naming the
-//! Principal, the entities it may act as and its explicit operation grants:
+//! Principal, the entities it may act as and its explicit operation grants,
+//! and optionally the consents some of those operations require (#309):
 //!
 //! ```toml
 //! principal_id = "01JC0GATEWAYQ0CA1PR1NC1PA1"
 //! trust_domain = "local"
 //! actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
-//! operations = ["session.read", "timeline.create", "timeline.events.read"]
+//! operations = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
+//!
+//! [consent]
+//! subject_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+//! grantee_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
+//! operations = ["timeline.create"]
+//!
+//! [[consent.grants]]
+//! purpose = "local decision preview"
+//! export_permitted = false
 //! ```
 //!
 //! Provisioning persists one root capability grant through
@@ -27,6 +37,21 @@
 //! `401 unauthenticated`. A store holds at most one Local Principal; a
 //! different document is refused rather than merged.
 //!
+//! A document with a `[consent]` table (owner decision 1(a) on #309) records
+//! each of its grants as one `consent.granted.v1` Event on the Principal's
+//! one consent Timeline, [`local_principal_consent_timeline`], and splits the
+//! Principal's operations over two grants: its root grant keeps the
+//! operations no consent governs, and a consent-bound root grant on its own
+//! authority Timeline covers the consented operations, names the consent
+//! subject and references every consent. Each referenced consent is named
+//! by the BLAKE3 derivation of its canonical `consent.granted.v1` payload, so
+//! the document alone fixes both grants. The consent-bound grant is decided
+//! by the ADR-059 evaluator, which requires every referenced consent to be
+//! active and to cover the request, so all of the document's consents cover
+//! its consented operations and share one subject and one grantee. No
+//! consent may govern an exempt operation
+//! ([`GatewayOperationV1::consent_exempt`]).
+//!
 //! `serve` reads the record through its one erasure host and never writes
 //! authority at startup, so starting with or without it never rewrites a
 //! recorded authority record.
@@ -39,9 +64,13 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityCommitOutcomeV1, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, Hash,
-    PersistedAuthorityV1, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConsentAuthority, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1,
+    ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft, EventReadBounds, Hash, Kind,
+    PersistedAuthorityV1, PrincipalRefV1, Seq, SeqRange, TimelineId, WallTime,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CONSENT_HISTORY_EVENTS,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use serde::Deserialize;
@@ -49,8 +78,10 @@ use thiserror::Error;
 use ulid::Ulid;
 
 use crate::{
-    startup::erasure_host_failure, Gateway, GatewayAuthoritySourceV1, GatewayAuthorization,
-    GatewayOperationV1, LocalAuthenticationAdapter, OwnTracksOwnerKey,
+    startup::erasure_host_failure, Gateway, GatewayAuthorityRecordV1, GatewayAuthoritySourceV1,
+    GatewayAuthorization, GatewayConsentRecordV1, GatewayConsentV1, GatewayConsentedAuthorityV1,
+    GatewayConsentsV1, GatewayOperationV1, GatewayPinnedAuthorityV1, LocalAuthenticationAdapter,
+    OwnTracksOwnerKey,
 };
 
 /// The one systemd credential `provision-local-principal` reads.
@@ -61,6 +92,11 @@ pub const MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES: usize = 16 * 1_024;
 const LOCAL_ADAPTER_ID: &str = "local-loopback";
 /// The one audience every Gateway operation is evaluated for.
 const GATEWAY_AUDIENCE: &str = "gateway";
+/// The name of the Principal's consent Timeline.
+const CONSENT_TIMELINE_NAME: &str = "pigloros.local-principal.consents";
+/// The ADR-059 withdrawal policy of every Local consent: it is withdrawn at
+/// its ADR-039 revocation fence.
+const CONSENT_WITHDRAWAL_POLICY: &str = "adr-039-revocation-fence";
 
 /// Closed Local Principal provisioning and composition failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -96,13 +132,52 @@ struct LocalPrincipalDocumentV1 {
     trust_domain: String,
     actor_entity_ids: Vec<String>,
     operations: Vec<String>,
+    #[serde(default)]
+    consent: Option<LocalConsentDocumentV1>,
 }
 
-/// One validated Local Principal provisioning: its root capability grant
-/// and the authority registry snapshot that attests it.
+/// The document's `[consent]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalConsentDocumentV1 {
+    subject_entity_id: String,
+    grantee_entity_id: String,
+    operations: Vec<String>,
+    grants: Vec<LocalConsentGrantDraftV1>,
+}
+
+/// One consent of a provisioning: its ADR-039 purpose and whether it
+/// permits export.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalConsentGrantDraftV1 {
+    /// The purpose the subject consents to, at most 128 UTF-8 bytes.
+    pub purpose: String,
+    /// Whether the consent permits export.
+    pub export_permitted: bool,
+}
+
+/// The consents of a provisioning (#309): the operations they govern, the
+/// subject who consents and the actor they grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalConsentDraftV1 {
+    /// The entity whose data the consents govern; one of the actors.
+    pub subject: EntityId,
+    /// The actor the consents grant; one of the actors.
+    pub grantee: EntityId,
+    /// The consented operations: granted operations no exempt operation.
+    pub operations: Vec<GatewayOperationV1>,
+    /// The consents, recorded in this order.
+    pub grants: Vec<LocalConsentGrantDraftV1>,
+}
+
+/// One validated Local Principal provisioning: its root capability grant,
+/// its consent-bound grant and consent records when it binds consents, and
+/// the authority registry snapshot that attests them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalPrincipalProvisionV1 {
     grant: CapabilityGrantV1,
+    consent: Option<(CapabilityGrantV1, Vec<ConsentGrantedV1>)>,
     registry: AuthorityRegistrySnapshotV1,
 }
 
@@ -117,53 +192,88 @@ impl LocalPrincipalProvisionV1 {
         actor_entity_ids: impl IntoIterator<Item = EntityId>,
         operations: impl IntoIterator<Item = GatewayOperationV1>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
+        Self::try_new_with_consent(principal, actor_entity_ids, operations, None)
+    }
+
+    /// Grant `principal` exactly `operations`, acting as `actor_entity_ids`,
+    /// with `consent` governing its consented operations.
+    ///
+    /// # Errors
+    /// Returns [`LocalPrincipalErrorV1::Invalid`] for an empty or oversized
+    /// actor or operation set, an invalid Principal or entity, or a consent
+    /// that names no grant, more than
+    /// [`MAX_CAPABILITY_CONSENT_REFERENCES`] grants, an over-long purpose, a
+    /// subject or grantee that is not an actor, or an operation that is not
+    /// granted or is exempt, or that leaves no operation unconsented.
+    pub fn try_new_with_consent(
+        principal: &PrincipalRefV1,
+        actor_entity_ids: impl IntoIterator<Item = EntityId>,
+        operations: impl IntoIterator<Item = GatewayOperationV1>,
+        consent: Option<LocalConsentDraftV1>,
+    ) -> Result<Self, LocalPrincipalErrorV1> {
         let mut actors = actor_entity_ids.into_iter().collect::<Vec<_>>();
         actors.sort_unstable();
         actors.dedup();
-        let mut operations = operations.into_iter().collect::<Vec<_>>();
-        operations.sort_unstable_by_key(operation_name);
-        operations.dedup();
-        let registry_digest = registry_digest(principal, &actors, &operations);
-        CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: sorted_set(operations.iter().copied().map(GatewayOperationV1::resource)),
-            actions: sorted_set(operations.iter().copied().map(GatewayOperationV1::action)),
-            purposes: sorted_set(operations.iter().copied().map(GatewayOperationV1::purpose)),
-            audiences: vec![GATEWAY_AUDIENCE.to_owned()],
-            actor_entity_ids: actors,
-            subject_ids: Vec::new(),
-            participant_ids: Vec::new(),
-            plugin_id: None,
-            principal_roles: vec![AuthorityRoleV1::Actor],
-            max_uses: 1,
-            budget: 1,
-            environment_constraints: Vec::new(),
-        })
-        .and_then(|scope| {
-            CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-                grant_id: local_principal_grant_id(),
-                grantor: principal.clone(),
-                grantee: AuthorityGranteeV1::Principal(principal.clone()),
-                trust_domain: principal.trust_domain().to_owned(),
-                scope,
-                valid_from_position: Seq::from_u64(1),
-                valid_until_position: Seq::from_u64(u64::MAX),
-                parent_grant_id: None,
-                delegation_depth: 0,
-                max_delegation_depth: 0,
-                permitted_delegate_classes: Vec::new(),
-                consent_references: Vec::new(),
-                policy_revision: derived_hash("pigloros gateway local principal policy v1"),
-                issuance_timeline: local_principal_authority_timeline(),
-                issuance_seq: Seq::from_u64(1),
-                revocation_epoch: 0,
-                revocation_fence: None,
-                authority_registry_digest: registry_digest,
+        let operations = sorted_operations(operations);
+        let consent = consent.map(|mut consent| {
+            consent.operations = sorted_operations(consent.operations);
+            consent
+        });
+        let registry_digest = registry_digest(principal, &actors, &operations, consent.as_ref());
+        consent
+            .as_ref()
+            .map_or(Ok(()), |consent| {
+                validate_consent(consent, &actors, &operations)
             })
-        })
-        .and_then(|grant| {
-            authority_for(&grant, &grant).map(|(_, registry)| Self { grant, registry })
-        })
-        .map_err(|_| LocalPrincipalErrorV1::Invalid)
+            .and_then(|()| {
+                let unconsented = operations
+                    .iter()
+                    .copied()
+                    .filter(|operation| {
+                        consent
+                            .as_ref()
+                            .is_none_or(|consent| !consent.operations.contains(operation))
+                    })
+                    .collect::<Vec<_>>();
+                let grant = root_grant(
+                    principal,
+                    LocalGrantKindV1::Root,
+                    (actors.as_slice(), unconsented.as_slice()),
+                    None,
+                    registry_digest,
+                );
+                let consent = consent
+                    .map(|consent| consented_grant(principal, &actors, &consent, registry_digest))
+                    .transpose();
+                grant
+                    .map_err(|_| LocalPrincipalErrorV1::Invalid)
+                    .and_then(|grant| consent.map(|consent| (grant, consent)))
+            })
+            .and_then(|(grant, consent)| {
+                consent
+                    .as_ref()
+                    .map_or(Ok(Vec::new()), |(consented, records)| {
+                        records
+                            .iter()
+                            .map(|record| {
+                                consent_reference(consented, record)
+                                    .map(|reference| reference.binding_digest())
+                            })
+                            .collect()
+                    })
+                    .and_then(|bindings| {
+                        let consented = consent
+                            .as_ref()
+                            .map(|(consented, _)| (consented, consented));
+                        authority_for((&grant, &grant), consented, bindings)
+                    })
+                    .map(|(_, registry)| Self {
+                        grant,
+                        consent,
+                        registry,
+                    })
+                    .map_err(|_| LocalPrincipalErrorV1::Invalid)
+            })
     }
 
     /// Parse and validate the operator's TOML provisioning document.
@@ -171,7 +281,7 @@ impl LocalPrincipalProvisionV1 {
     /// # Errors
     /// Returns [`LocalPrincipalErrorV1::Invalid`] for malformed TOML, an
     /// unknown member, a malformed ULID, an unknown operation name, or a
-    /// document [`Self::try_new`] refuses.
+    /// document [`Self::try_new_with_consent`] refuses.
     pub fn from_toml(text: &str) -> Result<Self, LocalPrincipalErrorV1> {
         toml::from_str::<LocalPrincipalDocumentV1>(text)
             .ok()
@@ -184,27 +294,262 @@ impl LocalPrincipalProvisionV1 {
                 let actors = document
                     .actor_entity_ids
                     .iter()
-                    .map(|text| Ulid::from_string(text).ok().map(EntityId::from_ulid))
+                    .map(|text| entity(text))
                     .collect::<Option<Vec<_>>>();
-                let operations = document
-                    .operations
-                    .iter()
-                    .map(|name| GatewayOperationV1::named(name))
-                    .collect::<Option<Vec<_>>>();
-                principal.zip(actors).zip(operations)
+                let operations = named_operations(&document.operations);
+                let consent = document.consent.map_or(Some(None), |consent| {
+                    entity(&consent.subject_entity_id)
+                        .zip(entity(&consent.grantee_entity_id))
+                        .zip(named_operations(&consent.operations))
+                        .map(|((subject, grantee), operations)| {
+                            Some(LocalConsentDraftV1 {
+                                subject,
+                                grantee,
+                                operations,
+                                grants: consent.grants,
+                            })
+                        })
+                });
+                principal.zip(actors).zip(operations).zip(consent)
             })
             .ok_or(LocalPrincipalErrorV1::Invalid)
-            .and_then(|((principal, actors), operations)| {
-                Self::try_new(&principal, actors, operations)
+            .and_then(|(((principal, actors), operations), consent)| {
+                Self::try_new_with_consent(&principal, actors, operations, consent)
             })
     }
 }
 
+/// The two root grants a Local Principal may hold.
+#[derive(Clone, Copy)]
+enum LocalGrantKindV1 {
+    /// The grant of the operations no consent governs.
+    Root,
+    /// The consent-bound grant of the consented operations.
+    Consented,
+}
+
+impl LocalGrantKindV1 {
+    /// The grant's identity and its authority Timeline.
+    fn identity(self) -> (Hash, TimelineId) {
+        match self {
+            Self::Root => (
+                local_principal_grant_id(),
+                local_principal_authority_timeline(),
+            ),
+            Self::Consented => (
+                derived_hash("pigloros gateway local principal consent grant v1"),
+                derived_timeline("pigloros gateway local principal consent authority timeline v1"),
+            ),
+        }
+    }
+}
+
+/// One root grant of `principal` of `kind` for `operations` acting as
+/// `actors`, bound to `consent` (its subject and consent references) when
+/// given.
+fn root_grant(
+    principal: &PrincipalRefV1,
+    kind: LocalGrantKindV1,
+    (actors, operations): (&[EntityId], &[GatewayOperationV1]),
+    consent: Option<(EntityId, Vec<Hash>)>,
+    registry_digest: Hash,
+) -> Result<CapabilityGrantV1, AuthorityErrorV1> {
+    let (grant_id, issuance_timeline) = kind.identity();
+    let (subject_ids, consent_references) = consent.map_or_else(
+        || (Vec::new(), Vec::new()),
+        |(subject, references)| (vec![subject], references),
+    );
+    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: sorted_set(operations.iter().copied().map(GatewayOperationV1::resource)),
+        actions: sorted_set(operations.iter().copied().map(GatewayOperationV1::action)),
+        purposes: sorted_set(operations.iter().copied().map(GatewayOperationV1::purpose)),
+        audiences: vec![GATEWAY_AUDIENCE.to_owned()],
+        actor_entity_ids: actors.to_vec(),
+        subject_ids,
+        participant_ids: Vec::new(),
+        plugin_id: None,
+        principal_roles: vec![AuthorityRoleV1::Actor],
+        max_uses: 1,
+        budget: 1,
+        environment_constraints: Vec::new(),
+    })
+    .and_then(|scope| {
+        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id,
+            grantor: principal.clone(),
+            grantee: AuthorityGranteeV1::Principal(principal.clone()),
+            trust_domain: principal.trust_domain().to_owned(),
+            scope,
+            valid_from_position: Seq::from_u64(1),
+            valid_until_position: Seq::from_u64(u64::MAX),
+            parent_grant_id: None,
+            delegation_depth: 0,
+            max_delegation_depth: 0,
+            permitted_delegate_classes: Vec::new(),
+            consent_references,
+            policy_revision: derived_hash("pigloros gateway local principal policy v1"),
+            issuance_timeline,
+            issuance_seq: Seq::from_u64(1),
+            revocation_epoch: 0,
+            revocation_fence: None,
+            authority_registry_digest: registry_digest,
+        })
+    })
+}
+
+/// The consent-bound grant of `consent` and its `consent.granted.v1`
+/// records, the `n`-th at consent Timeline sequence `n`.
+fn consented_grant(
+    principal: &PrincipalRefV1,
+    actors: &[EntityId],
+    consent: &LocalConsentDraftV1,
+    registry_digest: Hash,
+) -> Result<(CapabilityGrantV1, Vec<ConsentGrantedV1>), LocalPrincipalErrorV1> {
+    let records = consent
+        .grants
+        .iter()
+        .zip(1_u64..)
+        .map(|(grant, grant_seq)| ConsentGrantedV1 {
+            subject_id: consent.subject,
+            grantee_id: consent.grantee,
+            purpose: grant.purpose.clone(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: grant.export_permitted,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq,
+        })
+        .collect::<Vec<_>>();
+    records
+        .iter()
+        .map(|record| record.encode().map(|payload| consent_id(&payload)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| LocalPrincipalErrorV1::Invalid)
+        .and_then(|mut references| {
+            references.sort_unstable();
+            root_grant(
+                principal,
+                LocalGrantKindV1::Consented,
+                (actors, consent.operations.as_slice()),
+                Some((consent.subject, references)),
+                registry_digest,
+            )
+            .map_err(|_| LocalPrincipalErrorV1::Invalid)
+        })
+        .map(|grant| (grant, records))
+}
+
+/// A consent's grants, operations and parties against the document.
+fn validate_consent(
+    consent: &LocalConsentDraftV1,
+    actors: &[EntityId],
+    operations: &[GatewayOperationV1],
+) -> Result<(), LocalPrincipalErrorV1> {
+    let grants_bounded = (1..=MAX_CAPABILITY_CONSENT_REFERENCES).contains(&consent.grants.len());
+    let parties_act = actors.contains(&consent.subject) && actors.contains(&consent.grantee);
+    let operations_consentable = !consent.operations.is_empty()
+        && consent
+            .operations
+            .iter()
+            .all(|operation| operations.contains(operation) && !operation.consent_exempt());
+    (grants_bounded && parties_act && operations_consentable)
+        .then_some(())
+        .ok_or(LocalPrincipalErrorV1::Invalid)
+}
+
+/// Record the consents of `provision` on the Principal's consent Timeline
+/// of the store `host` owns; a provisioning that binds none records nothing.
+///
+/// The consent Timeline is opened under its well-known identity and each
+/// consent is appended as one `consent.granted.v1` Event, in document order,
+/// in one bounded commit. An exact retry finds the same grants (and any
+/// revocation recorded since) and records nothing.
+///
+/// # Errors
+/// Returns [`LocalPrincipalErrorV1::Conflict`] when the consent Timeline
+/// holds other consents, and [`LocalPrincipalErrorV1::Unavailable`] when the
+/// host cannot open, read or append it.
+pub fn provision_local_consents(
+    host: &mut ErasureExecutionHostV1,
+    provision: &LocalPrincipalProvisionV1,
+) -> Result<(), LocalPrincipalErrorV1> {
+    let Some((_, records)) = provision.consent.as_ref() else {
+        return Ok(());
+    };
+    let authority = ConsentAuthority::new();
+    let timeline = local_principal_consent_timeline();
+    host.bind_consent_authority(authority.append_permit())
+        .and_then(|()| {
+            host.command_sender()
+                .and_then(|mut sender| sender.open_root_timeline(timeline, CONSENT_TIMELINE_NAME))
+        })
+        .and_then(|_| {
+            host.read_sender().and_then(|mut reads| {
+                reads.read_bounded(timeline, SeqRange::all(), consent_bounds())
+            })
+        })
+        .map_err(|_| LocalPrincipalErrorV1::Unavailable)
+        .and_then(|recorded| {
+            if !recorded.is_empty() {
+                return recorded_grants_are(&recorded, records)
+                    .then_some(())
+                    .ok_or(LocalPrincipalErrorV1::Conflict);
+            }
+            records
+                .iter()
+                .map(|record| {
+                    record.encode().map(|payload| {
+                        EventDraft::new(
+                            record.subject_id,
+                            Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                            payload,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| LocalPrincipalErrorV1::Invalid)
+                .and_then(|drafts| {
+                    host.command_sender()
+                        .and_then(|mut sender| {
+                            sender.append_consent_bounded(
+                                timeline,
+                                &drafts,
+                                authority.append_permit(),
+                                u64::try_from(MAX_CONSENT_HISTORY_EVENTS).unwrap_or(u64::MAX),
+                            )
+                        })
+                        .ok()
+                        .flatten()
+                        .map(drop)
+                        .ok_or(LocalPrincipalErrorV1::Unavailable)
+                })
+        })
+}
+
+/// Whether the `consent.granted.v1` Events of `recorded` are exactly
+/// `records`, in order; revocations may follow them.
+fn recorded_grants_are(recorded: &[Event], records: &[ConsentGrantedV1]) -> bool {
+    let granted = recorded
+        .iter()
+        .filter(|event| event.event_type.as_str() == EVENT_TYPE_CONSENT_GRANTED_V1)
+        .map(|event| ConsentGrantedV1::decode(&event.payload).ok())
+        .collect::<Vec<_>>();
+    granted.len() == records.len()
+        && granted
+            .iter()
+            .zip(records)
+            .all(|(granted, record)| granted.as_ref() == Some(record))
+}
+
 /// Persist `provision` as the store's one Local Principal.
 ///
-/// Its root capability grant commits under a permit of the
-/// [`AuthorityPersistenceHostV1`] its registry snapshot attests. An exact
-/// retry is [`AuthorityCommitOutcomeV1::Unchanged`].
+/// Its root capability grant, and its consent-bound grant when it binds
+/// consents, commit under permits of the [`AuthorityPersistenceHostV1`] its
+/// registry snapshot attests. An exact retry is
+/// [`AuthorityCommitOutcomeV1::Unchanged`]. Record the consents first with
+/// [`provision_local_consents`].
 ///
 /// # Errors
 /// Returns [`LocalPrincipalErrorV1::Conflict`] when the store already holds
@@ -220,6 +565,13 @@ where
     let host = AuthorityPersistenceHostV1::new(&provision.registry);
     store
         .bind_authority_persistence(host.persistence_binding())
+        .and_then(|()| {
+            provision.consent.iter().try_for_each(|(consented, _)| {
+                host.authorize_grant(consented)
+                    .and_then(|permit| store.issue_capability_grant(permit, consented))
+                    .map(drop)
+            })
+        })
         .and_then(|()| host.authorize_grant(&provision.grant))
         .and_then(|permit| store.issue_capability_grant(permit, &provision.grant))
         .map_err(persistence_failure)
@@ -258,27 +610,49 @@ pub fn provision_local_principal_from_credentials(
         crate::mode_profile::GatewayModeStoreLockV1::shared(sqlite_path)
             .map_err(io::Error::other)
             .and_then(|lock| {
-                let provisioned = pos_store::sqlite::SqliteStore::open(sqlite_path)
-                    .map_err(io::Error::other)
-                    .and_then(|mut store| {
-                        crate::mode_profile::attach_offline_writer_v1(&mut store)
-                            .and_then(|mode| admit_in_mode(&provision, mode))
-                            .map_err(io::Error::other)
-                            .and_then(|()| {
-                                provision_local_principal(&mut store, &provision)
-                                    .map(|_| ())
-                                    .map_err(io::Error::other)
-                            })
-                    });
+                let provisioned = crate::startup::open_recovered_erasure_host(
+                    pos_store::StoreConfig::Sqlite {
+                        path: sqlite_path.to_owned(),
+                    },
+                    crate::startup::GatewayHostStoreV1::Standard,
+                    &pos_runtime::ErasureCoordinatorCompositionV1::closed(),
+                )
+                .and_then(|mut host| provision_on_host(&mut host, &provision));
                 drop(lock);
                 provisioned
             })
     })
 }
 
+/// Attach the offline writer to the store `host` owns, refuse a Principal
+/// its mode does not allow, then record the consents and persist the
+/// Principal of `provision`.
+///
+/// # Errors
+/// Returns an error when the store is unbound or bound to a mode that
+/// refuses the Principal, or provisioning fails.
+pub fn provision_on_host(
+    host: &mut ErasureExecutionHostV1,
+    provision: &LocalPrincipalProvisionV1,
+) -> io::Result<()> {
+    crate::mode_profile::attach_offline_writer_v1(host.gateway_mode_binding())
+        .and_then(|mode| admit_in_mode(provision, mode))
+        .map_err(io::Error::other)
+        .and_then(|()| provision_local_consents(host, provision).map_err(io::Error::other))
+        .and_then(|()| {
+            host.command_sender()
+                .and_then(|mut sender| {
+                    sender.with_scheduled_admission(|ports| {
+                        provision_local_principal(&mut *ports, provision)
+                    })
+                })
+                .map_err(erasure_host_failure)
+                .and_then(|provisioned| provisioned.map(drop).map_err(io::Error::other))
+        })
+}
+
 /// ADR-134 §4 and D6: a store bound to a mode without network refuses a
 /// Principal grant that names the network capability.
-#[cfg(target_os = "linux")]
 fn admit_in_mode(
     provision: &LocalPrincipalProvisionV1,
     mode: crate::mode_profile::GatewayModeProfileIdV1,
@@ -293,7 +667,9 @@ fn admit_in_mode(
 /// Compose the Local Principal recorded in `store` as the Gateway
 /// authorizer, or `None` when the store has none (an unprovisioned host).
 ///
-/// Reading never writes the store.
+/// Reading never writes the store. A Principal whose provisioning binds
+/// consents is composed with its consent-bound chain and unread consents: the
+/// host reads its consent Timeline before its first decision.
 ///
 /// # Errors
 /// Returns [`LocalPrincipalErrorV1::Unavailable`] when the store cannot be
@@ -308,14 +684,39 @@ pub fn load_local_principal<S>(
 where
     S: AuthorityPersistencePortV1 + ?Sized,
 {
-    match store.load_authority(local_principal_grant_id()) {
+    load_chain(store, LocalGrantKindV1::Root).and_then(|chain| {
+        chain.map_or(Ok(None), |chain| {
+            load_chain(store, LocalGrantKindV1::Consented).and_then(|consented| {
+                compose(&GatewayAuthorityRecordV1 {
+                    chain,
+                    consented: consented.map(|chain| GatewayConsentRecordV1 {
+                        chain,
+                        head: Seq::ZERO,
+                        events: None,
+                    }),
+                })
+                .map(Some)
+                .ok_or(LocalPrincipalErrorV1::Corrupt)
+            })
+        })
+    })
+}
+
+/// The chain `store` records under the grant of `kind`, or `None` when it
+/// records none.
+fn load_chain<S>(
+    store: &S,
+    kind: LocalGrantKindV1,
+) -> Result<Option<PersistedAuthorityV1>, LocalPrincipalErrorV1>
+where
+    S: AuthorityPersistencePortV1 + ?Sized,
+{
+    match store.load_authority(kind.identity().0) {
         // The store resolves no chain for an absent leaf grant.
         Err(AuthorityPersistenceErrorV1::Conflict) => Ok(None),
         Err(AuthorityPersistenceErrorV1::Unavailable) => Err(LocalPrincipalErrorV1::Unavailable),
         Err(_) => Err(LocalPrincipalErrorV1::Corrupt),
-        Ok(persisted) => compose(&persisted)
-            .map(Some)
-            .ok_or(LocalPrincipalErrorV1::Corrupt),
+        Ok(persisted) => Ok(Some(persisted)),
     }
 }
 
@@ -373,7 +774,9 @@ pub fn local_gateway(
 }
 
 /// The source a Local Principal authorizer recomposes itself from: the
-/// store's record under the one Local Principal grant identity.
+/// store's record under the one Local Principal grant identity, and the
+/// consent-bound grant and consent Timeline when its provisioning binds
+/// consents.
 struct LocalPrincipalSourceV1;
 
 impl GatewayAuthoritySourceV1 for LocalPrincipalSourceV1 {
@@ -381,69 +784,332 @@ impl GatewayAuthoritySourceV1 for LocalPrincipalSourceV1 {
         local_principal_grant_id()
     }
 
-    fn recompose(
-        &self,
-        persisted: &PersistedAuthorityV1,
-    ) -> Option<(AuthorityViewV1, AuthorityRegistrySnapshotV1)> {
-        recompose(persisted).map(|(view, registry, _)| (view, registry))
+    fn recompose(&self, record: &GatewayAuthorityRecordV1) -> Option<GatewayPinnedAuthorityV1> {
+        recompose(record).map(|(pinned, _)| pinned)
     }
 }
 
-/// The authorizer of one recorded Local Principal chain, which brings
-/// itself current with the store's record before each decision.
-fn compose(persisted: &PersistedAuthorityV1) -> Option<GatewayAuthorization> {
-    recompose(persisted).map(|(view, registry, evidence)| {
-        GatewayAuthorization::new(
+/// The authorizer of one recorded Local Principal, which brings itself
+/// current with the store's record before each decision.
+fn compose(record: &GatewayAuthorityRecordV1) -> Option<GatewayAuthorization> {
+    recompose(record).map(|(pinned, evidence)| {
+        GatewayAuthorization::new_pinned(
             Arc::new(LocalAuthenticationAdapter::new(evidence)),
-            view,
-            registry,
+            pinned,
         )
         .with_source(Arc::new(LocalPrincipalSourceV1))
     })
 }
 
-/// Recompose the view, attesting registry and pinned evidence of one
-/// recorded Local Principal chain.
+/// Recompose the pinned authority and pinned evidence of one recorded Local
+/// Principal.
 ///
-/// The record is the as-issued root grant plus the revocations the store
-/// holds on its authority Timeline; a chain this host cannot reproduce
-/// exactly is refused, never merged.
+/// Each chain is its as-issued root grant plus the revocations the store
+/// holds on its authority Timeline, and the consents are those of the read
+/// consent Timeline; a state this host cannot reproduce exactly is refused,
+/// never merged.
 fn recompose(
+    record: &GatewayAuthorityRecordV1,
+) -> Option<(GatewayPinnedAuthorityV1, AuthenticatedPrincipalResultV1)> {
+    issued_root(&record.chain).and_then(|(issued, root)| {
+        record
+            .consented
+            .as_ref()
+            .map_or(Some(None), |consented| {
+                RecordedConsentV1::of(consented).map(Some)
+            })
+            .and_then(|consented| {
+                let bindings = consented
+                    .as_ref()
+                    .map_or_else(Vec::new, RecordedConsentV1::bindings);
+                authority_for(
+                    (&issued, root),
+                    consented.as_ref().map(RecordedConsentV1::grants),
+                    bindings,
+                )
+                .ok()
+                .and_then(|(evidence, registry)| {
+                    let host = AuthorityPersistenceHostV1::new(&registry);
+                    replayed_view(&host, &issued, &record.chain)
+                        .zip(
+                            consented.map_or(Some(None), |consented| {
+                                consented.authority(&host).map(Some)
+                            }),
+                        )
+                        .map(|(view, consented)| {
+                            (
+                                GatewayPinnedAuthorityV1::new(view, registry, consented),
+                                evidence,
+                            )
+                        })
+                })
+            })
+    })
+}
+
+/// One recorded consent-bound chain: its record, its as-issued and recorded
+/// root grant, and its consents once read.
+struct RecordedConsentV1<'a> {
+    record: &'a GatewayConsentRecordV1,
+    issued: CapabilityGrantV1,
+    root: &'a CapabilityGrantV1,
+    consents: Option<GatewayConsentsV1>,
+}
+
+impl<'a> RecordedConsentV1<'a> {
+    /// The recorded consent-bound chain of `record`, or `None` when its root
+    /// grant or its read consent Timeline cannot be reproduced.
+    fn of(record: &'a GatewayConsentRecordV1) -> Option<Self> {
+        issued_root(&record.chain).and_then(|(issued, root)| {
+            record
+                .events
+                .as_deref()
+                .map_or(Some(None), |events| {
+                    local_consents(&issued, events).map(Some)
+                })
+                .map(|consents| Self {
+                    record,
+                    issued,
+                    root,
+                    consents,
+                })
+        })
+    }
+
+    /// The as-issued and recorded root grant.
+    const fn grants(&self) -> (&CapabilityGrantV1, &CapabilityGrantV1) {
+        (&self.issued, self.root)
+    }
+
+    /// The registry bindings of the read consents.
+    fn bindings(&self) -> Vec<Hash> {
+        self.consents
+            .as_ref()
+            .map_or_else(Vec::new, |consents| consents.bindings().collect())
+    }
+
+    /// The consent-bound authority, when its chain reproduces the record.
+    fn authority(self, host: &AuthorityPersistenceHostV1) -> Option<GatewayConsentedAuthorityV1> {
+        replayed_view(host, &self.issued, &self.record.chain).map(|view| {
+            GatewayConsentedAuthorityV1::new(
+                view,
+                local_principal_consent_timeline(),
+                self.consents,
+            )
+        })
+    }
+}
+
+/// The as-issued root grant of `persisted` and its recorded form.
+fn issued_root(
     persisted: &PersistedAuthorityV1,
-) -> Option<(
-    AuthorityViewV1,
-    AuthorityRegistrySnapshotV1,
-    AuthenticatedPrincipalResultV1,
-)> {
+) -> Option<(CapabilityGrantV1, &CapabilityGrantV1)> {
     persisted
         .chain()
         .grants()
         .first()
-        .and_then(|root| {
-            as_issued(root)
-                .and_then(|grant| {
-                    authority_for(&grant, root)
-                        .map(|(evidence, registry)| (grant, evidence, registry))
-                })
-                .ok()
+        .and_then(|root| as_issued(root).ok().map(|issued| (issued, root)))
+}
+
+/// The view of the as-issued `grant` with the revocations `persisted`
+/// records, when it reproduces `persisted` exactly.
+fn replayed_view(
+    host: &AuthorityPersistenceHostV1,
+    grant: &CapabilityGrantV1,
+    persisted: &PersistedAuthorityV1,
+) -> Option<AuthorityViewV1> {
+    let mut state = AuthorityPersistenceStateV1::new();
+    host.authorize_grant(grant)
+        .and_then(|permit| state.issue_grant(permit, grant.clone()))
+        .and_then(|_| {
+            persisted.revocations().iter().try_for_each(|revocation| {
+                host.authorize_revocation(grant, revocation)
+                    .and_then(|permit| state.revoke_grant(permit, revocation.clone()))
+                    .map(|_| ())
+            })
         })
-        .and_then(|(grant, evidence, registry)| {
-            let host = AuthorityPersistenceHostV1::new(&registry);
-            let mut state = AuthorityPersistenceStateV1::new();
-            host.authorize_grant(&grant)
-                .and_then(|permit| state.issue_grant(permit, grant.clone()))
-                .and_then(|_| {
-                    persisted.revocations().iter().try_for_each(|revocation| {
-                        host.authorize_revocation(&grant, revocation)
-                            .and_then(|permit| state.revoke_grant(permit, revocation.clone()))
-                            .map(|_| ())
+        .and_then(|()| state.view(grant.grant_id()))
+        .ok()
+        .filter(|view| view.authority() == persisted)
+}
+
+/// One replayed consent and the ADR-059 identity of its grant payload.
+type ReplayedConsentV1 = (GatewayConsentV1, Hash);
+
+/// The consents of the consent-bound `grant` recorded in `events`, the
+/// consent Timeline in order.
+///
+/// Every Event is a `consent.granted.v1` at its own sequence or a
+/// `consent.revoked.v1` of an earlier, unrevoked grant at its own sequence,
+/// all of the grant's subject, and the granted consents are exactly the ones
+/// the grant references. Anything else is refused.
+fn local_consents(grant: &CapabilityGrantV1, events: &[Event]) -> Option<GatewayConsentsV1> {
+    grant
+        .scope()
+        .subject_ids()
+        .first()
+        .copied()
+        .and_then(|subject| {
+            events
+                .iter()
+                .try_fold(Vec::new(), |consents, event| {
+                    replay_consent_event(consents, subject, event)
+                })
+                .and_then(|consents| {
+                    let head = events.last().map_or(Seq::ZERO, |event| event.seq);
+                    consent_state(grant, subject, head, consents)
+                })
+        })
+}
+
+/// `consents` after the consent Timeline Event `event` of `subject`.
+fn replay_consent_event(
+    mut consents: Vec<ReplayedConsentV1>,
+    subject: EntityId,
+    event: &Event,
+) -> Option<Vec<ReplayedConsentV1>> {
+    let at_own_seq = |seq: u64| seq == event.seq.as_u64();
+    match event.event_type.as_str() {
+        EVENT_TYPE_CONSENT_GRANTED_V1 => ConsentGrantedV1::decode(&event.payload)
+            .ok()
+            .filter(|granted| {
+                event.entity == subject
+                    && granted.subject_id == subject
+                    && at_own_seq(granted.grant_seq)
+            })
+            .map(|granted| {
+                consents.push((
+                    GatewayConsentV1::new(
+                        event.id,
+                        granted.grantee_id,
+                        event.seq,
+                        granted.export_permitted,
+                        None,
+                    ),
+                    consent_id(&event.payload),
+                ));
+                consents
+            }),
+        EVENT_TYPE_CONSENT_REVOKED_V1 => ConsentRevokedV1::decode(&event.payload)
+            .ok()
+            .filter(|revoked| {
+                event.entity == subject
+                    && revoked.subject_id == subject
+                    && at_own_seq(revoked.fence_seq)
+            })
+            .and_then(|revoked| {
+                consents
+                    .iter_mut()
+                    .find(|(consent, _)| {
+                        consent.grant_seq().as_u64() == revoked.grant_seq
+                            && consent.grantee() == revoked.grantee_id
+                            && consent.revocation().is_none()
                     })
-                })
-                .and_then(|()| state.view(grant.grant_id()))
-                .ok()
-                .filter(|view| view.authority() == persisted)
-                .map(|view| (view, registry, evidence))
+                    .map(|(consent, _)| *consent = consent.revoked_at(event.id, event.seq))
+            })
+            .map(|()| consents),
+        _ => None,
+    }
+}
+
+/// The consents of `subject` at `head`, when the replayed grants are
+/// exactly the ones the consent-bound `grant` references.
+fn consent_state(
+    grant: &CapabilityGrantV1,
+    subject: EntityId,
+    head: Seq,
+    consents: Vec<ReplayedConsentV1>,
+) -> Option<GatewayConsentsV1> {
+    consents
+        .iter()
+        .map(|(consent, id)| {
+            consent_reference_of(
+                grant,
+                (*id, subject, consent.grantee()),
+                consent.grant_seq(),
+                consent.revocation().map(|(_, fence)| fence),
+            )
         })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .and_then(|mut references| {
+            references.sort_unstable_by_key(ConsentGrantRefV1::consent_id);
+            references
+                .iter()
+                .map(ConsentGrantRefV1::consent_id)
+                .eq(grant.consent_references().iter().copied())
+                .then(|| {
+                    GatewayConsentsV1::new(
+                        local_principal_consent_timeline(),
+                        head,
+                        subject,
+                        references,
+                        consents.into_iter().map(|(consent, _)| consent).collect(),
+                    )
+                })
+        })
+}
+
+/// The ADR-059 record of the provisioned, active `record`.
+fn consent_reference(
+    grant: &CapabilityGrantV1,
+    record: &ConsentGrantedV1,
+) -> Result<ConsentGrantRefV1, AuthorityErrorV1> {
+    record
+        .encode()
+        .map_err(|_| AuthorityErrorV1::InvalidEncoding)
+        .and_then(|payload| {
+            consent_reference_of(
+                grant,
+                (consent_id(&payload), record.subject_id, record.grantee_id),
+                Seq::from_u64(record.grant_seq),
+                None,
+            )
+        })
+}
+
+/// The ADR-059 record of the consent `(consent_id, subject, grantee)` of the
+/// consent-bound `grant`: it covers exactly the grant's resources, actions,
+/// purposes and audiences, has no wall-clock expiry and is withdrawn at its
+/// ADR-039 fence.
+fn consent_reference_of(
+    grant: &CapabilityGrantV1,
+    (consent_id, subject, grantee): (Hash, EntityId, EntityId),
+    grant_position: Seq,
+    fence: Option<Seq>,
+) -> Result<ConsentGrantRefV1, AuthorityErrorV1> {
+    let scope = grant.scope();
+    ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
+        consent_id,
+        subject_id: subject,
+        grantee_id: grantee,
+        data_categories: scope.resources().to_vec(),
+        purposes: scope.purposes().to_vec(),
+        audiences: scope.audiences().to_vec(),
+        action_classes: scope.actions().to_vec(),
+        valid_from: WallTime::from_micros(0),
+        valid_until: WallTime::from_micros(u64::MAX),
+        withdrawal_retention_policy: CONSENT_WITHDRAWAL_POLICY.to_owned(),
+        policy_revision: grant.policy_revision(),
+        issuer: grant.grantor().clone(),
+        issuer_evidence: grant.authority_registry_digest(),
+        consent_timeline: local_principal_consent_timeline(),
+        grant_position,
+        status: fence.map_or(ConsentGrantStatusV1::Active, |_| {
+            ConsentGrantStatusV1::RevokedAtFence
+        }),
+        revocation_fence: fence,
+        authority_registry_digest: grant.authority_registry_digest(),
+    })
+}
+
+/// The ADR-059 identity of the consent whose canonical
+/// `consent.granted.v1` payload is `payload`.
+fn consent_id(payload: &CanonicalBytes) -> Hash {
+    Hash::from_bytes(blake3::derive_key(
+        "pigloros gateway local consent v1",
+        payload.as_slice(),
+    ))
 }
 
 /// The grant as provisioned: a resolved chain carries the store's current
@@ -473,41 +1139,49 @@ fn as_issued(grant: &CapabilityGrantV1) -> Result<CapabilityGrantV1, AuthorityEr
 
 /// The Local Principal's pinned authentication evidence and the registry
 /// snapshot that attests it, the as-issued `grant` and its `current`
-/// recorded form; all are functions of the recorded grant.
+/// recorded form, the consent-bound grant's two forms when given, and the
+/// registry bindings of its consents; all are functions of the recorded
+/// grants and consent Timeline.
 ///
-/// A recorded revocation changes the grant's resolved form, so attesting it
-/// lets the evaluator answer a revoked Principal `revoked` rather than
-/// `unauthorized`. The evidence has no expiry: loopback reachability, not a
-/// credential, is the Local trust boundary (D1), so it is valid from the
-/// epoch on.
+/// A recorded revocation changes a grant's resolved form, and a consent
+/// revocation its ADR-059 record, so attesting them lets the evaluator answer
+/// a revoked Principal or consent `revoked` rather than `unauthorized`. The
+/// evidence has no expiry: loopback reachability, not a credential, is the
+/// Local trust boundary (D1), so it is valid from the epoch on.
 fn authority_for(
-    grant: &CapabilityGrantV1,
-    current: &CapabilityGrantV1,
+    grant: (&CapabilityGrantV1, &CapabilityGrantV1),
+    consented: Option<(&CapabilityGrantV1, &CapabilityGrantV1)>,
+    mut consent_bindings: Vec<Hash>,
 ) -> Result<(AuthenticatedPrincipalResultV1, AuthorityRegistrySnapshotV1), AuthorityErrorV1> {
+    let (issued, current) = grant;
     AssuranceLevelV1::try_new(1)
         .and_then(|assurance| {
             AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                principal: grant.grantee().principal().clone(),
+                principal: issued.grantee().principal().clone(),
                 adapter_id: LOCAL_ADAPTER_ID.to_owned(),
                 assurance,
                 issued_at: WallTime::from_micros(0),
                 expires_at: WallTime::from_micros(u64::MAX),
-                binding_digest: grant.authority_registry_digest(),
+                binding_digest: issued.authority_registry_digest(),
             })
         })
         .and_then(|evidence| {
-            [grant, current]
+            let consent_grants =
+                consented.map_or_else(Vec::new, |(issued, current)| vec![issued, current]);
+            [issued, current]
                 .into_iter()
+                .chain(consent_grants)
                 .map(CapabilityGrantV1::binding_digest)
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|mut bindings| {
                     bindings.sort_unstable();
                     bindings.dedup();
+                    consent_bindings.sort_unstable();
                     AuthorityRegistrySnapshotV1::try_new(
-                        grant.authority_registry_digest(),
+                        issued.authority_registry_digest(),
                         vec![evidence.registry_binding_digest()],
                         bindings,
-                        Vec::new(),
+                        consent_bindings,
                     )
                 })
                 .map(|registry| (evidence, registry))
@@ -527,11 +1201,14 @@ const fn persistence_failure(error: AuthorityPersistenceErrorV1) -> LocalPrincip
     }
 }
 
-/// The registry digest committing to one whole provisioning document.
+/// The registry digest committing to one whole provisioning document; a
+/// document without consents commits to its Principal, actors and
+/// operations only.
 fn registry_digest(
     principal: &PrincipalRefV1,
     actors: &[EntityId],
     operations: &[GatewayOperationV1],
+    consent: Option<&LocalConsentDraftV1>,
 ) -> Hash {
     let mut hasher = blake3::Hasher::new_derive_key("pigloros gateway local principal registry v1");
     hasher.update(principal.principal_id());
@@ -543,6 +1220,19 @@ fn registry_digest(
     hasher.update(&(operations.len() as u64).to_be_bytes());
     for operation in operations {
         framed(&mut hasher, operation.name().as_bytes());
+    }
+    if let Some(consent) = consent {
+        hasher.update(&consent.subject.inner().to_bytes());
+        hasher.update(&consent.grantee.inner().to_bytes());
+        hasher.update(&(consent.operations.len() as u64).to_be_bytes());
+        for operation in &consent.operations {
+            framed(&mut hasher, operation.name().as_bytes());
+        }
+        hasher.update(&(consent.grants.len() as u64).to_be_bytes());
+        for grant in &consent.grants {
+            framed(&mut hasher, grant.purpose.as_bytes());
+            hasher.update(&[u8::from(grant.export_permitted)]);
+        }
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -556,6 +1246,14 @@ fn derived_hash(context: &str) -> Hash {
     Hash::from_bytes(blake3::derive_key(context, &[]))
 }
 
+/// The Timeline identity of the derivation `context`.
+fn derived_timeline(context: &str) -> TimelineId {
+    let digest = blake3::derive_key(context, &[]);
+    let mut identity = [0; 16];
+    identity.copy_from_slice(&digest[..16]);
+    TimelineId::from_ulid(Ulid::from_bytes(identity))
+}
+
 /// The one grant identity a store's Local Principal is recorded under.
 fn local_principal_grant_id() -> Hash {
     derived_hash("pigloros gateway local principal grant v1")
@@ -563,13 +1261,44 @@ fn local_principal_grant_id() -> Hash {
 
 /// The authority Timeline the Local Principal's grant is issued on.
 fn local_principal_authority_timeline() -> TimelineId {
-    let digest = blake3::derive_key(
-        "pigloros gateway local principal authority timeline v1",
-        &[],
-    );
-    let mut identity = [0; 16];
-    identity.copy_from_slice(&digest[..16]);
-    TimelineId::from_ulid(Ulid::from_bytes(identity))
+    derived_timeline("pigloros gateway local principal authority timeline v1")
+}
+
+/// The one consent Timeline of a store's Local Principal (#309): a root
+/// Timeline under this well-known identity, which no client can create.
+#[must_use]
+pub fn local_principal_consent_timeline() -> TimelineId {
+    derived_timeline("pigloros gateway local principal consent timeline v1")
+}
+
+/// The bounds of one complete consent Timeline read.
+pub(crate) fn consent_bounds() -> EventReadBounds {
+    EventReadBounds::new(
+        crate::MAX_EVENT_PAYLOAD_BYTES,
+        crate::MAX_EVENT_TYPE_BYTES,
+        crate::MAX_FORK_DEPTH,
+        MAX_CONSENT_HISTORY_EVENTS,
+    )
+}
+
+fn entity(text: &str) -> Option<EntityId> {
+    Ulid::from_string(text).ok().map(EntityId::from_ulid)
+}
+
+fn named_operations(names: &[String]) -> Option<Vec<GatewayOperationV1>> {
+    names
+        .iter()
+        .map(|name| GatewayOperationV1::named(name))
+        .collect()
+}
+
+fn sorted_operations(
+    operations: impl IntoIterator<Item = GatewayOperationV1>,
+) -> Vec<GatewayOperationV1> {
+    let mut operations = operations.into_iter().collect::<Vec<_>>();
+    operations.sort_unstable_by_key(operation_name);
+    operations.dedup();
+    operations
 }
 
 const fn operation_name(operation: &GatewayOperationV1) -> &'static str {
@@ -1705,10 +2434,10 @@ mod tests {
         provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
         let authorization =
             load_local_principal(&SqliteStore::open(&path)?)?.ok_or("provisioned")?;
-        let recorded = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        let recorded = chain_record(&path)?;
         assert!(!authorization.is_behind(&recorded));
         record_revocation(&path, &provision)?;
-        let revoked = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        let revoked = chain_record(&path)?;
         assert!(authorization.is_behind(&revoked));
         Ok(())
     }
@@ -1721,15 +2450,24 @@ mod tests {
         provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
         let authorization =
             load_local_principal(&SqliteStore::open(&path)?)?.ok_or("provisioned")?;
-        let older = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
+        let older = chain_record(&path)?;
         record_revocation(&path, &provision)?;
-        let newer = SqliteStore::open(&path)?.load_authority(local_principal_grant_id())?;
-        authorization.refresh(&newer).await?;
+        let newer = chain_record(&path)?;
+        authorization.refresh(newer.clone()).await?;
         assert!(!authorization.is_behind(&newer));
         // A refresh that read the store before the revocation lands later.
-        authorization.refresh(&older).await?;
+        authorization.refresh(older).await?;
         assert!(!authorization.is_behind(&newer));
         Ok(())
+    }
+
+    /// The record of the Local Principal chain the store at `path` holds,
+    /// for a Principal whose provisioning binds no consent.
+    fn chain_record(path: &str) -> TestResult<GatewayAuthorityRecordV1> {
+        Ok(GatewayAuthorityRecordV1 {
+            chain: SqliteStore::open(path)?.load_authority(local_principal_grant_id())?,
+            consented: None,
+        })
     }
 
     #[tokio::test]
@@ -2066,5 +2804,514 @@ mod tests {
         std::fs::write(credentials.join("extra"), b"")?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
         Ok(())
+    }
+
+    // --- #309: provisioned consents and their revocation ---
+
+    /// The consent of the consent tests: the actor consents for itself to
+    /// `operations`, once per purpose.
+    fn consent_draft(
+        operations: Vec<GatewayOperationV1>,
+        purposes: &[&str],
+    ) -> TestResult<LocalConsentDraftV1> {
+        Ok(LocalConsentDraftV1 {
+            subject: actor()?,
+            grantee: actor()?,
+            operations,
+            grants: purposes
+                .iter()
+                .map(|purpose| LocalConsentGrantDraftV1 {
+                    purpose: (*purpose).to_owned(),
+                    export_permitted: purpose.starts_with("export"),
+                })
+                .collect(),
+        })
+    }
+
+    /// The Principal of the consent tests: Timeline creation is governed by
+    /// `purposes`, reads, the Session and revocation are not.
+    fn consented_provision(purposes: &[&str]) -> TestResult<LocalPrincipalProvisionV1> {
+        Ok(LocalPrincipalProvisionV1::try_new_with_consent(
+            &principal()?,
+            [actor()?],
+            [
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
+            ],
+            Some(consent_draft(
+                vec![GatewayOperationV1::CREATE_TIMELINE],
+                purposes,
+            )?),
+        )?)
+    }
+
+    /// A Local store at `path` provisioned with `provision` through the
+    /// production host path, and the Gateway `serve` composes over it.
+    fn consented_gateway(
+        path: &str,
+        provision: &LocalPrincipalProvisionV1,
+    ) -> TestResult<(Gateway, Router)> {
+        let mode = crate::mode_profile::test_binding(
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            [],
+        );
+        provision_on_host(&mut sqlite_host(path)?, provision)?;
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(path)?, &mode),
+            None,
+            &mode,
+        )?;
+        Ok((gateway.clone(), app_of(gateway)))
+    }
+
+    async fn revoke_with(
+        app: &Router,
+        consent_ref: &Value,
+        key: &str,
+    ) -> TestResult<(StatusCode, Value)> {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/me/consent-revocations")
+            .header("idempotency-key", key)
+            .header(ACTOR_ENTITY_HEADER, actor()?.to_string())
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"consent_ref": consent_ref}).to_string()))?;
+        let response = app.clone().oneshot(request).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    async fn session(app: &Router) -> TestResult<Value> {
+        let (status, body) = send(app, "GET", "/v1/session", Some(actor()?), None).await?;
+        assert_eq!(status, StatusCode::OK);
+        Ok(body)
+    }
+
+    /// Owner decisions 1(a) and 2(b) on #309, end to end through the
+    /// production provisioning and serve composition: a provisioned consent
+    /// is disclosed and governs Timeline creation only; its revocation is
+    /// recorded once, answered with its original afterwards, takes effect
+    /// before the next decision and survives a restart; reads, the Session
+    /// and revocation itself stay available.
+    #[tokio::test]
+    async fn a_revoked_consent_stops_only_the_operations_it_governs() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let provision = consented_provision(&["decision preview", "export to the subject"])?;
+        let (gateway, app) = consented_gateway(&path, &provision)?;
+
+        let granted = session(&app).await?;
+        assert_eq!(granted["generation"], 4);
+        assert_eq!(
+            granted["grants"],
+            json!([
+                "consent.revoke",
+                "session.read",
+                "timeline.create",
+                "timeline.events.read"
+            ])
+        );
+        assert_eq!(granted["consents"][0]["state"], "granted");
+        assert_eq!(granted["consents"][0]["export_permitted"], false);
+        assert_eq!(granted["consents"][1]["export_permitted"], true);
+        let first = granted["consents"][0]["consent_ref"].clone();
+        let second = granted["consents"][1]["consent_ref"].clone();
+        let (created, timeline) = create(&app, Some(actor()?)).await?;
+        assert_eq!(created, StatusCode::CREATED);
+
+        let (recorded, revocation) = revoke_with(&app, &first, "revoke-first").await?;
+        assert_eq!(recorded, StatusCode::CREATED);
+        assert_eq!(revocation["consent_ref"], first);
+        assert_eq!(revocation["state"], "revoked");
+        assert_eq!(revocation["future_protected_work"], "denied");
+        assert_eq!(revocation["generation"], 5);
+        assert_eq!(revocation["mode_profile"]["binding_epoch"], 1);
+        assert_ne!(revocation["id"], first);
+        // An exact retry, and a revocation of the revoked consent under a
+        // fresh key, return the original revocation.
+        assert_eq!(
+            revoke_with(&app, &first, "revoke-first").await?,
+            (StatusCode::OK, revocation.clone())
+        );
+        assert_eq!(
+            revoke_with(&app, &first, "revoke-again").await?,
+            (StatusCode::OK, revocation.clone())
+        );
+        // A key names the consent it first revoked.
+        let (conflict, problem) = revoke_with(&app, &second, "revoke-first").await?;
+        assert_eq!(conflict, StatusCode::CONFLICT);
+        assert_eq!(problem["code"], "idempotency-conflict");
+        // A consent the Principal does not hold is not found.
+        let (missing, problem) =
+            revoke_with(&app, &json!(Ulid::new().to_string()), "missing").await?;
+        assert_eq!(missing, StatusCode::NOT_FOUND);
+        assert_eq!(problem["code"], "not-found-or-unavailable");
+
+        // The governed operation is revoked; the others stay available.
+        let (denied, problem) = create(&app, Some(actor()?)).await?;
+        assert_eq!(denied, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "revoked");
+        let events = format!(
+            "/v1/timelines/{}/events",
+            timeline["id"].as_str().unwrap_or_default()
+        );
+        assert_eq!(
+            send(&app, "GET", &events, Some(actor()?), None).await?.0,
+            StatusCode::OK
+        );
+        let revoked = session(&app).await?;
+        assert_eq!(revoked["generation"], 5);
+        assert_eq!(revoked["consents"][0]["state"], "revoked");
+        assert_eq!(revoked["consents"][1]["state"], "granted");
+        assert_eq!(
+            revoked["grants"],
+            json!(["consent.revoke", "session.read", "timeline.events.read"])
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
+
+        // A restarted host recomposes the revocation from the consent
+        // Timeline, and an exact provisioning retry records nothing.
+        let (gateway, app) = consented_gateway(&path, &provision)?;
+        assert_eq!(session(&app).await?["consents"], revoked["consents"]);
+        assert_eq!(create(&app, Some(actor()?)).await?.0, StatusCode::FORBIDDEN);
+        let (second_recorded, second_revocation) =
+            revoke_with(&app, &second, "revoke-second").await?;
+        assert_eq!(second_recorded, StatusCode::CREATED);
+        assert_eq!(second_revocation["generation"], 6);
+        gateway.shutdown().await?;
+        drop(gateway);
+        Ok(())
+    }
+
+    /// A consent the acting entity neither gave nor holds is not found, and
+    /// a host without an authorizer has no consent to revoke.
+    #[tokio::test]
+    async fn only_the_subject_or_grantee_revokes_and_an_open_host_revokes_nothing() -> TestResult {
+        let other = EntityId::new();
+        let provision = LocalPrincipalProvisionV1::try_new_with_consent(
+            &principal()?,
+            [actor()?, other],
+            [
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::READ_SESSION,
+            ],
+            Some(consent_draft(
+                vec![GatewayOperationV1::CREATE_TIMELINE],
+                &["one"],
+            )?),
+        )?;
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let (gateway, app) = consented_gateway(&path, &provision)?;
+        let consent = session(&app).await?["consents"][0]["consent_ref"].clone();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/me/consent-revocations")
+            .header("idempotency-key", "other")
+            .header(ACTOR_ENTITY_HEADER, other.to_string())
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"consent_ref": consent}).to_string()))?;
+        assert_eq!(
+            app.clone().oneshot(request).await?.status(),
+            StatusCode::NOT_FOUND
+        );
+        // The other actor is no grantee: consent-governed creation is refused
+        // as consent-invalid, never answered as revoked.
+        let (refused, problem) = create(&app, Some(other)).await?;
+        assert_eq!(refused, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "consent-invalid");
+        gateway.shutdown().await?;
+        drop(gateway);
+
+        let open = Gateway::unprotected_for_harness(memory_host()?)?;
+        let (status, problem) = revoke_with(&app_of(open.clone()), &consent, "open").await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(problem["code"], "unauthenticated");
+        open.shutdown().await?;
+        drop(open);
+        Ok(())
+    }
+
+    #[test]
+    fn a_consent_document_is_validated_before_anything_is_recorded() -> TestResult {
+        let operations = [
+            GatewayOperationV1::CREATE_TIMELINE,
+            GatewayOperationV1::READ_SESSION,
+            GatewayOperationV1::REVOKE_CONSENT,
+        ];
+        let create = vec![GatewayOperationV1::CREATE_TIMELINE];
+        let refused = |granted: &[GatewayOperationV1], consent| -> TestResult<bool> {
+            Ok(LocalPrincipalProvisionV1::try_new_with_consent(
+                &principal()?,
+                [actor()?],
+                granted.iter().copied(),
+                Some(consent),
+            ) == Err(LocalPrincipalErrorV1::Invalid))
+        };
+        assert!(!refused(
+            &operations,
+            consent_draft(create.clone(), &["one"])?
+        )?);
+        let too_many = vec!["many"; MAX_CAPABILITY_CONSENT_REFERENCES + 1];
+        let long = "p".repeat(129);
+        for (label, granted, consent) in [
+            (
+                "no grant",
+                &operations[..],
+                consent_draft(create.clone(), &[])?,
+            ),
+            (
+                "too many grants",
+                &operations[..],
+                consent_draft(create.clone(), &too_many)?,
+            ),
+            (
+                "long purpose",
+                &operations[..],
+                consent_draft(create.clone(), &[long.as_str()])?,
+            ),
+            (
+                "no operation",
+                &operations[..],
+                consent_draft(Vec::new(), &["one"])?,
+            ),
+            (
+                "an ungranted operation",
+                &operations[..],
+                consent_draft(vec![GatewayOperationV1::READ_EVENTS], &["one"])?,
+            ),
+            (
+                "an exempt operation",
+                &operations[..],
+                consent_draft(vec![GatewayOperationV1::READ_SESSION], &["one"])?,
+            ),
+            (
+                "no unconsented operation",
+                &operations[..1],
+                consent_draft(create.clone(), &["one"])?,
+            ),
+            (
+                "a subject who does not act",
+                &operations[..],
+                LocalConsentDraftV1 {
+                    subject: EntityId::new(),
+                    ..consent_draft(create.clone(), &["one"])?
+                },
+            ),
+            (
+                "a grantee who does not act",
+                &operations[..],
+                LocalConsentDraftV1 {
+                    grantee: EntityId::new(),
+                    ..consent_draft(create.clone(), &["one"])?
+                },
+            ),
+        ] {
+            assert!(refused(granted, consent)?, "{label}");
+        }
+        assert!(GatewayOperationV1::REVOKE_CONSENT.consent_exempt());
+        assert!(!GatewayOperationV1::CREATE_TIMELINE.consent_exempt());
+        Ok(())
+    }
+
+    #[test]
+    fn a_consent_table_is_parsed_from_the_document() -> TestResult {
+        let base = document(
+            &format!("\"{ACTOR}\""),
+            "\"consent.revoke\", \"session.read\", \"timeline.create\"",
+        );
+        let table = format!(
+            "{base}[consent]\nsubject_entity_id = \"{ACTOR}\"\ngrantee_entity_id = \"{ACTOR}\"\n\
+             operations = [\"timeline.create\"]\n\n[[consent.grants]]\n\
+             purpose = \"decision preview\"\nexport_permitted = true\n"
+        );
+        let parsed = LocalPrincipalProvisionV1::from_toml(&table)?;
+        let built = LocalPrincipalProvisionV1::try_new_with_consent(
+            &principal()?,
+            [actor()?],
+            [
+                GatewayOperationV1::REVOKE_CONSENT,
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::CREATE_TIMELINE,
+            ],
+            Some(LocalConsentDraftV1 {
+                subject: actor()?,
+                grantee: actor()?,
+                operations: vec![GatewayOperationV1::CREATE_TIMELINE],
+                grants: vec![LocalConsentGrantDraftV1 {
+                    purpose: "decision preview".to_owned(),
+                    export_permitted: true,
+                }],
+            }),
+        )?;
+        assert_eq!(parsed, built);
+        assert_ne!(parsed, LocalPrincipalProvisionV1::from_toml(&base)?);
+        for broken in [
+            table.replace("subject_entity_id = \"", "subject_entity_id = \"x"),
+            table.replace("grantee_entity_id = \"", "grantee_entity_id = \"x"),
+            table.replace(
+                "operations = [\"timeline.create\"]",
+                "operations = [\"timeline.delete\"]",
+            ),
+            table.replace(
+                "export_permitted = true",
+                "export_permitted = true\nextra = 1",
+            ),
+        ] {
+            assert_eq!(
+                LocalPrincipalProvisionV1::from_toml(&broken),
+                Err(LocalPrincipalErrorV1::Invalid)
+            );
+        }
+        Ok(())
+    }
+
+    /// A store's consent Timeline holds one provisioning's consents: a
+    /// document with other consents conflicts, and a provisioning without
+    /// consents records none.
+    #[test]
+    fn a_consent_timeline_holds_one_provisioning() -> TestResult {
+        let mut host = memory_host()?;
+        provision_local_consents(&mut host, &served_provision()?)?;
+        provision_local_consents(&mut host, &consented_provision(&["one"])?)?;
+        provision_local_consents(&mut host, &consented_provision(&["one"])?)?;
+        assert_eq!(
+            provision_local_consents(&mut host, &consented_provision(&["two"])?),
+            Err(LocalPrincipalErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    /// The recorded consents of `provision`'s consent-bound grant, as Events
+    /// of the consent Timeline at sequences 1, 2, ...
+    fn consent_events(
+        provision: &LocalPrincipalProvisionV1,
+    ) -> TestResult<(CapabilityGrantV1, Vec<Event>)> {
+        let (grant, records) = provision
+            .consent
+            .clone()
+            .ok_or("the provision binds consents")?;
+        let events = records
+            .iter()
+            .map(|record| -> TestResult<Event> {
+                Ok(consent_event(
+                    record.subject_id,
+                    EVENT_TYPE_CONSENT_GRANTED_V1,
+                    record.encode()?,
+                    record.grant_seq,
+                ))
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+        Ok((grant, events))
+    }
+
+    fn consent_event(
+        entity: EntityId,
+        event_type: &str,
+        payload: CanonicalBytes,
+        seq: u64,
+    ) -> Event {
+        Event {
+            id: pos_core::EventId::new(),
+            entity,
+            event_type: Kind::new(event_type),
+            payload,
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    /// A consent Timeline this host cannot reproduce exactly is refused.
+    #[test]
+    fn a_consent_timeline_out_of_contract_is_refused() -> TestResult {
+        let provision = consented_provision(&["one", "two"])?;
+        let (grant, events) = consent_events(&provision)?;
+        let consents = local_consents(&grant, &events).ok_or("the recorded consents replay")?;
+        assert_eq!(consents.disclosed().len(), 2);
+        assert_eq!(consents.head(), Seq::from_u64(2));
+        let revocation = |grant_seq: u64, seq: u64| -> TestResult<Event> {
+            Ok(consent_event(
+                actor()?,
+                EVENT_TYPE_CONSENT_REVOKED_V1,
+                ConsentRevokedV1 {
+                    subject_id: actor()?,
+                    grantee_id: actor()?,
+                    grant_seq,
+                    fence_seq: 3,
+                }
+                .encode()?,
+                seq,
+            ))
+        };
+        let revoked = [events.clone(), vec![revocation(1, 3)?]].concat();
+        let replayed = local_consents(&grant, &revoked).ok_or("a revocation replays")?;
+        assert!(replayed.disclosed()[0].revocation().is_some());
+        assert!(replayed.disclosed()[1].revocation().is_none());
+        let mut foreign = events.clone();
+        foreign[0].entity = EntityId::new();
+        let mut shifted = events.clone();
+        shifted[1].seq = Seq::from_u64(3);
+        let mut unknown = events.clone();
+        unknown[0].event_type = Kind::new("consent.renewed.v1");
+        let mut garbled = events.clone();
+        garbled[1].payload = CanonicalBytes::from_static(b"garbled");
+        let mut foreign_revocation = revocation(1, 3)?;
+        foreign_revocation.entity = EntityId::new();
+        let no_subject = local_grant_without_subject(&grant)?;
+        for (label, grant, events) in [
+            ("a foreign entity", &grant, foreign),
+            ("a grant at another sequence", &grant, shifted),
+            ("an unknown event type", &grant, unknown),
+            ("a garbled payload", &grant, garbled),
+            ("a missing grant", &grant, events[..1].to_vec()),
+            (
+                "a revocation of no grant",
+                &grant,
+                [events.clone(), vec![revocation(7, 3)?]].concat(),
+            ),
+            (
+                "a revocation at another sequence",
+                &grant,
+                [events.clone(), vec![revocation(1, 4)?]].concat(),
+            ),
+            (
+                "a revocation by a foreign entity",
+                &grant,
+                [events.clone(), vec![foreign_revocation]].concat(),
+            ),
+            ("a grant without a subject", &no_subject, events.clone()),
+        ] {
+            assert!(local_consents(grant, &events).is_none(), "{label}");
+        }
+        Ok(())
+    }
+
+    /// `grant` with no subject in its scope.
+    fn local_grant_without_subject(grant: &CapabilityGrantV1) -> TestResult<CapabilityGrantV1> {
+        Ok(root_grant(
+            grant.grantor(),
+            LocalGrantKindV1::Consented,
+            (
+                grant.scope().actor_entity_ids(),
+                [GatewayOperationV1::CREATE_TIMELINE].as_slice(),
+            ),
+            None,
+            grant.authority_registry_digest(),
+        )?)
     }
 }
