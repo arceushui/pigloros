@@ -13,7 +13,7 @@
 #   deny         — cargo-deny (licenses, bans, sources)
 #   notices      — third-party notice bundle from the locked graphs (#545)
 #   unsafe       — workspace unsafe_code = "forbid" plus the source-based
-#                  owner-bridge unsafe policy (owner-bridge-policy job)
+#                  owner-bridge unsafe policy (owner-bridge-policies job)
 #   asan         — address sanitizer on nightly
 #   docker       — image builds and smoke-tests
 #   wasm         — world-client WASM contract + browser parity
@@ -161,7 +161,8 @@ jobs:
       - ci_change_scope
       - trunk-pr
       - pinned-dependencies
-      - owner-bridge-policy
+      - source-policies
+      - owner-bridge-policies
       - conformance-fixtures
       - conformance-non-linux
       - plugin-component-fixtures
@@ -176,7 +177,8 @@ jobs:
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           TRUNK_RESULT: ${{ needs.trunk-pr.result }}
           POLICY_RESULT: ${{ needs.pinned-dependencies.result }}
-          OWNER_BRIDGE_POLICY_RESULT: ${{ needs.owner-bridge-policy.result }}
+          SOURCE_POLICY_RESULT: ${{ needs.source-policies.result }}
+          OWNER_POLICY_RESULT: ${{ needs.owner-bridge-policies.result }}
           FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
           NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
           PLUGIN_FIXTURES_RESULT: ${{ needs.plugin-component-fixtures.result }}
@@ -193,12 +195,14 @@ jobs:
           fi
           if [[ "${RUST_SCOPE}" = true ]]; then
             test "${POLICY_RESULT}" = success
-            test "${OWNER_BRIDGE_POLICY_RESULT}" = success
+            test "${SOURCE_POLICY_RESULT}" = success
+            test "${OWNER_POLICY_RESULT}" = success
             test "${PLUGIN_FIXTURES_RESULT}" = success
             test "${NOTICES_RESULT}" = success
           else
             test "${POLICY_RESULT}" = skipped
-            test "${OWNER_BRIDGE_POLICY_RESULT}" = skipped
+            test "${SOURCE_POLICY_RESULT}" = skipped
+            test "${OWNER_POLICY_RESULT}" = skipped
             test "${PLUGIN_FIXTURES_RESULT}" = skipped
             test "${NOTICES_RESULT}" = skipped
           fi
@@ -1659,10 +1663,7 @@ jobs:
           fi
           test "${MUTATION_RESULT}" = "${expected}"
 
-# ── Fast policy preflight (blocking) ────────────────────────────────────────
-# The policy checks run as two parallel jobs: the owner-bridge source policies,
-# led by the slow Windows unsafe-policy test, and everything else.
-# preflight-gate requires both.
+# ── Informational reports (non-blocking) ────────────────────────────────────
 
   pinned-dependencies:
     name: pinned-dependencies
@@ -1717,6 +1718,42 @@ jobs:
           python scripts/test_check_test_support_features.py
       - name: Test rust-test-policy test-code classification
         run: python scripts/test_rust_test_policy.py
+      - name: Check the community Plugin handoff READMEs
+        run: |
+          python scripts/check_handoff_readme.py
+          python scripts/test_check_handoff_readme.py
+      - name: Check PMF1 golden vectors match their generator
+        run: python scripts/generate_pmf1_golden_vectors.py --check
+      - name: Check independent owner-bridge codec vectors
+        run: |
+          python scripts/owner_bridge_vectors.py --check
+          python scripts/test_owner_bridge_vectors.py
+      - name: Check independent owner-bridge WebAuthn fixture
+        run: python scripts/owner_bridge_webauthn_fixtures.py --check
+      - name: Test Wasmtime pin checker
+        run: python scripts/test_check_wasmtime_feature_pin.py
+      - name: Check and test the third-party notice generator
+        run: |
+          python scripts/third_party_notices.py check
+          python scripts/test_third_party_notices.py
+
+  # Source-confinement policy checks, split from pinned-dependencies so each
+  # preflight policy job finishes well inside its timeout.
+  source-policies:
+    name: source-policies
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.11
+      - name: Install pinned dependency checker
+        run: >
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-pinned-dependencies.txt
       - name: Check counterfactual adapter seal policy
         run: |
           python scripts/check_counterfactual_adapter_seal.py
@@ -1737,27 +1774,11 @@ jobs:
         run: |
           python scripts/check_fixture_instant_confinement.py
           python scripts/test_check_fixture_instant_confinement.py
-      - name: Check the community Plugin handoff READMEs
-        run: |
-          python scripts/check_handoff_readme.py
-          python scripts/test_check_handoff_readme.py
-      - name: Check PMF1 golden vectors match their generator
-        run: python scripts/generate_pmf1_golden_vectors.py --check
-      - name: Check independent owner-bridge codec vectors
-        run: |
-          python scripts/owner_bridge_vectors.py --check
-          python scripts/test_owner_bridge_vectors.py
-      - name: Check independent owner-bridge WebAuthn fixture
-        run: python scripts/owner_bridge_webauthn_fixtures.py --check
-      - name: Test Wasmtime pin checker
-        run: python scripts/test_check_wasmtime_feature_pin.py
-      - name: Check and test the third-party notice generator
-        run: |
-          python scripts/third_party_notices.py check
-          python scripts/test_third_party_notices.py
 
-  owner-bridge-policy:
-    name: owner-bridge-policy
+  # Owner-bridge source policy checks, split from pinned-dependencies so each
+  # preflight policy job finishes well inside its timeout.
+  owner-bridge-policies:
+    name: owner-bridge-policies
     needs: ci_change_scope
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
@@ -1785,8 +1806,6 @@ jobs:
           python scripts/test_check_subject_encryption_activation.py
       - name: Test Windows shim coverage exclusions
         run: python scripts/test_owner_bridge_windows_cov_ignore.py
-
-# ── Informational reports (non-blocking) ────────────────────────────────────
 
   # Main-only reports keep running only after every normal check, including
   # cargo-crap, which standard-gate no longer covers.

@@ -97,10 +97,11 @@ PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = (
     "ci_change_scope",
     "pinned-dependencies",
-    "owner-bridge-policy",
+    "source-policies",
+    "owner-bridge-policies",
 )
-POLICY_JOB_NEEDS = "ci_change_scope"
-POLICY_JOB_IF = (
+PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
+PINNED_DEPENDENCIES_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request' }}"
 )
@@ -108,13 +109,18 @@ CI_WORKFLOW_POLICY_TEST_STEP = {
     "name": "Test CI workflow policy",
     "run": "python scripts/test_ci_workflow_policy.py",
 }
-# The two branches of the preflight-gate Rust-scope check: a policy job must
-# succeed when Rust is in scope and be skipped otherwise.
-RUST_SCOPE_BRANCHES = re.compile(
-    r'^if \[\[ "\$\{RUST_SCOPE\}" = true \]\]; then\n(.*?)^else\n(.*?)^fi$',
-    re.MULTILINE | re.DOTALL,
+# The preflight policy checks run as parallel jobs so each one finishes well
+# inside its timeout. Every job shares the reachability, setup and result
+# contract of pinned-dependencies, including its runner, checkout, pinned
+# Python and hash-pinned install steps; each check runs exactly once, in the
+# job listed here, in this order, with exactly this step body.
+PREFLIGHT_POLICY_JOB_TIMEOUT = 10
+PREFLIGHT_POLICY_RUNNER = "ubuntu-24.04"
+PREFLIGHT_POLICY_JOB_KEYS = {"name", "needs", "if", "runs-on", "timeout-minutes", "steps"}
+LOST_POLICY_CHECK = (
+    "exactly its policy checks|must run exactly once|run the CI workflow policy test"
 )
-POLICY_JOB_SETUP_STEPS = (
+PREFLIGHT_POLICY_SETUP = [
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
     {
         "uses": "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
@@ -125,182 +131,184 @@ POLICY_JOB_SETUP_STEPS = (
         "run": "python -m pip install --require-hashes --only-binary=:all: "
         "--requirement requirements-pinned-dependencies.txt\n",
     },
-)
-# Every fast policy job, the preflight-gate variable that carries its result,
-# and the exact checks it runs after the shared setup. The checks were split
-# from one serial job for wall clock; none may be dropped, moved or softened.
-POLICY_PREFLIGHT_JOBS = {
+]
+PREFLIGHT_POLICY_SETUP_STEPS = len(PREFLIGHT_POLICY_SETUP)
+PREFLIGHT_POLICY_RESULT_ENV = {
+    "pinned-dependencies": "POLICY_RESULT",
+    "source-policies": "SOURCE_POLICY_RESULT",
+    "owner-bridge-policies": "OWNER_POLICY_RESULT",
+}
+PREFLIGHT_POLICY_STEPS = {
     "pinned-dependencies": (
-        "POLICY_RESULT",
-        (
-            {
-                "name": "Check immutable Action and Docker references",
-                "run": "bash scripts/check-pinned-dependencies.sh",
-            },
-            {
-                "name": "Test pinned dependency checker",
-                "run": "bash scripts/test-check-pinned-dependencies.sh",
-            },
-            CI_WORKFLOW_POLICY_TEST_STEP,
-            {
-                "name": "Test mutation workflow policy",
-                "run": "python scripts/test_mutation_workflow_policy.py",
-            },
-            {
-                "name": "Test deploy workflow policy",
-                "run": "python scripts/test_deploy_workflow_policy.py",
-            },
-            {
-                "name": "Test ignored-test summary checker",
-                "run": "python scripts/test_assert_no_ignored_in_test_summary.py",
-            },
-            {
-                "name": "Check ASan CI policy",
-                "run": "bash scripts/check-asan-ci-policy.sh",
-            },
-            {
-                "name": "Test ASan CI policy checker",
-                "run": (
-                    "python scripts/test_check_asan_ci_policy.py\n"
-                    "python scripts/test_check_lsan_suppression_report.py\n"
-                ),
-            },
-            {
-                "name": "Check MemoryStore benchmark CI policy",
-                "run": "python scripts/check_memory_store_benchmark_ci_policy.py",
-            },
-            {
-                "name": "Test MemoryStore benchmark CI policy checker",
-                "run": "python scripts/test_check_memory_store_benchmark_ci_policy.py",
-            },
-            {
-                "name": "Check delegated isolated-test policy",
-                "run": (
-                    "python scripts/check_isolated_test_runner_policy.py\n"
-                    "python scripts/test_check_isolated_test_runner_policy.py\n"
-                ),
-            },
-            {
-                "name": "Check cargo-crap CI policy",
-                "run": "python scripts/check_cargo_crap_ci_policy.py",
-            },
-            {
-                "name": "Test cargo-crap policy checkers",
-                "run": (
-                    "python scripts/test_check_cargo_crap_ci_policy.py\n"
-                    "python scripts/test_check_cargo_crap_report.py\n"
-                ),
-            },
-            {
-                "name": "Check test-support feature policy",
-                "run": (
-                    "python scripts/check_test_support_features.py\n"
-                    "python scripts/test_check_test_support_features.py\n"
-                ),
-            },
-            {
-                "name": "Test rust-test-policy test-code classification",
-                "run": "python scripts/test_rust_test_policy.py",
-            },
-            {
-                "name": "Check counterfactual adapter seal policy",
-                "run": (
-                    "python scripts/check_counterfactual_adapter_seal.py\n"
-                    "python scripts/test_check_counterfactual_adapter_seal.py\n"
-                ),
-            },
-            {
-                "name": "Check trusted-clock port implementation policy",
-                "run": (
-                    "python scripts/check_trusted_clock_port_impls.py\n"
-                    "python scripts/test_check_trusted_clock_port_impls.py\n"
-                ),
-            },
-            {
-                "name": "Check Plugin trust registry confinement policy",
-                "run": (
-                    "python scripts/check_plugin_trust_registry_impls.py\n"
-                    "python scripts/test_check_plugin_trust_registry_impls.py\n"
-                ),
-            },
-            {
-                "name": "Check composition fallback registry confinement policy",
-                "run": (
-                    "python scripts/check_composition_fallback_registry_impls.py\n"
-                    "python scripts/test_check_composition_fallback_registry_impls.py\n"
-                ),
-            },
-            {
-                "name": "Check fixture evaluation instant and admission host confinement policy",
-                "run": (
-                    "python scripts/check_fixture_instant_confinement.py\n"
-                    "python scripts/test_check_fixture_instant_confinement.py\n"
-                ),
-            },
-            {
-                "name": "Check the community Plugin handoff READMEs",
-                "run": (
-                    "python scripts/check_handoff_readme.py\n"
-                    "python scripts/test_check_handoff_readme.py\n"
-                ),
-            },
-            {
-                "name": "Check PMF1 golden vectors match their generator",
-                "run": "python scripts/generate_pmf1_golden_vectors.py --check",
-            },
-            {
-                "name": "Check independent owner-bridge codec vectors",
-                "run": (
-                    "python scripts/owner_bridge_vectors.py --check\n"
-                    "python scripts/test_owner_bridge_vectors.py\n"
-                ),
-            },
-            {
-                "name": "Check independent owner-bridge WebAuthn fixture",
-                "run": "python scripts/owner_bridge_webauthn_fixtures.py --check",
-            },
-            {
-                "name": "Test Wasmtime pin checker",
-                "run": "python scripts/test_check_wasmtime_feature_pin.py",
-            },
-            {
-                "name": "Check and test the third-party notice generator",
-                "run": (
-                    "python scripts/third_party_notices.py check\n"
-                    "python scripts/test_third_party_notices.py\n"
-                ),
-            },
-        ),
+        {
+            "name": "Check immutable Action and Docker references",
+            "run": "bash scripts/check-pinned-dependencies.sh",
+        },
+        {
+            "name": "Test pinned dependency checker",
+            "run": "bash scripts/test-check-pinned-dependencies.sh",
+        },
+        {
+            "name": "Test CI workflow policy",
+            "run": "python scripts/test_ci_workflow_policy.py",
+        },
+        {
+            "name": "Test mutation workflow policy",
+            "run": "python scripts/test_mutation_workflow_policy.py",
+        },
+        {
+            "name": "Test deploy workflow policy",
+            "run": "python scripts/test_deploy_workflow_policy.py",
+        },
+        {
+            "name": "Test ignored-test summary checker",
+            "run": "python scripts/test_assert_no_ignored_in_test_summary.py",
+        },
+        {
+            "name": "Check ASan CI policy",
+            "run": "bash scripts/check-asan-ci-policy.sh",
+        },
+        {
+            "name": "Test ASan CI policy checker",
+            "run": (
+                "python scripts/test_check_asan_ci_policy.py\n"
+                "python scripts/test_check_lsan_suppression_report.py\n"
+            ),
+        },
+        {
+            "name": "Check MemoryStore benchmark CI policy",
+            "run": "python scripts/check_memory_store_benchmark_ci_policy.py",
+        },
+        {
+            "name": "Test MemoryStore benchmark CI policy checker",
+            "run": "python scripts/test_check_memory_store_benchmark_ci_policy.py",
+        },
+        {
+            "name": "Check delegated isolated-test policy",
+            "run": (
+                "python scripts/check_isolated_test_runner_policy.py\n"
+                "python scripts/test_check_isolated_test_runner_policy.py\n"
+            ),
+        },
+        {
+            "name": "Check cargo-crap CI policy",
+            "run": "python scripts/check_cargo_crap_ci_policy.py",
+        },
+        {
+            "name": "Test cargo-crap policy checkers",
+            "run": (
+                "python scripts/test_check_cargo_crap_ci_policy.py\n"
+                "python scripts/test_check_cargo_crap_report.py\n"
+            ),
+        },
+        {
+            "name": "Check test-support feature policy",
+            "run": (
+                "python scripts/check_test_support_features.py\n"
+                "python scripts/test_check_test_support_features.py\n"
+            ),
+        },
+        {
+            "name": "Test rust-test-policy test-code classification",
+            "run": "python scripts/test_rust_test_policy.py",
+        },
+        {
+            "name": "Check the community Plugin handoff READMEs",
+            "run": (
+                "python scripts/check_handoff_readme.py\n"
+                "python scripts/test_check_handoff_readme.py\n"
+            ),
+        },
+        {
+            "name": "Check PMF1 golden vectors match their generator",
+            "run": "python scripts/generate_pmf1_golden_vectors.py --check",
+        },
+        {
+            "name": "Check independent owner-bridge codec vectors",
+            "run": (
+                "python scripts/owner_bridge_vectors.py --check\n"
+                "python scripts/test_owner_bridge_vectors.py\n"
+            ),
+        },
+        {
+            "name": "Check independent owner-bridge WebAuthn fixture",
+            "run": "python scripts/owner_bridge_webauthn_fixtures.py --check",
+        },
+        {
+            "name": "Test Wasmtime pin checker",
+            "run": "python scripts/test_check_wasmtime_feature_pin.py",
+        },
+        {
+            "name": "Check and test the third-party notice generator",
+            "run": (
+                "python scripts/third_party_notices.py check\n"
+                "python scripts/test_third_party_notices.py\n"
+            ),
+        },
     ),
-    "owner-bridge-policy": (
-        "OWNER_BRIDGE_POLICY_RESULT",
-        (
-            {
-                "name": "Check owner-bridge Windows unsafe policy",
-                "run": (
-                    "python scripts/check_owner_bridge_unsafe_policy.py\n"
-                    "python scripts/test_check_owner_bridge_unsafe_policy.py\n"
-                ),
-            },
-            {
-                "name": "Check owner-bridge encryptor-lock dependency pin",
-                "run": (
-                    "python scripts/check_owner_bridge_lock.py\n"
-                    "python scripts/test_check_owner_bridge_lock.py\n"
-                ),
-            },
-            {
-                "name": "Check subject-encryption activation boundary",
-                "run": (
-                    "python scripts/check_subject_encryption_activation.py\n"
-                    "python scripts/test_check_subject_encryption_activation.py\n"
-                ),
-            },
-            {
-                "name": "Test Windows shim coverage exclusions",
-                "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
-            },
-        ),
+    "source-policies": (
+        {
+            "name": "Check counterfactual adapter seal policy",
+            "run": (
+                "python scripts/check_counterfactual_adapter_seal.py\n"
+                "python scripts/test_check_counterfactual_adapter_seal.py\n"
+            ),
+        },
+        {
+            "name": "Check trusted-clock port implementation policy",
+            "run": (
+                "python scripts/check_trusted_clock_port_impls.py\n"
+                "python scripts/test_check_trusted_clock_port_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check Plugin trust registry confinement policy",
+            "run": (
+                "python scripts/check_plugin_trust_registry_impls.py\n"
+                "python scripts/test_check_plugin_trust_registry_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check composition fallback registry confinement policy",
+            "run": (
+                "python scripts/check_composition_fallback_registry_impls.py\n"
+                "python scripts/test_check_composition_fallback_registry_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check fixture evaluation instant and admission host confinement policy",
+            "run": (
+                "python scripts/check_fixture_instant_confinement.py\n"
+                "python scripts/test_check_fixture_instant_confinement.py\n"
+            ),
+        },
+    ),
+    "owner-bridge-policies": (
+        {
+            "name": "Check owner-bridge Windows unsafe policy",
+            "run": (
+                "python scripts/check_owner_bridge_unsafe_policy.py\n"
+                "python scripts/test_check_owner_bridge_unsafe_policy.py\n"
+            ),
+        },
+        {
+            "name": "Check owner-bridge encryptor-lock dependency pin",
+            "run": (
+                "python scripts/check_owner_bridge_lock.py\n"
+                "python scripts/test_check_owner_bridge_lock.py\n"
+            ),
+        },
+        {
+            "name": "Check subject-encryption activation boundary",
+            "run": (
+                "python scripts/check_subject_encryption_activation.py\n"
+                "python scripts/test_check_subject_encryption_activation.py\n"
+            ),
+        },
+        {
+            "name": "Test Windows shim coverage exclusions",
+            "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
+        },
     ),
 }
 EXPECTED_EXCLUDES = {
@@ -507,23 +515,20 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
     if "if" in scope:
         raise AssertionError("ci_change_scope must remain unconditional")
 
-    for job_name, (_, checks) in POLICY_PREFLIGHT_JOBS.items():
-        job = jobs.get(job_name)
-        if not isinstance(job, dict):
-            raise AssertionError(f"ci.yml must define {job_name}")
-        if job.get("needs") != POLICY_JOB_NEEDS:
-            raise AssertionError(f"{job_name} must wait for ci_change_scope")
-        if job.get("if") != POLICY_JOB_IF:
-            raise AssertionError(f"{job_name} must remain reachable on a main push")
-        if job.get("timeout-minutes") != 10 or "continue-on-error" in job:
-            raise AssertionError(f"{job_name} must keep its blocking 10-minute limit")
-        steps = job.get("steps")
-        if job_name == "pinned-dependencies" and (
-            not isinstance(steps, list) or CI_WORKFLOW_POLICY_TEST_STEP not in steps
-        ):
-            raise AssertionError("pinned-dependencies must run the CI workflow policy test")
-        if steps != [*POLICY_JOB_SETUP_STEPS, *checks]:
-            raise AssertionError(f"{job_name} must run exactly its blocking policy checks")
+    for policy_name in PREFLIGHT_POLICY_STEPS:
+        policy_job = jobs.get(policy_name)
+        if not isinstance(policy_job, dict):
+            raise AssertionError(f"ci.yml must define {policy_name}")
+        if policy_job.get("needs") != PINNED_DEPENDENCIES_NEEDS:
+            raise AssertionError(f"{policy_name} must wait for ci_change_scope")
+        if policy_job.get("if") != PINNED_DEPENDENCIES_IF:
+            raise AssertionError(f"{policy_name} must remain reachable on a main push")
+    pinned_steps = jobs["pinned-dependencies"].get("steps")
+    if (
+        not isinstance(pinned_steps, list)
+        or CI_WORKFLOW_POLICY_TEST_STEP not in pinned_steps
+    ):
+        raise AssertionError("pinned-dependencies must run the CI workflow policy test")
 
     preflight = jobs.get("preflight-gate")
     if not isinstance(preflight, dict):
@@ -535,21 +540,54 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
         preflight_needs
     ):
         raise AssertionError("preflight-gate must retain scope and policy dependencies")
-    preflight_steps = preflight.get("steps")
-    check = preflight_steps[0] if isinstance(preflight_steps, list) and preflight_steps else {}
-    env = check.get("env", {})
-    script = check.get("run", "")
-    if "if" in check or "continue-on-error" in check:
-        raise AssertionError("preflight-gate result check must remain blocking")
-    scope = RUST_SCOPE_BRANCHES.search(script)
-    in_scope, out_of_scope = scope.groups() if scope else ("", "")
-    for job_name, (variable, _) in POLICY_PREFLIGHT_JOBS.items():
-        if (
-            env.get(variable) != f"${{{{ needs.{job_name}.result }}}}"
-            or f'test "${{{variable}}}" = success\n' not in in_scope
-            or f'test "${{{variable}}}" = skipped\n' not in out_of_scope
-        ):
-            raise AssertionError(f"preflight-gate must require the {job_name} result")
+
+
+def assert_preflight_policy_split(workflow: dict) -> None:
+    """Each preflight policy job keeps its checks, setup and gate result."""
+    assert_main_push_prerequisites(workflow)
+    jobs = workflow["jobs"]
+    for policy_name, expected_steps in PREFLIGHT_POLICY_STEPS.items():
+        expected_names = tuple(step["name"] for step in expected_steps)
+        job = jobs[policy_name]
+        if job.get("name") != policy_name:
+            raise AssertionError(f"{policy_name} must keep its check name")
+        if job.get("runs-on") != PREFLIGHT_POLICY_RUNNER:
+            raise AssertionError(f"{policy_name} must keep its pinned runner")
+        if (job.get("timeout-minutes") != PREFLIGHT_POLICY_JOB_TIMEOUT
+                or "continue-on-error" in job):
+            raise AssertionError(f"{policy_name} must keep its blocking 10-minute limit")
+        steps = job.get("steps", [])
+        if steps[:PREFLIGHT_POLICY_SETUP_STEPS] != PREFLIGHT_POLICY_SETUP:
+            raise AssertionError(f"{policy_name} must use the shared pinned Python setup")
+        checks = steps[PREFLIGHT_POLICY_SETUP_STEPS:]
+        if tuple(step.get("name") for step in checks) != expected_names:
+            raise AssertionError(f"{policy_name} must run exactly its policy checks")
+        if any("if" in step or "continue-on-error" in step for step in steps):
+            raise AssertionError(f"{policy_name} steps must remain unconditional and blocking")
+        if tuple(checks) != expected_steps:
+            raise AssertionError(f"{policy_name} must run its pinned policy step bodies")
+        if set(job) != PREFLIGHT_POLICY_JOB_KEYS:
+            raise AssertionError(f"{policy_name} must keep exactly its reviewed job keys")
+        for name in expected_names:
+            owners = [
+                owner
+                for owner, candidate in jobs.items()
+                for step in candidate.get("steps", [])
+                if step.get("name") == name
+            ]
+            if owners != [policy_name]:
+                raise AssertionError(f"{name} must run exactly once, in {policy_name}")
+
+    preflight = jobs["preflight-gate"]
+    if not set(PREFLIGHT_POLICY_STEPS).issubset(job_needs(preflight)):
+        raise AssertionError("preflight-gate must wait for every preflight policy job")
+    step = preflight["steps"][0]
+    for policy_name, variable in PREFLIGHT_POLICY_RESULT_ENV.items():
+        if step["env"].get(variable) != "${{ needs." + policy_name + ".result }}":
+            raise AssertionError(f"preflight-gate must read the actual {policy_name} result")
+        for expected in ("success", "skipped"):
+            if f'test "${{{variable}}}" = {expected}' not in step["run"]:
+                raise AssertionError(f"preflight-gate must enforce the {policy_name} result")
 
 
 def assert_core_rust_cache_contract(workflow: dict) -> None:
@@ -1631,7 +1669,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_owner_bridge_coverage_scope_runs_with_fixtures_and_real_metadata(self) -> None:
         jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
         expected = (
-            ("owner-bridge-policy", {
+            ("owner-bridge-policies", {
                 "name": "Test Windows shim coverage exclusions",
                 "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
             }),
@@ -1891,35 +1929,17 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 ["trunk-pr"],
                 "ci_change_scope must have no prerequisites",
             ),
-            *(
-                mutation
-                for policy_job in POLICY_PREFLIGHT_JOBS
-                for mutation in (
-                    (
-                        policy_job,
-                        "if",
-                        "${{ github.event_name == 'pull_request' }}",
-                        f"{policy_job} must remain reachable on a main push",
-                    ),
-                    (
-                        policy_job,
-                        "needs",
-                        "trunk-pr",
-                        f"{policy_job} must wait for ci_change_scope",
-                    ),
-                    (
-                        policy_job,
-                        "timeout-minutes",
-                        20,
-                        f"{policy_job} must keep its blocking 10-minute limit",
-                    ),
-                    (
-                        policy_job,
-                        "continue-on-error",
-                        True,
-                        f"{policy_job} must keep its blocking 10-minute limit",
-                    ),
-                )
+            (
+                "pinned-dependencies",
+                "if",
+                "${{ github.event_name == 'pull_request' }}",
+                "pinned-dependencies must remain reachable on a main push",
+            ),
+            (
+                "pinned-dependencies",
+                "needs",
+                "trunk-pr",
+                "pinned-dependencies must wait for ci_change_scope",
             ),
             (
                 "preflight-gate",
@@ -1934,120 +1954,163 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 "preflight-gate must retain scope and policy dependencies",
             ),
         ):
-            with self.subTest(job=job_name, field=field):
+            with self.subTest(job=job_name):
                 mutated = copy.deepcopy(workflow)
                 mutated["jobs"][job_name][field] = value
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_core_rust_cache_contract(mutated)
 
-    def test_core_cache_contract_requires_every_policy_preflight_dependency(self) -> None:
+    def test_core_cache_contract_requires_pinned_preflight_dependency(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
-        for job_name in POLICY_PREFLIGHT_JOBS:
-            with self.subTest(job=job_name):
+        for policy_name in PREFLIGHT_POLICY_STEPS:
+            with self.subTest(job=policy_name):
                 mutated = copy.deepcopy(workflow)
-                mutated["jobs"]["preflight-gate"]["needs"].remove(job_name)
+                mutated["jobs"]["preflight-gate"]["needs"].remove(policy_name)
                 with self.assertRaisesRegex(
                     AssertionError, "preflight-gate must retain scope and policy dependencies"
                 ):
                     assert_core_rust_cache_contract(mutated)
 
-    def test_core_cache_contract_requires_every_policy_job(self) -> None:
+    def test_split_policy_jobs_remain_reachable_preflight_inputs(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
-        for job_name in POLICY_PREFLIGHT_JOBS:
-            with self.subTest(job=job_name):
-                mutated = copy.deepcopy(workflow)
-                del mutated["jobs"][job_name]
-                with self.assertRaisesRegex(AssertionError, f"must define {job_name}"):
-                    assert_core_rust_cache_contract(mutated)
-
-    def test_core_cache_contract_requires_every_policy_result_check(self) -> None:
-        workflow = load_workflow(CI_WORKFLOW_PATH)
-        for job_name, (variable, _) in POLICY_PREFLIGHT_JOBS.items():
-            for mutate in (
-                lambda step, v=variable: step["env"].pop(v),
-                lambda step, v=variable: step["env"].__setitem__(
-                    v, "${{ needs.trunk-pr.result }}"
-                ),
-                lambda step, v=variable: step.__setitem__(
-                    "run", step["run"].replace(f'test "${{{v}}}" = success\n', "")
-                ),
-                lambda step, v=variable: step.__setitem__(
-                    "run", step["run"].replace(f'test "${{{v}}}" = skipped\n', "")
-                ),
+        for policy_name in ("source-policies", "owner-bridge-policies"):
+            for field, value, message in (
+                ("if", "${{ github.event_name == 'pull_request' }}",
+                 f"{policy_name} must remain reachable on a main push"),
+                ("needs", "trunk-pr", f"{policy_name} must wait for ci_change_scope"),
+                (None, None, f"ci.yml must define {policy_name}"),
             ):
-                with self.subTest(job=job_name, mutate=mutate):
+                with self.subTest(job=policy_name, field=field):
                     mutated = copy.deepcopy(workflow)
-                    mutate(mutated["jobs"]["preflight-gate"]["steps"][0])
-                    with self.assertRaisesRegex(
-                        AssertionError, f"preflight-gate must require the {job_name} result"
-                    ):
+                    if field is None:
+                        del mutated["jobs"][policy_name]
+                    else:
+                        mutated["jobs"][policy_name][field] = value
+                    with self.assertRaisesRegex(AssertionError, message):
                         assert_core_rust_cache_contract(mutated)
 
-    def test_core_cache_contract_rejects_swapped_policy_scope_branches(self) -> None:
-        workflow = load_workflow(CI_WORKFLOW_PATH)
-        for job_name, (variable, _) in POLICY_PREFLIGHT_JOBS.items():
-            with self.subTest(job=job_name):
-                mutated = copy.deepcopy(workflow)
-                step = mutated["jobs"]["preflight-gate"]["steps"][0]
-                success = f'test "${{{variable}}}" = success\n'
-                skipped = f'test "${{{variable}}}" = skipped\n'
-                swapped = (
-                    step["run"].replace(success, "\0").replace(skipped, success)
-                    .replace("\0", skipped)
-                )
-                self.assertNotEqual(swapped, step["run"])
-                step["run"] = swapped
-                with self.assertRaisesRegex(
-                    AssertionError, f"preflight-gate must require the {job_name} result"
-                ):
-                    assert_core_rust_cache_contract(mutated)
+    def test_preflight_policy_split_contract(self) -> None:
+        assert_preflight_policy_split(load_workflow(CI_WORKFLOW_PATH))
 
-    def test_core_cache_contract_requires_blocking_preflight_result_check(self) -> None:
+    def test_preflight_policy_split_keeps_every_check_in_its_job(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
-        for field, value in (("continue-on-error", True), ("if", "${{ false }}")):
-            with self.subTest(field=field):
-                mutated = copy.deepcopy(workflow)
-                mutated["jobs"]["preflight-gate"]["steps"][0][field] = value
-                with self.assertRaisesRegex(
-                    AssertionError, "preflight-gate result check must remain blocking"
-                ):
-                    assert_core_rust_cache_contract(mutated)
+        for policy_name, expected_steps in PREFLIGHT_POLICY_STEPS.items():
+            for name in (step["name"] for step in expected_steps):
+                with self.subTest(job=policy_name, step=name, change="missing"):
+                    mutated = copy.deepcopy(workflow)
+                    steps = mutated["jobs"][policy_name]["steps"]
+                    steps.remove(next(s for s in steps if s.get("name") == name))
+                    with self.assertRaisesRegex(AssertionError, LOST_POLICY_CHECK):
+                        assert_preflight_policy_split(mutated)
+                for other in (*PREFLIGHT_POLICY_STEPS, "fmt"):
+                    if other == policy_name:
+                        continue
+                    for moved in (False, True):
+                        change = f"{'moved' if moved else 'duplicated'} to {other}"
+                        with self.subTest(job=policy_name, step=name, change=change):
+                            mutated = copy.deepcopy(workflow)
+                            steps = mutated["jobs"][policy_name]["steps"]
+                            step = next(s for s in steps if s.get("name") == name)
+                            if moved:
+                                steps.remove(step)
+                            mutated["jobs"][other]["steps"].append(copy.deepcopy(step))
+                            with self.assertRaisesRegex(AssertionError, LOST_POLICY_CHECK):
+                                assert_preflight_policy_split(mutated)
 
-    def test_core_cache_contract_requires_every_policy_step(self) -> None:
+    def test_preflight_policy_split_rejects_weakened_jobs(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
-        for job_name, (_, checks) in POLICY_PREFLIGHT_JOBS.items():
-            for step in (*POLICY_JOB_SETUP_STEPS, *checks):
-                if step == CI_WORKFLOW_POLICY_TEST_STEP:
-                    continue
-                label = step.get("name", step.get("uses"))
-                for mutate in (
-                    lambda steps, s=step: steps.remove(s),
-                    lambda steps, s=step: steps[steps.index(s)].__setitem__(
-                        "continue-on-error", True
-                    ),
-                    lambda steps, s=step: steps[steps.index(s)].__setitem__(
-                        "if", "${{ false }}"
-                    ),
-                ):
-                    with self.subTest(job=job_name, step=label, mutate=mutate):
-                        mutated = copy.deepcopy(workflow)
-                        mutate(mutated["jobs"][job_name]["steps"])
-                        with self.assertRaisesRegex(
-                            AssertionError,
-                            f"{job_name} must run exactly its blocking policy checks",
-                        ):
-                            assert_core_rust_cache_contract(mutated)
 
-    def test_core_cache_contract_rejects_moved_policy_steps(self) -> None:
-        workflow = load_workflow(CI_WORKFLOW_PATH)
-        mutated = copy.deepcopy(workflow)
-        moved = POLICY_PREFLIGHT_JOBS["owner-bridge-policy"][1][0]
-        mutated["jobs"]["owner-bridge-policy"]["steps"].remove(moved)
-        mutated["jobs"]["pinned-dependencies"]["steps"].append(moved)
-        with self.assertRaisesRegex(
-            AssertionError, "pinned-dependencies must run exactly its blocking policy checks"
-        ):
-            assert_core_rust_cache_contract(mutated)
+        def drop_one_command(job: dict) -> None:
+            step = next(s for s in job["steps"][PREFLIGHT_POLICY_SETUP_STEPS:]
+                        if len(s["run"].splitlines()) > 1)
+            step["run"] = "".join(step["run"].splitlines(keepends=True)[1:])
+
+        for policy_name in PREFLIGHT_POLICY_STEPS:
+            variable = PREFLIGHT_POLICY_RESULT_ENV[policy_name]
+            for label, change, message in (
+                ("renamed check", lambda job: job.update(name="renamed"), "keep its check name"),
+                ("longer timeout", lambda job: job.update({"timeout-minutes": 30}),
+                 "blocking 10-minute limit"),
+                ("nonblocking", lambda job: job.update({"continue-on-error": True}),
+                 "blocking 10-minute limit"),
+                ("unpinned setup", lambda job: job["steps"][1]["with"].update(
+                    {"python-version": "3.12"}), "shared pinned Python setup"),
+                ("missing install", lambda job: job["steps"].pop(2),
+                 "shared pinned Python setup"),
+                ("reordered checks", lambda job: job["steps"].insert(
+                    PREFLIGHT_POLICY_SETUP_STEPS, job["steps"].pop()),
+                 "exactly its policy checks"),
+                ("changed runner", lambda job: job.update({"runs-on": "self-hosted"}),
+                 "pinned runner"),
+                ("job env", lambda job: job.update(env={"PYTHONPATH": "/tmp"}),
+                 "reviewed job keys"),
+                ("job permissions", lambda job: job.update(permissions="write-all"),
+                 "reviewed job keys"),
+                ("job strategy", lambda job: job.update(
+                    strategy={"matrix": {"python": ["3.11"]}}), "reviewed job keys"),
+                ("job defaults", lambda job: job.update(
+                    defaults={"run": {"shell": "true {0}"}}), "reviewed job keys"),
+                ("no-op step", lambda job: job["steps"][-1].update(run="true"),
+                 "pinned policy step bodies"),
+                ("dropped command", drop_one_command, "pinned policy step bodies"),
+                ("step env", lambda job: job["steps"][-1].update(env={"PYTHONPATH": "/tmp"}),
+                 "pinned policy step bodies"),
+                ("step shell", lambda job: job["steps"][-1].update(shell="true {0}"),
+                 "pinned policy step bodies"),
+                ("conditional step", lambda job: job["steps"][-1].update({"if": "false"}),
+                 "unconditional and blocking"),
+                ("nonblocking step", lambda job: job["steps"][-1].update(
+                    {"continue-on-error": True}), "unconditional and blocking"),
+            ):
+                with self.subTest(job=policy_name, change=label):
+                    mutated = copy.deepcopy(workflow)
+                    change(mutated["jobs"][policy_name])
+                    with self.assertRaisesRegex(AssertionError, message):
+                        assert_preflight_policy_split(mutated)
+            for label, change, message in (
+                ("missing need", lambda gate: gate["needs"].remove(policy_name),
+                 "scope and policy dependencies"),
+                ("forged result", lambda gate: gate["steps"][0]["env"].update(
+                    {variable: "success"}), f"actual {policy_name} result"),
+                ("missing result", lambda gate: gate["steps"][0]["env"].pop(variable),
+                 f"actual {policy_name} result"),
+                ("unchecked result", lambda gate: gate["steps"][0].update(
+                    run=gate["steps"][0]["run"].replace(
+                        f'test "${{{variable}}}" = success', "true")),
+                 f"enforce the {policy_name} result"),
+                ("unchecked skip", lambda gate: gate["steps"][0].update(
+                    run=gate["steps"][0]["run"].replace(
+                        f'test "${{{variable}}}" = skipped', "true")),
+                 f"enforce the {policy_name} result"),
+            ):
+                with self.subTest(job=policy_name, change=label):
+                    mutated = copy.deepcopy(workflow)
+                    change(mutated["jobs"]["preflight-gate"])
+                    with self.assertRaisesRegex(AssertionError, message):
+                        assert_preflight_policy_split(mutated)
+
+    def run_preflight_gate(self, rust_scope: str, **results: str) -> bool:
+        step = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]["steps"][0]
+        in_scope = "success" if rust_scope == "true" else "skipped"
+        env = dict(os.environ, **{name: in_scope for name in step["env"]})
+        env.update(EVENT_NAME="pull_request", RUST_SCOPE=rust_scope, SCOPE_RESULT="success",
+                   TRUNK_RESULT="success", FIXTURES_RESULT="success",
+                   NON_LINUX_RESULT="success")
+        env.update(results)
+        return subprocess.run(["bash", "-c", step["run"]], env=env,
+                              capture_output=True, check=False).returncode == 0
+
+    def test_preflight_gate_requires_each_policy_job_result_exactly_when_in_scope(self) -> None:
+        self.assertTrue(self.run_preflight_gate("true"))
+        self.assertTrue(self.run_preflight_gate("false"))
+        for variable in PREFLIGHT_POLICY_RESULT_ENV.values():
+            for rust_scope, required in (("true", "success"), ("false", "skipped")):
+                for result in ("success", "failure", "cancelled", "skipped", ""):
+                    with self.subTest(variable=variable, rust_scope=rust_scope, result=result):
+                        self.assertEqual(
+                            self.run_preflight_gate(rust_scope, **{variable: result}),
+                            result == required,
+                        )
 
     def test_core_cache_contract_requires_its_pinned_workflow_invocation(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -2340,13 +2403,14 @@ STATIC_LAUNCHER_JOB_SET = ['asan',
  'modules-structure',
  'mutation-checks',
  'mutation-required',
- 'owner-bridge-policy',
+ 'owner-bridge-policies',
  'owner-bridge-windows',
  'pinned-dependencies',
  'plugin-component-fixtures',
  'preflight-gate',
  'reference-evaluator-release',
  'rustdoc',
+ 'source-policies',
  'standard-gate',
  'static-launcher',
  'test',

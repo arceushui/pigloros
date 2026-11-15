@@ -37,8 +37,9 @@ the three cache identities, the pinned action revision, and the main-only
 write condition. The contract requires the unfiltered `pull_request` trigger
 and the exact `push: {branches: [main]}` mapping, so neither ordered
 branch-exclusion nor path filters can superficially retain `main` while
-suppressing a trusted writer. The `pinned-dependencies` policy job must itself
-remain main-reachable and a required preflight input. It also requires each
+suppressing a trusted writer. The `pinned-dependencies`, `source-policies` and
+`owner-bridge-policies` policy jobs must themselves remain main-reachable and
+required preflight inputs. It also requires each
 cache step to run on pull requests, so a step-level condition cannot turn a
 restore into a silent skip. Adversarial mutations prove those trigger,
 prerequisite, reachability, and restore-path protections fail closed. It
