@@ -4335,7 +4335,7 @@ impl Fixture {
     /// `renderer_start_pending`). The caller rechecks the phase afterwards, so
     /// a mark that advanced while pumping still fails the case.
     fn settled_early_presence(
-        &mut self,
+        &self,
         phase: EarlyRendererPhase,
         clock: &dyn pos_owner_bridge::MonotonicClock,
     ) -> Result<crate::RendererPresence, Box<dyn std::error::Error>> {
