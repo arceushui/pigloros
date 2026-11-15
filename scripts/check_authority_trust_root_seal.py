@@ -55,6 +55,7 @@ feature by construction) nor build configuration outside manifests, workflows, D
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -65,10 +66,9 @@ from check_counterfactual_adapter_seal import (
     _build_configs,
     _deployable_tables,
     _in_crate_tests,
-    _kept,
+    SKIPPED_PARTS,
 )
 from check_test_support_features import default_closure
-from check_trusted_clock_port_impls import strip_comments
 
 FEATURE = "authority-trust-root"
 SEAL_NAME = "AuthorityTrustRootSealV1"
@@ -130,9 +130,12 @@ ENV_INCLUDE = re.compile(
 CFG_ATTR_PATH = re.compile(r"cfg_attr\s*\([^\]]*\bpath\s*=")
 SEAL_RENAME = re.compile(rf"\b{SEAL_NAME}\s+as\s+\w+")
 BUILD_SCRIPT = "build.rs"
-LITERAL = re.compile(
-    r'(?<!\w)b?r(#*)"(?:.|\n)*?"\1|(?<!\w)b?"(?:\\.|[^"\\])*"|(?<!\w)b?\'(?:\\.|[^\'\\\n])\''
+TOKEN = re.compile(
+    r'//[^\n]*|/\*|(?<!\w)b?r(#*)"(?:.|\n)*?"\1|(?<!\w)b?"(?:\\[\s\S]|[^"\\])*"'
+    r"|(?<!\w)b?'(?:\\.|[^'\\\n])'"
 )
+BLOCK_COMMENT = re.compile(r"/\*|\*/")
+BRACE = re.compile(r"[{}]")
 
 
 def _forwards(members: list[str]) -> bool:
@@ -157,9 +160,7 @@ def _forwarding_allowed(name: str, feature: str) -> bool:
 
 def manifest_violations(root: Path) -> list[str]:
     found: list[str] = []
-    for path in sorted(root.rglob("Cargo.toml")):
-        if not _kept(path, root):
-            continue
+    for path in _sources(root.resolve(), "Cargo.toml"):
         name = path.relative_to(root).as_posix()
         manifest = tomllib.loads(path.read_text(encoding="utf-8"))
         features = manifest.get("features", {})
@@ -198,12 +199,7 @@ def _public_bodies(code: str, keyword: str) -> list[str]:
     for match in PUBLIC_BODY.finditer(code):
         if match.group(1) != keyword:
             continue
-        depth = 1
-        index = match.end()
-        while index < len(code) and depth:
-            depth += {"{": 1, "}": -1}.get(code[index], 0)
-            index += 1
-        bodies.append(code[match.end() : index])
+        bodies.append(code[match.end() : _block_end(code, match.end())])
     return bodies
 
 
@@ -224,6 +220,44 @@ def _leaks(name: str, code: str) -> list[str]:
     return found
 
 
+def _block_comment_end(text: str, start: int) -> int:
+    """Return the index after the (possibly nested) block comment opening at `start`."""
+    depth = 0
+    for match in BLOCK_COMMENT.finditer(text, start):
+        depth += 1 if match.group(0) == "/*" else -1
+        if not depth:
+            return match.end()
+    return len(text)
+
+
+def _scan(text: str) -> tuple[str, str]:
+    """Return `text` without comments, and that text with every literal interior blanked.
+
+    One pass replaces each comment with a space, as `strip_comments` does, and blanks the
+    interior of every string, raw string and char literal in place, so offsets in the two
+    results agree. A lifetime is not a char literal: one needs its closing quote.
+    """
+    kept: list[str] = []
+    blanked: list[str] = []
+    position = 0
+    while (match := TOKEN.search(text, position)) is not None:
+        kept.append(text[position : match.start()])
+        blanked.append(text[position : match.start()])
+        token = match.group(0)
+        if token.startswith("/"):
+            kept.append(" ")
+            blanked.append(" ")
+            end = match.end() if token.startswith("//") else _block_comment_end(text, match.start())
+            position = end
+        else:
+            kept.append(token)
+            blanked.append(_blank_interior(match))
+            position = match.end()
+    kept.append(text[position:])
+    blanked.append(text[position:])
+    return "".join(kept), "".join(blanked)
+
+
 def _blank_interior(match: re.Match[str]) -> str:
     text = match.group(0)
     opening = text.index(text[-1] if text[-1] == "'" else '"') + 1
@@ -232,14 +266,6 @@ def _blank_interior(match: re.Match[str]) -> str:
     return text[:opening] + interior + text[closing:]
 
 
-def _blank_literals(code: str) -> str:
-    """Blank the interior of every string and char literal, keeping every offset.
-
-    Braces and names inside a literal are then not code, and a span found in the blanked text
-    is the same span in the original text.
-    """
-    return LITERAL.sub(_blank_interior, code)
-
 
 def _crate_directory(path: Path) -> Path:
     return next(
@@ -247,7 +273,7 @@ def _crate_directory(path: Path) -> Path:
     )
 
 
-def _references(path: Path, raw: str) -> tuple[list[Path], list[str]]:
+def _references(path: Path, raw: str, blanked: str) -> tuple[list[Path], list[str]]:
     """Return the files that non-test `raw` (the code of `path`) pulls in, and refused forms.
 
     `include!` must take exactly one plain string literal, or be
@@ -257,7 +283,6 @@ def _references(path: Path, raw: str) -> tuple[list[Path], list[str]]:
     `path`. `include_str!` and `include_bytes!` (which `include\\s*!` does not match) pull in
     data, not code, so they are allowed.
     """
-    blanked = _blank_literals(raw)
     spans = _test_spans(blanked)
     files: list[Path] = []
     refused: list[str] = []
@@ -284,11 +309,11 @@ def _references(path: Path, raw: str) -> tuple[list[Path], list[str]]:
 
 def _block_end(code: str, start: int) -> int:
     depth = 1
-    index = start
-    while index < len(code) and depth:
-        depth += {"{": 1, "}": -1}.get(code[index], 0)
-        index += 1
-    return index
+    for match in BRACE.finditer(code, start):
+        depth += 1 if match.group(0) == "{" else -1
+        if not depth:
+            return match.end()
+    return len(code)
 
 
 def _test_spans(code: str) -> list[tuple[int, int]]:
@@ -330,12 +355,13 @@ def _test_files(codes: dict[Path, str]) -> set[Path]:
 
 
 def _non_test_references(
-    raw: dict[Path, str], non_test: list[Path], base: Path
+    raw: dict[Path, str], codes: dict[Path, str], non_test: list[Path], base: Path
 ) -> tuple[set[Path], list[str]]:
     """Return files that non-test code pulls in by `include!` or `#[path]`, transitively.
 
     A referenced file that is not a scanned `.rs` file (another extension, or a file under a
-    skipped directory) is read and added to `raw`, so its code is checked as non-test code too.
+    skipped directory) is read and added to `raw` and `codes`, so its code is checked as
+    non-test code too.
     A reference outside the repository is reported, since its code cannot be checked.
     """
     found: set[Path] = set()
@@ -343,7 +369,7 @@ def _non_test_references(
     pending = list(non_test)
     while pending:
         path = pending.pop()
-        files, refused = _references(path, raw[path])
+        files, refused = _references(path, raw[path], codes[path])
         outside.extend(
             f"{path.relative_to(base).as_posix()}: pulls in a file by a non-literal path: {form}"
             for form in refused
@@ -356,7 +382,7 @@ def _non_test_references(
                 continue
             if target not in raw:
                 text = target.read_text(encoding="utf-8", errors="replace")
-                raw[target] = strip_comments(text)
+                raw[target], codes[target] = _scan(text)
             found.add(target)
             pending.append(target)
     return found, outside
@@ -433,7 +459,9 @@ def _core_seal_violations(name: str, code: str) -> list[str]:
     return found
 
 
-def _build_script_violations(raw: dict[Path, str], base: Path) -> list[str]:
+def _build_script_violations(
+    raw: dict[Path, str], codes: dict[Path, str], base: Path
+) -> list[str]:
     """Reject a build script, or a file it pulls in, that names the seal even in a literal.
 
     Code a build script generates into `OUT_DIR` reaches a crate through
@@ -450,19 +478,34 @@ def _build_script_violations(raw: dict[Path, str], base: Path) -> list[str]:
         seen.add(path)
         if MINT.search(raw[path]) or SEAL.search(raw[path]):
             found.append(f"{path.relative_to(base).as_posix()}: build code names the seal")
-        files, _ = _references(path, raw[path])
+        files, _ = _references(path, raw[path], codes[path])
         pending.extend(files)
     return found
 
 
+def _sources(root: Path, suffix: str) -> list[Path]:
+    """Return every file named `suffix` (or ending in it, for an extension) under `root`.
+
+    The top-level build, VCS and tool directories are skipped without being walked.
+    """
+    found: list[Path] = []
+    for directory, subdirectories, files in os.walk(root):
+        if Path(directory) == root:
+            subdirectories[:] = [name for name in subdirectories if name not in SKIPPED_PARTS]
+        found.extend(
+            Path(directory) / name
+            for name in files
+            if name == suffix or (suffix.startswith(".") and name.endswith(suffix))
+        )
+    return sorted(found)
+
+
 def source_violations(root: Path) -> list[str]:
-    raw = {
-        path.resolve(): strip_comments(path.read_text(encoding="utf-8", errors="replace"))
-        for path in sorted(root.rglob("*.rs"))
-        if _kept(path, root)
-    }
-    codes = {path: _blank_literals(code) for path, code in raw.items()}
     base = root.resolve()
+    raw: dict[Path, str] = {}
+    codes: dict[Path, str] = {}
+    for path in _sources(base, ".rs"):
+        raw[path], codes[path] = _scan(path.read_text(encoding="utf-8", errors="replace"))
     tests = {
         path
         for path in _test_files(codes)
@@ -470,6 +513,7 @@ def source_violations(root: Path) -> list[str]:
     }
     referenced, found = _non_test_references(
         raw,
+        codes,
         [
             path
             for path in codes
@@ -477,8 +521,7 @@ def source_violations(root: Path) -> list[str]:
         ],
         base,
     )
-    codes = {path: _blank_literals(code) for path, code in raw.items()}
-    found.extend(_build_script_violations(raw, base))
+    found.extend(_build_script_violations(raw, codes, base))
     for path, code in codes.items():
         relative = path.relative_to(base)
         name = relative.as_posix()
