@@ -42,7 +42,9 @@ git fetch origin main
 git worktree add ../pigloros-<task-name> -b <branch-name> origin/main
 cd ../pigloros-<task-name>
 
-# Enable the versioned pre-commit hook once per clone.
+# Enable the versioned pre-commit and pre-push hooks once per clone.
+# pre-commit: cargo fmt --check, full staged Trunk check, lockfile check and
+# targeted Clippy; pre-push: full Trunk check over the pushed commits.
 git config core.hooksPath .githooks
 
 rustup show active-toolchain
@@ -56,7 +58,7 @@ version control; for example, verify private files with:
 git check-ignore -- .secrets/ledger.key
 ```
 
-The local hook is an early feedback mechanism. It does not replace the
+The local hooks are an early feedback mechanism. They do not replace the
 hosted required checks.
 
 ## Make a focused change

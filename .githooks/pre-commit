@@ -12,7 +12,14 @@ if ! command -v trunk >/dev/null 2>&1; then
 fi
 
 echo "pre-commit: trunk check (all enabled linters and formatters, staged files, no fixes)"
-trunk check --index --upstream=HEAD --no-fix --no-progress
+# Same invocation as Trunk's own trunk-check-pre-commit action. --upstream=HEAD
+# makes Trunk diff the index against HEAD, so only staged changes are checked
+# and only issues they introduce fail the commit. --index-file follows the
+# index Git hands this hook: `git commit <paths>` and `git commit -a` use a
+# temporary index, which a plain --index (always .git/index) would miss.
+# Formatters run check-only; nothing is rewritten.
+index_file=${GIT_INDEX_FILE:-$(git rev-parse --git-path index)}
+trunk check -n -t git-commit --index-file "$index_file" --upstream=HEAD --no-progress
 
 changed_files=$(git diff --cached --name-only --diff-filter=ACMRTD)
 deleted_files=$(git diff --cached --name-only --diff-filter=D)

@@ -8,13 +8,30 @@ if ! command -v trunk >/dev/null 2>&1; then
     exit 1
 fi
 
+zero_sha=0000000000000000000000000000000000000000
+
 # Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on
-# stdin; Trunk derives the pushed range from that file.
+# stdin. Keep every ref update that pushes commits and drop deletions (local
+# sha all zeros), which push nothing to check. A new remote branch (remote sha
+# all zeros) stays in the list: Trunk then checks the files changed since the
+# merge-base with the upstream default branch.
 pushed_refs=$(mktemp)
 trap 'rm -f "$pushed_refs"' EXIT
-cat >"$pushed_refs"
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$local_sha" = "$zero_sha" ]; then
+        echo "pre-push: skip deletion of $remote_ref"
+        continue
+    fi
+    printf '%s %s %s %s\n' "$local_ref" "$local_sha" "$remote_ref" "$remote_sha" >>"$pushed_refs"
+done
+
+if [ ! -s "$pushed_refs" ]; then
+    echo "pre-push: no commits pushed; nothing to check"
+    exit 0
+fi
 
 echo "pre-push: trunk check (all enabled linters and formatters, pushed commits, no fixes)"
-trunk check --commit-ref-from-pre-push "$pushed_refs" --no-fix --no-progress
+# Same invocation as Trunk's own trunk-check-pre-push action.
+trunk check -n -t git-push --commit-ref-from-pre-push "$pushed_refs" --no-progress
 
 echo "pre-push: OK"

@@ -40,10 +40,11 @@ actions:
   # Trunk's git-hook actions rewrite core.hooksPath to a Trunk cache directory,
   # so the versioned hooks in .githooks replace them (enable them with
   # `git config core.hooksPath .githooks`):
-  # - pre-commit runs `trunk check --index --upstream=HEAD --no-fix` on staged
-  #   files (every enabled linter and formatter, check-only, no auto-format);
-  # - pre-push runs `trunk check --commit-ref-from-pre-push <stdin> --no-fix`
-  #   over the pushed commits.
+  # - pre-commit runs `trunk check -n -t git-commit --index-file
+  #   $GIT_INDEX_FILE --upstream=HEAD` on the staged changes (every enabled
+  #   linter and formatter, check-only, no auto-format);
+  # - pre-push runs `trunk check -n -t git-push --commit-ref-from-pre-push
+  #   <refs>` over the pushed commits, skipping branch deletions.
   disabled:
     - trunk-announce
     - trunk-fmt-pre-commit
