@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use futures_util::StreamExt;
 use tokio::time::Instant;
-use zbus::proxy::CacheProperties;
-use zbus_systemd::systemd1::ServiceProxy;
+use zbus::OwnedVariant;
+use zbus_systemd::systemd1::JobRemovedStream;
 
 use super::{
     await_job_completion, classify_call_error, decode_job_completion, ManagerProxy,
@@ -34,9 +34,15 @@ impl SystemdTransientUnitTransport {
         &self,
         family: ProviderUnitFamily,
     ) -> UnitsResult<Vec<ProviderUnit>> {
-        let proxy = ManagerProxy::new(&self.connection)
-            .await
-            .map_err(SystemdTransientUnitTransportError::Proxy)?;
+        Self::observe_provider_units_with(ManagerProxy::new(&self.connection).await, family).await
+    }
+
+    /// [`Self::observe_provider_units`] over an already constructed proxy.
+    pub(crate) async fn observe_provider_units_with(
+        proxy: Result<ManagerProxy<'_>, zbus::Error>,
+        family: ProviderUnitFamily,
+    ) -> UnitsResult<Vec<ProviderUnit>> {
+        let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
         let rows = proxy
             .list_units_by_patterns(Vec::new(), vec![format!("{}*", family.prefix())])
             .await
@@ -120,18 +126,40 @@ impl SystemdTransientUnitTransport {
         name: &TransientServiceUnitName,
         request: &ProviderRuntimeUnitRequest,
     ) -> UnitsResult<StartedProviderUnit> {
-        let proxy = ManagerProxy::new(&self.connection)
+        self.start_runtime_with(
+            ManagerProxy::new(&self.connection).await,
+            name,
+            request.properties(),
+        )
+        .await
+    }
+
+    /// [`Self::start_provider_runtime_unit`] over an already constructed proxy
+    /// and property bundle.
+    pub(crate) async fn start_runtime_with(
+        &self,
+        proxy: Result<ManagerProxy<'_>, zbus::Error>,
+        name: &TransientServiceUnitName,
+        properties: Result<Vec<(String, OwnedVariant)>, zbus::Error>,
+    ) -> UnitsResult<StartedProviderUnit> {
+        let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+        let completions = proxy.receive_job_removed().await;
+        self.start_runtime_with_completions(&proxy, completions, name, properties)
             .await
-            .map_err(SystemdTransientUnitTransportError::Proxy)?;
-        let completions = proxy
-            .receive_job_removed()
-            .await
-            .map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
-        let mut completions =
-            completions.map(|completion| decode_job_completion(completion.args()));
-        let properties = request
-            .properties()
-            .map_err(SystemdTransientUnitTransportError::Serialization)?;
+    }
+
+    /// The start itself, once the job signal subscription was attempted.
+    pub(crate) async fn start_runtime_with_completions(
+        &self,
+        proxy: &ManagerProxy<'_>,
+        completions: Result<JobRemovedStream, zbus::Error>,
+        name: &TransientServiceUnitName,
+        properties: Result<Vec<(String, OwnedVariant)>, zbus::Error>,
+    ) -> UnitsResult<StartedProviderUnit> {
+        let mut completions = completions
+            .map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?
+            .map(|completion| decode_job_completion(completion.args()));
+        let properties = properties.map_err(SystemdTransientUnitTransportError::Serialization)?;
         let job = proxy
             .start_transient_unit(
                 name.as_str().to_owned(),
@@ -143,22 +171,8 @@ impl SystemdTransientUnitTransport {
             .map_err(classify_call_error)?;
         await_job_completion(&mut completions, job.as_str(), name.as_str().to_owned()).await?;
         let unit_path = self.unit_path_of(name).await?;
-        let service = ServiceProxy::builder(&self.connection)
-            .path(unit_path.clone())
-            .cache_properties(CacheProperties::No)
-            .build()
-            .await
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
-        let main_pid = service.main_pid().await.map_err(|source| {
-            SystemdTransientUnitTransportError::PropertyReadback {
-                property: "MainPID",
-                source: Box::new(source),
-            }
-        })?;
-        let control_group = service
-            .control_group()
-            .await
-            .map_err(SystemdTransientUnitTransportError::CgroupReadback)?;
+        let main_pid = self.read_main_pid(name).await?;
+        let control_group = self.listed_control_group(&unit_path).await?;
         if self.unit_path_of(name).await? != unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }

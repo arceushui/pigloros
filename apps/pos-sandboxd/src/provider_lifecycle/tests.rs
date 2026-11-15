@@ -86,8 +86,22 @@ enum Fault {
     StartResult(&'static str),
     /// The start job's completion names this unit.
     CompletionUnit(&'static str),
-    /// After its first lookup, the started unit resolves to another object.
+    /// The started unit's final identity re-check resolves to another object.
     Substitute,
+    /// Listing call number `n` (from 1) and every later one is denied.
+    ListFailsFrom(usize),
+    /// The runtime listing also names a noncanonical unit.
+    BadListing,
+    /// The listing repeats every row.
+    DuplicateListing,
+    /// Every `GetUnit` is denied.
+    LookupDenied,
+    /// A listed unit resolves to another object.
+    ListedElsewhere,
+    /// Lookup number `n` (from 1) of the started unit and every later one is denied.
+    StartedLookupFailsFrom(usize),
+    /// Every `MainPID` read is denied.
+    MainPid,
 }
 
 #[derive(Default)]
@@ -97,6 +111,7 @@ struct State {
     subscribed: bool,
     started: Option<FakeUnit>,
     started_lookups: usize,
+    lists: usize,
     fault: Fault,
     cgroups: PathBuf,
 }
@@ -149,7 +164,13 @@ impl Manager {
             .to_owned();
         let mut state = self.lock()?;
         state.calls.push(Call::List(states, patterns));
-        if state.fault == Fault::List {
+        state.lists += 1;
+        let denied = match state.fault {
+            Fault::List => true,
+            Fault::ListFailsFrom(first) => state.lists >= first,
+            _ => false,
+        };
+        if denied {
             return Err(fdo::Error::AccessDenied("listing denied".to_owned()));
         }
         let mut rows = Vec::new();
@@ -170,15 +191,31 @@ impl Manager {
                 ));
             }
         }
+        match state.fault {
+            Fault::BadListing if prefix.ends_with("runtime-") => {
+                let mut bad = rows.first().cloned().ok_or_else(|| failed("no row"))?;
+                bad.0 = format!("{prefix}zz.service");
+                rows.push(bad);
+            }
+            Fault::DuplicateListing => rows.extend(rows.clone()),
+            _ => {}
+        }
         drop(state);
         Ok(rows)
     }
 
     fn get_unit(&self, name: String) -> Result<OwnedObjectPath, BoxDBusError> {
         let mut state = self.lock()?;
+        if state.fault == Fault::LookupDenied {
+            return Err(fdo::Error::AccessDenied("lookup denied".to_owned()).into());
+        }
         if state.started.as_ref().is_some_and(|unit| unit.name == name) {
             state.started_lookups += 1;
-            let substitute = state.fault == Fault::Substitute && state.started_lookups > 1;
+            let substitute = state.fault == Fault::Substitute && state.started_lookups > 2;
+            if matches!(state.fault, Fault::StartedLookupFailsFrom(first) if state.started_lookups >= first)
+            {
+                return Err(fdo::Error::AccessDenied("lookup denied".to_owned()).into());
+            }
             drop(state);
             let path = if substitute {
                 OTHER_PATH
@@ -191,7 +228,11 @@ impl Manager {
             .units
             .iter()
             .position(|unit| unit.loaded && unit.name == name);
+        let elsewhere = state.fault == Fault::ListedElsewhere;
         drop(state);
+        if elsewhere && slot.is_some() {
+            return OwnedObjectPath::try_from(OTHER_PATH).map_err(|error| failed(error).into());
+        }
         slot.map_or_else(
             || Err(Box::new(ManagerError::NoSuchUnit(name)) as BoxDBusError),
             |slot| {
@@ -356,6 +397,9 @@ impl Service {
 
     #[zbus(property, name = "MainPID")]
     fn main_pid(&self) -> fdo::Result<u32> {
+        if self.0.state.lock().map_err(failed)?.fault == Fault::MainPid {
+            return Err(fdo::Error::AccessDenied("MainPID denied".to_owned()));
+        }
         self.0.unit().map(|unit| unit.main_pid)
     }
 }
@@ -881,5 +925,113 @@ fn connect_fails_closed_without_a_usable_system_bus() -> TestResult {
         .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
         .status()?;
     assert!(status.success());
+    Ok(())
+}
+
+#[test]
+fn inconsistent_listings_are_unavailable() -> TestResult {
+    for fault in [
+        Fault::BadListing,
+        Fault::DuplicateListing,
+        Fault::LookupDenied,
+        Fault::ListedElsewhere,
+    ] {
+        let harness = Harness::new(vec![loaded(runtime_name(9), "failed", "")], fault)?;
+        assert_eq!(
+            harness.terminate(Duration::from_secs(10)),
+            Err(ProviderLifecycleError::Unavailable),
+            "{fault:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_unprovable_final_listing_is_residual() -> TestResult {
+    let harness = Harness::new(
+        vec![loaded(runtime_name(10), "failed", "")],
+        Fault::ListFailsFrom(3),
+    )?;
+    assert_eq!(
+        harness.terminate(Duration::from_secs(10)),
+        Err(ProviderLifecycleError::ResidualResource)
+    );
+    Ok(())
+}
+
+#[test]
+fn unreadable_started_unit_evidence_is_unavailable() -> TestResult {
+    let path = binary_path([0x44; 32]);
+    for fault in [
+        Fault::LookupDenied,
+        Fault::MainPid,
+        Fault::ControlGroup,
+        Fault::StartedLookupFailsFrom(3),
+    ] {
+        let harness = starting(std::process::id(), "/system.slice/runtime.service", fault)?;
+        assert_eq!(
+            start(&harness, SCOPE, &path, Duration::from_secs(32)),
+            Err(ProviderLifecycleError::Unavailable),
+            "{fault:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn manager_setup_failures_never_start_a_unit() -> TestResult {
+    let harness = Harness::new(Vec::new(), Fault::None)?;
+    let transport = &harness.lifecycle.transport;
+    let name = TransientServiceUnitName::provider_unit(ProviderUnitFamily::Runtime, SCOPE)?;
+    let runtime = &harness.lifecycle.runtime;
+    assert!(matches!(
+        runtime.block_on(SystemdTransientUnitTransport::observe_provider_units_with(
+            Err(zbus::Error::Failure("no proxy".to_owned())),
+            ProviderUnitFamily::Runtime,
+        )),
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
+    assert!(matches!(
+        runtime.block_on(transport.start_runtime_with(
+            Err(zbus::Error::Failure("no proxy".to_owned())),
+            &name,
+            Ok(Vec::new()),
+        )),
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
+    let subscribe_failure = runtime.block_on(async {
+        let proxy = zbus_systemd::systemd1::ManagerProxy::new(transport.connection()).await?;
+        let started = transport
+            .start_runtime_with_completions(
+                &proxy,
+                Err(zbus::Error::Failure("no subscription".to_owned())),
+                &name,
+                Ok(Vec::new()),
+            )
+            .await;
+        Ok::<_, zbus::Error>(started)
+    })?;
+    assert!(matches!(
+        subscribe_failure,
+        Err(SystemdTransientUnitTransportError::JobSignalSubscribe(_))
+    ));
+    let serialization_failure = runtime.block_on(async {
+        let proxy = zbus_systemd::systemd1::ManagerProxy::new(transport.connection()).await?;
+        let completions = proxy.receive_job_removed().await;
+        let started = transport
+            .start_runtime_with_completions(
+                &proxy,
+                completions,
+                &name,
+                Err(zbus::Error::IncorrectType),
+            )
+            .await;
+        Ok::<_, zbus::Error>(started)
+    })?;
+    assert!(matches!(
+        serialization_failure,
+        Err(SystemdTransientUnitTransportError::Serialization(_))
+    ));
+    assert!(harness.calls()?.is_empty());
     Ok(())
 }

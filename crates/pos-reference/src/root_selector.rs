@@ -684,26 +684,29 @@ impl RootSelectorComposition {
         port: Box<dyn ProviderLifecyclePort + Send + Sync>,
         executable_digest: runtime_start::ExecutableDigest,
     ) -> Result<Self, SelectorBoundaryError> {
-        let recovery_directory = open_recovery_directory()?;
-        let admitted = InstalledSelectorState::open()
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)?;
-        let (transport, runtime) =
-            runtime_start::start_provider_runtime(&*port, &admitted, executable_digest)?;
-        Ok(Self {
-            service: RootSelectorService {
-                admission_time: SystemTime::now,
-                admission: SelectorAdmission::new(admitted, runtime),
-                transport: SelectedProviderTransport::new(transport),
-                peer_uid: ROOT_UID,
-                evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                recovery_directory: Arc::new(recovery_directory),
-                recovery_owner: ROOT_UID,
-            },
-            updates: Mutex::new(()),
-            live_update_timeout: LIVE_UPDATE_TIMEOUT,
-            lifecycle: port,
-            executable_digest,
+        open_recovery_directory().and_then(|recovery_directory| {
+            InstalledSelectorState::open()
+                .and_then(InstalledSelectorState::authenticate_bootstrap)
+                .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+                .and_then(|admitted| {
+                    runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
+                        |(transport, runtime)| Self {
+                            service: RootSelectorService {
+                                admission_time: SystemTime::now,
+                                admission: SelectorAdmission::new(admitted, runtime),
+                                transport: SelectedProviderTransport::new(transport),
+                                peer_uid: ROOT_UID,
+                                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                                recovery_directory: Arc::new(recovery_directory),
+                                recovery_owner: ROOT_UID,
+                            },
+                            updates: Mutex::new(()),
+                            live_update_timeout: LIVE_UPDATE_TIMEOUT,
+                            lifecycle: port,
+                            executable_digest,
+                        },
+                    )
+                })
         })
     }
 
@@ -754,8 +757,11 @@ impl RootSelectorComposition {
             .and_then(|closed| {
                 self.service
                     .transport
-                    .current()?
-                    .complete_committed_update(closed.committed, self.live_update_timeout)
+                    .current()
+                    .and_then(|current| {
+                        current
+                            .complete_committed_update(closed.committed, self.live_update_timeout)
+                    })
                     .map(
                         |(successor, acknowledgement)| SynchronizedInstallationUpdate {
                             admission: closed.admission,
@@ -802,17 +808,18 @@ impl RootSelectorComposition {
         });
         match started {
             Ok((successor, transport, runtime)) => {
-                self.service.transport.replace(transport)?;
-                self.service.admission.admit_successor(
-                    previous,
-                    successor,
-                    runtime,
-                    &admission.live_attempt_ids,
-                )?;
+                self.service.transport.replace(transport).and_then(|()| {
+                    self.service.admission.admit_successor(
+                        previous,
+                        successor,
+                        runtime,
+                        &admission.live_attempt_ids,
+                    )
+                })
             }
-            Err(_) => self.service.admission.retire_previous(previous)?,
+            Err(_) => self.service.admission.retire_previous(previous),
         }
-        Ok(acknowledgement)
+        .map(|()| acknowledgement)
     }
 
     fn receive_installation_update(
@@ -4722,6 +4729,51 @@ mod tests {
             .attempts
             .is_empty());
         drop(lease);
+        Ok(())
+    }
+
+    /// R11 §8.6: if the fresh runtime cannot be started, admission stays
+    /// closed for the successor too, and the durable update is still
+    /// acknowledged.
+    #[test]
+    fn a_failed_runtime_replacement_keeps_admission_closed() -> TestResult {
+        let provider_directory = tempfile::tempdir()?;
+        let provider_path = provider_directory.path().join("provider.sock");
+        let _provider_listener = UnixListener::bind(&provider_path)?;
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let owner = fs::metadata(".")?.uid();
+        let composition = RootSelectorComposition {
+            service: RootSelectorService {
+                admission_time: fixture_admission_time,
+                admission: SelectorAdmission::for_test(admitted)?,
+                transport: SelectedProviderTransport::new(ProviderTransport::from_path_for_test(
+                    &provider_path,
+                )?),
+                peer_uid: owner,
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: owner,
+            },
+            updates: Mutex::new(()),
+            live_update_timeout: LIVE_UPDATE_TIMEOUT,
+            lifecycle: Box::new(InProcessProviderPort::refusing()),
+            executable_digest: test_executable_digest,
+        };
+        let before = composition.service.transport.current()?;
+        let closed = composition.service.admission.close_and_snapshot()?;
+        let successor =
+            crate::selector::installation::tests::admitted_state()?.authenticate_bootstrap()?;
+        let acknowledgement = composition.replace_runtime(SynchronizedInstallationUpdate {
+            admission: closed,
+            successor,
+            acknowledgement: vec![7, 8],
+        })?;
+        assert_eq!(acknowledgement, vec![7, 8]);
+        assert!(composition.service.admission.current().is_err());
+        assert!(Arc::ptr_eq(
+            &before,
+            &composition.service.transport.current()?
+        ));
         Ok(())
     }
 
