@@ -85,7 +85,7 @@ fn encode(value: &Value) -> Vec<u8> {
 /// Rule 2 over the unsigned record.
 fn decode_unsigned(unsigned: &Value) -> Result<Decoded, ProviderInstallationError> {
     let [magic, version, range, probe, cap, budget, key] = array::<7>(unsigned)?;
-    if *magic != Value::Text("SPI1".to_owned()) || uint(version, 1..=1).is_err() {
+    if *magic != Value::Text("SPI1".to_owned()) || uint(version, &(1..=1)).is_err() {
         return Err(ProviderInstallationError::InvalidEncoding);
     }
     let [ipv4, ipv4_length, ipv6, ipv6_length] = array::<4>(range)?;
@@ -93,22 +93,22 @@ fn decode_unsigned(unsigned: &Value) -> Result<Decoded, ProviderInstallationErro
     let cleanup = array::<5>(budget)?;
     let mut cleanup_ms = [0; 5];
     for (phase, value) in cleanup_ms.iter_mut().zip(cleanup) {
-        *phase = uint(value, CLEANUP_PHASE_MS)?;
+        *phase = uint(value, &CLEANUP_PHASE_MS)?;
     }
     Ok(Decoded {
         ipv4: (
             Ipv4Addr::from(bytes::<4>(ipv4)?),
-            narrow(uint(ipv4_length, 8..=30)?),
+            narrow(uint(ipv4_length, &(8..=30))?),
         ),
         ipv6: (
             Ipv6Addr::from(bytes::<16>(ipv6)?),
-            narrow(uint(ipv6_length, 7..=127)?),
+            narrow(uint(ipv6_length, &(7..=127))?),
         ),
         probe: (
             Ipv4Addr::from(bytes::<4>(probe_network)?),
-            narrow(uint(port, 1..=u64::from(u16::MAX))?),
+            narrow(uint(port, &(1..=u64::from(u16::MAX)))?),
         ),
-        staging_aggregate_bytes: uint(cap, 1..=u64::MAX)?,
+        staging_aggregate_bytes: uint(cap, &(1..=u64::MAX))?,
         cleanup_ms,
         runtime_key_file: key_file_name(key)?,
     })
@@ -184,7 +184,7 @@ fn array<const N: usize>(value: &Value) -> Result<&[Value; N], ProviderInstallat
 }
 
 /// An unsigned integer inside `bounds`.
-fn uint(value: &Value, bounds: RangeInclusive<u64>) -> Result<u64, ProviderInstallationError> {
+fn uint(value: &Value, bounds: &RangeInclusive<u64>) -> Result<u64, ProviderInstallationError> {
     match value {
         Value::Integer(integer) => u64::try_from(*integer).ok(),
         _ => None,

@@ -74,7 +74,8 @@ pub(super) fn read_installation(
                 && metadata.mode() & 0o7777 == 0o400
                 && (1..=INSTALLATION_LIMIT as u64).contains(&metadata.len())
         })
-        .map(|metadata| metadata.len())
+        .as_ref()
+        .map(std::fs::Metadata::len)
         .ok_or(ProviderInstallationError::UnsafeFile)?;
     read_exactly(&file, length).ok_or(ProviderInstallationError::UnsafeFile)
 }

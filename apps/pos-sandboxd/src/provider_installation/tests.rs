@@ -384,6 +384,15 @@ fn rules_four_and_five_reject_the_attempt_range() -> TestResult {
         };
         assert_eq!(rejection(&spec)?, expected);
     }
+    // Rule 5 is checked before rule 6.
+    let v6_and_probe = spi1_a().with(|spec| {
+        spec.ipv6 = bytes(&unaligned.octets());
+        spec.probe = bytes(&[127, 0, 0, 0]);
+    });
+    assert_eq!(
+        rejection(&v6_and_probe)?,
+        ProviderInstallationError::AttemptIpv6Range
+    );
     // Rule 4 is checked before rule 5.
     let both = spi1_a().with(|spec| {
         spec.ipv4 = bytes(&[11, 0, 0, 0]);
@@ -545,8 +554,6 @@ fn a_valid_file_yields_its_validated_values() -> TestResult {
         }
     );
     assert_eq!(installation.runtime_key_file(), KEY_FILE);
-    // The budget is the decoded one, not a default.
-    assert!(format!("{:?}", installation.cleanup_budget()).contains("CleanupBudget"));
     Ok(())
 }
 
