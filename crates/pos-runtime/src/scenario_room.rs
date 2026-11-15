@@ -823,7 +823,7 @@ fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
             .all(|(pair, byte)| {
                 nibble(pair[0])
                     .zip(nibble(pair[1]))
-                    .map(|(high, low)| *byte = (high << 4) | low)
+                    .map(|(high, low)| *byte = high * 16 + low)
                     .is_some()
             });
     decoded.then_some(out)
