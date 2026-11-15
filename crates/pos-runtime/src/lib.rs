@@ -75,7 +75,8 @@ pub use erasure_authority_view::ErasureAuthorityReadViewV1;
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    ErasureReadSenderV1,
+    ErasureReadSenderV1, LocalErasureSubmissionBindingV1, LocalErasureSubmissionV1,
+    LocalErasureSubmitErrorV1,
 };
 #[cfg(target_os = "linux")]
 pub use erasure_local_authority::{

@@ -179,6 +179,9 @@ struct Case {
     operator_public_key: [u8; 32],
     authority_registry_digest: ErasureReferenceV1,
     execution_binding: Option<LocalErasureExecutionBindingV1>,
+    principal_grant: Hash,
+    authority_timeline: TimelineId,
+    clock: fn() -> u64,
 }
 
 impl Case {
@@ -198,6 +201,9 @@ impl Case {
             operator_public_key: operator().verifying_key().to_bytes(),
             authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
             execution_binding: Some(execution_binding()),
+            principal_grant: grant_id(),
+            authority_timeline: authority_timeline(),
+            clock: present,
         })
     }
 
@@ -216,6 +222,9 @@ impl Case {
                 operator_public_key: self.operator_public_key,
                 authority_registry_digest: self.authority_registry_digest,
                 execution_binding: self.execution_binding.as_ref(),
+                principal_grant: self.principal_grant,
+                authority_timeline: self.authority_timeline,
+                clock: self.clock,
             },
             store,
         )
@@ -844,5 +853,922 @@ fn the_classification_is_exactly_the_owner_table() -> TestResult {
         }
     }
     assert_eq!(permitted, 48);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-136 §5/§6: `LocalErasureAuthorityV1` and `submit_local_erasure`
+// (acceptance tests 3b, 5 and 6, authority parts).
+// ---------------------------------------------------------------------------
+
+use pos_core::{
+    local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
+    local_erasure_requester_v1, local_erasure_subject_v1, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, EntityId, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureArtifactClassV1,
+    ErasureCorrectionProvenanceInputV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
+    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInventoriesV1, ErasureReplayClaimV1,
+    ErasureRequiredTargetV1, ErasureScopeExtensionInputV1, LocalErasureAuthorizationV1,
+    LocalErasureIdempotencyV1, LocalErasureOwnerRowV1, LocalErasureRejectionV1,
+    LocalErasureSelectorV1, PrincipalRefV1, Seq, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+};
+use pos_runtime::{LocalErasureSubmissionV1, LocalErasureSubmitErrorV1};
+use ulid::Ulid;
+
+/// The clock of an open deployment, in Unix seconds.
+const PRESENT: u64 = 1_000;
+/// The test TPS1 `offline_valid_through`, 9999-12-31T23:59:59Z.
+const TPS1_EXPIRY: u64 = 253_402_300_799;
+/// A nonzero ELB1 expiry.
+const BUNDLE_EXPIRY: u64 = 5_000;
+/// The compiled request-head reserve.
+const RESERVE: usize = 512;
+
+const fn present() -> u64 {
+    PRESENT
+}
+
+const fn at_trust_expiry() -> u64 {
+    TPS1_EXPIRY
+}
+
+const fn after_trust_expiry() -> u64 {
+    TPS1_EXPIRY + 1
+}
+
+const fn at_bundle_expiry() -> u64 {
+    BUNDLE_EXPIRY
+}
+
+const fn after_bundle_expiry() -> u64 {
+    BUNDLE_EXPIRY + 1
+}
+
+fn fail<E: std::fmt::Debug>(error: E) -> Box<dyn std::error::Error> {
+    format!("{error:?}").into()
+}
+
+fn grant_id() -> Hash {
+    Hash::from_bytes([0x71; 32])
+}
+
+fn authority_timeline() -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes([0x72; 16]))
+}
+
+fn other_timeline() -> TimelineId {
+    TimelineId::from_ulid(Ulid::from_bytes([0x7a; 16]))
+}
+
+fn principal() -> TestResult<PrincipalRefV1> {
+    PrincipalRefV1::try_new([0x73; 16], "local").map_err(fail)
+}
+
+fn actor() -> EntityId {
+    EntityId::from_ulid(Ulid::from_bytes([0x74; 16]))
+}
+
+fn other_actor() -> EntityId {
+    EntityId::from_ulid(Ulid::from_bytes([0x7b; 16]))
+}
+
+fn principal_ref() -> TestResult<ErasureReferenceV1> {
+    let digest = pos_core::fork_authentication::principal_digest_v1(&principal()?).map_err(fail)?;
+    Ok(ErasureReferenceV1::from_digest(*digest.as_bytes()))
+}
+
+/// The recorded root grant: its resources, actors, Timeline and registry.
+struct GrantShape {
+    resources: Vec<String>,
+    actors: Vec<EntityId>,
+    timeline: TimelineId,
+    registry: [u8; 32],
+}
+
+impl GrantShape {
+    fn standard() -> Self {
+        Self {
+            resources: vec!["erasure".to_owned(), "timeline".to_owned()],
+            actors: vec![actor()],
+            timeline: authority_timeline(),
+            registry: REGISTRY,
+        }
+    }
+
+    fn root_grant(&self) -> TestResult<CapabilityGrantV1> {
+        let principal = principal()?;
+        let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+            resources: self.resources.clone(),
+            actions: vec!["request".to_owned()],
+            purposes: vec!["operation".to_owned()],
+            audiences: vec!["gateway".to_owned()],
+            actor_entity_ids: self.actors.clone(),
+            subject_ids: Vec::new(),
+            participant_ids: Vec::new(),
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 1,
+            budget: 1,
+            environment_constraints: Vec::new(),
+        })
+        .map_err(fail)?;
+        CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id: grant_id(),
+            grantor: principal.clone(),
+            grantee: AuthorityGranteeV1::Principal(principal.clone()),
+            trust_domain: principal.trust_domain().to_owned(),
+            scope,
+            valid_from_position: Seq::from_u64(1),
+            valid_until_position: Seq::from_u64(u64::MAX),
+            parent_grant_id: None,
+            delegation_depth: 0,
+            max_delegation_depth: 0,
+            permitted_delegate_classes: Vec::new(),
+            consent_references: Vec::new(),
+            policy_revision: Hash::from_bytes([0x75; 32]),
+            issuance_timeline: self.timeline,
+            issuance_seq: Seq::from_u64(1),
+            revocation_epoch: 0,
+            revocation_fence: None,
+            authority_registry_digest: Hash::from_bytes(self.registry),
+        })
+        .map_err(fail)
+    }
+}
+
+/// A provisioned `SQLite` store that records the root grant of `shape`.
+struct LocalStore {
+    _directory: tempfile::TempDir,
+    path: String,
+    /// The root-grant chain head the store records.
+    head: u64,
+}
+
+impl LocalStore {
+    fn new(shape: &GrantShape) -> TestResult<Self> {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join("local-erasure.sqlite3")
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?
+            .to_owned();
+        let mut store = SqliteStore::open(&path)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
+        register_signer(&mut store, &erasure_signer(), 1)?;
+        let grant = shape.root_grant()?;
+        let registry = AuthorityRegistrySnapshotV1::try_new(
+            grant.authority_registry_digest(),
+            vec![Hash::from_bytes([0x76; 32])],
+            vec![grant.binding_digest().map_err(fail)?],
+            Vec::new(),
+        )
+        .map_err(fail)?;
+        let host = AuthorityPersistenceHostV1::new(&registry);
+        store
+            .bind_authority_persistence(host.persistence_binding())
+            .map_err(fail)?;
+        let permit = host.authorize_grant(&grant).map_err(fail)?;
+        store.issue_capability_grant(permit, &grant).map_err(fail)?;
+        let head = store
+            .load_authority(grant_id())
+            .map_err(fail)?
+            .head_position()
+            .as_u64();
+        Ok(Self {
+            _directory: directory,
+            path,
+            head,
+        })
+    }
+
+    /// Retain `objects` in the store's erasure object store.
+    fn retain(&self, objects: &[Vec<u8>]) -> TestResult {
+        let mut store = SqliteStore::open(&self.path)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        for object in objects {
+            store.retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)?;
+        }
+        Ok(())
+    }
+
+    /// Compose `case` over the store and open a host over it.
+    fn host(&self, case: &Case, maximum_requests: usize) -> TestResult<ErasureExecutionHostV1> {
+        let composition = {
+            let mut store = SqliteStore::open(&self.path)?;
+            store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+            case.compose(&mut store).map_err(fail)?
+        };
+        Ok(ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite {
+                path: self.path.clone(),
+            },
+            &composition,
+            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
+        )?)
+    }
+}
+
+fn submission(key: u8, scope: ErasureScopeV1) -> TestResult<LocalErasureSubmissionV1> {
+    Ok(LocalErasureSubmissionV1 {
+        principal: principal()?,
+        actor: actor(),
+        scope,
+        idempotency_key_digest: reference(key),
+    })
+}
+
+/// The ERQ1 request reference the host derives for Idempotency-Key `key`.
+fn request_of(key: u8) -> TestResult<ErasureReferenceV1> {
+    Ok(local_erasure_request_v1(local_erasure_id_v1(
+        principal_ref()?,
+        actor(),
+        reference(key),
+    )?)?)
+}
+
+/// The ERAZ1 the host builds for key `key` at chain head `head`.
+fn authorization(key: u8, head: u64) -> TestResult<LocalErasureAuthorizationV1> {
+    Ok(LocalErasureAuthorizationV1 {
+        principal_ref: principal_ref()?,
+        actor_entity: actor(),
+        operation: "erasure.request".to_owned(),
+        authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
+        authority_chain: authority_timeline(),
+        chain_head_position: head,
+        revocation_epoch: 0,
+        erq1_request: request_of(key)?,
+    })
+}
+
+/// An authorize-stage ELREJ1 for the request of key `key`.
+fn rejection(key: u8) -> TestResult<LocalErasureRejectionV1> {
+    Ok(LocalErasureRejectionV1 {
+        request: request_of(key)?,
+        error: ErasureErrorV1::Unauthorized,
+    })
+}
+
+fn rejected(store: &LocalStore, keys: &[u8]) -> TestResult {
+    let mut objects = Vec::new();
+    for key in keys {
+        objects.push(rejection(*key)?.to_canonical_cbor()?);
+    }
+    store.retain(&objects)
+}
+
+fn local_case() -> TestResult<Case> {
+    Case::valid()
+}
+
+#[test]
+fn a_local_submission_is_derived_idempotent_and_bound_to_its_body() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut sender = host.command_sender()?;
+    let state = sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert_eq!(state.lifecycle(), ErasureLifecycleV1::Submitted);
+    // An exact retry returns the original state.
+    assert_eq!(
+        sender.submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Ok(state)
+    );
+    // The same key with another body, or a retained-only scope, conflicts.
+    assert_eq!(
+        sender.submit_local_erasure(&submission(1, ErasureScopeV1::ConsentedSharedData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::Conflict
+        ))
+    );
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PublicRecord)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::Conflict
+        ))
+    );
+    // A Timeline created while the request is submitted stays unaffected,
+    // and the store recovers with the request after a restart.
+    let _created = sender.create_timeline("after-submission")?;
+    drop(host);
+    let host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+#[test]
+fn a_subject_has_one_pre_terminal_request() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut sender = host.command_sender()?;
+    sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::ConsentedSharedData)?),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    let authorized = sender
+        .authorize_erasure_request(request_of(1)?, authorization(1, store.head)?.reference()?)?;
+    assert_eq!(authorized.lifecycle(), ErasureLifecycleV1::Authorized);
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_subject_quota_admits_exactly_its_share() -> TestResult {
+    // One actor and 514 request heads: q_subject = (514 - 512) / 1 = 2.
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1, 2])?;
+    let mut host = store.host(&local_case()?, RESERVE + 2)?;
+    let mut sender = host.command_sender()?;
+    for key in [1, 2] {
+        sender
+            .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        let state =
+            sender.reject_erasure_request(request_of(key)?, rejection(key)?.reference()?)?;
+        assert_eq!(state.lifecycle(), ErasureLifecycleV1::Rejected);
+    }
+    assert_eq!(
+        sender.submit_local_erasure(&submission(3, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::QuotaExhausted)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_quota_is_shared_by_the_principals_actors() -> TestResult {
+    // Two actors and 514 request heads: q_subject = (514 - 512) / 2 = 1.
+    let mut shape = GrantShape::standard();
+    shape.actors = [actor(), other_actor()].into_iter().collect();
+    shape.actors.sort_unstable();
+    let store = LocalStore::new(&shape)?;
+    rejected(&store, &[1])?;
+    let mut host = store.host(&local_case()?, RESERVE + 2)?;
+    let mut sender = host.command_sender()?;
+    sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::QuotaExhausted)
+    );
+    Ok(())
+}
+
+#[test]
+fn authorization_names_the_requests_own_evidence() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    // An ELREJ1 of another request is retained, not one of request 1.
+    rejected(&store, &[2])?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut sender = host.command_sender()?;
+    sender
+        .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+        .map_err(fail)?;
+    let request = request_of(1)?;
+    assert_eq!(
+        sender.authorize_erasure_request(request, reference(0x99)),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        sender.reject_erasure_request(request, reference(0x99)),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        sender.reject_erasure_request(request, rejection(2)?.reference()?),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        sender
+            .authorize_erasure_request(request, authorization(1, store.head)?.reference()?)?
+            .lifecycle(),
+        ErasureLifecycleV1::Authorized
+    );
+    Ok(())
+}
+
+#[test]
+fn an_expired_bundle_closes_new_admissions_but_not_a_rejection() -> TestResult {
+    let mut expiring = bundle();
+    expiring.expiry = BUNDLE_EXPIRY;
+    let mut case = Case::signed(&expiring, &bundle_root(), &[])?;
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1])?;
+    // At the expiry instant the bundle still admits.
+    case.clock = at_bundle_expiry;
+    {
+        let mut host = store.host(&case, 4_096)?;
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+    }
+    // One second later it authorizes nothing new, rejects, and admits no
+    // new submission.
+    case.clock = after_bundle_expiry;
+    let mut host = store.host(&case, 4_096)?;
+    let mut sender = host.command_sender()?;
+    assert_eq!(
+        sender
+            .authorize_erasure_request(request_of(1)?, authorization(1, store.head)?.reference()?),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        sender
+            .reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?
+            .lifecycle(),
+        ErasureLifecycleV1::Rejected
+    );
+    assert_eq!(
+        sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::RecoveryUnavailable
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn an_expired_tps1_closes_new_admissions() -> TestResult {
+    let mut case = local_case()?;
+    assert_eq!(case.trust.expiry(), TPS1_EXPIRY);
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1])?;
+    case.clock = at_trust_expiry;
+    {
+        let mut host = store.host(&case, 4_096)?;
+        let mut sender = host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+    }
+    case.clock = after_trust_expiry;
+    let mut host = store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::RecoveryUnavailable
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn submission_needs_a_local_composition_and_its_principal() -> TestResult {
+    let mut closed = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    assert_eq!(
+        closed
+            .command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::AuthorizationDenied
+        ))
+    );
+    // A composition naming a root grant the store does not record.
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let mut case = local_case()?;
+    case.principal_grant = Hash::from_bytes([0x7c; 32]);
+    let mut host = store.host(&case, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::AuthorizationDenied
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn the_root_grant_must_match_the_composition_and_name_the_operation() -> TestResult {
+    let refused = |shape: GrantShape, case: &Case| -> TestResult {
+        let store = LocalStore::new(&shape)?;
+        let mut host = store.host(case, 4_096)?;
+        assert_eq!(
+            host.command_sender()?
+                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+            Err(LocalErasureSubmitErrorV1::Host(
+                ErasureHostErrorV1::AuthorizationDenied
+            ))
+        );
+        Ok(())
+    };
+    let case = local_case()?;
+    let mut shape = GrantShape::standard();
+    shape.resources = vec!["timeline".to_owned()];
+    refused(shape, &case)?;
+    let mut shape = GrantShape::standard();
+    shape.actors = vec![other_actor()];
+    refused(shape, &case)?;
+    let mut shape = GrantShape::standard();
+    shape.registry = [0x77; 32];
+    refused(shape, &case)?;
+    // A root grant on another authority Timeline than the composition's.
+    let mut shape = GrantShape::standard();
+    shape.timeline = other_timeline();
+    refused(shape, &case)?;
+    Ok(())
+}
+
+/// The parts of one ERQ1 a root submits through the plain
+/// `submit_erasure_request`.
+struct PlainRequest {
+    input: ErasureRequestInputV1,
+}
+
+impl PlainRequest {
+    /// The valid ERQ1 of key `key`, whose ERAZ1, ELSEL1 and ELIDEM1 are
+    /// retained by [`Self::objects`].
+    fn valid(key: u8, head: u64) -> TestResult<Self> {
+        let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
+        Ok(Self {
+            input: ErasureRequestInputV1 {
+                request: request_of(key)?,
+                subject,
+                scope: ErasureScopeV1::PrivateSubjectData,
+                selectors: vec![LocalErasureSelectorV1 { subject }.reference()?],
+                requester: local_erasure_requester_v1(principal_ref()?)?,
+                authorization: authorization(key, head)?.reference()?,
+                policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                request_position: 0,
+                horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+                provenance: idempotency(key)?.reference()?,
+            },
+        })
+    }
+
+    fn with_authorization(
+        key: u8,
+        authorization: &LocalErasureAuthorizationV1,
+        head: u64,
+    ) -> TestResult<Self> {
+        let mut request = Self::valid(key, head)?;
+        request.input.authorization = authorization.reference()?;
+        Ok(request)
+    }
+
+    fn submit(
+        self,
+        host: &mut ErasureExecutionHostV1,
+    ) -> Result<ErasureLifecycleV1, ErasureHostErrorV1> {
+        let request =
+            ErasureRequestV1::new(self.input).map_err(|_| ErasureHostErrorV1::Conflict)?;
+        let provenance = request.provenance();
+        host.command_sender()?
+            .submit_erasure_request(request, provenance)
+            .map(|state| state.lifecycle())
+    }
+}
+
+fn idempotency(key: u8) -> TestResult<LocalErasureIdempotencyV1> {
+    Ok(LocalErasureIdempotencyV1 {
+        idempotency_key_digest: reference(key),
+        body_digest: local_erasure_body_digest_v1(ErasureScopeV1::PrivateSubjectData)?,
+    })
+}
+
+/// A store retaining the valid ERAZ1, ELSEL1 and ELIDEM1 of key 1 plus
+/// `extra`, and a host over it.
+fn plain_host(
+    extra: &[LocalErasureAuthorizationV1],
+) -> TestResult<(LocalStore, ErasureExecutionHostV1)> {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
+    let mut objects = vec![
+        authorization(1, store.head)?.to_canonical_cbor()?,
+        LocalErasureSelectorV1 { subject }.to_canonical_cbor()?,
+        idempotency(1)?.to_canonical_cbor()?,
+    ];
+    for record in extra {
+        objects.push(record.to_canonical_cbor()?);
+    }
+    store.retain(&objects)?;
+    let host = store.host(&local_case()?, 4_096)?;
+    Ok((store, host))
+}
+
+#[test]
+fn the_authority_recomputes_every_eraz1_rule_of_a_plain_submission() -> TestResult {
+    let head = LocalStore::new(&GrantShape::standard())?.head;
+    let changes: [&dyn Fn(&mut LocalErasureAuthorizationV1); 8] = [
+        &|record| record.principal_ref = reference(0x81),
+        &|record| "erasure.read".clone_into(&mut record.operation),
+        &|record| record.authority_registry_digest = reference(0x82),
+        &|record| record.authority_chain = other_timeline(),
+        &|record| record.erq1_request = reference(0x83),
+        &|record| record.actor_entity = other_actor(),
+        &|record| record.chain_head_position = head + 1,
+        &|record| record.revocation_epoch = 1,
+    ];
+    let mut tampered = Vec::new();
+    for change in changes {
+        let mut record = authorization(1, head)?;
+        change(&mut record);
+        tampered.push(record);
+    }
+    let (store, mut host) = plain_host(&tampered)?;
+    assert_eq!(store.head, head);
+    // Every ERAZ1 that breaks a rule, or is not retained, is unauthorized.
+    for record in &tampered {
+        assert_eq!(
+            PlainRequest::with_authorization(1, record, head)?.submit(&mut host),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+    }
+    let mut missing = PlainRequest::valid(1, head)?;
+    missing.input.authorization = reference(0x85);
+    assert_eq!(
+        missing.submit(&mut host),
+        Err(ErasureHostErrorV1::AuthorizationDenied)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_authority_recomputes_every_erq1_field_of_a_plain_submission() -> TestResult {
+    let head = LocalStore::new(&GrantShape::standard())?.head;
+    let mut rebound = authorization(1, head)?;
+    rebound.erq1_request = reference(0x84);
+    let (_store, mut host) = plain_host(std::slice::from_ref(&rebound))?;
+    // Every ERQ1 field the host derives is recomputed; a mismatch conflicts.
+    let changes: [&dyn Fn(&mut ErasureRequestInputV1); 8] = [
+        &|input| input.subject = reference(0x86),
+        &|input| input.selectors = vec![reference(0x87)],
+        &|input| input.requester = reference(0x88),
+        &|input| input.policy = reference(0x89),
+        &|input| input.scope = ErasureScopeV1::ConsentedSharedData,
+        &|input| input.request_position = 1,
+        &|input| input.horizon_position = LOCAL_ERASURE_ATTEMPT_WINDOW_V1 + 1,
+        &|input| input.provenance = reference(0x8a),
+    ];
+    for change in changes {
+        let mut request = PlainRequest::valid(1, head)?;
+        change(&mut request.input);
+        assert_eq!(request.submit(&mut host), Err(ErasureHostErrorV1::Conflict));
+    }
+    // An ERAZ1 bound to a request id the key does not derive conflicts.
+    let mut rebound_request = PlainRequest::with_authorization(1, &rebound, head)?;
+    rebound_request.input.request = reference(0x84);
+    assert_eq!(
+        rebound_request.submit(&mut host),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    // The valid plain submission is admitted; a second one for the subject
+    // is refused while the first is pre-terminal.
+    assert_eq!(
+        PlainRequest::valid(1, head)?.submit(&mut host),
+        Ok(ErasureLifecycleV1::Submitted)
+    );
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Concurrent)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_plain_submission_cannot_bypass_the_subject_checks() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let head = store.head;
+    let subject = local_erasure_subject_v1(principal_ref()?, actor())?;
+    store.retain(&[
+        authorization(2, head)?.to_canonical_cbor()?,
+        LocalErasureSelectorV1 { subject }.to_canonical_cbor()?,
+        idempotency(2)?.to_canonical_cbor()?,
+        rejection(1)?.to_canonical_cbor()?,
+    ])?;
+    // One request head over the reserve: the subject's quota is 1.
+    let mut host = store.host(&local_case()?, RESERVE + 1)?;
+    {
+        let mut sender = host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+    }
+    // While request 1 is pre-terminal a plain request 2 is refused.
+    assert_eq!(
+        PlainRequest::valid(2, head)?.submit(&mut host),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    // Once request 1 is rejected the quota still refuses it.
+    host.command_sender()?
+        .reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+    assert_eq!(
+        PlainRequest::valid(2, head)?.submit(&mut host),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    Ok(())
+}
+
+/// The composed Local authority over a provisioned store whose bundle
+/// names one `key-registry` owner, and a host-built view of that store.
+fn local_authority() -> TestResult<(
+    LocalStore,
+    ErasureCoordinatorCompositionV1,
+    ErasureExecutionHostV1,
+    ErasureReferenceV1,
+)> {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let owner = pos_core::local_erasure_owner_ref_v1(
+        ErasureReferenceV1::from_digest(STORE_IDENTITY),
+        1,
+        "key-registry",
+    )?;
+    let mut with_owner = bundle();
+    with_owner.owners = vec![LocalErasureOwnerRowV1 {
+        category: 1,
+        ack_class: "key-registry".to_owned(),
+        owner_ref: owner,
+    }];
+    let case = Case::signed(&with_owner, &bundle_root(), &[])?;
+    let composition = {
+        let mut sqlite = SqliteStore::open(&store.path)?;
+        sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        case.compose(&mut sqlite).map_err(fail)?
+    };
+    let host = store.host(&case, 4_096)?;
+    Ok((store, composition, host, owner))
+}
+
+#[test]
+fn the_local_authority_admits_no_freeze_or_scope_extension_yet() -> TestResult {
+    let (_store, composition, mut host, _owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let request = reference(0x90);
+    let child = TimelineMeta::root("local-authority-child");
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: reference(0x91),
+        fork: reference(0x92),
+        child_timeline: child.id,
+        lineage_rule: reference(0x93),
+        predecessor_extension: None,
+        admission_provenance: reference(0x94),
+    })?;
+    let fork_input = ErasureForkAdmissionInputV1 {
+        operation: reference(0x95),
+        expected_inventory_generation: reference(0x96),
+        child_scope: reference(0x97),
+        child: child.clone(),
+    };
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(1),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(0x98),
+    };
+    let missing = Err(ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(
+        authority
+            .admit_atomic_freeze(&view, request, &transition)
+            .map(drop),
+        missing
+    );
+    assert_eq!(authority.admit_scope_extension(&view, &extension), missing);
+    assert_eq!(
+        authority.validate_scope_extension_with_view(&view, &extension),
+        missing
+    );
+    assert_eq!(
+        authority.admit_fork_scope_extension(&view, &extension, &fork_input),
+        missing
+    );
+    assert_eq!(
+        authority
+            .resolve_fork_child_scope(&view, child.id, &child)
+            .map(drop),
+        missing
+    );
+    Ok(())
+}
+
+#[test]
+fn the_local_authority_refuses_correction_resolution_and_receipts_yet() -> TestResult {
+    let (store, composition, mut host, _owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let request = reference(0x90);
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![reference(0x99)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(0x9a),
+            policy: reference(0x9b),
+            trust: reference(0x9c),
+            principal: reference(0x9d),
+            authorization_provenance: reference(0x9e),
+            reason: reference(0x9f),
+            issue_position: 1,
+            predecessor_resolution: None,
+        })?;
+    let correction =
+        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request,
+            rejected_terminal_state: reference(0xa0),
+            correction_reason: reference(0xa1),
+            authorization_provenance: reference(0xa2),
+        })?;
+    let erq1 = ErasureRequestV1::new(PlainRequest::valid(1, store.head)?.input)?;
+    let receipt = ErasureReceiptInputV1 {
+        request,
+        terminal_state: reference(0xa3),
+        coordinator: reference(0xa4),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 1,
+        acknowledgements: Vec::new(),
+        frozen_targets: Vec::new(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(0xa5),
+        trust: reference(0xa6),
+        provenance: reference(0xa7),
+        issue_position: 2,
+        signature: reference(0xa8),
+        receipt_digest: reference(0),
+    };
+    assert_eq!(
+        authority.admit_receipt(&view, &receipt),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    // Corrected submission and administrative resolution are refused (Q14, Q4).
+    let conflict = Err(ErasureErrorV1::PolicyConflict);
+    assert_eq!(
+        authority.admit_corrected_submission(&view, &erq1, &correction),
+        conflict
+    );
+    assert_eq!(
+        authority.admit_administrative_resolution(&view, &resolution),
+        conflict
+    );
+    assert_eq!(
+        authority.validate_administrative_resolution_with_view(&view, &resolution),
+        conflict
+    );
+    Ok(())
+}
+
+#[test]
+fn destruction_goes_only_to_an_owner_the_bundle_names() -> TestResult {
+    let (_store, composition, mut host, owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let request = reference(0x90);
+    let command = |owner| ErasureDestructionCommandV1 {
+        obligation: reference(0xb0),
+        category: ErasureInventoryCategoryV1::Key,
+        target: ErasureRequiredTargetV1 {
+            artifact_class: ErasureArtifactClassV1::TimelineReplay,
+            artifact_digest: reference(0xb1),
+            key_role: ErasureKeyRoleV1::DataEncryption,
+            key_digest: reference(0xb2),
+            replica_set: reference(0xb3),
+            replica_id: reference(0xb4),
+        },
+        owner,
+        command: reference(0xb5),
+        provenance: reference(0xb6),
+    };
+    assert_eq!(authority.dispatch_destruction(&view, request, &[]), Ok(()));
+    assert_eq!(
+        authority.dispatch_destruction(&view, request, &[command(owner)]),
+        Ok(())
+    );
+    assert_eq!(
+        authority.dispatch_destruction(&view, request, &[command(owner), command(reference(0xb7))]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    // The view built outside a host command reads no stored object.
+    assert_eq!(view.retained_object(reference(0xb8)), None);
+    assert!(view.local_principal_authority(grant_id()).is_none());
+    assert_eq!(view.maximum_requests(), 4_096);
+    assert!(view.verified_requests().is_empty());
+    assert!(view.verified_request(request).is_none());
     Ok(())
 }

@@ -97,6 +97,10 @@ name = "erasure_authority_view_public"
 required-features = ["test-support"]
 
 [[test]]
+name = "local_erasure_composition_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "event_type_ownership"
 required-features = ["test-support"]
 

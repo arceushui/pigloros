@@ -1908,6 +1908,26 @@ impl ErasureRequestV1 {
     pub const fn provenance(&self) -> ErasureReferenceV1 {
         self.0.provenance
     }
+    /// Return the minimized subject digest.
+    #[must_use]
+    pub const fn subject(&self) -> ErasureReferenceV1 {
+        self.0.subject
+    }
+    /// Return the authorized scope class.
+    #[must_use]
+    pub const fn scope(&self) -> ErasureScopeV1 {
+        self.0.scope
+    }
+    /// Return the requester digest.
+    #[must_use]
+    pub const fn requester(&self) -> ErasureReferenceV1 {
+        self.0.requester
+    }
+    /// Return the authorization evidence digest.
+    #[must_use]
+    pub const fn authorization(&self) -> ErasureReferenceV1 {
+        self.0.authorization
+    }
     /// Return canonical selectors defining the affected Timeline/Fork scope.
     #[must_use]
     pub fn selectors(&self) -> &[ErasureReferenceV1] {
@@ -3169,6 +3189,11 @@ impl ErasureVerifiedInventoryV1 {
     #[must_use]
     pub const fn request_count(&self) -> usize {
         self.request_heads.len()
+    }
+
+    /// Every positively verified request state of this inventory.
+    pub fn states(&self) -> impl Iterator<Item = &ErasureVerifiedStateV1> + '_ {
+        self.members.iter().map(|(state, _)| state)
     }
 
     /// Verify that a successor inventory preserves every existing frozen

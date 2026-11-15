@@ -1,11 +1,13 @@
 //! The single-host Local/Air-Gapped erasure authority (ADR-136).
 //!
-//! This module holds the ELP1 policy compiled into this binary and the
+//! This module holds the ELP1 policy compiled into this binary, the
 //! composition-time verification of the installed ELB1/ELB1S bundle against
-//! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*). The
-//! authority, executor, signer and driver of ADR-136 §1 are later slices of
-//! the same module.
+//! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*), and the
+//! verify-only `LocalErasureAuthorityV1` that composition installs over the
+//! verified bundle. The executor, signer and driver of ADR-136 §1 are later
+//! slices of the same module.
 
+mod authority;
 mod policy;
 
 use std::sync::Arc;
@@ -13,14 +15,16 @@ use std::sync::Arc;
 use pos_core::{
     local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1, CanonicalBytes,
     ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore,
-    KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
-    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
+    Hash, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature, TimelineId,
     ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
 
-use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1};
+use crate::erasure_host::LocalErasureSubmissionBindingV1;
+use crate::ErasureCoordinatorCompositionV1;
+use authority::LocalErasureAuthorityV1;
 
 pub use policy::{
     compiled_local_erasure_policy_v1, LocalErasureClassificationRowV1,
@@ -97,6 +101,13 @@ pub struct LocalErasureCompositionInputsV1<'a> {
     /// The composed executor, or `None` for a root that composes no
     /// executor and therefore skips the `execution_binding` check.
     pub execution_binding: Option<&'a LocalErasureExecutionBindingV1>,
+    /// The leaf grant id of the Local Principal's root grant.
+    pub principal_grant: Hash,
+    /// The authority Timeline the root grant is issued on.
+    pub authority_timeline: TimelineId,
+    /// The clock new admissions read, in Unix seconds (UTC): an expired
+    /// TPS1 or bundle closes new admissions only.
+    pub clock: fn() -> u64,
 }
 
 impl ErasureCoordinatorCompositionV1 {
@@ -116,9 +127,9 @@ impl ErasureCoordinatorCompositionV1 {
     /// verifies against the retained ELB1 and TPS1, never this check.
     ///
     /// The coordinator identity is `CA("ELCOORD1", [store_identity])`. The
-    /// composed authority is still the closed authority: it proves only an
-    /// empty store until the `LocalErasureAuthorityV1` slice installs the
-    /// verified bundle.
+    /// composed authority is `LocalErasureAuthorityV1` over the verified
+    /// bundle, and the composition carries the Local submission inputs the
+    /// host's `submit_local_erasure` needs.
     ///
     /// # Errors
     /// Returns the [`LocalErasureCompositionErrorV1`] that keeps the root
@@ -141,7 +152,23 @@ impl ErasureCoordinatorCompositionV1 {
                 local_erasure_coordinator_v1(bundle.store_identity)
                     .ok()
                     .and_then(|coordinator| {
-                        Self::new(Arc::new(ClosedErasureCoordinatorAuthorityV1), coordinator).ok()
+                        let binding = LocalErasureSubmissionBindingV1 {
+                            principal_grant: inputs.principal_grant,
+                            authority_timeline: inputs.authority_timeline,
+                            authority_registry_digest: bundle.authority_registry_digest,
+                            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+                            store_request_reserve: LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+                        };
+                        let authority = LocalErasureAuthorityV1 {
+                            bundle,
+                            trust_expiry: inputs.trust.expiry(),
+                            clock: inputs.clock,
+                            principal_grant: inputs.principal_grant,
+                            authority_timeline: inputs.authority_timeline,
+                        };
+                        Self::new(Arc::new(authority), coordinator)
+                            .ok()
+                            .map(|composition| composition.with_local_submission(binding))
                     })
                     .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
             })
