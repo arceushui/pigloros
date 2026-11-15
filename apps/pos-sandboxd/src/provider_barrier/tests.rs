@@ -1260,13 +1260,13 @@ mod kernel_observation {
             &attempt,
             parts.parameters.nonce,
             parts.evidence,
-            SlowSigner(test_signer(), Duration::from_millis(2_500)),
+            SlowSigner(test_signer(), Duration::from_millis(3_500)),
             parts.identity,
             parts.check,
         )?;
         let launcher = launcher(&mut barrier)?;
         let error = barrier
-            .release(&active(attempt, 2_000), cgroup_view())
+            .release(&active(attempt, 3_000), cgroup_view())
             .await
             .err()
             .ok_or("no expiry")?;

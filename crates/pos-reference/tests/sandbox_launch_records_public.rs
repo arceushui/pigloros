@@ -108,7 +108,8 @@ fn release() -> Result<ExecutionRelease, Box<dyn Error>> {
     let signature = key.sign(&record.signature_message()).to_bytes();
     Ok(ExecutionRelease::new(
         record.verify(signature, &key.verifying_key())?,
-    ))
+        &key.verifying_key(),
+    )?)
 }
 
 #[test]
@@ -303,7 +304,16 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
     assert_eq!(verified.signature(), signature);
     assert_eq!(verified.key(), &key.verifying_key());
     assert_eq!(record.key_id(), "runtime-key");
-    let release = ExecutionRelease::new(verified);
+    // A signature that verified under another key is not the admitted
+    // key's release.
+    assert_eq!(
+        ExecutionRelease::new(
+            verified.clone(),
+            &SigningKey::from_bytes(&[43; 32]).verifying_key()
+        ),
+        Err(SandboxProviderProtocolError::SignatureInvalid)
+    );
+    let release = ExecutionRelease::new(verified, &key.verifying_key())?;
     assert_eq!(release.digest, record.digest());
     release.verify_signature(&key.verifying_key())?;
     Ok(())

@@ -196,7 +196,7 @@ where
     ExecutionRelease::self_digested(fields)
         .map_err(RuntimeSignerError::from)
         .and_then(|record| sign_verified(signer, admitted, record))
-        .map(ExecutionRelease::new)
+        .and_then(|verified| ExecutionRelease::new(verified, admitted.key).map_err(Into::into))
 }
 
 #[cfg(test)]
@@ -347,7 +347,7 @@ mod tests {
         ));
         let verified = sign_verified(&signer, AdmittedRuntimeKey::new("runtime", &public), record)?;
         assert_eq!(verified.key(), &public);
-        ExecutionRelease::new(verified).verify_signature(&public)?;
+        ExecutionRelease::new(verified, &public)?.verify_signature(&public)?;
         Ok(())
     }
 }

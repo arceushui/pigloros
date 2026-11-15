@@ -432,14 +432,24 @@ impl ExecutionRelease {
             .map(|(digest, _)| SelfDigested::sealed(fields, digest))
     }
 
-    /// The signed record of a verified signature.
-    #[must_use]
-    pub fn new(verified: Verified<Rls1>) -> Self {
-        let (fields, digest, signature) = verified.into_parts();
-        Self {
-            fields,
-            digest,
-            signature,
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Rls1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, digest, signature) = verified.into_parts();
+            Ok(Self {
+                fields,
+                digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
         }
     }
 
