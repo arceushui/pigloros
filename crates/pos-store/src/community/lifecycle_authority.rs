@@ -378,13 +378,14 @@ impl CommunityLifecycleAuthorityV1 {
             request.action.as_str(),
             &request.operation_constraint(),
         );
+        let now = self.wall.sample().ok();
         AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(credential)
             .ok()
             .and_then(|evidence| {
                 verify_authenticated_principal_evidence_v1(&self.policy, evidence).ok()
             })
             .filter(|verified| verified.evidence().record().operation_nonce == nonce)
-            .and_then(|verified| self.wall.sample().ok().map(|now| (verified, now)))
+            .zip(now)
             .filter(|(verified, now)| {
                 let record = verified.evidence().record();
                 record.issued_at <= now.as_micros() && now.as_micros() < record.expires_at
@@ -567,9 +568,11 @@ struct RequestShapeV1<'a> {
     audience: &'a str,
 }
 
-/// One authenticated administrative call (R6.2(6)): its derived request,
-/// the `authenticated` result and actor derived from the call's FAE1, and
-/// the trusted wall sample every request of the call uses as `at_time`.
+/// One authenticated administrative call (R6.2(6)).
+///
+/// It holds the derived request, the `authenticated` result and actor
+/// derived from the call's FAE1, and the trusted wall sample every request
+/// of the call uses as `at_time`.
 ///
 /// It has no public constructor; only [`CommunityLifecycleAuthorityV1::authenticate`]
 /// produces it.

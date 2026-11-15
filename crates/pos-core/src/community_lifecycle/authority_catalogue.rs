@@ -32,7 +32,7 @@ const MAPPING_PROFILE_VERSION: u64 = 6;
 // An upper bound: record head and magic 7, version 1, profile 35, five
 // hashes 170, two texts 2 * 130, rows head 2, 64 rows of 52 bytes and two
 // 5-byte schema IDs.
-const MAX_ENCODED_BYTES: usize = 6 + 36 + 170 + 260 + 2 + MAX_COMMUNITY_ACTOR_ROWS_V1 * 52 + 10;
+const MAX_ENCODED_BYTES: usize = 7 + 1 + 35 + 170 + 260 + 2 + MAX_COMMUNITY_ACTOR_ROWS_V1 * 52 + 10;
 const _: () = assert!(MAX_ENCODED_BYTES <= MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1);
 // The attestation preimage holds at most the 128 attested bindings.
 const ATTESTATION_PREIMAGE_BYTES: usize = 1 + 34 + 3 + crate::MAX_AUTHORITY_REGISTRY_BINDINGS * 34;
