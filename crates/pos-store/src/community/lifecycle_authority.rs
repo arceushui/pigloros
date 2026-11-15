@@ -272,7 +272,10 @@ pub struct CommunityMemberUseV1<'a> {
     pub member: &'a CommunityMemberBindingV1<'a>,
     /// The closed data-use action.
     pub action: CommunityMemberActionV1,
-    /// The installed recipient of the new generation's selected cells.
+    /// The installed recipient of the new generation's selected cells
+    /// (A5.2(2)–(3)). The owner supplies its installed recipient identity
+    /// here, never caller text; a grant scoped to another recipient does not
+    /// match.
     pub audience: &'a str,
 }
 

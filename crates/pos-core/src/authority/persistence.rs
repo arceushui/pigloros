@@ -845,7 +845,10 @@ impl PersistedAuthorityV1 {
                     .iter()
                     .filter(|revocation| {
                         revocation.authority_timeline() == grant.issuance_timeline()
-                            && revocation.fence_position() < grant.issuance_seq()
+                            && revocation
+                                .fence_position()
+                                .cmp(&grant.issuance_seq())
+                                .is_lt()
                     })
                     .count() as u64;
                 grant

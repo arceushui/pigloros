@@ -29,10 +29,16 @@ pub const MAX_COMMUNITY_ACTOR_ROWS_V1: usize = 64;
 const MAPPING_PROFILE: &str = "pos.community.authority-mapping";
 const MAPPING_PROFILE_VERSION: u64 = 6;
 
-// Header 6, profile 36, five hashes 170, two texts 2 * 130, rows head 2,
-// 64 rows of 52 bytes and two 5-byte schema IDs.
+// An upper bound: record head and magic 7, version 1, profile 35, five
+// hashes 170, two texts 2 * 130, rows head 2, 64 rows of 52 bytes and two
+// 5-byte schema IDs.
 const MAX_ENCODED_BYTES: usize = 6 + 36 + 170 + 260 + 2 + MAX_COMMUNITY_ACTOR_ROWS_V1 * 52 + 10;
 const _: () = assert!(MAX_ENCODED_BYTES <= MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1);
+// The attestation preimage holds at most the 128 attested bindings.
+const ATTESTATION_PREIMAGE_BYTES: usize = 1 + 34 + 3 + crate::MAX_AUTHORITY_REGISTRY_BINDINGS * 34;
+// The nonce preimage holds one hash and three authority texts of at most 128
+// bytes each.
+const NONCE_PREIMAGE_BYTES: usize = 1 + 34 + 3 * (2 + MAX_AUTHORITY_TEXT_BYTES);
 
 /// One CAP1 actor row: the installed actor entity for one principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,7 +183,7 @@ impl CommunityAuthorityCatalogueV1 {
 #[must_use]
 pub fn community_capability_attestation_digest_v1(snapshot: &AuthorityRegistrySnapshotV1) -> Hash {
     let bindings = snapshot.capability_bindings();
-    let mut preimage = Vec::with_capacity(36 + 9 + bindings.len() * 34);
+    let mut preimage = Vec::with_capacity(ATTESTATION_PREIMAGE_BYTES);
     encode_head(&mut preimage, 4, 2);
     encode_hash(&mut preimage, snapshot.registry_digest());
     encode_head(&mut preimage, 4, bindings.len() as u64);
@@ -197,8 +203,7 @@ pub fn community_authentication_nonce_v1(
     action: &str,
     operation_constraint: &str,
 ) -> [u8; 32] {
-    let mut preimage =
-        Vec::with_capacity(36 + 27 + resource.len() + action.len() + operation_constraint.len());
+    let mut preimage = Vec::with_capacity(NONCE_PREIMAGE_BYTES);
     encode_head(&mut preimage, 4, 4);
     encode_hash(&mut preimage, catalogue_digest);
     for text in [resource, action, operation_constraint] {
