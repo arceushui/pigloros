@@ -5,7 +5,10 @@
 use pos_core::{Kind, Plugin, PluginId, TimelineId};
 
 use super::*;
-use crate::composition::{PluginAvailabilityV1, PluginRegistrationV1};
+use crate::composition::{
+    DomainImplementationKindV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
+    PluginRegistrationV1,
+};
 use crate::driver::{Driver, ObservationView, StepOutput};
 use crate::error::RuntimeError;
 use crate::PluginRegistry;
@@ -227,7 +230,7 @@ fn list_order_does_not_change_the_revision() -> TestResult {
 #[test]
 fn every_member_change_changes_the_descriptor_hash() -> TestResult {
     let base = admit(input()?)?.descriptor_hash();
-    let edits: [fn(&mut ScenarioRoomInputV1); 10] = [
+    let edits: &[fn(&mut ScenarioRoomInputV1)] = &[
         |input| input.tick_duration_ms = 101,
         |input| input.max_ticks = 601,
         |input| input.scheduler_seed = [5; 32],
@@ -340,8 +343,11 @@ fn an_unknown_schema_version_is_refused() -> TestResult {
 
 #[test]
 fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
-    let persona = |index: u64| RoomParticipantV1 {
-        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(index, u128::from(index))),
+    let persona = |index: usize| RoomParticipantV1 {
+        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(
+            1,
+            u128::try_from(index).unwrap_or_default(),
+        )),
         kind: RoomParticipantKindV1::Agent,
     };
     let plugins = |count: usize| {
@@ -354,7 +360,7 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
             .map(|index| rule(&format!("world.r{index}"), 0))
             .collect::<Vec<_>>()
     };
-    let participants = |count: u64| (1..=count).map(persona).collect::<Vec<_>>();
+    let participants = |count: usize| (1..=count).map(persona).collect::<Vec<_>>();
     let conditions = |count: usize| {
         (0..count)
             .map(|index| RoomInitialConditionV1 {
@@ -376,7 +382,7 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
     over.rules = rules(MAX_ROOM_RULES_V1 + 1);
     assert_eq!(admit(over).err(), limit(ScenarioRoomLimitV1::Rules));
     let mut over = input()?;
-    over.participants = participants(65);
+    over.participants = participants(MAX_ROOM_PARTICIPANTS_V1 + 1);
     assert_eq!(admit(over).err(), limit(ScenarioRoomLimitV1::Participants));
     let mut over = input()?;
     over.initial_conditions = conditions(MAX_ROOM_INITIAL_CONDITIONS_V1 + 1);
@@ -392,7 +398,7 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
     at.rules = rules(MAX_ROOM_RULES_V1);
     assert_eq!(admit(at)?.input().rules.len(), MAX_ROOM_RULES_V1);
     let mut at = input()?;
-    at.participants = participants(64);
+    at.participants = participants(MAX_ROOM_PARTICIPANTS_V1);
     at.initial_conditions = Vec::new();
     assert_eq!(admit(at).err(), limit(ScenarioRoomLimitV1::DescriptorBytes));
     let mut at = input()?;
@@ -454,7 +460,15 @@ fn malformed_plugins_are_refused() -> TestResult {
         refusal(|input| input.plugins.clear())?,
         invalid(Field::Plugins)
     );
-    for plugin_id in ["", "World", "1world", "wor ld", "wor.ld", &"w".repeat(129)] {
+    for plugin_id in [
+        "",
+        "World",
+        "1world",
+        "wor ld",
+        "wor.ld",
+        "w\u{f6}rld",
+        &"w".repeat(129),
+    ] {
         assert_eq!(
             refusal(|input| input.plugins[0].plugin_id = plugin_id.to_owned())?,
             invalid(Field::PluginId),
@@ -520,7 +534,11 @@ fn malformed_rules_are_refused() -> TestResult {
         refusal(|input| input.rules.push(rule("world.gravity", 1)))?,
         invalid(Field::Rules)
     );
-    for rule_id in ["world", "geo.gravity", "worldx.gravity"] {
+    assert_eq!(
+        refusal(|input| input.rules[0].rule_id = "world".to_owned())?,
+        None
+    );
+    for rule_id in ["geo", "geo.gravity", "worldx.gravity"] {
         assert_eq!(
             refusal(|input| input.rules[0].rule_id = rule_id.to_owned())?,
             Some(ScenarioRoomErrorV1::RuleWithoutPlugin),
@@ -546,10 +564,13 @@ fn malformed_participants_and_conditions_are_refused() -> TestResult {
         })?,
         invalid(Field::Participants)
     );
-    assert_eq!(
-        refusal(|input| input.initial_conditions[0].dimension = "Trust".to_owned())?,
-        invalid(Field::Dimension)
-    );
+    for dimension in ["Trust", "tr\u{fc}st"] {
+        assert_eq!(
+            refusal(|input| input.initial_conditions[0].dimension = dimension.to_owned())?,
+            invalid(Field::Dimension),
+            "{dimension}"
+        );
+    }
     assert_eq!(
         refusal(|input| input.initial_conditions[0].value_micro = i64::MAX)?,
         invalid(Field::ConditionValue)
@@ -589,44 +610,22 @@ fn an_ambiguous_catalogue_name_is_not_bundled() -> TestResult {
 
 #[test]
 fn the_capability_set_hash_matches_the_independent_golden_encoding() -> TestResult {
-    let capability = Capability {
-        owned_event_types: vec![
-            Kind::new("b.type"),
-            Kind::new("a.type"),
-            Kind::new("a.type"),
-        ],
-        owned_entity_kinds: vec!["zeta".to_owned(), "alpha".to_owned()],
-        has_driver: true,
-        has_reducer: false,
-    };
-    let schema = |event_type: &str| (event_type == "a.type").then_some(r#"{"type":"object"}"#);
-    let pin = |kind, isolation| {
-        PluginPinV1::try_new(
-            kind,
-            isolation,
-            Hash::from_bytes([7; 32]),
-            vec!["world".to_owned(), "guest".to_owned()],
-        )
-    };
-    let pinned = pin(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::OperatorTrustedNative,
-    )?;
+    let names = [
+        Kind::new("b.type"),
+        Kind::new("a.type"),
+        Kind::new("a.type"),
+    ];
     assert_eq!(
-        capability_set_hash_v1(&capability, Some(&pinned), schema),
-        digest("11cf96ab728d69bce55b2f0248fe062afd2c6367221f5ff733f45c86ac2264bd")?
-    );
-    let adapter = pin(
-        DomainImplementationKindV1::PublicAdapter,
-        PluginIsolationV1::GovernedCommunity,
-    )?;
-    assert_eq!(
-        capability_set_hash_v1(&capability, Some(&adapter), schema),
-        digest("88e53624ae60660998dba18db78996c1ca829bf644296eec63316a3cf16b84cd")?
+        capability_set_hash_v1(names.iter()),
+        digest("b37b2343dc454dd08d49892289a409d3bf29fbd15189944324450e661b3b9c5f")?
     );
     assert_eq!(
-        capability_set_hash_v1(&Capability::default(), None, |_| None),
-        digest("029d384828570e58de25bc8eb459864f6999a59e53deb21f5ddf1cd339a67d1f")?
+        capability_set_hash_v1(names.iter().rev()),
+        capability_set_hash_v1(names.iter())
+    );
+    assert_eq!(
+        capability_set_hash_v1(std::iter::empty()),
+        digest("29a9462cbf5263a962f021f538c9ec1c1b32f724c508b224d585494b626bfdfc")?
     );
     Ok(())
 }
@@ -671,47 +670,55 @@ impl Driver for NamedDriver {
     }
 }
 
-#[test]
-fn a_registry_catalogue_holds_its_plugin_registrations_only() -> TestResult {
-    let world = TestPlugin {
+fn test_plugin(name: &'static str, event_type: &'static str) -> TestPlugin {
+    TestPlugin {
         id: PluginId::new(),
-        name: "world",
+        name,
         version: "0.1.0",
-        event_type: "world.room-test.v1",
-    };
-    let society = TestPlugin {
-        id: PluginId::new(),
-        name: "society",
-        version: "0.1.0",
-        event_type: "society.room-test.v1",
-    };
-    let pin = PluginPinV1::try_new(
+        event_type,
+    }
+}
+
+fn pin(roles: &[&str]) -> Result<PluginPinV1, crate::PluginCompositionErrorV1> {
+    PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
         Hash::from_bytes([7; 32]),
-        vec!["society".to_owned()],
+        roles.iter().map(|role| (*role).to_owned()).collect(),
+    )
+}
+
+/// The catalogue entry of `society`, pinned with `roles` at `availability`.
+fn pinned_society(
+    roles: &[&str],
+    availability: PluginAvailabilityV1,
+) -> Result<Result<Hash, ScenarioRoomErrorV1>, Box<dyn std::error::Error>> {
+    let mut registry = PluginRegistry::new();
+    registry.register_pinned_generated(
+        &test_plugin("society", "society.room-test.v1"),
+        PluginRegistrationV1::new(pin(roles)?, availability),
+        None,
+        None,
     )?;
+    Ok(registry
+        .scenario_room_catalogue_v1()
+        .resolve(&plugin("society")))
+}
+
+#[test]
+fn a_registry_catalogue_holds_its_plugin_registrations_only() -> TestResult {
+    let world = test_plugin("world", "world.room-test.v1");
     let mut registry = PluginRegistry::new();
     registry.register_generated(&world, None, None)?;
-    registry.register_pinned_generated(
-        &society,
-        PluginRegistrationV1::new(pin.clone(), PluginAvailabilityV1::Available),
-        None,
-        None,
-    )?;
     registry.register_test_driver(Box::new(NamedDriver));
     let catalogue = registry.scenario_room_catalogue_v1();
+    // The one capability name is the Plugin's registered schema name.
+    assert!(registry.schemas.contains("world.room-test.v1"));
     assert_eq!(
         catalogue.resolve(&plugin("world")),
-        Ok(capability_set_hash_v1(&world.capability(), None, |_| None))
-    );
-    assert_eq!(
-        catalogue.resolve(&plugin("society")),
-        Ok(capability_set_hash_v1(
-            &society.capability(),
-            Some(&pin),
-            |_| None
-        ))
+        Ok(digest(
+            "259ffcb43ac16778e0ae8782a3cb6caeb391a4513989af23b672be89f0dc0a46"
+        )?)
     );
     assert_eq!(
         catalogue.resolve(&RoomPluginRefV1 {
@@ -720,20 +727,50 @@ fn a_registry_catalogue_holds_its_plugin_registrations_only() -> TestResult {
         }),
         Err(ScenarioRoomErrorV1::PluginNotBundled)
     );
-    assert_eq!(registry.schemas.json_schema("world.room-test.v1"), None);
-    assert_eq!(registry.schemas.json_schema("unknown.v1"), None);
     Ok(())
 }
 
 #[test]
-fn the_schema_registry_reports_a_registered_json_schema() {
-    let mut schemas = crate::schema::SchemaRegistry::new();
-    schemas.register_claimed(crate::schema::EventTypeSchema {
-        event_type: Kind::new("a.type"),
-        description: String::new(),
-        json_schema: Some(r#"{"type":"object"}"#.to_owned()),
-    });
-    assert_eq!(schemas.json_schema("a.type"), Some(r#"{"type":"object"}"#));
+fn only_an_available_pinned_registration_is_bundled_whatever_its_role_order() -> TestResult {
+    let available = pinned_society(&["society", "guest"], PluginAvailabilityV1::Available)?;
+    assert_eq!(
+        available,
+        Ok(capability_set_hash_v1(
+            [Kind::new("society.room-test.v1")].iter()
+        ))
+    );
+    assert_eq!(
+        pinned_society(&["guest", "society"], PluginAvailabilityV1::Available)?,
+        available
+    );
+    for availability in [
+        PluginAvailabilityV1::Disabled,
+        PluginAvailabilityV1::Unavailable,
+        PluginAvailabilityV1::Revoked,
+        PluginAvailabilityV1::Trapped,
+        PluginAvailabilityV1::ResourceExhausted,
+    ] {
+        assert_eq!(
+            pinned_society(&["society"], availability)?,
+            Err(ScenarioRoomErrorV1::PluginNotBundled),
+            "{availability:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn two_registrations_of_one_name_and_version_are_ambiguous() -> TestResult {
+    let mut registry = PluginRegistry::new();
+    registry.register_generated(&test_plugin("world", "world.first.v1"), None, None)?;
+    registry.register_generated(&test_plugin("world", "world.second.v1"), None, None)?;
+    assert_eq!(
+        registry
+            .scenario_room_catalogue_v1()
+            .resolve(&plugin("world")),
+        Err(ScenarioRoomErrorV1::PluginNotBundled)
+    );
+    Ok(())
 }
 
 #[test]

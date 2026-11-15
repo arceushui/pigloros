@@ -27,10 +27,8 @@
 
 use std::{collections::BTreeSet, num::NonZeroU64};
 
-use pos_core::{AppendDedupKey, AppendDedupScope, AppendIdentity, Capability, EntityId, Hash};
+use pos_core::{AppendDedupKey, AppendDedupScope, AppendIdentity, EntityId, Hash, Kind};
 use serde::Deserialize;
-
-use crate::composition::{DomainImplementationKindV1, PluginIsolationV1, PluginPinV1};
 
 /// The only Scenario Room descriptor schema version (ADR-041 section 1).
 pub const SCENARIO_ROOM_SCHEMA_VERSION_V1: u64 = 1;
@@ -274,78 +272,25 @@ impl ScenarioRoomCatalogueV1 {
     }
 }
 
-/// The `capability_set_hash` of one registered Plugin (amendment A3): its
-/// distinct owned Event types with the JSON Schema `schema` finds for each,
-/// its distinct owned entity kinds, its callback flags and its pin.
+/// The `capability_set_hash` of one registered Plugin (amendment A3): the
+/// BLAKE3 of its sorted, distinct capability names, which are its owned
+/// Event types and so also the names of the schemas it registers (#303
+/// decision 4a).
 pub(crate) fn capability_set_hash_v1<'a>(
-    capability: &Capability,
-    pin: Option<&PluginPinV1>,
-    schema: impl Fn(&str) -> Option<&'a str>,
+    owned_event_types: impl Iterator<Item = &'a Kind>,
 ) -> Hash {
+    let names: BTreeSet<&str> = owned_event_types.map(Kind::as_str).collect();
     let mut hasher = blake3::Hasher::new();
     hasher.update(CAPABILITY_SET_TAG);
-    let event_types: BTreeSet<&str> = capability
-        .owned_event_types
-        .iter()
-        .map(pos_core::Kind::as_str)
-        .collect();
-    hash_count(&mut hasher, event_types.len());
-    for event_type in event_types {
-        crate::hash_framed(&mut hasher, event_type.as_bytes());
-        hash_optional(&mut hasher, schema(event_type).map(str::as_bytes));
-    }
-    let entity_kinds: BTreeSet<&str> = capability
-        .owned_entity_kinds
-        .iter()
-        .map(String::as_str)
-        .collect();
-    hash_count(&mut hasher, entity_kinds.len());
-    for entity_kind in entity_kinds {
-        crate::hash_framed(&mut hasher, entity_kind.as_bytes());
-    }
-    hasher.update(&[
-        u8::from(capability.has_driver),
-        u8::from(capability.has_reducer),
-    ]);
-    hasher.update(&[u8::from(pin.is_some())]);
-    if let Some(pin) = pin {
-        hasher.update(&[
-            implementation_kind_byte(pin.implementation_kind()),
-            isolation_byte(pin.isolation()),
-        ]);
-        hasher.update(pin.configuration_digest().as_bytes());
-        hash_count(&mut hasher, pin.roles().len());
-        for role in pin.roles() {
-            crate::hash_framed(&mut hasher, role.as_bytes());
-        }
+    hash_count(&mut hasher, names.len());
+    for name in names {
+        crate::hash_framed(&mut hasher, name.as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn hash_count(hasher: &mut blake3::Hasher, count: usize) {
     hasher.update(&u64::try_from(count).unwrap_or(u64::MAX).to_le_bytes());
-}
-
-/// `0x00`, or `0x01` followed by the framed bytes.
-fn hash_optional(hasher: &mut blake3::Hasher, bytes: Option<&[u8]>) {
-    hasher.update(&[u8::from(bytes.is_some())]);
-    if let Some(bytes) = bytes {
-        crate::hash_framed(hasher, bytes);
-    }
-}
-
-const fn implementation_kind_byte(kind: DomainImplementationKindV1) -> u8 {
-    match kind {
-        DomainImplementationKindV1::Plugin => 0,
-        DomainImplementationKindV1::PublicAdapter => 1,
-    }
-}
-
-const fn isolation_byte(isolation: PluginIsolationV1) -> u8 {
-    match isolation {
-        PluginIsolationV1::OperatorTrustedNative => 0,
-        PluginIsolationV1::GovernedCommunity => 1,
-    }
 }
 
 /// One immutable, admitted Scenario Room revision (ADR-041 section 1).
@@ -751,7 +696,7 @@ fn order_checks(input: &ScenarioRoomInputV1) -> Vec<(bool, ScenarioRoomErrorV1)>
         ),
         (
             input.rules.iter().all(|rule| {
-                rule.rule_id.split_once('.').is_some_and(|(owner, _)| {
+                rule.rule_id.split('.').next().is_some_and(|owner| {
                     input.plugins.iter().any(|plugin| plugin.plugin_id == owner)
                 })
             }),
