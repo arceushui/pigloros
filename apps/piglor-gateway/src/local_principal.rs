@@ -96,6 +96,10 @@ struct LocalPrincipalDocumentV1 {
     trust_domain: String,
     actor_entity_ids: Vec<String>,
     operations: Vec<String>,
+    /// The host's single-participant Scenario Room governance record
+    /// (#303 decision 1a), if any.
+    #[serde(default)]
+    governance_record_id: Option<String>,
 }
 
 /// One validated Local Principal provisioning: its root capability grant
@@ -117,15 +121,43 @@ impl LocalPrincipalProvisionV1 {
         actor_entity_ids: impl IntoIterator<Item = EntityId>,
         operations: impl IntoIterator<Item = GatewayOperationV1>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
+        Self::try_new_governed(principal, actor_entity_ids, operations, None)
+    }
+
+    /// [`Self::try_new`], also recording `governance_record` as the host's
+    /// single-participant Scenario Room governance record (#303 decision
+    /// 1a): one scope resource [`crate::authorization::GOVERNANCE_RESOURCE_PREFIX`]
+    /// followed by the record's ULID. That resource names no operation.
+    ///
+    /// # Errors
+    /// Returns the refusals of [`Self::try_new`].
+    pub fn try_new_governed(
+        principal: &PrincipalRefV1,
+        actor_entity_ids: impl IntoIterator<Item = EntityId>,
+        operations: impl IntoIterator<Item = GatewayOperationV1>,
+        governance_record: Option<EntityId>,
+    ) -> Result<Self, LocalPrincipalErrorV1> {
         let mut actors = actor_entity_ids.into_iter().collect::<Vec<_>>();
         actors.sort_unstable();
         actors.dedup();
         let mut operations = operations.into_iter().collect::<Vec<_>>();
         operations.sort_unstable_by_key(operation_name);
         operations.dedup();
-        let registry_digest = registry_digest(principal, &actors, &operations);
+        let registry_digest = registry_digest(principal, &actors, &operations, governance_record);
+        let governance = governance_record.map(|record| {
+            format!(
+                "{}{record}",
+                crate::authorization::GOVERNANCE_RESOURCE_PREFIX
+            )
+        });
         CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-            resources: sorted_set(operations.iter().copied().map(GatewayOperationV1::resource)),
+            resources: sorted_set(
+                operations
+                    .iter()
+                    .copied()
+                    .map(GatewayOperationV1::resource)
+                    .chain(governance.as_deref()),
+            ),
             actions: sorted_set(operations.iter().copied().map(GatewayOperationV1::action)),
             purposes: sorted_set(operations.iter().copied().map(GatewayOperationV1::purpose)),
             audiences: vec![GATEWAY_AUDIENCE.to_owned()],
@@ -191,11 +223,17 @@ impl LocalPrincipalProvisionV1 {
                     .iter()
                     .map(|name| GatewayOperationV1::named(name))
                     .collect::<Option<Vec<_>>>();
-                principal.zip(actors).zip(operations)
+                let governance = document
+                    .governance_record_id
+                    .as_deref()
+                    .map_or(Some(None), |text| {
+                        crate::scenario_room::canonical_entity(text).map(Some)
+                    });
+                principal.zip(actors).zip(operations).zip(governance)
             })
             .ok_or(LocalPrincipalErrorV1::Invalid)
-            .and_then(|((principal, actors), operations)| {
-                Self::try_new(&principal, actors, operations)
+            .and_then(|(((principal, actors), operations), governance)| {
+                Self::try_new_governed(&principal, actors, operations, governance)
             })
     }
 }
@@ -532,6 +570,7 @@ fn registry_digest(
     principal: &PrincipalRefV1,
     actors: &[EntityId],
     operations: &[GatewayOperationV1],
+    governance_record: Option<EntityId>,
 ) -> Hash {
     let mut hasher = blake3::Hasher::new_derive_key("pigloros gateway local principal registry v1");
     hasher.update(principal.principal_id());
@@ -543,6 +582,10 @@ fn registry_digest(
     hasher.update(&(operations.len() as u64).to_be_bytes());
     for operation in operations {
         framed(&mut hasher, operation.name().as_bytes());
+    }
+    // The governance record, when the document names one.
+    if let Some(record) = governance_record {
+        hasher.update(&record.inner().to_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }

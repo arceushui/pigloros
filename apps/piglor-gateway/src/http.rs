@@ -3,8 +3,9 @@
 
 use crate::{
     operation::{
-        AppendSignalOperation, CreatePredictionOperation, CreateTimelineOperation,
-        OperationAuthority, ReadSessionOperation,
+        AppendSignalOperation, CreatePredictionOperation, CreateScenarioRoomOperation,
+        CreateTimelineOperation, DeriveScenarioRoomOperation, OperationAuthority,
+        ReadScenarioRoomOperation, ReadSessionOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -155,6 +156,15 @@ fn loopback_routes() -> Router<AppState> {
         .route("/v1/timelines/{timeline_id}/actions", post(post_action))
         .route("/v1/timelines/{timeline_id}/signals", post(post_signal))
         .route("/v1/session", get(get_session))
+        .route("/v1/scenario-rooms", post(create_scenario_room))
+        .route(
+            "/v1/scenario-rooms/{room_id}/revisions",
+            post(derive_scenario_room),
+        )
+        .route(
+            "/v1/scenario-rooms/{room_id}/revisions/{revision}",
+            get(get_scenario_room_revision),
+        )
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -173,13 +183,16 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-const PROTECTED_ROUTES: [(&str, &str); 6] = [
+const PROTECTED_ROUTES: [(&str, &str); 9] = [
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
     ("POST", "/v1/timelines/{timeline_id}/actions"),
     ("POST", "/v1/timelines/{timeline_id}/signals"),
     ("GET", "/v1/session"),
+    ("POST", "/v1/scenario-rooms"),
+    ("POST", "/v1/scenario-rooms/{room_id}/revisions"),
+    ("GET", "/v1/scenario-rooms/{room_id}/revisions/{revision}"),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -634,6 +647,85 @@ async fn get_session(
         .map(Json)
 }
 
+/// `POST /v1/scenario-rooms` (#1398): revision 1 of a room, decided with
+/// every `persona` participant covered by the Principal's grant.
+async fn create_scenario_room(
+    State(state): State<AppState>,
+    authority: OperationAuthority<CreateScenarioRoomOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Result<Response, ProblemV1> {
+    let request = crate::scenario_room::parse_create(&body)?;
+    let personas = crate::scenario_room::personas(&request.input);
+    let outcome = authority
+        .run_covering(
+            &state.gateway,
+            personas,
+            move |gateway, permit| async move {
+                let outcome = gateway.create_scenario_room(&permit, &key, request).await;
+                drop(permit);
+                Ok(outcome)
+            },
+        )
+        .await?;
+    room_response(outcome)
+}
+
+/// `POST /v1/scenario-rooms/{room_id}/revisions` (#1398).
+async fn derive_scenario_room(
+    State(state): State<AppState>,
+    ContractPath(room_id): ContractPath<String>,
+    authority: OperationAuthority<DeriveScenarioRoomOperation>,
+    IdempotencyKey(key): IdempotencyKey,
+    ContractJson(body): ContractJson<serde_json::Value>,
+) -> Result<Response, ProblemV1> {
+    let room_id = crate::scenario_room::parse_room_id(&room_id)?;
+    let request = crate::scenario_room::parse_derive(room_id, &body)?;
+    let personas = crate::scenario_room::personas(&request.input);
+    let outcome = authority
+        .run_covering(
+            &state.gateway,
+            personas,
+            move |gateway, permit| async move {
+                let outcome = gateway
+                    .derive_scenario_room(&permit, room_id, &key, request)
+                    .await;
+                drop(permit);
+                Ok(outcome)
+            },
+        )
+        .await?;
+    room_response(outcome)
+}
+
+/// `GET /v1/scenario-rooms/{room_id}/revisions/{revision}` (#1398).
+async fn get_scenario_room_revision(
+    State(state): State<AppState>,
+    ContractPath((room_id, revision)): ContractPath<(String, u64)>,
+    authority: OperationAuthority<ReadScenarioRoomOperation>,
+) -> Result<Response, ProblemV1> {
+    let room_id = crate::scenario_room::parse_room_id(&room_id)?;
+    let outcome = authority
+        .run(&state.gateway, None, move |gateway| async move {
+            Ok(gateway.read_scenario_room(room_id, revision).await)
+        })
+        .await?;
+    room_response(outcome)
+}
+
+/// The response of one room outcome or its problem.
+fn room_response(
+    outcome: Result<
+        crate::executor::scenario_room::RoomOutcomeV1,
+        crate::scenario_room::RoomFailureV1,
+    >,
+) -> Result<Response, ProblemV1> {
+    outcome.map_err(ProblemV1::from).map(|outcome| {
+        let (status, body) = crate::scenario_room::revision_response(&outcome);
+        (status, Json(body)).into_response()
+    })
+}
+
 async fn post_ledger_prediction(
     State(state): State<AppState>,
     authority: OperationAuthority<CreatePredictionOperation>,
@@ -1085,7 +1177,10 @@ mod tests {
                         .method(method)
                         .uri(format!(
                             "{}{query}",
-                            route.replace("{timeline_id}", &timeline)
+                            route
+                                .replace("{timeline_id}", &timeline)
+                                .replace("{room_id}", &timeline)
+                                .replace("{revision}", "1")
                         ))
                         .header("content-type", "application/json")
                         .header(

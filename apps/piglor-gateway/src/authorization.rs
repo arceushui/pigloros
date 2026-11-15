@@ -293,11 +293,37 @@ impl GatewayOperationV1 {
         "world.action.v1.submit",
         "action",
     );
+    /// `POST /v1/scenario-rooms`: create revision 1 of a Scenario Room (#303).
+    pub const CREATE_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.create",
+        "scenario-room",
+        "create",
+        "operation",
+    );
+    /// `POST /v1/scenario-rooms/{room_id}/revisions`: derive the next
+    /// revision of a Scenario Room (#303).
+    pub const DERIVE_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.derive",
+        "scenario-room.revision",
+        "derive",
+        "operation",
+    );
+    /// `GET /v1/scenario-rooms/{room_id}/revisions/{revision}`: read one
+    /// Scenario Room revision (#303).
+    pub const READ_SCENARIO_ROOM: Self = Self::new(
+        "scenario-room.read",
+        "scenario-room.revisions",
+        "read",
+        "read",
+    );
     /// Every operation this Gateway serves and the network capability, in
     /// name order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::NETWORK,
         Self::CREATE_PREDICTION,
+        Self::CREATE_SCENARIO_ROOM,
+        Self::DERIVE_SCENARIO_ROOM,
+        Self::READ_SCENARIO_ROOM,
         Self::READ_SESSION,
         Self::CREATE_TIMELINE,
         Self::READ_EVENTS,
@@ -353,6 +379,11 @@ impl GatewayOperationV1 {
             .find(|operation| operation.name == name)
     }
 }
+
+/// The scope resource prefix that records the host's single-participant
+/// Scenario Room governance record (#303 decision 1a); the record's ULID
+/// follows it. It names no [`GatewayOperationV1`].
+pub const GOVERNANCE_RESOURCE_PREFIX: &str = "scenario-room.governance.";
 
 /// Whether `scope` names `operation`: each [`GatewayOperationV1`] constant
 /// has its own resource, so naming that resource names the operation.
@@ -1098,6 +1129,24 @@ impl GatewayAuthorization {
 
     /// The current pinned authority; replacement only swaps a complete
     /// snapshot, so a poisoned lock still holds a whole one.
+    /// The single-participant governance record the pinned leaf grant
+    /// records, if any (#303 decision 1a).
+    pub(crate) fn governance_record(&self) -> Option<EntityId> {
+        self.pinned()
+            .view
+            .authority()
+            .chain()
+            .grants()
+            .last()
+            .and_then(|leaf| {
+                leaf.scope()
+                    .resources()
+                    .iter()
+                    .find_map(|resource| resource.strip_prefix(GOVERNANCE_RESOURCE_PREFIX))
+                    .and_then(crate::scenario_room::canonical_entity)
+            })
+    }
+
     fn pinned(&self) -> Arc<PinnedAuthorityV1> {
         Arc::clone(
             &self
