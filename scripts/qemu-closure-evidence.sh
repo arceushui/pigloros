@@ -88,7 +88,7 @@ record_provenance() {
 }
 
 boot() {
-  local architecture="$1" out="$2" work runner qemu_pid="" status=0 pid
+  local architecture="$1" out="$2" work runner qemu_pid="" status=0 pid qmp_failed=0
   require_architecture "${architecture}"
   work="$(mktemp -d)"
   mkdir -p "${work}/xchg"
@@ -134,7 +134,9 @@ boot() {
     # The interfaces of QEMU's own network namespace.
     sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
     # The accelerator QEMU itself reports (ADR-069 R13 §2.3).
-    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json"
+    # A failure must not skip the QEMU stop and cleanup below; it fails the
+    # step at the end instead.
+    query_qmp "${work}/qmp.sock" >"${out}/host/qemu-query-kvm.json" || qmp_failed=1
   else
     # Say why, so the next run names the cause rather than a timeout.
     {
@@ -172,8 +174,9 @@ boot() {
       printf 'work-directory\tpresent\n'
     fi
   } >"${out}/host/vm-cleanup"
-  if [[ -z ${qemu_pid} || ${status} -ne 0 ]]; then
-    printf 'VM observation failed (QEMU PID %s, exit status %s)\n' "${qemu_pid:-none}" "${status}" >&2
+  if [[ -z ${qemu_pid} || ${status} -ne 0 || ${qmp_failed} -ne 0 ]]; then
+    printf 'VM observation failed (QEMU PID %s, exit status %s, QMP failed %s)\n' \
+      "${qemu_pid:-none}" "${status}" "${qmp_failed}" >&2
     exit 1
   fi
 }

@@ -35,7 +35,7 @@ PRODUCER_SHA256 = {
     "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
     "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
-    "scripts/qemu-closure-evidence.sh": "a977118effb2378f11001f67d7e35c434da078c76276d77da281933bd58882fd",
+    "scripts/qemu-closure-evidence.sh": "49ed6548fcea6c0b17deea562014f01f7c3de389f4af14d10d935e28312d5da3",
     "scripts/check_qemu_closure_evidence.py": "9d9d3f2a1b222fd984a95e26694304ec4197723270b2b3b02baa2d6bb9279a2c",
     "deploy/nixos/flake.nix": "2cae6e9528ffb99aab13d20dc4730fffd4f144a2dc917a446fea0763c5dd206d",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
