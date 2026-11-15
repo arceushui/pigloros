@@ -42,7 +42,9 @@ git fetch origin main
 git worktree add ../pigloros-<task-name> -b <branch-name> origin/main
 cd ../pigloros-<task-name>
 
-# Enable the versioned pre-commit hook once per clone.
+# Enable the versioned pre-commit and pre-push hooks once per clone.
+# pre-commit: cargo fmt --check, full staged Trunk check, lockfile check and
+# targeted Clippy; pre-push: full Trunk check over the pushed commits.
 git config core.hooksPath .githooks
 
 rustup show active-toolchain
@@ -56,7 +58,7 @@ version control; for example, verify private files with:
 git check-ignore -- .secrets/ledger.key
 ```
 
-The local hook is an early feedback mechanism. It does not replace the
+The local hooks are an early feedback mechanism. They do not replace the
 hosted required checks.
 
 ## Make a focused change
@@ -159,17 +161,28 @@ flowchart TD
 ### Stage 1: fast preflight
 
 Pull requests run Trunk in its native diff mode before Cargo-heavy work. The
-same stage validates pinned workflow dependencies and the Linux/non-Linux
-conformance boundaries.
+same stage validates pinned workflow dependencies, the repository's source and
+owner-bridge policy checks, and the Linux/non-Linux conformance boundaries.
+The policy checks run as three parallel jobs so each one stays well inside its
+10-minute limit: `pinned-dependencies` (supply-chain pins plus workflow, CI,
+vector and notice policy tests), `source-policies` (the source-confinement
+checkers) and `owner-bridge-policies` (the owner-bridge unsafe, lock,
+subject-encryption and Windows shim coverage checks). Rust-affecting changes
+and every non-pull-request event run all three, and `preflight-gate` requires
+each to pass.
 
 ```mermaid
 flowchart LR
     S["Trusted scope"] --> T["Trunk changed-file check"]
-    S --> P["Pinned workflow policy"]
+    S --> P["pinned-dependencies"]
+    S --> SP["source-policies"]
+    S --> OP["owner-bridge-policies"]
     S --> F["Conformance fixtures"]
     S --> N["Non-Linux boundary"]
     T --> G["preflight-gate"]
     P --> G
+    SP --> G
+    OP --> G
     F --> G
     N --> G
 ```
