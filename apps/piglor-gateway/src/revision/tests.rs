@@ -920,6 +920,8 @@ async fn a_writer_whose_binding_moved_commits_nothing_and_stops() -> TestResult 
         row.get(0)
     })?;
     assert_eq!(rows, 0);
+    drop(connection);
+    drop(response);
     finish(served).await
 }
 
