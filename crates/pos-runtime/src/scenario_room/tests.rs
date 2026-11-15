@@ -816,3 +816,46 @@ fn the_errors_name_their_cause() {
         "Scenario Room limit exceeded: Plugins"
     );
 }
+
+struct RoomTestFactory;
+
+impl crate::InstalledPluginFactoryV1 for RoomTestFactory {
+    type Configuration = &'static str;
+    type Plugin = TestPlugin;
+    type Approver = crate::NoActionApproverV1;
+
+    fn configuration_details(_configuration: &&'static str) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn build(
+        configuration: &&'static str,
+    ) -> crate::InstalledPluginProductV1<TestPlugin, crate::NoActionApproverV1> {
+        crate::InstalledPluginProductV1 {
+            plugin: test_plugin("gateway-test-actions", *configuration),
+            reducer: None,
+            approver: crate::NoActionApproverV1,
+        }
+    }
+}
+
+#[test]
+fn a_host_catalogue_entry_describes_its_one_plugin_without_registering_it() -> TestResult {
+    let catalogue = crate::HostCatalogueEntryV1::<RoomTestFactory>::scenario_room_catalogue_v1(
+        &"gateway-test-actions.v1",
+    );
+    assert_eq!(
+        catalogue.resolve(&RoomPluginRefV1 {
+            plugin_id: "gateway-test-actions".to_owned(),
+            version: "0.1.0".to_owned(),
+        }),
+        Ok(capability_set_hash_v1(
+            [Kind::new("gateway-test-actions.v1")].iter()
+        ))
+    );
+    assert_eq!(
+        catalogue.resolve(&plugin("world")),
+        Err(ScenarioRoomErrorV1::PluginNotBundled)
+    );
+    Ok(())
+}
