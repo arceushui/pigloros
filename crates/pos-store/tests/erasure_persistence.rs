@@ -796,7 +796,7 @@ fn assert_committed_attempt_page_is_never_swept<
     );
     assert_eq!(
         backend.sweep_unreferenced_erasure_objects(
-            &[pos_core::ERASURE_ATTEMPT_HISTORY_TAG_V1],
+            &[pos_core::erasure::ERASURE_ATTEMPT_HISTORY_TAG_V1],
             &[],
             16
         )?,
