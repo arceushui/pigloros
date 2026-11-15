@@ -164,7 +164,8 @@ finish_boot() { # LAUNCHER QEMU_PID QEMU_START OBSERVE_FAILED WORK OUT
   if [[ -n $2 ]]; then
     stop_qemu "$2" "$3" || stopped=1
   fi
-  rm -rf -- "$5"
+  # A failed removal is reported in the cleanup record, never by exiting.
+  rm -rf -- "$5" || kept=1
   write_cleanup_record "$2" "$3" "$5" "$6"
   if [[ -z $2 || ${status} -ne 0 || $4 -ne 0 || ${stopped} -ne 0 || ${kept} -ne 0 ]]; then
     printf 'VM observation failed (QEMU PID %s, exit status %s, observation failed %s, stop failed %s, record failed %s)\n' \

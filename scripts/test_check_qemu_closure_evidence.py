@@ -484,6 +484,8 @@ class EvidenceTests(unittest.TestCase):
     def test_aarch64_devices_are_its_own(self):
         self.refuses(lambda f: f.update({"host/qemu-argv": qemu_argv("aarch64", "-usb")}), "aarch64")
         self.refuses(lambda f: f.update({"host/qemu-argv": qemu_argv("aarch64").replace(
+            b"virt,gic-version=max", b"virt,gic-version=3,secure=on")}), "aarch64")
+        self.refuses(lambda f: f.update({"host/qemu-argv": qemu_argv("aarch64").replace(
             b"-device\0virtio-gpu-pci\0", b"")}), "aarch64")
 
     def test_systemctl_omits_an_empty_environment_files_list(self):
@@ -559,6 +561,11 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home,mount_tag=home")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "vmxnet3")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-monitor", "stdio")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-S")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "q35")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"usb-tablet,bus=usb-bus.0", b"usb-tablet,bus=usb-bus.0,serial=x")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-fs-pci")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "usb-host,hostbus=1")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-rng-pci")}),

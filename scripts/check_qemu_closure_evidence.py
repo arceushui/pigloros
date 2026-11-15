@@ -84,11 +84,17 @@ FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "h
 # as recorded on the hosted runners. Any other device is foreign: no disk,
 # network or host-passthrough model can be added unnoticed.
 DEVICES = {
-    "x86_64": ["virtio-keyboard", "virtio-rng-pci", "usb-tablet"],
-    "aarch64": ["usb-ehci", "usb-kbd", "usb-tablet", "virtio-gpu-pci", "virtio-keyboard",
+    "x86_64": ["usb-tablet,bus=usb-bus.0", "virtio-keyboard", "virtio-rng-pci"],
+    "aarch64": ["usb-ehci,id=usb0", "usb-kbd", "usb-tablet", "virtio-gpu-pci", "virtio-keyboard",
                 "virtio-rng-pci"],
 }
 USB_OPTION = {"x86_64": 1, "aarch64": 0}
+# Every option flag of that runner. Anything else, however harmless it looks,
+# is not the reviewed runner.
+QEMU_FLAGS = {"-accel", "-append", "-cpu", "-device", "-initrd", "-kernel", "-m", "-name", "-nic",
+              "-no-reboot", "-nographic", "-qmp", "-smp", "-virtfs"}
+ARCHITECTURE_FLAGS = {"x86_64": {"-usb"}, "aarch64": {"-machine"}}
+MACHINES = {"x86_64": [], "aarch64": ["virt,gic-version=max"]}
 # Block-device file systems; the guest mounts none of them.
 BLOCK_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "msdos", "exfat", "ntfs", "ntfs3",
                  "f2fs", "erofs", "squashfs", "iso9660", "udf", "jfs", "reiserfs", "bcachefs"}
@@ -391,7 +397,7 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     images = (executable, f"{paths['qemu']}/bin/.qemu-system-{architecture}-wrapped")
     if evidence.line("host/qemu-exe") not in images or argv[0] != executable:
         raise EvidenceError("the running QEMU is not the recorded package's system emulator")
-    accelerators, nics, kernels, appends, shares, devices = [], [], [], [], [], []
+    accelerators, nics, kernels, appends, shares, devices, machines = [], [], [], [], [], [], []
     for index, flag in enumerate(argv[1:], start=1):
         value = argv[index + 1] if index + 1 < len(argv) else ""
         if flag.lstrip("-") in FORBIDDEN_QEMU_OPTIONS and flag.startswith("-"):
@@ -407,11 +413,20 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
         if flag in ("-append", "--append"):
             appends.append(value)
         if flag in ("-device", "--device"):
-            devices.append(value.split(",", 1)[0])
-        if flag in ("-machine", "--machine", "-M") and "accel" in value:
-            raise EvidenceError("the accelerator must come from -accel, not -machine")
+            devices.append(value)
+        if flag in ("-machine", "--machine", "-M"):
+            if "accel" in value:
+                raise EvidenceError("the accelerator must come from -accel, not -machine")
+            machines.append(value)
     if sorted(devices) != sorted(DEVICES[architecture]) or argv.count("-usb") != USB_OPTION[architecture]:
         raise EvidenceError(f"QEMU devices {sorted(devices)} are not the reviewed runner's")
+    if machines != MACHINES[architecture]:
+        raise EvidenceError(f"QEMU machine {machines} is not the reviewed runner's")
+    # No value of the reviewed runner starts with "-", so every such word is a flag.
+    flags = {argument for argument in argv[1:] if argument.startswith("-")}
+    unexpected = sorted(flags - QEMU_FLAGS - ARCHITECTURE_FLAGS[architecture])
+    if unexpected:
+        raise EvidenceError(f"QEMU options {unexpected} are not the reviewed runner's")
     # ADR-069 R13 §2.3: started with `-accel tcg` only, and QEMU reports no KVM.
     if accelerators != ["tcg"]:
         raise EvidenceError(f"QEMU must be started with exactly -accel tcg, not {accelerators}")
