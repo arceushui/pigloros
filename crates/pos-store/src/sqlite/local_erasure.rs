@@ -367,6 +367,35 @@ fn delete_retained(
 mod tests {
     use super::*;
 
+    /// An address the evidence path already holds is never marked as a
+    /// sweep candidate when the same bytes are retained again, so a startup
+    /// sweep cannot delete committed evidence. No current writer keys
+    /// committed evidence by the full-bytes content address, so the
+    /// evidence row is seeded directly.
+    #[test]
+    fn retaining_bytes_the_evidence_path_wrote_first_never_marks_them(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("evidence-first.sqlite3");
+        let path = path
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?;
+        let store = SqliteStore::open(path)?;
+        let bytes = [0x82, 0x64, b'E', b'R', b'C', b'1', 0x01];
+        let reference = ErasureRetainedObjectV1::new(&bytes, 1_024)?.reference();
+        store.conn.execute(
+            "INSERT INTO erasure_evidence (reference_digest, object_cbor) VALUES (?1, ?2)",
+            params![reference.digest().as_slice(), bytes.as_slice()],
+        )?;
+        assert_eq!(store.local_erasure_retain(&bytes, 1_024)?, reference);
+        assert_eq!(store.local_erasure_sweep(&["ERC1"], &[], 16)?, 0);
+        assert_eq!(
+            load_sqlite_erasure_evidence(&store.conn, reference)?,
+            bytes.to_vec()
+        );
+        Ok(())
+    }
+
     /// The production snapshot reads all its parts in the one transaction it
     /// is given: a Timeline another connection commits after that
     /// transaction's read snapshot began is in none of them.

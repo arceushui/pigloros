@@ -598,7 +598,9 @@ fn evidence_object_survives_while_its_retained_copy_is_swept(
     let proof = rejoin_proof()?;
     store.store_rejoin_proof(&proof)?;
     let bytes = proof.to_canonical_cbor()?;
-    // (a) The evidence-path object is never a sweep candidate.
+    // (a) The evidence-path object is not a sweep candidate. It is not in the
+    // retained table at all; the "address already present, so not marked"
+    // rule is covered by each adapter's own unit test.
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
         0
@@ -607,7 +609,13 @@ fn evidence_object_survives_while_its_retained_copy_is_swept(
     // (b) The same bytes retained again get their content address.
     let copy = store.retain_erasure_object(&bytes, 1_024)?;
     assert_ne!(copy, proof.reference());
-    assert_eq!(copy, address(&bytes)?);
+    // The content address, computed independently of the production
+    // derivation: BLAKE3 over the tag, a zero byte and the full bytes.
+    let content_address = [b"ERRJ1".as_slice(), &[0], &bytes].concat();
+    assert_eq!(
+        copy,
+        ErasureReferenceV1::from_digest(*blake3::hash(&content_address).as_bytes())
+    );
     // (c) The sweep removes exactly that copy and keeps the evidence object.
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
