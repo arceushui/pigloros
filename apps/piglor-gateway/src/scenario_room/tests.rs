@@ -115,7 +115,7 @@ mod served {
     struct Served {
         gateway: Gateway,
         app: Router,
-        _directory: tempfile::TempDir,
+        directory: tempfile::TempDir,
         path: String,
         /// The `consent_ref` of the Principal's consent.
         consent: String,
@@ -124,6 +124,13 @@ mod served {
     impl Served {
         fn descriptor(&self, value_micro: i64) -> Value {
             descriptor(value_micro, &self.consent)
+        }
+
+        /// Shut the Gateway down, keeping the store directory and path for
+        /// reading the store afterwards.
+        async fn close(self) -> TestResult<(tempfile::TempDir, String)> {
+            self.gateway.shutdown().await?;
+            Ok((self.directory, self.path))
         }
     }
 
@@ -163,7 +170,7 @@ mod served {
         Ok(Served {
             gateway,
             app,
-            _directory: directory,
+            directory,
             path,
             consent,
         })
@@ -340,6 +347,16 @@ mod served {
             (status, &body["code"]),
             (StatusCode::BAD_REQUEST, &json!("invalid-request"))
         );
+        derive_over_http(&served, &room, &created).await?;
+        drop(served.close().await?);
+        Ok(())
+    }
+
+    /// Revision 2 of `room`, derived from revision 1, its section 7
+    /// duplicate and a stale derive, then the room Timeline read through the
+    /// events route and derives of an unknown or malformed room.
+    async fn derive_over_http(served: &Served, room: &str, created: &Value) -> TestResult {
+        let app = &served.app;
         let revisions = format!("/v1/scenario-rooms/{room}/revisions");
         let derive = json!({"parent_revision": 1, "descriptor": served.descriptor(500_000)});
         let (status, derived) = post(app, &revisions, Some("k-2"), &derive).await?;
@@ -401,7 +418,6 @@ mod served {
             (status, &body["code"]),
             (StatusCode::BAD_REQUEST, &json!("invalid-request"))
         );
-        served.gateway.shutdown().await?;
         Ok(())
     }
 
@@ -489,7 +505,7 @@ mod served {
         let derive = format!("/v1/scenario-rooms/{}/revisions", EntityId::new());
         let (status, _) = post(&served.app, &derive, Some("bad-derive"), &body).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        served.gateway.shutdown().await?;
+        drop(served.close().await?);
         Ok(())
     }
 
@@ -506,8 +522,8 @@ mod served {
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("unauthorized"))
         );
-        served.gateway.shutdown().await?;
-        let denials = SqliteStore::open(&served.path)?
+        let (_directory, path) = served.close().await?;
+        let denials = SqliteStore::open(&path)?
             .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?;
         assert!(
             matches!(
@@ -527,7 +543,7 @@ mod served {
         let full = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let (_, created) = post(&full.app, "/v1/scenario-rooms", Some("k"), &create(&full)).await?;
         let room = created["id"].as_str().ok_or("room id")?.to_owned();
-        full.gateway.shutdown().await?;
+        drop(full.close().await?);
         for granted in [&ROOMS[1..], &[ROOMS[0], ROOMS[2]][..], &ROOMS[..2]] {
             let served = served(&provision(granted, Some(id(GOVERNANCE)?))?).await?;
             let derive = json!({"parent_revision": 1, "descriptor": served.descriptor(2)});
@@ -562,7 +578,7 @@ mod served {
                 })
                 .count();
             assert_eq!(refused, 1, "{answers:?}");
-            served.gateway.shutdown().await?;
+            drop(served.close().await?);
         }
         let ungoverned = served(&provision(&ROOMS, None)?).await?;
         let (status, problem) = post(
@@ -579,7 +595,7 @@ mod served {
                 &json!("admission-rejected")
             )
         );
-        ungoverned.gateway.shutdown().await?;
+        drop(ungoverned.close().await?);
         Ok(())
     }
 
@@ -623,10 +639,70 @@ mod served {
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("consent-invalid"))
         );
-        // A create admitted before the revocation holds its permit. The
-        // revocation reaches the commit fence and waits there: a writer is
-        // queued behind the permit's read guard. The create still commits
-        // on its pin, and releasing its permit lets the revocation through.
+        revoke_while_a_create_holds_its_permit(&served).await?;
+        // Fail-closed: even an exact retry of the first create is refused
+        // once its consent is revoked.
+        let (status, problem) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("held"),
+            &json!({"descriptor": served.descriptor(1)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
+        let (status, problem) = post(
+            &served.app,
+            "/v1/scenario-rooms",
+            Some("revoked"),
+            &json!({"descriptor": served.descriptor(3)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
+        let (status, problem) = post(
+            &served.app,
+            &format!("/v1/scenario-rooms/{room}/revisions"),
+            Some("revoked-derive"),
+            &json!({"parent_revision": 1, "descriptor": served.descriptor(4)}),
+        )
+        .await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::FORBIDDEN, &json!("revoked"))
+        );
+        let (_directory, path) = served.close().await?;
+        // Each consent refusal left its ADN1 record before it was answered.
+        let outcomes = SqliteStore::open(&path)?
+            .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?
+            .into_iter()
+            .filter_map(|(_, evidence)| match evidence {
+                AuthorizationDenialEvidenceV1::Denial(record) => Some(record.outcome()),
+                AuthorizationDenialEvidenceV1::Suppressed(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes,
+            [
+                AuthorizationOutcomeV1::ConsentMissing,
+                AuthorizationOutcomeV1::ConsentMissing,
+                AuthorizationOutcomeV1::RevokedAtFence,
+                AuthorizationOutcomeV1::RevokedAtFence,
+                AuthorizationOutcomeV1::RevokedAtFence,
+            ]
+        );
+        Ok(())
+    }
+
+    /// A create admitted before the revocation holds its permit. The
+    /// revocation reaches the commit fence and waits there: a writer is
+    /// queued behind the permit's read guard. The create still commits on
+    /// its pin, and releasing its permit lets the revocation through.
+    async fn revoke_while_a_create_holds_its_permit(served: &Served) -> TestResult {
         let permit = served
             .gateway
             .authorize_operation(
@@ -666,71 +742,13 @@ mod served {
         .await
         .map_err(|_| "the revocation never reached the commit fence")?;
         let body = json!({"descriptor": served.descriptor(2)});
+        let parsed = parse_create(&body).map_err(|_| "parse")?;
         let admitted = served
             .gateway
-            .create_scenario_room(
-                permit,
-                "admitted",
-                parse_create(&body).map_err(|_| "parse")?,
-            )
+            .create_scenario_room(permit, "admitted", parsed)
             .await;
         assert!(matches!(admitted, Ok(RoomOutcomeV1::Committed(_))));
         assert_eq!(revocation.await??, StatusCode::CREATED);
-        // Fail-closed: even an exact retry of the first create is refused
-        // once its consent is revoked.
-        let (status, problem) = post(
-            &served.app,
-            "/v1/scenario-rooms",
-            Some("held"),
-            &json!({"descriptor": served.descriptor(1)}),
-        )
-        .await?;
-        assert_eq!(
-            (status, &problem["code"]),
-            (StatusCode::FORBIDDEN, &json!("revoked"))
-        );
-        let (status, problem) = post(
-            &served.app,
-            "/v1/scenario-rooms",
-            Some("revoked"),
-            &json!({"descriptor": served.descriptor(3)}),
-        )
-        .await?;
-        assert_eq!(
-            (status, &problem["code"]),
-            (StatusCode::FORBIDDEN, &json!("revoked"))
-        );
-        let (status, problem) = post(
-            &served.app,
-            &format!("/v1/scenario-rooms/{room}/revisions"),
-            Some("revoked-derive"),
-            &json!({"parent_revision": 1, "descriptor": served.descriptor(4)}),
-        )
-        .await?;
-        assert_eq!(
-            (status, &problem["code"]),
-            (StatusCode::FORBIDDEN, &json!("revoked"))
-        );
-        served.gateway.shutdown().await?;
-        // Each consent refusal left its ADN1 record before it was answered.
-        let outcomes = SqliteStore::open(&served.path)?
-            .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?
-            .into_iter()
-            .filter_map(|(_, evidence)| match evidence {
-                AuthorizationDenialEvidenceV1::Denial(record) => Some(record.outcome()),
-                AuthorizationDenialEvidenceV1::Suppressed(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            outcomes,
-            [
-                AuthorizationOutcomeV1::ConsentMissing,
-                AuthorizationOutcomeV1::ConsentMissing,
-                AuthorizationOutcomeV1::RevokedAtFence,
-                AuthorizationOutcomeV1::RevokedAtFence,
-                AuthorizationOutcomeV1::RevokedAtFence,
-            ]
-        );
         Ok(())
     }
 
@@ -764,6 +782,7 @@ mod served {
             )
         );
         gateway.shutdown().await?;
+        drop(gateway);
         Ok(())
     }
 

@@ -339,8 +339,8 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
     ] {
         let mut host = host(true)?;
         let limited = RoomAdmissionV1 {
-            max_timelines,
             max_events,
+            max_timelines,
             ..admission()?
         };
         assert_eq!(
