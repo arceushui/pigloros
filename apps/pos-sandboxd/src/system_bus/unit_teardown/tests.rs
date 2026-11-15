@@ -1027,10 +1027,11 @@ pub(super) mod cases {
         let (shutdown, deadline) = budgets()?;
         let listed = OwnedObjectPath::try_from(path)?;
         let root = CgroupRoot::for_test(File::open(fixture.cgroups.path())?);
-        Ok(fixture
+        let stopped = fixture
             .transport
             .stop_listed_with_root(&fixture.unit, &listed, Ok(root), (shutdown, deadline))
-            .await)
+            .await;
+        Ok(stopped)
     }
 
     #[tokio::test(start_paused = true)]
