@@ -523,36 +523,58 @@ fn rejoin_proof() -> Result<pos_core::ErasureRejoinProofV1, ErasureErrorV1> {
     })
 }
 
-/// An address the evidence path wrote first is never a sweep candidate, even
-/// after the same bytes are retained again.
-fn coordinator_object_survives_sweep(
+/// The evidence path and the retain path address the same bytes
+/// differently, and the sweep takes only what the retain path inserted.
+///
+/// `store_rejoin_proof` writes an ERRJ1 at `proof.reference()`, the ADR-060
+/// V1 self-digest over the record's core array (the record without its own
+/// digest field). `retain_erasure_object` addresses a record by its ADR-136
+/// §4a content address, the domain-separated digest of the full canonical
+/// bytes. Re-retaining the same ERRJ1 bytes therefore inserts a second,
+/// distinct object, and only that copy is a sweep candidate.
+fn evidence_object_survives_while_its_retained_copy_is_swept(
     store: &mut (impl LocalErasureStore + pos_store::ErasureRejoinPersistencePortV1),
 ) -> TestResult {
     let proof = rejoin_proof()?;
     store.store_rejoin_proof(&proof)?;
     let bytes = proof.to_canonical_cbor()?;
-    assert_eq!(
-        store.retain_erasure_object(&bytes, 1_024)?,
-        proof.reference()
-    );
+    // (a) The evidence-path object is never a sweep candidate.
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
         0
     );
     assert_eq!(store.read_object(proof.reference())?, bytes);
+    // (b) The same bytes retained again get their content address.
+    let copy = store.retain_erasure_object(&bytes, 1_024)?;
+    assert_ne!(copy, proof.reference());
+    assert_eq!(copy, address(&bytes)?);
+    // (c) The sweep removes exactly that copy and keeps the evidence object.
+    assert_eq!(
+        store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
+        1
+    );
+    assert_eq!(
+        store.read_object(copy),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(store.read_object(proof.reference())?, bytes);
+    assert_eq!(
+        store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
+        0
+    );
     Ok(())
 }
 
 #[test]
-fn sweep_never_takes_an_object_the_evidence_path_wrote_first() -> TestResult {
-    coordinator_object_survives_sweep(&mut MemoryStore::new())?;
+fn sweep_takes_only_the_retained_copy_of_an_evidence_object() -> TestResult {
+    evidence_object_survives_while_its_retained_copy_is_swept(&mut MemoryStore::new())?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("coordinator-object.sqlite3");
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
-    coordinator_object_survives_sweep(&mut store)
+    evidence_object_survives_while_its_retained_copy_is_swept(&mut store)
 }
 
 fn unbound_registry_refuses(store: &mut impl LocalErasureStore) -> TestResult {
