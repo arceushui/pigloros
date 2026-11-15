@@ -33,6 +33,8 @@ const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
+#[cfg(target_os = "linux")]
+mod provider_units;
 mod unit_absence;
 pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
 mod unit_result;
@@ -60,12 +62,27 @@ impl TransientServiceUnitName {
     /// Returns [`TransientServiceUnitNameError::ZeroAttemptId`] when the
     /// identifier is not a valid nonzero attempt identity.
     pub fn from_attempt_id(attempt_id: [u8; 16]) -> Result<Self, TransientServiceUnitNameError> {
-        if attempt_id == [0; 16] {
+        Self::with_prefix(UNIT_PREFIX, attempt_id)
+    }
+
+    /// The unit name of one selector-owned provider unit (ADR-069 R12 §7.2):
+    /// `pigloros-provider-runtime-<hex(lifecycle-scope-id)>.service` or
+    /// `pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn provider_unit(
+        family: crate::provider_lifecycle::ProviderUnitFamily,
+        scope_id: [u8; 16],
+    ) -> Result<Self, TransientServiceUnitNameError> {
+        Self::with_prefix(family.prefix(), scope_id)
+    }
+
+    fn with_prefix(prefix: &str, id: [u8; 16]) -> Result<Self, TransientServiceUnitNameError> {
+        if id == [0; 16] {
             return Err(TransientServiceUnitNameError::ZeroAttemptId);
         }
-        let mut name = String::with_capacity(UNIT_PREFIX.len() + 32 + UNIT_SUFFIX.len());
-        name.push_str(UNIT_PREFIX);
-        for byte in attempt_id {
+        let mut name = String::with_capacity(prefix.len() + 32 + UNIT_SUFFIX.len());
+        name.push_str(prefix);
+        for byte in id {
             name.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
             name.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
         }
@@ -79,10 +96,12 @@ impl TransientServiceUnitName {
         &self.0
     }
 
-    /// The exact 32-character attempt-directory component derived from the ID.
+    /// The exact 32-character component derived from the ID: for an attempt
+    /// unit, its attempt-directory name.
     #[must_use]
     pub fn attempt_component(&self) -> &str {
-        &self.0[UNIT_PREFIX.len()..self.0.len() - UNIT_SUFFIX.len()]
+        let end = self.0.len() - UNIT_SUFFIX.len();
+        &self.0[end - 32..end]
     }
 }
 

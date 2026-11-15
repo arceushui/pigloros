@@ -6263,6 +6263,7 @@ name = "pos-root-selector"
 version = "0.1.0"
 dependencies = [
  "pos-reference",
+ "pos-sandboxd",
 ]
 
 [[package]]

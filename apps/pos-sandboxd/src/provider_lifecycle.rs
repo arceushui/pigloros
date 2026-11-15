@@ -1,0 +1,248 @@
+//! The one production [`ProviderLifecyclePort`]: the selector-owned provider
+//! runtime as systemd transient units (ADR-069 R11 §5.0, §5.2; R12 §4.2, §7.2).
+//!
+//! Only `apps/pos-root-selector` composes [`SystemdProviderLifecycle`]. It
+//! owns one current-thread Tokio runtime and one system-bus connection, opened
+//! with [`SystemdTransientUnitTransport::connect_system`] (Unix transport only).
+//! It never creates a process itself: systemd starts the runtime unit when
+//! the manager runs `StartTransientUnit` (ADR-087 A.3).
+
+use std::num::NonZeroU64;
+use std::time::Duration;
+
+use pos_reference::selector::runtime_lifecycle::{
+    process_start_time_ticks, CgroupPath, ObservationChallenge, ProviderLifecycleError,
+    ProviderLifecyclePort, RuntimeSlotTarget, StaleUnitsObservation, StartedRuntimeObservation,
+};
+use tokio::runtime::Runtime;
+use tokio::time::{timeout_at, Instant};
+use zbus::OwnedObjectPath;
+
+use crate::transient_unit::ProviderRuntimeUnitRequest;
+use crate::{
+    AttemptCgroupError, AttemptShutdownDeadlines, CgroupRoot, SystemdTransientUnitTransport,
+    SystemdTransientUnitTransportError, TransientServiceUnitName,
+};
+
+/// Fixed stop phases of one stale unit, measured from the start of its stop.
+/// They fit inside ADR-069 §9's 5 s per-unit forced-cleanup ceiling; normal
+/// open reads no SPI1 (owner reading, 2026-11-15). The selector bounds the
+/// whole operation by §9's 10 s restart bound.
+const STALE_STOP_GRACE: Duration = Duration::from_millis(500);
+const STALE_UNIT_KILL: Duration = Duration::from_millis(1_000);
+const STALE_SHUTDOWN: Duration = Duration::from_millis(1_500);
+const STALE_UNIT_ABSENT: Duration = Duration::from_millis(3_000);
+
+/// Opens the cgroup2 mount for one cgroup observation.
+pub(super) type CgroupRootSource =
+    Box<dyn Fn() -> Result<CgroupRoot, AttemptCgroupError> + Send + Sync>;
+
+/// The two selector-owned unit families (ADR-069 R12 §7.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ProviderUnitFamily {
+    /// `pigloros-provider-runtime-<hex(lifecycle-scope-id)>.service` (R11 D7).
+    Runtime,
+    /// `pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service`.
+    Recovery,
+}
+
+impl ProviderUnitFamily {
+    const ALL: [Self; 2] = [Self::Runtime, Self::Recovery];
+
+    pub(crate) const fn prefix(self) -> &'static str {
+        match self {
+            Self::Runtime => "pigloros-provider-runtime-",
+            Self::Recovery => "pigloros-provider-recovery-",
+        }
+    }
+}
+
+/// One loaded provider unit, resolved back to its listed object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ProviderUnit {
+    name: TransientServiceUnitName,
+    path: OwnedObjectPath,
+}
+
+impl ProviderUnit {
+    pub(crate) const fn new(name: TransientServiceUnitName, path: OwnedObjectPath) -> Self {
+        Self { name, path }
+    }
+
+    pub(crate) const fn name(&self) -> &TransientServiceUnitName {
+        &self.name
+    }
+
+    pub(crate) const fn path(&self) -> &OwnedObjectPath {
+        &self.path
+    }
+}
+
+/// The started runtime unit's `MainPID` and `ControlGroup`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StartedProviderUnit {
+    main_pid: u32,
+    control_group: String,
+}
+
+impl StartedProviderUnit {
+    pub(crate) const fn new(main_pid: u32, control_group: String) -> Self {
+        Self {
+            main_pid,
+            control_group,
+        }
+    }
+}
+
+/// The systemd adapter of the selector-owned provider-runtime lifecycle.
+pub struct SystemdProviderLifecycle {
+    runtime: Runtime,
+    transport: SystemdTransientUnitTransport,
+    cgroup_root: CgroupRootSource,
+}
+
+impl SystemdProviderLifecycle {
+    /// Connect to the host system bus and subscribe to manager signals.
+    ///
+    /// # Errors
+    /// Returns [`ProviderLifecycleError::Unavailable`] when the runtime cannot
+    /// be built or the system bus is unavailable or not a Unix socket.
+    pub fn connect() -> Result<Self, ProviderLifecycleError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| ProviderLifecycleError::Unavailable)?;
+        let transport = runtime
+            .block_on(SystemdTransientUnitTransport::connect_system())
+            .map_err(|_| ProviderLifecycleError::Unavailable)?;
+        Ok(Self::from_parts(
+            runtime,
+            transport,
+            Box::new(CgroupRoot::system),
+        ))
+    }
+
+    const fn from_parts(
+        runtime: Runtime,
+        transport: SystemdTransientUnitTransport,
+        cgroup_root: CgroupRootSource,
+    ) -> Self {
+        Self {
+            runtime,
+            transport,
+            cgroup_root,
+        }
+    }
+
+    async fn observe(
+        &self,
+        family: ProviderUnitFamily,
+    ) -> Result<Vec<ProviderUnit>, ProviderLifecycleError> {
+        self.transport
+            .observe_provider_units(family)
+            .await
+            .map_err(|_| ProviderLifecycleError::Unavailable)
+    }
+
+    /// Stop every loaded unit of both families, then list both again: any
+    /// unit that is still, or again, loaded is a residue.
+    async fn terminate_stale(&self, deadline: Instant) -> Result<usize, ProviderLifecycleError> {
+        let mut stopped = 0;
+        for family in ProviderUnitFamily::ALL {
+            for unit in self.observe(family).await? {
+                let started = Instant::now();
+                let shutdown = AttemptShutdownDeadlines::new(
+                    started + STALE_STOP_GRACE,
+                    started + STALE_UNIT_KILL,
+                    started + STALE_SHUTDOWN,
+                )
+                .map_err(|_| ProviderLifecycleError::DeadlineExceeded)?;
+                let unit_deadline = deadline.min(started + STALE_UNIT_ABSENT);
+                timeout_at(
+                    unit_deadline,
+                    self.transport.stop_provider_unit(
+                        &unit,
+                        &self.cgroup_root,
+                        shutdown,
+                        unit_deadline,
+                    ),
+                )
+                .await
+                .unwrap_or(Err(ProviderLifecycleError::DeadlineExceeded))?;
+                stopped += 1;
+            }
+        }
+        for family in ProviderUnitFamily::ALL {
+            if !self.observe(family).await?.is_empty() {
+                return Err(ProviderLifecycleError::ResidualResource);
+            }
+        }
+        Ok(stopped)
+    }
+}
+
+impl ProviderLifecyclePort for SystemdProviderLifecycle {
+    fn terminate_stale_runtimes(
+        &self,
+        challenge: ObservationChallenge,
+        deadline: std::time::Instant,
+    ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
+        let deadline = Instant::from_std(deadline);
+        self.runtime
+            .block_on(timeout_at(deadline, self.terminate_stale(deadline)))
+            .unwrap_or(Err(ProviderLifecycleError::DeadlineExceeded))
+            .map(|stopped| StaleUnitsObservation::new(challenge, stopped))
+    }
+
+    fn start_provider_runtime(
+        &self,
+        slot: &RuntimeSlotTarget<'_>,
+        deadline: std::time::Instant,
+    ) -> Result<StartedRuntimeObservation, ProviderLifecycleError> {
+        let name = TransientServiceUnitName::provider_unit(
+            ProviderUnitFamily::Runtime,
+            slot.lifecycle_scope_id(),
+        )
+        .map_err(|_| ProviderLifecycleError::Contradiction)?;
+        let request = ProviderRuntimeUnitRequest::new(
+            slot.provider_binary_path(),
+            slot.provider_binary_digest(),
+        )
+        .map_err(|_| ProviderLifecycleError::Contradiction)?;
+        let started = self
+            .runtime
+            .block_on(timeout_at(
+                Instant::from_std(deadline),
+                self.transport.start_provider_runtime_unit(&name, &request),
+            ))
+            .map_err(|_| ProviderLifecycleError::DeadlineExceeded)?
+            .map_err(|error| start_failure(&error))?;
+        let main_pid = NonZeroU64::new(u64::from(started.main_pid))
+            .ok_or(ProviderLifecycleError::Contradiction)?;
+        let ticks = process_start_time_ticks(main_pid)?;
+        let control_group = CgroupPath::new(&started.control_group)?;
+        Ok(StartedRuntimeObservation::new(
+            slot.challenge(),
+            slot.lifecycle_scope_id(),
+            main_pid,
+            ticks,
+            control_group,
+        ))
+    }
+}
+
+/// A start whose evidence names another unit or object is a contradiction;
+/// every other failure leaves the manager unavailable for this start.
+const fn start_failure(error: &SystemdTransientUnitTransportError) -> ProviderLifecycleError {
+    match error {
+        SystemdTransientUnitTransportError::JobIdentityMismatch { .. }
+        | SystemdTransientUnitTransportError::CgroupUnitMismatch => {
+            ProviderLifecycleError::Contradiction
+        }
+        _ => ProviderLifecycleError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

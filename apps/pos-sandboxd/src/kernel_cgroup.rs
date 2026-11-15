@@ -156,6 +156,29 @@ impl CgroupRoot {
     pub(crate) const fn for_test(root: File) -> Self {
         Self(root)
     }
+
+    /// Whether the cgroup `control_group` still exists beneath this mount.
+    ///
+    /// The path is resolved beneath the retained root without symlinks.
+    /// Absence is exactly `ENOENT`.
+    ///
+    /// # Errors
+    /// Rejects an invalid path and any other open failure.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn contains(&self, control_group: &str) -> Result<bool, AttemptCgroupError> {
+        let relative = relative_cgroup_path(control_group)?;
+        match openat2(
+            &self.0,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            RESOLVE_CHILD,
+        ) {
+            Ok(_) => Ok(true),
+            Err(Errno::NOENT) => Ok(false),
+            Err(error) => Err(AttemptCgroupError::PathOpen(error)),
+        }
+    }
 }
 
 /// Why the exact bound cgroup is known to contain no live processes.
@@ -762,6 +785,26 @@ mod tests {
             Some(AttemptCgroupError::Metadata(_))
         ));
         assert_eq!(reads, 2);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn containment_is_exact_absence_beneath_the_retained_root() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("system.slice/unit.service"))?;
+        fs::write(root.path().join("file"), b"")?;
+        let cgroups = CgroupRoot::for_test(File::open(root.path())?);
+        assert!(cgroups.contains("/system.slice/unit.service")?);
+        assert!(!cgroups.contains("/system.slice/gone.service")?);
+        assert!(matches!(
+            cgroups.contains("system.slice"),
+            Err(AttemptCgroupError::InvalidPath)
+        ));
+        assert!(matches!(
+            cgroups.contains("/file"),
+            Err(AttemptCgroupError::PathOpen(Errno::NOTDIR))
+        ));
         Ok(())
     }
 }

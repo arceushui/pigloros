@@ -4,7 +4,11 @@
 //!
 //! The `pos-root-selector` binary lives only in this package (owner decision
 //! O7), so `pos-reference` keeps no copy of it, and this package's entrypoint
-//! is the only production code that activates the selector runtime.
+//! is the only production code that activates the selector runtime. Exactly
+//! one production type implements `ProviderLifecyclePort`, the systemd
+//! adapter of `pos-sandboxd`; only this entrypoint composes it, and it reaches
+//! the system bus only through `connect_system` (Unix transport, no
+//! `unixexec`).
 
 use std::{
     error::Error,
@@ -15,6 +19,8 @@ use std::{
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const ACTIVATION: &str = "RootSelectorRuntime::activate";
+const COMPOSITION: &str = "SystemdProviderLifecycle::connect";
+const ADAPTER: &str = "apps/pos-sandboxd/src/provider_lifecycle.rs";
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn workspace_root() -> PathBuf {
@@ -77,21 +83,83 @@ fn pos_reference_keeps_no_root_selector_binary() -> TestResult {
     Ok(())
 }
 
-#[test]
+/// Every production source of the workspace whose text contains `token`.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn only_the_selector_entrypoint_activates_the_runtime() -> TestResult {
+fn production_files_containing(token: &str) -> TestResult<Vec<PathBuf>> {
     let root = workspace_root();
     let mut sources = Vec::new();
     for directory in ["crates", "apps", "plugins"] {
         rust_sources(&root.join(directory), &mut sources)?;
     }
-    let entrypoint = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
-    let mut callers = Vec::new();
+    let mut found = Vec::new();
     for path in &sources {
-        if production_text(path)?.contains(ACTIVATION) {
-            callers.push(fs::canonicalize(path)?);
+        if production_text(path)?.contains(token) {
+            found.push(fs::canonicalize(path)?);
         }
     }
-    assert_eq!(callers, vec![fs::canonicalize(entrypoint)?]);
+    Ok(found)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn entrypoint() -> TestResult<PathBuf> {
+    Ok(fs::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )?)
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn only_the_selector_entrypoint_activates_the_runtime() -> TestResult {
+    assert_eq!(
+        production_files_containing(ACTIVATION)?,
+        vec![entrypoint()?]
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn exactly_one_production_lifecycle_port_is_composed_only_here() -> TestResult {
+    let adapter = fs::canonicalize(workspace_root().join(ADAPTER))?;
+    assert_eq!(
+        production_files_containing("ProviderLifecyclePort for ")?,
+        vec![adapter.clone()]
+    );
+    let text = production_text(&adapter)?;
+    assert_eq!(
+        text.matches("impl ProviderLifecyclePort for SystemdProviderLifecycle {")
+            .count(),
+        1
+    );
+    assert_eq!(text.matches("ProviderLifecyclePort for ").count(), 1);
+    assert_eq!(
+        production_files_containing(COMPOSITION)?,
+        vec![entrypoint()?]
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_adapter_reaches_the_system_bus_only_through_connect_system() -> TestResult {
+    let text = production_text(&workspace_root().join(ADAPTER))?;
+    assert_eq!(
+        text.matches("SystemdTransientUnitTransport::connect_system()")
+            .count(),
+        1
+    );
+    for forbidden in [
+        "Connection::system",
+        "unixexec",
+        "Builder::address",
+        "connection::Builder",
+        "from_connection",
+        "Address::",
+    ] {
+        assert!(!text.contains(forbidden), "`{forbidden}` in the adapter");
+    }
+    // The shared transport refuses every non-Unix system-bus address.
+    let bus = production_text(&workspace_root().join("apps/pos-sandboxd/src/system_bus.rs"))?;
+    assert!(bus.contains("matches!(address.transport(), Transport::Unix(_))"));
     Ok(())
 }

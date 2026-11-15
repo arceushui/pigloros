@@ -1013,6 +1013,93 @@ impl TransientUnitRequest {
     }
 }
 
+/// The directory of the SIC1 kind-11 provider binaries (ADR-069 R11 §5.2).
+#[cfg(target_os = "linux")]
+const PROVIDER_BINARY_DIRECTORY: &str = "/var/lib/pigloros/sandbox/providers/";
+/// The provider daemon mode's only argument (ADR-069 R11 §5.1 step 1).
+#[cfg(target_os = "linux")]
+const PROVIDER_RUNTIME_ARGUMENT: &str = "provider-runtime";
+/// The runtime's start-to-`READY=1` bound, 30 s (R11 §5.2, owner decision O7).
+#[cfg(target_os = "linux")]
+const PROVIDER_RUNTIME_START_TIMEOUT_USEC: u64 = 30_000_000;
+/// Owner-only files and directories (R11 §5.2, owner decision O9).
+#[cfg(target_os = "linux")]
+const PROVIDER_UNIT_UMASK: u32 = 0o077;
+
+/// The exact property set of one provider-runtime unit (ADR-069 R11 §5.2,
+/// the single normative owner of these values).
+///
+/// It sets `Type=notify`, `NotifyAccess=main`, `ExitType=main`,
+/// `KillMode=control-group`, `Restart=no`, `TimeoutStartUSec=30s`,
+/// `CollectMode=inactive-or-failed`, `UMask=0077`, `StandardInput=null` and
+/// `ExecStart=[<binary>, [<binary>, "provider-runtime"], false]`, and nothing
+/// else: no environment, socket, descriptor or credential property, and no
+/// `RuntimeMaxUSec`. #444 owns the additional shared confinement set.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct ProviderRuntimeUnitRequest {
+    binary_path: String,
+}
+
+#[cfg(target_os = "linux")]
+impl ProviderRuntimeUnitRequest {
+    /// The runtime unit of the kind-11 object whose content digest is `digest`.
+    ///
+    /// # Errors
+    /// Rejects a path other than the digest's fixed SIC1 object path.
+    pub(crate) fn new(
+        binary_path: &str,
+        digest: [u8; 32],
+    ) -> Result<Self, TransientUnitRequestError> {
+        if binary_path.strip_prefix(PROVIDER_BINARY_DIRECTORY) == Some(lower_hex(&digest).as_str())
+        {
+            Ok(Self {
+                binary_path: binary_path.to_owned(),
+            })
+        } else {
+            Err(TransientUnitRequestError::InvalidLauncherSource)
+        }
+    }
+
+    /// The `StartTransientUnit` properties, in submission order.
+    ///
+    /// # Errors
+    /// Returns a D-Bus value-conversion failure.
+    pub(crate) fn properties(&self) -> Result<Vec<(String, zbus::OwnedVariant)>, zbus::Error> {
+        let exec_start = vec![(
+            self.binary_path.clone(),
+            vec![
+                self.binary_path.clone(),
+                PROVIDER_RUNTIME_ARGUMENT.to_owned(),
+            ],
+            false,
+        )];
+        [
+            ("Type", zbus::Variant::from("notify".to_owned())),
+            ("NotifyAccess", zbus::Variant::from("main".to_owned())),
+            ("ExitType", zbus::Variant::from("main".to_owned())),
+            ("KillMode", zbus::Variant::from("control-group".to_owned())),
+            ("Restart", zbus::Variant::from("no".to_owned())),
+            (
+                "TimeoutStartUSec",
+                zbus::Variant::from(PROVIDER_RUNTIME_START_TIMEOUT_USEC),
+            ),
+            (
+                "CollectMode",
+                zbus::Variant::from("inactive-or-failed".to_owned()),
+            ),
+            ("UMask", zbus::Variant::from(PROVIDER_UNIT_UMASK)),
+            ("StandardInput", zbus::Variant::from("null".to_owned())),
+            ("ExecStart", zbus::Variant::from(exec_start)),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            zbus::OwnedVariant::try_from(value).map(|value| (name.to_owned(), value))
+        })
+        .collect()
+    }
+}
+
 #[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {
     path.len() < MAX_PROVIDER_PATH_BYTES
