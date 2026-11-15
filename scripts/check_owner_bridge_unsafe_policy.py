@@ -1868,7 +1868,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "d6a96b6a83647cd1b19c01cfb1209a2ab10b51761718418f4c0ba53febd4f315",
+        lib: "1288a8544e61a087aa6c1e5eb1a0a79dce49086fb140cd6eea48fc2e548d5641",
         prefix + "ffi/mod.rs": "192d401a70e2e106bec3894fba45eeab9d84baa7e3481192489028bc1f9c4090",
         prefix + "adapter/native_tests.rs": "5f1ddbd12093d300d1482f226b0d33be5f8e78880cabe698526a132abee06c6e",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "bb0cbe0ced177ac33833c89cffaa68f2e30ddd4af0e07e875c67283b6e9cb3e6",
@@ -1945,7 +1945,7 @@ EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'cf9f1cb7a28dea1bce36c1c939bd0f901177e3f84dc0b020d450c43d2b4359e7',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '71f6f8d17899bb398948fada325cb478cd7e71e532c38ac305f83dc686a0ddf9',
     'crates/pos-owner-bridge-windows/src/ffi/session.rs': '4b8d0d6988f0d20b4238182d7d1b638f51bef11467fdd47fd502b70bc2a0ee5c',
-    'crates/pos-owner-bridge-windows/src/lib.rs': 'd6a96b6a83647cd1b19c01cfb1209a2ab10b51761718418f4c0ba53febd4f315',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '1288a8544e61a087aa6c1e5eb1a0a79dce49086fb140cd6eea48fc2e548d5641',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '88fbe08686eba330d9b3624bdb1ed5406efe331f5caabc67babf74b3ef98ae0e',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '5f1ddbd12093d300d1482f226b0d33be5f8e78880cabe698526a132abee06c6e',
     'crates/pos-owner-bridge-windows/src/adapter/events.rs': 'dc38f06f41d825b8487ddb33e5f637d6931bae05927e2091125ca1b034d6a718',

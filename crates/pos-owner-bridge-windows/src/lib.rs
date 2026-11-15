@@ -888,16 +888,25 @@ mod tests {
 
     #[test]
     fn nonce_lock_native() {
+        // Share the native-test lock so probe processes and storage churn
+        // never overlap the WebView2 owner fixtures.
+        let _native = crate::Native::fixed_port_fixture();
         crate::Native::exercise_native_lock();
     }
 
     #[test]
     fn windows_store_file_identity_native() {
+        // Share the native-test lock so probe processes and storage churn
+        // never overlap the WebView2 owner fixtures.
+        let _native = crate::Native::fixed_port_fixture();
         crate::Native::exercise_store_file_identity();
     }
 
     #[test]
     fn windows_nonce_ledger_storage_native() {
+        // Share the native-test lock so probe processes and storage churn
+        // never overlap the WebView2 owner fixtures.
+        let _native = crate::Native::fixed_port_fixture();
         crate::Native::exercise_ledger_storage();
     }
 
