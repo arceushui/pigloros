@@ -1,6 +1,6 @@
 //! ADR-021 admitted-batch contract shared by `MemoryStore` and `SqliteStore`.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -21,7 +21,8 @@ use pos_core::{
     FactualFoldBindingV1, FactualFoldSourceV1, FactualHeadV1, FactualIngressEventV1,
     FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1,
     FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
-    FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1,
+    FactualTickShapeV1, GatewayModeBindingHostV1, GatewayModeBindingPortV1,
+    GatewayModeProfileRefV1, Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1,
     PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
     PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
@@ -46,6 +47,7 @@ trait Harness:
     + AuthorityPersistencePortV1
     + CounterfactualDependencyReadPortV1
     + FactualPrefixReadPortV1
+    + GatewayModeBindingPortV1
 {
 }
 
@@ -56,6 +58,7 @@ impl<T> Harness for T where
         + AuthorityPersistencePortV1
         + CounterfactualDependencyReadPortV1
         + FactualPrefixReadPortV1
+        + GatewayModeBindingPortV1
 {
 }
 
@@ -1137,6 +1140,59 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
 }
 
 /// The attempt that follows a committed `previous` one: the next Tick.
+fn mode_profile(byte: u8) -> GatewayModeProfileRefV1 {
+    ok(GatewayModeProfileRefV1::try_new(
+        "gateway-mode-local-v1",
+        [byte; 32],
+    ))
+}
+
+/// ADR-134 §8: a receipt carries the Gateway mode-binding epoch its commit
+/// was recorded under, through an exact retry and a basis-free lookup after a
+/// rotation, while a later commit carries the new epoch.
+#[test]
+fn receipts_carry_the_epoch_their_commit_was_recorded_under() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let host = GatewayModeBindingHostV1::new();
+        ok(store.bind_empty_store_mode(host.authorize_bind(mode_profile(1))));
+        let fixture = prepare(store.as_mut());
+        let first = attempt(&fixture, 1, 0);
+        let receipt = committed(ok(admit(store.as_mut(), &first)));
+        assert_eq!(receipt.mode_binding_epoch(), NonZeroU64::new(1), "{name}");
+
+        ok(store.rotate_mode(ok(host.authorize_rotation(mode_profile(1), mode_profile(2)))));
+        assert_eq!(
+            ok(admit(store.as_mut(), &first)),
+            PipelineOutcomeV1::RecoveredDuplicate(receipt.clone()),
+            "{name}"
+        );
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            PipelineReceiptLookupV1::Retained(receipt),
+            "{name}"
+        );
+        let second = committed(ok(admit(store.as_mut(), &attempt_after(&first, 2, 3))));
+        assert_eq!(second.mode_binding_epoch(), NonZeroU64::new(2), "{name}");
+    }
+}
+
+#[test]
+fn unbound_receipts_carry_no_epoch() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let first = attempt(&fixture, 1, 0);
+        let receipt = committed(ok(admit(store.as_mut(), &first)));
+        assert_eq!(receipt.mode_binding_epoch(), None, "{name}");
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            PipelineReceiptLookupV1::Retained(receipt),
+            "{name}"
+        );
+    }
+}
+
 fn attempt_after(previous: &Attempt, key: u8, head: u64) -> Attempt {
     Attempt {
         key,

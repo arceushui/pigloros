@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pos_owner_bridge_codec::LoopbackRequestDisposition;
 use sha2::{Digest, Sha256};
@@ -21,11 +21,12 @@ use super::bind::{
 use super::ledger::ServedLedger;
 use super::serve::{
     read_request, respond, write_hashed, write_owner_response, OwnerWrite, ReadOutcome,
-    ServeContext, TimedRead, MIN_TIMEOUT, REQUEST_BUFFER_BYTES,
+    ServeContext, SilentReason, TimedRead, REQUEST_BUFFER_BYTES,
 };
 use super::{
-    dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig, ListenerTimeouts,
-    LoopbackListener, Shared, SlotGuard, ADR_TIMEOUTS, MAX_CONCURRENT_CONNECTIONS,
+    accept_loop, dispatch, spawn_thread_handle, start_accept_threads, ListenerConfig,
+    ListenerTimeouts, LoopbackListener, Shared, SlotGuard, ADR_TIMEOUTS,
+    MAX_CONCURRENT_CONNECTIONS,
 };
 use crate::{BridgeError, LoopbackPort, UnavailableCode};
 
@@ -288,18 +289,18 @@ fn only_the_bytes_the_writer_accepted_are_hashed() {
 #[test]
 fn a_failed_or_mismatched_owner_response_never_counts_as_served() {
     let mut whole = flaky(64, usize::MAX, false);
-    let complete = write_owner_response(&mut whole, &ADR_DIGEST);
+    let complete = write_owner_response(&mut whole, &ADR_DIGEST, &super::assets::OWNER);
     assert_eq!(complete, OwnerWrite::Complete { digest_ok: true });
     assert_eq!(whole.accepted, expected_owner_response());
     let mut mismatched = flaky(4_096, usize::MAX, false);
     assert_eq!(
-        write_owner_response(&mut mismatched, &[0; 32]),
+        write_owner_response(&mut mismatched, &[0; 32], &super::assets::OWNER),
         OwnerWrite::Complete { digest_ok: false }
     );
     for budget in [10, OWNER_RESPONSE_HEAD.len() + 10] {
         let mut cut = flaky(100, budget, true);
         assert_eq!(
-            write_owner_response(&mut cut, &ADR_DIGEST),
+            write_owner_response(&mut cut, &ADR_DIGEST, &super::assets::OWNER),
             OwnerWrite::Incomplete
         );
     }
@@ -312,8 +313,11 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
     let ledger = Arc::new(ServedLedger::default());
     let context = ServeContext {
         ledger: Arc::clone(&ledger),
+        received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     };
     for disposition in [
         Some(LoopbackRequestDisposition::OwnerDocument),
@@ -444,8 +448,175 @@ fn read_scripted(
 ) -> (ReadOutcome, Vec<Duration>) {
     let mut reader = Scripted::new(chunks);
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let outcome = read_request(&mut reader, &mut buffer, timeouts);
+    let outcome = read_request(
+        &mut reader,
+        &mut buffer,
+        Instant::now(),
+        timeouts,
+        &crate::SystemClock,
+        || {},
+        |_| {},
+    );
     (outcome, reader.limits)
+}
+
+#[test]
+fn first_request_byte_is_observed_once_even_without_complete_headers() {
+    for (bytes, expected) in [(&b""[..], 0), (&b"G"[..], 1), (OWNER_REQUEST, 1)] {
+        let chunks = bytes.chunks(2).map(|part| Ok(part.to_vec())).collect();
+        let mut reader = Scripted::new(chunks);
+        let mut buffer = [0; REQUEST_BUFFER_BYTES];
+        let mut received = 0;
+        let outcome = read_request(
+            &mut reader,
+            &mut buffer,
+            Instant::now(),
+            ADR_TIMEOUTS,
+            &crate::SystemClock,
+            || received += 1,
+            |_| {},
+        );
+        assert_eq!(received, expected);
+        let expected_outcome = if bytes == OWNER_REQUEST {
+            ReadOutcome::Complete(bytes.len())
+        } else {
+            ReadOutcome::Silent
+        };
+        assert_eq!(outcome, expected_outcome);
+    }
+}
+
+struct AdvancingReader {
+    clock: crate::fake::clock::FakeClock,
+    chunks: VecDeque<(Duration, Vec<u8>)>,
+}
+
+impl Read for AdvancingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let Some((delay, chunk)) = self.chunks.pop_front() else {
+            return Ok(0);
+        };
+        self.clock.advance(delay);
+        let count = chunk.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&chunk[..count]);
+        Ok(count)
+    }
+}
+
+impl TimedRead for AdvancingReader {
+    fn limit_next_read(&mut self, _limit: Duration) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn read_advancing(
+    chunks: Vec<(Duration, Vec<u8>)>,
+    callback_delay: Duration,
+) -> (ReadOutcome, usize, Vec<SilentReason>) {
+    use crate::MonotonicClock as _;
+
+    let clock = crate::fake::clock::FakeClock::start();
+    let accepted = clock.now();
+    let mut reader = AdvancingReader {
+        clock: clock.clone(),
+        chunks: chunks.into(),
+    };
+    let mut buffer = [0; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    let outcome = read_request(
+        &mut reader,
+        &mut buffer,
+        accepted,
+        ADR_TIMEOUTS,
+        &clock,
+        || {
+            first_bytes += 1;
+            clock.advance(callback_delay);
+        },
+        |reason| silent.push(reason),
+    );
+    (outcome, first_bytes, silent)
+}
+
+#[test]
+fn first_byte_completing_at_deadline_is_silent_but_observed() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(ADR_TIMEOUTS.first_byte, OWNER_REQUEST.to_vec())],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn header_completing_at_deadline_is_silent() {
+    let (outcome, count, silent) = read_advancing(
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (ADR_TIMEOUTS.header, OWNER_REQUEST[4..].to_vec()),
+        ],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn observations_just_before_each_deadline_remain_accepted() {
+    let tick = Duration::from_nanos(1);
+    let first = ADR_TIMEOUTS.first_byte.saturating_sub(tick);
+    let header = ADR_TIMEOUTS.header.saturating_sub(tick);
+    for chunks in [
+        vec![(first, OWNER_REQUEST.to_vec())],
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (header, OWNER_REQUEST[4..].to_vec()),
+        ],
+    ] {
+        let (outcome, count, silent) = read_advancing(chunks, Duration::ZERO);
+        assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
+        assert_eq!(count, 1);
+        assert!(silent.is_empty());
+    }
+}
+
+#[test]
+fn incomplete_header_followed_by_eof_is_silent() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(Duration::ZERO, OWNER_REQUEST[..4].to_vec())],
+        Duration::ZERO,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Eof]);
+}
+
+#[test]
+fn callback_latency_does_not_restart_header_deadline() {
+    let (outcome, count, silent) = read_advancing(
+        vec![
+            (Duration::ZERO, OWNER_REQUEST[..4].to_vec()),
+            (Duration::ZERO, OWNER_REQUEST[4..].to_vec()),
+        ],
+        ADR_TIMEOUTS.header,
+    );
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert_eq!(count, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
+}
+
+#[test]
+fn timely_complete_header_survives_callback_latency() {
+    let (outcome, count, silent) = read_advancing(
+        vec![(Duration::ZERO, OWNER_REQUEST.to_vec())],
+        ADR_TIMEOUTS.header,
+    );
+    assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
+    assert_eq!(count, 1);
+    assert!(silent.is_empty());
 }
 
 #[test]
@@ -480,6 +651,40 @@ fn a_silent_closed_or_failed_read_is_answered_with_nothing() {
 }
 
 #[test]
+fn silent_read_diagnostics_preserve_the_silent_outcome() {
+    for (chunk, expected) in [
+        (Ok(Vec::new()), SilentReason::Eof),
+        (
+            Err(io::Error::from(io::ErrorKind::TimedOut)),
+            SilentReason::Timeout,
+        ),
+        (
+            Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            SilentReason::Timeout,
+        ),
+        (
+            Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+            SilentReason::Other,
+        ),
+    ] {
+        let mut reader = Scripted::new(vec![chunk]);
+        let mut buffer = [0; REQUEST_BUFFER_BYTES];
+        let mut observed = Vec::new();
+        let outcome = read_request(
+            &mut reader,
+            &mut buffer,
+            Instant::now(),
+            ADR_TIMEOUTS,
+            &crate::SystemClock,
+            || {},
+            |reason| observed.push(reason),
+        );
+        assert_eq!(outcome, ReadOutcome::Silent);
+        assert_eq!(observed, [expected]);
+    }
+}
+
+#[test]
 fn a_full_buffer_without_the_end_of_the_head_is_too_large() {
     let chunks = vec![Ok(vec![b'a'; REQUEST_BUFFER_BYTES])];
     let outcome = read_scripted(chunks, ListenerConfig::adr().timeouts()).0;
@@ -490,22 +695,84 @@ fn a_full_buffer_without_the_end_of_the_head_is_too_large() {
 }
 
 #[test]
-fn a_passed_deadline_still_reads_for_the_shortest_limit_a_socket_accepts() {
+fn an_expired_first_byte_deadline_refuses_a_queued_request_without_reading() {
     let timeouts = ListenerTimeouts {
         first_byte: Duration::ZERO,
         ..ListenerConfig::adr().timeouts()
     };
     let (outcome, limits) = read_scripted(vec![Ok(OWNER_REQUEST.to_vec())], timeouts);
-    assert_eq!(outcome, ReadOutcome::Complete(OWNER_REQUEST.len()));
-    assert_eq!(limits, [MIN_TIMEOUT]);
+    assert_eq!(outcome, ReadOutcome::Silent);
+    assert!(limits.is_empty());
+}
+
+#[test]
+fn the_first_byte_deadline_begins_at_accept_before_a_worker_runs() -> TestResult {
+    let accepted_at = Instant::now()
+        .checked_sub(ADR_TIMEOUTS.first_byte)
+        .ok_or("monotonic clock cannot represent the accepted instant")?;
+    let mut reader = Scripted::new(vec![Ok(OWNER_REQUEST.to_vec())]);
+    let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    assert_eq!(
+        read_request(
+            &mut reader,
+            &mut buffer,
+            accepted_at,
+            ADR_TIMEOUTS,
+            &crate::SystemClock,
+            || first_bytes += 1,
+            |reason| silent.push(reason),
+        ),
+        ReadOutcome::Silent
+    );
+    assert!(reader.limits.is_empty());
+    assert_eq!(reader.chunks.len(), 1);
+    assert_eq!(first_bytes, 0);
+    assert_eq!(silent, [SilentReason::Timeout]);
+    Ok(())
+}
+
+#[test]
+fn an_expired_header_deadline_refuses_the_remaining_queued_bytes() {
+    let timeouts = ListenerTimeouts {
+        header: Duration::ZERO,
+        ..ADR_TIMEOUTS
+    };
+    let mut reader = Scripted::new(vec![
+        Ok(OWNER_REQUEST[..4].to_vec()),
+        Ok(OWNER_REQUEST[4..].to_vec()),
+    ]);
+    let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
+    let mut first_bytes = 0;
+    let mut silent = Vec::new();
+    assert_eq!(
+        read_request(
+            &mut reader,
+            &mut buffer,
+            Instant::now(),
+            timeouts,
+            &crate::SystemClock,
+            || first_bytes += 1,
+            |reason| silent.push(reason),
+        ),
+        ReadOutcome::Silent
+    );
+    assert_eq!(reader.limits.len(), 1);
+    assert_eq!(reader.chunks.len(), 1);
+    assert_eq!(first_bytes, 1);
+    assert_eq!(silent, [SilentReason::Timeout]);
 }
 
 #[test]
 fn the_fixed_error_responses_are_written_exactly() {
     let context = ServeContext {
         ledger: Arc::new(ServedLedger::default()),
+        received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     };
     let cases = [
         (None, BAD_REQUEST_RESPONSE),
@@ -545,8 +812,11 @@ fn held(shared: &Arc<Shared>) -> usize {
 fn serve_context() -> Arc<ServeContext> {
     Arc::new(ServeContext {
         ledger: Arc::new(ServedLedger::default()),
+        received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     })
 }
 
@@ -577,7 +847,7 @@ fn a_worker_that_cannot_be_spawned_gives_back_its_slot_and_closes_the_stream() -
     let (mut client, server) = connected()?;
     let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
     assert_eq!(held(&shared), 1);
-    dispatch(server, slot, &serve_context(), |_work| {
+    dispatch(server, Instant::now(), slot, &serve_context(), |_work| {
         Err(io::Error::other("no threads left"))
     });
     assert_eq!(held(&shared), 0);
@@ -592,7 +862,7 @@ fn a_worker_that_runs_gives_back_its_slot_when_it_finishes() -> TestResult {
     let (client, server) = connected()?;
     drop(client);
     let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
-    dispatch(server, slot, &serve_context(), |work| {
+    dispatch(server, Instant::now(), slot, &serve_context(), |work| {
         work();
         Ok(())
     });
@@ -600,8 +870,63 @@ fn a_worker_that_runs_gives_back_its_slot_when_it_finishes() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_delayed_worker_uses_the_original_accept_deadline() -> TestResult {
+    let shared = Arc::new(Shared::default());
+    let context = serve_context();
+    let (mut client, server) = connected()?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    client.write_all(OWNER_REQUEST)?;
+    let accepted_at = Instant::now()
+        .checked_sub(ADR_TIMEOUTS.first_byte)
+        .ok_or("monotonic clock cannot represent the accepted instant")?;
+    let slot = SlotGuard::acquire(&shared).ok_or("no slot")?;
+    dispatch(server, accepted_at, slot, &context, |work| {
+        work();
+        Ok(())
+    });
+    assert_eq!(held(&shared), 0);
+    assert_eq!(context.received.load(Ordering::SeqCst), 0);
+    assert_eq!(context.observations.complete.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        context.observations.silent_timeout.load(Ordering::SeqCst),
+        1
+    );
+    match client.read(&mut [0_u8; 1]) {
+        Ok(received) => assert_eq!(received, 0),
+        Err(error) => assert!(matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+        )),
+    }
+    Ok(())
+}
+
 fn bound() -> Result<TcpListener, io::Error> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+}
+
+#[test]
+fn idle_and_full_accept_pauses_keep_only_independently_owned_slots() -> TestResult {
+    let listener = bound()?;
+    listener.set_nonblocking(true)?;
+    for count in [1, MAX_CONCURRENT_CONNECTIONS] {
+        let shared = Arc::new(Shared::default());
+        let guards: Vec<_> = (0..count)
+            .map(|_| SlotGuard::acquire(&shared).ok_or("no slot"))
+            .collect::<Result<_, _>>()?;
+        let pauses = std::cell::Cell::new(0);
+        accept_loop(&listener, &serve_context(), &shared, || {
+            pauses.set(pauses.get() + 1);
+            assert_eq!(held(&shared), count);
+            shared.stop.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(pauses.get(), 1);
+        assert_eq!(held(&shared), count);
+        drop(guards);
+        assert_eq!(held(&shared), 0);
+    }
+    Ok(())
 }
 
 #[test]
