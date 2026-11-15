@@ -554,19 +554,19 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
 #[test]
 fn normalization_pins_captured_echoes_and_replaces_only_well_formed_room_hashes() {
     let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-    let room = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
-    let consent = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
-    let captured = [("{consent}", consent), ("{room}", room)];
+    let room_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    let consent_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    let captured = [("{consent}", consent_id), ("{room}", room_id)];
     let schema = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
     let hash = "ab".repeat(32);
     let normalized = |value: Value| normalize_response_v1(substitute_captured_v1(value, &captured));
     assert_eq!(
         normalized(json!({
             "schema_id": schema,
-            "id": room,
+            "id": room_id,
             "descriptor": {
-                "room_id": room,
-                "privacy_export_ref": consent,
+                "room_id": room_id,
+                "privacy_export_ref": consent_id,
                 "governance_ref": ulid,
                 "correlation_id": "5f".repeat(16),
                 "descriptor_hash": hash,
@@ -610,7 +610,7 @@ fn normalization_pins_captured_echoes_and_replaces_only_well_formed_room_hashes(
         assert_eq!(normalized(kept.clone()), kept, "{kept}");
     }
     assert_eq!(
-        substitute_captured_v1(json!([room, {"a": consent}, ulid, null]), &captured),
+        substitute_captured_v1(json!([room_id, {"a": consent_id}, ulid, null]), &captured),
         json!(["{room}", {"a": "{consent}"}, ulid, null])
     );
 }

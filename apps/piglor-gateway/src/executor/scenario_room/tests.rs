@@ -365,7 +365,7 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
     );
     assert_eq!(refusal(create(&mut host, 3, 3, 3, &one)?), "EventCeiling");
     // The host's root ceiling also refuses a room's own Timeline.
-    let mut host = host(true)?;
+    let mut host = self::host(true)?;
     let two = RoomAdmissionV1 {
         max_timelines: 2,
         ..admission()?

@@ -840,9 +840,9 @@ mod served {
             let provision = LocalPrincipalProvisionV1::from_toml(text)?;
             let mut store = pos_store::memory::MemoryStore::new();
             provision_local_principal(&mut store, &provision)?;
-            Ok(load_local_principal(&store)?
-                .ok_or("a provisioned store recomposes")?
-                .governance_record())
+            let recomposed =
+                load_local_principal(&store)?.ok_or("a provisioned store recomposes")?;
+            Ok(recomposed.governance_record())
         };
         assert_eq!(
             loaded(&document(&format!(
