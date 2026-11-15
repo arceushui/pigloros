@@ -94,14 +94,14 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 - A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
   `400 invalid-request` before the authority decision and before any lookup; every other
   answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
-  claimed once, as a plain Event on the host's request Timeline, and stays claimed for that
-  Timeline's lifetime (no ADR-038 retention window applies to it). A refused request, a stale
-  derive and a ceiling refusal claim nothing, so the key stays free for another request. A
-  derive whose parent is not the head is decided before any key lookup or claim: it answers the
-  head (`200`) when it hashes like the revision already derived from that parent (ADR-041
-  section 7), and is otherwise `409 append-conflict`, even when its `Idempotency-Key` was used
-  for a different request, which would else be `409 idempotency-conflict`. A new
-  room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
+  claimed once, as a plain Event on the host's request Timeline for a creation, or on the room's
+  own Timeline for a derive, and stays claimed for that Timeline's lifetime (no ADR-038
+  retention window applies to it). A refused request, a stale derive and a ceiling refusal
+  claim nothing, so the key stays free for another request. A derive whose parent is not the
+  head is decided before any key lookup or claim: it answers with the revision already derived
+  from that parent (`200`) when it hashes like that revision (ADR-041 section 7), and is
+  otherwise `409 append-conflict`, even when its `Idempotency-Key` was used for a different
+  request, which would else be `409 idempotency-conflict`. A new room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
   room. A creation claims on the host's request Timeline (at most one claim per room, so the
   root-Timeline ceiling of 64 keeps it far below its Event ceiling); a derive claims on the room's
   own Timeline, which holds its claims and revisions, so a room holds at most half of
