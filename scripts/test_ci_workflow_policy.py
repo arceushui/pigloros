@@ -108,6 +108,12 @@ CI_WORKFLOW_POLICY_TEST_STEP = {
     "name": "Test CI workflow policy",
     "run": "python scripts/test_ci_workflow_policy.py",
 }
+# The two branches of the preflight-gate Rust-scope check: a policy job must
+# succeed when Rust is in scope and be skipped otherwise.
+RUST_SCOPE_BRANCHES = re.compile(
+    r'^if \[\[ "\$\{RUST_SCOPE\}" = true \]\]; then\n(.*?)^else\n(.*?)^fi$',
+    re.MULTILINE | re.DOTALL,
+)
 POLICY_JOB_SETUP_STEPS = (
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
     {
@@ -535,11 +541,13 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
     script = check.get("run", "")
     if "if" in check or "continue-on-error" in check:
         raise AssertionError("preflight-gate result check must remain blocking")
+    scope = RUST_SCOPE_BRANCHES.search(script)
+    in_scope, out_of_scope = scope.groups() if scope else ("", "")
     for job_name, (variable, _) in POLICY_PREFLIGHT_JOBS.items():
         if (
             env.get(variable) != f"${{{{ needs.{job_name}.result }}}}"
-            or f'test "${{{variable}}}" = success' not in script
-            or f'test "${{{variable}}}" = skipped' not in script
+            or f'test "${{{variable}}}" = success\n' not in in_scope
+            or f'test "${{{variable}}}" = skipped\n' not in out_of_scope
         ):
             raise AssertionError(f"preflight-gate must require the {job_name} result")
 
@@ -1974,6 +1982,25 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                         AssertionError, f"preflight-gate must require the {job_name} result"
                     ):
                         assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_swapped_policy_scope_branches(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for job_name, (variable, _) in POLICY_PREFLIGHT_JOBS.items():
+            with self.subTest(job=job_name):
+                mutated = copy.deepcopy(workflow)
+                step = mutated["jobs"]["preflight-gate"]["steps"][0]
+                success = f'test "${{{variable}}}" = success\n'
+                skipped = f'test "${{{variable}}}" = skipped\n'
+                swapped = (
+                    step["run"].replace(success, "\0").replace(skipped, success)
+                    .replace("\0", skipped)
+                )
+                self.assertNotEqual(swapped, step["run"])
+                step["run"] = swapped
+                with self.assertRaisesRegex(
+                    AssertionError, f"preflight-gate must require the {job_name} result"
+                ):
+                    assert_core_rust_cache_contract(mutated)
 
     def test_core_cache_contract_requires_blocking_preflight_result_check(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)

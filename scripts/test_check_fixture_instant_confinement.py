@@ -300,8 +300,16 @@ def check_prefilter() -> None:
         stripped.append(text)
         return original(text)
 
+    checked = (
+        "crates/pos-state/src/wall.rs",
+        "crates/pos-state/src/instant.rs",
+        "crates/pos-core/src/lib.rs",
+    )
     files = {
-        "crates/pos-state/src/forged.rs": "use pos_core::trusted_clock::FixtureWallSourceV1;\n",
+        # One guard token per file, so dropping any single guard hides a violation.
+        "crates/pos-state/src/wall.rs": "fn f(_: FixtureWallSourceV1) {}\n",
+        "crates/pos-state/src/instant.rs": "fn f(_: FixtureEvaluationInstantV1) {}\n",
+        "crates/pos-core/src/lib.rs": "pub use trusted_clock::*;\n",
         "crates/pos-state/src/plain.rs": "// plain\nfn plain() {}\n",
     }
     checker.strip_comments = recording
@@ -315,10 +323,10 @@ def check_prefilter() -> None:
             found = checker.source_violations(root)
     finally:
         checker.strip_comments = original
-    for relative in ("crates/pos-state/src/forged.rs",):
+    for relative in checked:
         if not any(finding.startswith(relative + ":") for finding in found):
             raise SystemExit(f"prefilter hid the violation in {relative}: {found}")
-    if sorted(stripped) != sorted(files[relative] for relative in ("crates/pos-state/src/forged.rs",)):
+    if sorted(stripped) != sorted(files[relative] for relative in checked):
         raise SystemExit(f"prefilter stripped a file without a guarded token: {stripped}")
 
 
