@@ -10,6 +10,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_authority_trust_root_seal.py"
+sys.path.insert(0, str(CHECKER.parent))
+
+from check_authority_trust_root_seal import ADMISSION_HOLDERS, holder_violations  # noqa: E402
 
 ENABLING = 'pos-core = { path = "../pos-core", features = ["authority-trust-root"] }\n'
 DEV_ONLY = "[dev-dependencies]\n" + ENABLING
@@ -198,6 +201,26 @@ REJECTED_SOURCES = {
         "pub enum Minted { Seal(AuthorityTrustRootSealV1) }\n",
         ITEM,
     ),
+    "public enum variant line": (
+        "crates/pos-state/src/lib.rs",
+        "pub enum Minted {\n    Empty,\n    Seal(AuthorityTrustRootSealV1),\n}\n",
+        ITEM,
+    ),
+    "private type alias": (
+        "crates/pos-store/src/lib.rs",
+        "type Root = pos_core::AuthorityTrustRootSealV1;\npub fn root() -> Root {\n",
+        ITEM,
+    ),
+    "crate type alias": (
+        "crates/pos-state/src/lib.rs",
+        "pub(crate) type Root<'a> = &'a AuthorityTrustRootSealV1;\n",
+        ITEM,
+    ),
+    "public trait method": (
+        "crates/pos-state/src/lib.rs",
+        "pub trait Minter {\n    fn seal(&self) -> AuthorityTrustRootSealV1;\n}\n",
+        RETURNS,
+    ),
     "public field": (
         "apps/pos-experiment/src/lib.rs",
         "pub(crate) struct Holder {\n    pub seal: AuthorityTrustRootSealV1,\n}\n",
@@ -261,6 +284,14 @@ def main() -> None:
     for case, (relative, text, reason) in REJECTED_SOURCES.items():
         result = with_files({**CRATE_MANIFEST, relative: text})
         expect_rejected(f"the seal in a {case}", result, reason)
+    if holder_violations(tuple(reversed(ADMISSION_HOLDERS))):
+        raise SystemExit("checker rejected the pinned local-admission-host holders")
+    for widened in (
+        (*ADMISSION_HOLDERS, "apps/fixture/Cargo.toml"),
+        ADMISSION_HOLDERS[:1],
+    ):
+        if not holder_violations(widened):
+            raise SystemExit(f"checker accepted local-admission-host holders {widened}")
 
 
 if __name__ == "__main__":
