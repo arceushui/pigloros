@@ -78,6 +78,7 @@ fn owner() -> Fallible<AuthenticatedPrincipalResultV1> {
 
 fn owner_via(adapter: &str) -> Fallible<AuthenticatedPrincipalResultV1> {
     Ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         AuthenticatedPrincipalDraftV1 {
             principal: principal(2)?,
             adapter_id: adapter.to_owned(),
@@ -167,6 +168,7 @@ fn registry_for(grants: &[CapabilityGrantV1]) -> Fallible<AuthorityRegistrySnaps
     bindings.sort_unstable();
     let owner_binding = owner()?.registry_binding_digest();
     Ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         REGISTRY,
         vec![owner_binding],
         bindings,
@@ -201,6 +203,7 @@ fn installed(
     samples: &[u64],
 ) -> CommunityMetadataAuthorityV1 {
     CommunityMetadataAuthorityV1::new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         CommunityMetadataAuthorityInputV1 {
             registry,
             principal,
@@ -1172,12 +1175,14 @@ fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
     // Same revision, but it also trusts the foreign adapter, so only the
     // policy's owner registry binding can refuse that principal.
     let trusts_foreign = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         REGISTRY,
         authenticated.clone(),
         bindings.clone(),
         vec![],
     )?;
     let foreign_revision = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         Hash::from_bytes([49; 32]),
         authenticated,
         bindings,

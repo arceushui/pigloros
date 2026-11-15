@@ -195,6 +195,7 @@ fn authority_host() -> AuthorityPersistenceHostV1 {
         .collect::<Vec<_>>();
     bindings.sort_unstable();
     AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![hash(200)],
         bindings,

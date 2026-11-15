@@ -614,6 +614,7 @@ async fn budget_exhaustion_is_typed_and_a_committed_retry_still_recovers() -> Te
 async fn an_authority_the_store_cannot_persist_is_indeterminate() -> TestResult {
     let mut foreign = host(&StoreConfig::Memory)?;
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         Hash::from_bytes([9; 32]),
         vec![Hash::from_bytes([10; 32])],
         vec![Hash::from_bytes([11; 32])],
@@ -1052,6 +1053,7 @@ fn history_registry(
 ) -> TestResult<AuthorityRegistrySnapshotV1> {
     bindings.sort_unstable();
     Ok(AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         HISTORY_REGISTRY,
         vec![authenticated.registry_binding_digest()],
         bindings,
@@ -1062,15 +1064,17 @@ fn history_registry(
 impl AuthorityHistory {
     fn new(actor: EntityId) -> TestResult<Self> {
         let principal = PrincipalRefV1::try_new([1; 16], "gateway.test")?;
-        let authenticated =
-            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+        let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            AuthenticatedPrincipalDraftV1 {
                 principal: principal.clone(),
                 adapter_id: "fixture".to_owned(),
                 assurance: AssuranceLevelV1::try_new(1)?,
                 issued_at: WallTime::from_micros(1),
                 expires_at: WallTime::from_micros(u64::MAX),
                 binding_digest: Hash::from_bytes([2; 32]),
-            })?;
+            },
+        )?;
         let timeline = TimelineId::new();
         let root = history_grant(actor, &principal, timeline, 5, 1)?;
         let sibling = history_grant(actor, &principal, timeline, 6, 2)?;
@@ -1319,6 +1323,7 @@ async fn an_expired_grant_is_revoked_with_durable_evidence() -> TestResult {
 async fn a_store_that_refuses_the_denial_record_never_answers_the_denial() -> TestResult {
     let mut foreign = host(&StoreConfig::Memory)?;
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         Hash::from_bytes([9; 32]),
         vec![Hash::from_bytes([10; 32])],
         vec![Hash::from_bytes([11; 32])],

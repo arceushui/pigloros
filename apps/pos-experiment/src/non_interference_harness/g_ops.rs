@@ -85,10 +85,10 @@ use pos_core::{
     plugin::{Capability, Plugin},
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, ConsentEvidenceV1, ErasureRecoveryLimitsV1, Event, Hash,
-    PersistedAuthorityV1, PrincipalRefV1, Seq, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ErasureRecoveryLimitsV1, Event,
+    Hash, PersistedAuthorityV1, PrincipalRefV1, Seq, WallTime,
 };
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_supervisor::test_support::{
@@ -185,6 +185,10 @@ const LOG_MESSAGE_BOUND: u64 = 256;
 const COORDINATE_BOUND: u64 = 128;
 const LOG_SCHEMA: &str = "pigloros.operational-log.v1";
 const NONE: &str = "none";
+/// The composition-root seal this harness, its own trusted composition root,
+/// builds the capture Principal and registry with (ADR-129 A5.9, #1374).
+const AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
+    AuthorityTrustRootSealV1::for_composition_root();
 const SIBLING_WATCHDOG: Duration = Duration::from_secs(30);
 /// The run-independent identity of the subject Plugin, so every mode and
 /// every Fork registers the same composition.
@@ -895,6 +899,7 @@ impl DecisionV1 {
                     .ok()
                     .and_then(|binding| {
                         AuthorityRegistrySnapshotV1::try_new(
+                            &AUTHORITY_TRUST_ROOT,
                             Hash::from_bytes(REGISTRY_DIGEST),
                             vec![request.authenticated().registry_binding_digest()],
                             vec![binding],
@@ -978,14 +983,17 @@ fn authorization_request(
     assurance: AssuranceLevelV1,
     authority_timeline: TimelineId,
 ) -> Option<AuthorizationRequestV1> {
-    AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-        principal,
-        adapter_id: "ni-g-ops-adapter".to_owned(),
-        assurance,
-        issued_at: WallTime::from_micros(1),
-        expires_at: WallTime::from_micros(100),
-        binding_digest: Hash::from_bytes([3; 32]),
-    })
+    AuthenticatedPrincipalResultV1::try_from_draft(
+        &AUTHORITY_TRUST_ROOT,
+        AuthenticatedPrincipalDraftV1 {
+            principal,
+            adapter_id: "ni-g-ops-adapter".to_owned(),
+            assurance,
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(100),
+            binding_digest: Hash::from_bytes([3; 32]),
+        },
+    )
     .ok()
     .and_then(|authenticated| {
         AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {

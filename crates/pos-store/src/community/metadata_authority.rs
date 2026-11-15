@@ -13,6 +13,21 @@
 //! and registry snapshot) are fixed at the trusted composition root. The
 //! decision permits only private inspection or writing of closed structural
 //! metadata; it cannot decrypt State, observation or guest payloads.
+//!
+//! Installing the authority takes the composition-root
+//! [`AuthorityTrustRootSealV1`] (ADR-129 A5.9, #1374), so same-process code
+//! outside the trusted boundary cannot install one around values it holds:
+//!
+//! ```compile_fail,E0061
+//! use pos_core::trusted_clock::TrustedWallSourceV1;
+//! use pos_store::community::{CommunityMetadataAuthorityInputV1, CommunityMetadataAuthorityV1};
+//! fn forge(
+//!     input: CommunityMetadataAuthorityInputV1,
+//!     wall: impl TrustedWallSourceV1 + 'static,
+//! ) -> CommunityMetadataAuthorityV1 {
+//!     CommunityMetadataAuthorityV1::new(input, wall)
+//! }
+//! ```
 
 use super::attestation::evaluation_snapshot;
 use pos_core::community_lifecycle::{
@@ -21,8 +36,9 @@ use pos_core::community_lifecycle::{
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
-    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, WallTime,
+    AuthorityRoleV1, AuthorityTrustRootSealV1, AuthorizationDecisionV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, Hash,
+    PersistedAuthorityV1, WallTime,
 };
 
 const DATA_CATEGORY: &str = "community.owner-metadata";
@@ -75,9 +91,11 @@ pub struct CommunityMetadataAuthorityV1 {
 }
 
 impl CommunityMetadataAuthorityV1 {
-    /// Install the authority at the trusted composition root.
+    /// Install the authority at the trusted composition root, which alone
+    /// holds the [`AuthorityTrustRootSealV1`].
     #[must_use]
     pub fn new(
+        _seal: &AuthorityTrustRootSealV1,
         input: CommunityMetadataAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
     ) -> Self {

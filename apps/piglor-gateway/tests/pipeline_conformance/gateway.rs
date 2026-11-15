@@ -49,16 +49,18 @@ struct PinnedAuthority {
 
 fn pinned_authority(actor: EntityId) -> PinnedAuthority {
     let principal = PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok();
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        AuthenticatedPrincipalDraftV1 {
             principal: principal.clone(),
             adapter_id: "fixture".to_owned(),
             assurance: AssuranceLevelV1::try_new(1).test_ok(),
             issued_at: WallTime::from_micros(1),
             expires_at: WallTime::from_micros(u64::MAX),
             binding_digest: Hash::from_bytes([2; 32]),
-        })
-        .test_ok();
+        },
+    )
+    .test_ok();
     let registry_digest = Hash::from_bytes([3; 32]);
     let grant = CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
         grant_id: Hash::from_bytes([5; 32]),
@@ -96,6 +98,7 @@ fn pinned_authority(actor: EntityId) -> PinnedAuthority {
     })
     .test_ok();
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         registry_digest,
         vec![authenticated.registry_binding_digest()],
         vec![grant.binding_digest().test_ok()],

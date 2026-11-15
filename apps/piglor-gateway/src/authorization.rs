@@ -1693,14 +1693,17 @@ mod tests {
     }
 
     fn fixture_authenticated(expires_at: WallTime) -> AuthenticatedPrincipalResultV1 {
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok(),
-            adapter_id: "fixture".to_owned(),
-            assurance: AssuranceLevelV1::try_new(1).test_ok(),
-            issued_at: WallTime::from_micros(1),
-            expires_at,
-            binding_digest: hash(2),
-        })
+        AuthenticatedPrincipalResultV1::try_from_draft(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+            AuthenticatedPrincipalDraftV1 {
+                principal: PrincipalRefV1::try_new([1; 16], "gateway.test").test_ok(),
+                adapter_id: "fixture".to_owned(),
+                assurance: AssuranceLevelV1::try_new(1).test_ok(),
+                issued_at: WallTime::from_micros(1),
+                expires_at,
+                binding_digest: hash(2),
+            },
+        )
         .test_ok()
     }
 
@@ -1770,6 +1773,7 @@ mod tests {
     ) -> AuthorityRegistrySnapshotV1 {
         bindings.sort_unstable();
         AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             hash(3),
             vec![authenticated.registry_binding_digest()],
             bindings,

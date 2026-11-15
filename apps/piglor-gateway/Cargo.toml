@@ -12,7 +12,12 @@ name = "piglor-gateway"
 path = "src/main.rs"
 
 [dependencies]
-pos-core = { path = "../../crates/pos-core" }
+# The Local Principal authentication adapter builds its trust roots with the
+# composition-root seal (ADR-129 A5.9, #1374;
+# scripts/check_authority_trust_root_seal.py).
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+] }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
@@ -45,7 +50,10 @@ rustix = { version = "1.1.4", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-core = { path = "../../crates/pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 pos-state = { path = "../../crates/pos-state" }
