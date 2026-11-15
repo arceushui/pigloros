@@ -3531,7 +3531,7 @@ mod tests {
     }
 
     /// A revocation admitted before another host commits anything to the
-    /// store fails closed (README "SQLite and host ownership"; the SQLite
+    /// store fails closed (README "`SQLite` and host ownership"; the `SQLite`
     /// store checks `PRAGMA data_version` on every fenced read): its re-read
     /// of the consent Timeline under the exclusive fence is refused, so it
     /// records nothing and answers `503`.
@@ -3601,8 +3601,8 @@ mod tests {
         Ok(())
     }
 
-    /// A host exclusively owns its store (README "SQLite and host
-    /// ownership"; the SQLite store enforces it by checking `PRAGMA
+    /// A host exclusively owns its store (README "`SQLite` and host
+    /// ownership"; the `SQLite` store enforces it by checking `PRAGMA
     /// data_version` on every fenced read): once another host commits a
     /// revocation to it, every decision the serving host's grants cover
     /// fails closed as stale revocation state (`503`, retryable), while an
@@ -4086,10 +4086,10 @@ mod tests {
             ),
             None
         );
-        for gateway in [gateway, open] {
-            gateway.shutdown().await?;
-            drop(gateway);
-        }
+        open.shutdown().await?;
+        drop(open);
+        gateway.shutdown().await?;
+        drop(gateway);
         drop(app);
         Ok(())
     }
