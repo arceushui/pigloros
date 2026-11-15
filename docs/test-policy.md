@@ -15,7 +15,7 @@ Shared reference for humans and agents.
 | Layer | Tool | Notes |
 |---|---|---|
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
-| Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
+| Git hooks | Versioned `.githooks/pre-commit` runs `cargo fmt --check`, the full Trunk check of the staged changes (every enabled linter and formatter, including `rust-test-policy`; check-only), a staged `Cargo.lock` check for manifest changes, and targeted Clippy; versioned `.githooks/pre-push` runs the full Trunk check over the pushed commits | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | CI: `cargo nextest run --run-ignored all` in three `--partition slice:k/3` shards plus `cargo test --doc -- --include-ignored`; locally `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); outside `--partitioned=N` mode fails on any ignored or skipped test or a missing summary; `--partitioned=N` instead proves the N shards ran every test exactly once (partitioning itself causes skips) |
 | Coverage | `cargo llvm-cov nextest` with `--run-ignored all` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
@@ -251,7 +251,7 @@ require an unsuppressed audit and removal review for both rules.
 ## Local setup
 
 ```bash
-# One-time per clone (enables the versioned pre-commit hook):
+# One-time per clone (enables the versioned pre-commit and pre-push hooks):
 git config core.hooksPath .githooks
 
 # Full CI parity:
