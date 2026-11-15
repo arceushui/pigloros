@@ -3454,7 +3454,60 @@ mod tests {
         Ok(())
     }
 
-    /// A host exclusively owns its store: once another host commits a
+    /// A revocation admitted before another host commits anything to the
+    /// store fails closed (README "SQLite and host ownership"; the SQLite
+    /// store checks `PRAGMA data_version` on every fenced read): its re-read
+    /// of the consent Timeline under the exclusive fence is refused, so it
+    /// records nothing and answers `503`.
+    #[tokio::test]
+    async fn a_revocation_admitted_before_a_foreign_commit_fails_closed() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
+        let admitted = gateway
+            .authorize_operation(GatewayOperationV1::CREATE_TIMELINE, Some(actor), None, None)
+            .await?;
+        let revoking = tokio::spawn({
+            let app = app.clone();
+            async move {
+                revoke_with(&app, actor, &consent, "racing")
+                    .await
+                    .map(|(status, problem)| (status, problem["code"].clone()))
+                    .ok()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !revoking.is_finished(),
+            "the revocation waits for the admitted operation"
+        );
+        let (other, other_app) = serve_local(&path)?;
+        assert_eq!(
+            create(&other_app, Some(actor)).await?.0,
+            StatusCode::CREATED
+        );
+        drop(admitted);
+        assert_eq!(
+            revoking.await?,
+            Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable")
+            ))
+        );
+        for gateway in [gateway, other] {
+            gateway.shutdown().await?;
+            drop(gateway);
+        }
+        drop((app, other_app));
+        Ok(())
+    }
+
+    /// A host exclusively owns its store (README "SQLite and host
+    /// ownership"; the SQLite store enforces it by checking `PRAGMA
+    /// data_version` on every fenced read): once another host commits a
     /// revocation to it, every decision the serving host's grants cover
     /// fails closed as stale revocation state (`503`, retryable), while an
     /// operation no grant covers is still `403 unauthorized`; a restarted

@@ -265,17 +265,16 @@ impl Gateway {
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<(GatewayConsentsV1, [u8; 16]), GatewayError> {
-        let record = match authorization.source_leaf() {
-            Some(leaf) => self.authority_record(authorization, leaf).await,
-            None => Err(super::GatewayAuthorizationError::AuthorityUnavailable),
-        };
-        let refreshed = match record {
-            Ok(record) => match self.with_consent_events(authorization, record).await {
-                Ok(record) => authorization.refresh_held(record),
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        };
+        let record = self
+            .authority_record(authorization)
+            .await
+            .and_then(|record| {
+                record.ok_or(super::GatewayAuthorizationError::AuthorityUnavailable)
+            });
+        let refreshed = self
+            .with_consent_events(authorization, record)
+            .await
+            .and_then(|record| authorization.refresh_held(record));
         refreshed
             .ok()
             .and_then(|()| authorization.principal_consents())

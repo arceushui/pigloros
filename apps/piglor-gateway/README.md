@@ -112,9 +112,10 @@ unchanged. `serve` only reads the record: before each protected decision it comp
 with the authority it holds and, when another writer recorded a revocation of a Principal without
 consents, rebuilds the authority from the record, so the next request is answered `403 revoked`.
 A Principal with consents is read through the consent Timeline, which the serving host owns: once
-another process records a revocation to the store, every decision its grants cover fails closed as
-`503 temporarily-unavailable` (retryable) until the host restarts, and the restarted host sees the
-revocation (see [SQLite and host ownership](#sqlite-and-host-ownership)). A signal's `entity_id`
+another process records anything to the store, the host's protected reads and writes fail closed,
+and once that includes a revocation, every decision its grants cover fails closed as
+`503 temporarily-unavailable` (retryable) until the host restarts, and the restarted host sees it
+(see [SQLite and host ownership](#sqlite-and-host-ownership)). A signal's `entity_id`
 must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
 host answers every protected route `401` before reading the request body.
 
@@ -158,8 +159,9 @@ consent governs, a World action included, is `403 revoked`, while every other op
 available. Revoking a revoked consent returns the original revocation (`200`), byte for byte: its
 `generation` is its fence and its `mode_profile` the binding its commit was produced under. The
 host reads the consent Timeline head before every decision, and a restarted host recomposes every
-revocation from it. A revocation another process records to the store makes every decision the
-host's grants cover fail closed as `503 temporarily-unavailable` until the host restarts; the
+revocation from it. Once another process records anything to the store, the host fails closed
+(`503 temporarily-unavailable`) on every read of the consent Timeline, so a revocation recorded
+there makes every decision the host's grants cover fail closed until the host restarts; the
 restarted host then sees it.
 
 ### Session
