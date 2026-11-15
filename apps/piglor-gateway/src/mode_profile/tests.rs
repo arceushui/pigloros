@@ -364,6 +364,14 @@ fn identifiers_and_grants_parse_from_their_closed_text() {
     );
     assert_eq!(GatewayNetworkGrantV1::OwnTracks.tag(), 0x01);
     assert_eq!(GatewayNetworkGrantV1::PublicReadOnly.tag(), 0x02);
+    for grant in [
+        GatewayNetworkGrantV1::OwnTracks,
+        GatewayNetworkGrantV1::PublicReadOnly,
+    ] {
+        assert_eq!(grant.as_str().parse(), Ok(grant));
+    }
+    assert_eq!(GatewayModeProfileIdV1::Local.mode(), "local");
+    assert_eq!(GatewayModeProfileIdV1::AirGapped.mode(), "air-gapped");
 }
 
 #[test]
@@ -578,9 +586,59 @@ fn a_stale_process_cannot_commit_after_a_migration() -> TestResult {
     );
     drop(serving);
     let mut reopened = sqlite_host(&path)?;
-    bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut reopened)?;
+    let migrated =
+        bind_gateway_mode_v1(GatewayModeProfileIdV1::AirGapped, loopback(), &mut reopened)?;
     assert_eq!(binding_epoch(&mut reopened)?, 2);
+    // The handle carries the epoch it was bound at, which Session discloses.
+    let session = migrated.session_mode();
+    assert_eq!(session.provenance_fields(), (AIR_GAPPED_DIGEST_HEX, 2));
+    assert_eq!(session.disclosure(false)["binding_epoch"], 2);
     assert_eq!(reopened.command_sender()?.logical_head(timeline)?, head);
+    Ok(())
+}
+
+/// ADR-134 §4: migrating to a mode without network refuses a store whose
+/// Local Principal holds the network capability, so the next `serve` never
+/// fails on it; the binding is unchanged.
+#[test]
+fn migration_to_a_mode_without_network_refuses_a_networked_principal() -> TestResult {
+    use crate::{
+        local_principal::{provision_local_principal, LocalPrincipalProvisionV1},
+        GatewayOperationV1,
+    };
+    use GatewayModeProfileIdV1::{AirGapped, Local};
+    let principal = pos_core::PrincipalRefV1::try_new([1; 16], "local")?;
+    for (operations, refused) in [
+        (
+            vec![
+                GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::NETWORK,
+            ],
+            true,
+        ),
+        (vec![GatewayOperationV1::READ_SESSION], false),
+    ] {
+        let (_directory, path) = temporary_database()?;
+        bind_gateway_mode_v1(Local, loopback(), &mut sqlite_host(&path)?)?;
+        let provision = LocalPrincipalProvisionV1::try_new(
+            &principal,
+            [pos_core::EntityId::new()],
+            operations,
+        )?;
+        provision_local_principal(&mut SqliteStore::open(&path)?, &provision)?;
+        let migrated = migrate_gateway_mode_v1(&path, Local, AirGapped);
+        let epoch = binding_epoch(&mut sqlite_host(&path)?)?;
+        if refused {
+            assert_eq!(migrated, Err(GatewayModeErrorV1::PrincipalNetworkRefused));
+            assert!(GatewayModeErrorV1::PrincipalNetworkRefused
+                .to_string()
+                .contains("keep the Local mode"));
+            assert_eq!(epoch, 1);
+        } else {
+            assert!(migrated.is_ok());
+            assert_eq!(epoch, 2);
+        }
+    }
     Ok(())
 }
 
@@ -707,6 +765,40 @@ fn the_handle_discloses_only_its_revision_inputs_and_selection() {
     assert!(revision.revocation_current_by_construction());
 }
 
+#[test]
+fn only_session_discloses_the_current_mode_and_network_posture() {
+    let local = test_binding(
+        GatewayModeProfileIdV1::Local,
+        [
+            GatewayNetworkGrantV1::PublicReadOnly,
+            GatewayNetworkGrantV1::OwnTracks,
+        ],
+    )
+    .session_mode();
+    assert_eq!(
+        local.disclosure(false),
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": "gateway-mode-local-v1",
+            "mode": "local",
+            "mode_profile_digest": LOCAL_DIGEST_HEX,
+            "binding_epoch": 1,
+            "network_grants": ["owntracks", "public-read-only"],
+            "network": "denied",
+        })
+    );
+    assert_eq!(local.disclosure(true)["network"], "capability-granted");
+    assert_eq!(local.provenance_fields(), (LOCAL_DIGEST_HEX, 1));
+    let air_gapped = test_binding(GatewayModeProfileIdV1::AirGapped, []).session_mode();
+    for capability in [false, true] {
+        let disclosure = air_gapped.disclosure(capability);
+        assert_eq!(disclosure["network"], "absent");
+        assert_eq!(disclosure["mode"], "air-gapped");
+        assert_eq!(disclosure["mode_profile_digest"], AIR_GAPPED_DIGEST_HEX);
+        assert_eq!(disclosure["network_grants"], serde_json::json!([]));
+    }
+}
+
 #[tokio::test]
 async fn the_stale_signal_wakes_the_serve_loop_once_fired() {
     let binding = test_binding(GatewayModeProfileIdV1::Local, []);
@@ -735,6 +827,7 @@ fn every_error_has_a_closed_message() {
         E::StoreLockUnavailable,
         E::RefusedInMode,
         E::Stale,
+        E::PrincipalNetworkRefused,
     ] {
         assert!(!error.to_string().is_empty());
     }
