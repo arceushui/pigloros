@@ -182,3 +182,28 @@ impl MemoryStore {
             })
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// An address the evidence path already holds is never marked as a
+    /// sweep candidate when the same bytes are retained again, so a startup
+    /// sweep cannot delete committed evidence. The coordinator CAS does key
+    /// ERSEH1 and ERAH1 evidence by that address; the public guard is in
+    /// `tests/erasure_persistence.rs`, and this seeded case is a cheap
+    /// mutation guard for the adapter branch alone.
+    #[test]
+    fn retaining_bytes_the_evidence_path_wrote_first_never_marks_them() -> Result<(), ErasureErrorV1>
+    {
+        let mut store = MemoryStore::new();
+        let bytes = vec![0x82, 0x64, b'E', b'R', b'C', b'1', 0x01];
+        let reference = ErasureRetainedObjectV1::new(&bytes, 1_024)?.reference();
+        store.erasure_evidence.insert(reference, bytes.clone());
+        assert_eq!(store.local_erasure_retain(&bytes, 1_024)?, reference);
+        assert_eq!(store.local_erasure_sweep(&["ERC1"], &[], 16), 0);
+        assert_eq!(store.erasure_evidence.get(&reference), Some(&bytes));
+        Ok(())
+    }
+}

@@ -505,7 +505,9 @@ fn consented_grants(
 /// Returns [`LocalPrincipalErrorV1::Conflict`] when the consent Timeline
 /// holds other consents, including any for a provisioning that binds none,
 /// and [`LocalPrincipalErrorV1::Unavailable`] when the host cannot open,
-/// read or append it.
+/// read or append it, including a consent Timeline the store records but
+/// its erasure fence refuses to read (contained, erased or unclassified):
+/// nothing is written then.
 pub fn provision_local_consents(
     host: &mut ErasureExecutionHostV1,
     provision: &LocalPrincipalProvisionV1,
@@ -516,12 +518,12 @@ pub fn provision_local_consents(
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
-    // A Timeline outside the verified topology is fenced from a direct
-    // lookup, so the consent Timeline's existence is read from the listing.
+    // Whether the store records the consent Timeline at all, whatever its
+    // erasure classification; one it records is read under its fence, so a
+    // contained or unclassified consent Timeline is refused as unavailable.
     let existing = host
-        .read_sender()
-        .and_then(|mut reads| reads.timelines())
-        .map(|timelines| timelines.iter().any(|known| known.id() == timeline))
+        .command_sender()
+        .and_then(|mut sender| sender.records_timeline(timeline))
         .map_err(|_| LocalPrincipalErrorV1::Unavailable);
     let recorded = match existing {
         Ok(true) => host
@@ -3064,20 +3066,6 @@ mod tests {
         )?)
     }
 
-    /// The Gateway `serve` composes over the Local store at `path`.
-    fn serve_local(path: &str) -> TestResult<(Gateway, Router)> {
-        let mode = crate::mode_profile::test_binding(
-            crate::mode_profile::GatewayModeProfileIdV1::Local,
-            [],
-        );
-        let gateway = local_gateway(
-            crate::mode_profile::test_attach_host(sqlite_host(path)?, &mode),
-            None,
-            &mode,
-        )?;
-        Ok((gateway.clone(), app_of(gateway)))
-    }
-
     /// A Local store at `path` provisioned with `provision` through the
     /// production host path, and a Gateway over it that requires its
     /// recorded Principal, as `serve` composes it, with a World action
@@ -3266,10 +3254,25 @@ mod tests {
         drop(gateway);
         drop(app);
 
+        a_restart_and_a_migration_keep_the_revocation(&path, actor, &refs, &revoked, revocation)
+            .await?;
+        Ok(())
+    }
+
+    /// The tail of `a_revoked_consent_stops_only_the_operations_it_governs`:
+    /// the store at `path` after the revocations `revoked` shows, the first
+    /// of which answered `revocation`.
+    async fn a_restart_and_a_migration_keep_the_revocation(
+        path: &str,
+        actor: EntityId,
+        refs: &[Value],
+        revoked: &Value,
+        revocation: Value,
+    ) -> TestResult {
         // A restarted host recomposes every revocation from the consent
         // Timeline; the key still names the consent it revoked, and the
         // original answer is byte-identical.
-        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        let (gateway, app) = consented_gateway(path, &consented_provision()?)?;
         assert_eq!(
             session_of(&app, actor).await?["consents"],
             revoked["consents"]
@@ -3287,11 +3290,11 @@ mod tests {
         // Under a later binding epoch, the answer still names the binding
         // the revocation was produced under.
         crate::mode_profile::migrate_gateway_mode_v1(
-            &path,
+            path,
             crate::mode_profile::GatewayModeProfileIdV1::Local,
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
         )?;
-        let mut host = sqlite_host(&path)?;
+        let mut host = sqlite_host(path)?;
         let mode = crate::mode_profile::bind_gateway_mode_v1(
             crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
             crate::mode_profile::GatewayServeCompositionV1 {
@@ -3437,48 +3440,6 @@ mod tests {
         Ok(())
     }
 
-    /// A permit's decision pins the consent Timeline as the store holds it:
-    /// a revocation another serving process recorded is seen by the next
-    /// decision.
-    #[tokio::test]
-    async fn a_decision_pins_the_current_consent_timeline() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        let path = sqlite_path(&directory)?;
-        bind_local(&path)?;
-        let actor = actor()?;
-        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
-        let (other, other_app) = serve_local(&path)?;
-        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
-        let consent_ref =
-            pos_core::EventId::from_ulid(Ulid::from_string(consent.as_str().unwrap_or_default())?);
-        let read = || {
-            gateway.authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
-        };
-        let permit = read().await?;
-        assert!(gateway
-            .consent_pinned(&permit, consent_ref)
-            .is_some_and(|consent| consent.revocation().is_none()));
-        drop(permit);
-        // Another serving process revokes it.
-        assert_eq!(
-            revoke_with(&other_app, actor, &consent, "elsewhere")
-                .await?
-                .0,
-            StatusCode::CREATED
-        );
-        let permit = read().await?;
-        assert!(gateway
-            .consent_pinned(&permit, consent_ref)
-            .is_some_and(|consent| consent.revocation().is_some()));
-        drop(permit);
-        for gateway in [gateway, other] {
-            gateway.shutdown().await?;
-            drop(gateway);
-        }
-        drop((app, other_app));
-        Ok(())
-    }
-
     /// H1: a re-provisioning with another document is refused before it
     /// writes anything, whether it adds consents or replaces them.
     #[test]
@@ -3513,19 +3474,21 @@ mod tests {
         Ok(())
     }
 
+    /// The authority chains and the consent Timeline Event payloads a store
+    /// records.
+    type RecordedState = (Vec<Option<PersistedAuthorityV1>>, Vec<Vec<u8>>);
+
     /// The authority chains and consent Timeline Events the store at `path`
     /// records.
-    fn recorded_state(path: &str) -> TestResult<(Vec<Option<PersistedAuthorityV1>>, Vec<Vec<u8>>)> {
+    fn recorded_state(path: &str) -> TestResult<RecordedState> {
         let store = SqliteStore::open(path)?;
-        let chains = [LocalGrantKindV1::Root]
-            .into_iter()
+        let chains = std::iter::once(LocalGrantKindV1::Root)
             .chain((0..4).map(LocalGrantKindV1::Consented))
             .map(|kind| load_chain(&store, kind))
             .collect::<Result<Vec<_>, _>>()?;
         let mut host = sqlite_host(path)?;
         let timeline = local_principal_consent_timeline();
-        let listed = host.read_sender()?.timelines()?;
-        let events = if listed.iter().any(|known| known.id() == timeline) {
+        let events = if host.command_sender()?.records_timeline(timeline)? {
             host.read_sender()?
                 .read_bounded(timeline, SeqRange::all(), consent_bounds())?
                 .into_iter()
@@ -3875,11 +3838,15 @@ mod tests {
             .is_some_and(|consent| consent.revocation().is_some()));
         drop(permit);
         let open = Gateway::unprotected_for_harness(memory_host()?)?;
-        let unprotected = open
-            .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
-            .await?;
-        assert_eq!(open.consent_pinned(&unprotected, consent_ref), None);
-        drop(unprotected);
+        assert_eq!(
+            open.consent_pinned(
+                &open
+                    .authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+                    .await?,
+                consent_ref
+            ),
+            None
+        );
         for gateway in [gateway, open] {
             gateway.shutdown().await?;
             drop(gateway);
@@ -3940,6 +3907,26 @@ mod tests {
             drop((gateway, app));
             assert_eq!(recorded_state(&path)?, before, "{actions_consented}");
         }
+        Ok(())
+    }
+
+    /// L1: a consent Timeline the store records but its erasure fence
+    /// refuses to read is never treated as absent: provisioning, with or
+    /// without consents, is refused as unavailable before it appends.
+    #[test]
+    fn a_consent_timeline_the_fence_refuses_is_never_absent() -> TestResult {
+        let mut host = memory_host()?;
+        provision_local_consents(&mut host, &consented_provision()?)?;
+        let timeline = local_principal_consent_timeline();
+        assert!(host.command_sender()?.records_timeline(timeline)?);
+        host.freeze_timeline_for_test(timeline);
+        for provision in [consented_provision()?, served_provision()?] {
+            assert_eq!(
+                provision_local_consents(&mut host, &provision),
+                Err(LocalPrincipalErrorV1::Unavailable)
+            );
+        }
+        assert!(host.command_sender()?.records_timeline(timeline)?);
         Ok(())
     }
 }

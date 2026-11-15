@@ -101,7 +101,10 @@ fn a_root_timeline_opens_once_under_its_identity() -> Result<(), Box<dyn Error +
         )?;
         let id = pos_core::TimelineId::new();
         let mut commands = host.command_sender()?;
+        assert!(!commands.records_timeline(id)?);
         let opened = commands.open_root_timeline(id, "host-owned")?;
+        assert!(commands.records_timeline(id)?);
+        assert!(!commands.records_timeline(pos_core::TimelineId::new())?);
         assert_eq!(opened.id(), id);
         assert_eq!(opened.meta.name.as_deref(), Some("host-owned"));
         assert!(opened.meta.fork_point.is_none());

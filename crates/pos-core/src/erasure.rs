@@ -3314,6 +3314,14 @@ impl ErasureVerifiedInventoryV1 {
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 
+    /// Whether this complete inventory records the Timeline/Fork `timeline`,
+    /// whatever its classification: the inventory classifies every durable
+    /// Timeline and Fork of its snapshot.
+    #[must_use]
+    pub fn records_timeline(&self, timeline: TimelineId) -> bool {
+        self.classification_for(timeline).is_some()
+    }
+
     /// Require positive exclusion of a Timeline/Fork from every recovered
     /// request scope.
     ///
@@ -7744,6 +7752,21 @@ mod coverage_paths {
             empty.verified_inventory_with_limits(ErasureRecoveryLimitsV1::new(1, 1, 1)?),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_complete_inventory_records_exactly_its_topology() -> Result<(), ErasureErrorV1> {
+        let mut topology = vec![TimelineId::new(), TimelineId::new()];
+        topology.sort_unstable();
+        let inventory = ErasureVerifiedEmptyInventoryQueryV1::new(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), topology.clone(), 4)?,
+        )
+        .verified_inventory(4)?;
+        assert!(topology
+            .iter()
+            .all(|timeline| inventory.records_timeline(*timeline)));
+        assert!(!inventory.records_timeline(TimelineId::new()));
         Ok(())
     }
 
