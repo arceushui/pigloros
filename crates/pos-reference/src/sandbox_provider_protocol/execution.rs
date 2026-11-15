@@ -10,7 +10,7 @@ use super::codec::{
     verify_signature, MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES, MAX_SAFE_DETAIL_BYTES,
 };
 use super::operations::{decode_request_authority, validate_request_authority, RequestAuthority};
-use super::SandboxProviderProtocolError;
+use super::{SandboxProviderProtocolError, SelfDigested, Spe1, Verified};
 
 const PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_CHUNKS: u64 = 128;
@@ -872,6 +872,25 @@ impl SandboxProviderErrorCode {
     }
 }
 
+/// The signed body of an SPE1 before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxProviderErrorFields {
+    /// The operation the failure answers, once it was identified.
+    pub operation: Option<u8>,
+    /// The request's ID, once it was decoded.
+    pub request_id: Option<[u8; 16]>,
+    /// The request's self-digest, once it was verified.
+    pub request_digest: Option<[u8; 32]>,
+    /// The attempt the request names.
+    pub attempt_id: Option<[u8; 16]>,
+    /// The closed failure code.
+    pub code: SandboxProviderErrorCode,
+    /// Optional detail that names no secret.
+    pub safe_detail: Option<String>,
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
+
 /// Independently decoded signed SPE1 failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxProviderError {
@@ -887,6 +906,64 @@ pub struct SandboxProviderError {
 }
 
 impl SandboxProviderError {
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SPE1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects out-of-bounds fields and identities inconsistent with the
+    /// code, as the decoder does.
+    pub fn self_digested(
+        fields: SandboxProviderErrorFields,
+    ) -> Result<SelfDigested<Spe1>, SandboxProviderProtocolError> {
+        validate_error_fields(&fields)
+            .and_then(|()| {
+                record_digest(
+                    "SPE1",
+                    &Value::Array(error_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Spe1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, error_digest, signature) = verified.into_parts();
+            Ok(Self {
+                operation: fields.operation,
+                request_id: fields.request_id,
+                request_digest: fields.request_digest,
+                attempt_id: fields.attempt_id,
+                code: fields.code,
+                safe_detail: fields.safe_detail,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                error_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
+        }
+    }
+
+    /// Exact canonical SPE1 bytes.
+    ///
+    /// # Errors
+    /// Returns an encoding error if the record cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        encode(&Value::Array(vec![
+            Value::Array(self.unsigned_value().to_vec()),
+            bytes_value(&self.error_digest),
+            bytes_value(&self.signature),
+        ]))
+    }
+
     /// Decode and fully validate exact canonical SPE1 bytes.
     ///
     /// # Errors
@@ -922,70 +999,96 @@ impl SandboxProviderError {
     }
 
     fn validate(&self, unsigned: &[Value; 9]) -> Result<(), SandboxProviderProtocolError> {
-        if self.operation.is_some_and(|operation| operation > 3)
-            || self.request_id == Some([0; 16])
-            || self.request_digest == Some([0; 32])
-            || self.attempt_id == Some([0; 16])
-            || !valid_key_id(&self.runtime_attestation_key_id)
-            || self.safe_detail.as_ref().is_some_and(|detail| {
-                detail.is_empty() || detail.len() > MAX_SAFE_DETAIL_BYTES || detail.contains('\0')
-            })
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
-        if (self.request_digest.is_some() && self.request_id.is_none())
-            || (self.attempt_id.is_some()
-                && (self.operation.is_none() || self.request_id.is_none()))
-        {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
-        }
-        if self.code.requires_identified_operation() && self.operation.is_none() {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
-        }
-        if self.code.requires_authenticated_request() {
-            let Some(operation) = self.operation else {
-                return Err(SandboxProviderProtocolError::InconsistentFields);
-            };
-            let attempt_identity_matches_operation = if operation == 0 {
-                self.attempt_id.is_none()
-            } else {
-                self.attempt_id.is_some()
-            };
-            if self.request_id.is_none()
-                || self.request_digest.is_none()
-                || !attempt_identity_matches_operation
-            {
-                return Err(SandboxProviderProtocolError::InconsistentFields);
-            }
-        }
-        if self.code == SandboxProviderErrorCode::PayloadTransferTimeout
-            && (self.operation != Some(1)
-                || self.request_id.is_none()
-                || self.request_digest.is_none()
-                || self.attempt_id.is_none())
-        {
-            return Err(SandboxProviderProtocolError::InconsistentFields);
-        }
+        validate_error_fields(&self.fields())?;
         require_signature(&self.signature)?;
         verify_digest("SPE1", unsigned, self.error_digest)
     }
 
-    fn unsigned_value(&self) -> [Value; 9] {
-        [
-            text_value("SPE1"),
-            uint_value(1),
-            self.operation
-                .map_or(Value::Null, |operation| uint_value(u64::from(operation))),
-            optional_bytes_value(self.request_id.as_ref()),
-            optional_digest_value(self.request_digest.as_ref()),
-            optional_bytes_value(self.attempt_id.as_ref()),
-            uint_value(self.code.code()),
-            self.safe_detail
-                .as_ref()
-                .map_or(Value::Null, |detail| text_value(detail)),
-            text_value(&self.runtime_attestation_key_id),
-        ]
+    fn fields(&self) -> SandboxProviderErrorFields {
+        SandboxProviderErrorFields {
+            operation: self.operation,
+            request_id: self.request_id,
+            request_digest: self.request_digest,
+            attempt_id: self.attempt_id,
+            code: self.code,
+            safe_detail: self.safe_detail.clone(),
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
+        }
     }
+
+    fn unsigned_value(&self) -> [Value; 9] {
+        error_unsigned_value(&self.fields())
+    }
+}
+
+/// The SPE1 field bounds and the identities each code requires.
+fn validate_error_fields(
+    fields: &SandboxProviderErrorFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    if fields.operation.is_some_and(|operation| operation > 3)
+        || fields.request_id == Some([0; 16])
+        || fields.request_digest == Some([0; 32])
+        || fields.attempt_id == Some([0; 16])
+        || !valid_key_id(&fields.runtime_attestation_key_id)
+        || fields.safe_detail.as_ref().is_some_and(|detail| {
+            detail.is_empty() || detail.len() > MAX_SAFE_DETAIL_BYTES || detail.contains('\0')
+        })
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if (fields.request_digest.is_some() && fields.request_id.is_none())
+        || (fields.attempt_id.is_some()
+            && (fields.operation.is_none() || fields.request_id.is_none()))
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    if fields.code.requires_identified_operation() && fields.operation.is_none() {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    if fields.code.requires_authenticated_request() {
+        let Some(operation) = fields.operation else {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        };
+        let attempt_identity_matches_operation = if operation == 0 {
+            fields.attempt_id.is_none()
+        } else {
+            fields.attempt_id.is_some()
+        };
+        if fields.request_id.is_none()
+            || fields.request_digest.is_none()
+            || !attempt_identity_matches_operation
+        {
+            return Err(SandboxProviderProtocolError::InconsistentFields);
+        }
+    }
+    if fields.code == SandboxProviderErrorCode::PayloadTransferTimeout
+        && (fields.operation != Some(1)
+            || fields.request_id.is_none()
+            || fields.request_digest.is_none()
+            || fields.attempt_id.is_none())
+    {
+        return Err(SandboxProviderProtocolError::InconsistentFields);
+    }
+    Ok(())
+}
+
+fn error_unsigned_value(fields: &SandboxProviderErrorFields) -> [Value; 9] {
+    [
+        text_value("SPE1"),
+        uint_value(1),
+        fields
+            .operation
+            .map_or(Value::Null, |operation| uint_value(u64::from(operation))),
+        optional_bytes_value(fields.request_id.as_ref()),
+        optional_digest_value(fields.request_digest.as_ref()),
+        optional_bytes_value(fields.attempt_id.as_ref()),
+        uint_value(fields.code.code()),
+        fields
+            .safe_detail
+            .as_ref()
+            .map_or(Value::Null, |detail| text_value(detail)),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
 }
 
 /// Named eight-digest authority block carried by SPR1.

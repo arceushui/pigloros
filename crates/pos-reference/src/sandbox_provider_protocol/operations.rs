@@ -6,7 +6,7 @@ use super::codec::{
     signed, text_value, uint, uint_value, valid_key_id, validate_magic, verify_digest,
     verify_signature, MAX_SAFE_DETAIL_BYTES,
 };
-use super::SandboxProviderProtocolError;
+use super::{SandboxProviderProtocolError, Sdy1, SelfDigested, Verified};
 
 /// Closed Sandbox Provider operation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -299,6 +299,23 @@ pub struct SandboxDescribeRequest {
     pub request_digest: [u8; 32],
 }
 
+/// The signed body of an SDY1 before its digest and signature exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxDescribeResponseFields {
+    /// The request this response answers.
+    pub request_id: [u8; 16],
+    /// The admitted SPM1 self-digest.
+    pub spm1_digest: [u8; 32],
+    /// The admitted provider binary digest.
+    pub provider_binary_digest: [u8; 32],
+    /// The admitted HCP1 digest.
+    pub hcp1_digest: [u8; 32],
+    /// The active APT1 digest.
+    pub active_apt1_digest: [u8; 32],
+    /// Provider runtime-attestation key ID.
+    pub runtime_attestation_key_id: String,
+}
+
 /// Signed SDY1 describe response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxDescribeResponse {
@@ -528,32 +545,112 @@ signed_response_codec!(
         response_digest: digest,
         signature,
     }),
-    |record: &SandboxDescribeResponse| [
-        text_value("SDY1"),
-        uint_value(1),
-        bytes_value(&record.request_id),
-        bytes_value(&record.spm1_digest),
-        bytes_value(&record.provider_binary_digest),
-        bytes_value(&record.hcp1_digest),
-        bytes_value(&record.active_apt1_digest),
-        text_value(&record.runtime_attestation_key_id),
-    ]
+    |record: &SandboxDescribeResponse| describe_unsigned_value(&record.fields())
 );
 
+/// The SDY1 field bounds: nonzero identities and a valid key ID.
+fn validate_describe_fields(
+    fields: &SandboxDescribeResponseFields,
+) -> Result<(), SandboxProviderProtocolError> {
+    if fields.request_id == [0; 16]
+        || [
+            fields.spm1_digest,
+            fields.provider_binary_digest,
+            fields.hcp1_digest,
+            fields.active_apt1_digest,
+        ]
+        .contains(&[0; 32])
+        || !valid_key_id(&fields.runtime_attestation_key_id)
+    {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn describe_unsigned_value(fields: &SandboxDescribeResponseFields) -> [Value; 8] {
+    [
+        text_value("SDY1"),
+        uint_value(1),
+        bytes_value(&fields.request_id),
+        bytes_value(&fields.spm1_digest),
+        bytes_value(&fields.provider_binary_digest),
+        bytes_value(&fields.hcp1_digest),
+        bytes_value(&fields.active_apt1_digest),
+        text_value(&fields.runtime_attestation_key_id),
+    ]
+}
+
 impl SandboxDescribeResponse {
-    fn validate(&self, unsigned: &[Value; 8]) -> Result<(), SandboxProviderProtocolError> {
-        if self.request_id == [0; 16]
-            || [
-                self.spm1_digest,
-                self.provider_binary_digest,
-                self.hcp1_digest,
-                self.active_apt1_digest,
-            ]
-            .contains(&[0; 32])
-            || !valid_key_id(&self.runtime_attestation_key_id)
-        {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    /// Validate the fields and self-digest them: the only input the
+    /// runtime-attestation signer accepts for an SDY1 (ADR-069 R9 §5).
+    ///
+    /// # Errors
+    /// Rejects a zero identity or an invalid key ID.
+    pub fn self_digested(
+        fields: SandboxDescribeResponseFields,
+    ) -> Result<SelfDigested<Sdy1>, SandboxProviderProtocolError> {
+        validate_describe_fields(&fields)
+            .and_then(|()| {
+                record_digest(
+                    "SDY1",
+                    &Value::Array(describe_unsigned_value(&fields).to_vec()),
+                )
+            })
+            .map(|digest| SelfDigested::sealed(fields, digest))
+    }
+
+    /// The signed record of a signature that verified under `key`, the
+    /// admitted runtime-attestation key.
+    ///
+    /// # Errors
+    /// `SignatureInvalid` when the signature verified under another key.
+    pub fn new(
+        verified: Verified<Sdy1>,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        if verified.key() == key {
+            let (fields, response_digest, signature) = verified.into_parts();
+            Ok(Self {
+                request_id: fields.request_id,
+                spm1_digest: fields.spm1_digest,
+                provider_binary_digest: fields.provider_binary_digest,
+                hcp1_digest: fields.hcp1_digest,
+                active_apt1_digest: fields.active_apt1_digest,
+                runtime_attestation_key_id: fields.runtime_attestation_key_id,
+                response_digest,
+                signature,
+            })
+        } else {
+            Err(SandboxProviderProtocolError::SignatureInvalid)
         }
+    }
+
+    /// Exact canonical SDY1 bytes.
+    ///
+    /// # Errors
+    /// Returns an encoding error if the record cannot be serialized.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        encode(&Value::Array(vec![
+            Value::Array(self.unsigned_value().to_vec()),
+            bytes_value(&self.response_digest),
+            bytes_value(&self.signature),
+        ]))
+    }
+
+    fn fields(&self) -> SandboxDescribeResponseFields {
+        SandboxDescribeResponseFields {
+            request_id: self.request_id,
+            spm1_digest: self.spm1_digest,
+            provider_binary_digest: self.provider_binary_digest,
+            hcp1_digest: self.hcp1_digest,
+            active_apt1_digest: self.active_apt1_digest,
+            runtime_attestation_key_id: self.runtime_attestation_key_id.clone(),
+        }
+    }
+
+    fn validate(&self, unsigned: &[Value; 8]) -> Result<(), SandboxProviderProtocolError> {
+        validate_describe_fields(&self.fields())?;
         require_signature(&self.signature)?;
         verify_digest("SDY1", unsigned, self.response_digest)
     }
