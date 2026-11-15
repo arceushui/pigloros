@@ -549,11 +549,8 @@ struct Gates {
 impl Gates {
     fn new() -> Result<Self, BoxError> {
         let real = Real::new()?;
-        let world = CommunityEvaluationWorldV1::open(
-            &real.material,
-            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let world = CommunityEvaluationWorldV1::open(&real.material, &TEST_TRUST_ROOT)
+            .map_err(|e| format!("{e:?}"))?;
         Ok(Self { real, world })
     }
 

@@ -24,10 +24,10 @@ fixture-instant = []
 # results and registry snapshots the authority evaluator trusts (ADR-129 A5.9,
 # #1374). Only the trusted composition roots may enable it outside
 # dev-dependencies: `piglor-gateway` (the Local Principal adapter),
-# `pos-experiment` (the local experiment host), `pos-plugin-conformance-adapter`
-# (its evaluation worlds), and `pos-store`, reserved for the ADR-129 community
-# owner (#560), which does not enable it yet. `local-admission-host` never
-# forwards it: the local admission host takes the seal from its caller.
+# `pos-experiment` (the local experiment host) and
+# `pos-plugin-conformance-adapter` (its evaluation worlds), each minting it at
+# one pinned site. `local-admission-host` never forwards it: the local
+# admission host takes the seal from its caller.
 # scripts/check_authority_trust_root_seal.py enforces that in CI.
 authority-trust-root = []
 
