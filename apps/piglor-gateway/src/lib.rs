@@ -34,6 +34,7 @@ pub mod operation;
 pub mod owntracks;
 pub mod owntracks_http;
 pub mod problem;
+mod session;
 pub mod startup;
 
 pub use authorization::{

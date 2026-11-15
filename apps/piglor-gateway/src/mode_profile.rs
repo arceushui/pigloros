@@ -19,6 +19,7 @@
 //! let _handle = piglor_gateway::mode_profile::GatewayModeBindingV1 {
 //!     profile: unimplemented!(),
 //!     composition: unimplemented!(),
+//!     binding_epoch: unimplemented!(),
 //!     stale: Default::default(),
 //! };
 //! ```
@@ -42,6 +43,7 @@ use std::{
     ffi::OsString,
     fmt,
     net::SocketAddr,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -65,7 +67,8 @@ mod compiled {
 
 /// The Principal network capability (ADR-134 §4): a `DomainKey` that
 /// authorizes no operation in v1 and only selects the per-Principal Session
-/// `network` disclosure, which C4 (#1362) serves.
+/// `network` disclosure. It is granted only through explicit-grant
+/// provisioning, as [`crate::GatewayOperationV1::NETWORK`].
 pub const GATEWAY_NETWORK_CAPABILITY_V1: &str = "gateway.network.v1";
 
 /// Digest domain of one canonical GMP1 record, distinct from EPF1's.
@@ -150,6 +153,15 @@ impl GatewayModeProfileIdV1 {
             Self::AirGapped => AIR_GAPPED_MODE_PROFILE_ID,
         }
     }
+
+    /// The disclosed `mode` the profile pairs with (ADR-134 §2 field 4).
+    #[must_use]
+    pub const fn mode(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::AirGapped => "air-gapped",
+        }
+    }
 }
 
 impl FromStr for GatewayModeProfileIdV1 {
@@ -173,6 +185,15 @@ pub enum GatewayNetworkGrantV1 {
 }
 
 impl GatewayNetworkGrantV1 {
+    /// The `--network-grant` value, as Session discloses it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnTracks => "owntracks",
+            Self::PublicReadOnly => "public-read-only",
+        }
+    }
+
     /// The one-byte security-revision tag (ADR-134 §6).
     const fn tag(self) -> u8 {
         match self {
@@ -511,6 +532,49 @@ impl GatewayExecutionModeRevisionV1 {
     }
 }
 
+/// The current execution mode of one binding as `Session` alone discloses
+/// it (ADR-134 §5): the profile, its digest, the store binding epoch, the
+/// operator's network grants and whether the profile allows network.
+#[derive(Clone, Debug)]
+pub(crate) struct GatewaySessionModeV1 {
+    id: GatewayModeProfileIdV1,
+    digest_hex: String,
+    binding_epoch: NonZeroU64,
+    network_allowed: bool,
+    network_grants: Vec<&'static str>,
+}
+
+impl GatewaySessionModeV1 {
+    /// The `SessionModeProfile` of a Principal that does or does not hold
+    /// [`GATEWAY_NETWORK_CAPABILITY_V1`].
+    pub(crate) fn disclosure(&self, network_capability: bool) -> serde_json::Value {
+        serde_json::json!({
+            "profile_kind": "gateway-mode-v1",
+            "mode_profile_id": self.id.as_str(),
+            "mode": self.id.mode(),
+            "mode_profile_digest": self.digest_hex,
+            "binding_epoch": self.binding_epoch.get(),
+            "network_grants": self.network_grants,
+            "network": network_posture(self.network_allowed, network_capability),
+        })
+    }
+
+    /// The disclosed digest and binding epoch the Session provenance binds.
+    pub(crate) const fn provenance_fields(&self) -> (&str, u64) {
+        (self.digest_hex.as_str(), self.binding_epoch.get())
+    }
+}
+
+/// The per-Principal `network` posture: `absent` in a mode without network,
+/// else `capability-granted` only for a holder of the network capability.
+const fn network_posture(network_allowed: bool, network_capability: bool) -> &'static str {
+    match (network_allowed, network_capability) {
+        (false, _) => "absent",
+        (true, false) => "denied",
+        (true, true) => "capability-granted",
+    }
+}
+
 /// Opaque handle of one composition-verified, store-bound execution mode.
 ///
 /// Only [`bind_gateway_mode_v1`] returns one. It has no public constructor,
@@ -519,6 +583,7 @@ impl GatewayExecutionModeRevisionV1 {
 pub struct GatewayModeBindingV1 {
     profile: GatewayModeProfileV1,
     composition: GatewayServeCompositionV1,
+    binding_epoch: NonZeroU64,
     stale: Arc<GatewayModeStaleSignalV1>,
 }
 
@@ -529,10 +594,18 @@ impl fmt::Debug for GatewayModeBindingV1 {
 }
 
 impl GatewayModeBindingV1 {
-    fn new(profile: GatewayModeProfileV1, composition: GatewayServeCompositionV1) -> Self {
+    /// The handle of `profile` over `composition`, bound at the store's
+    /// `binding_epoch`. The epoch is fixed for the process: a migration needs
+    /// the exclusive store lock, and a stale write stops the process.
+    fn new(
+        profile: GatewayModeProfileV1,
+        composition: GatewayServeCompositionV1,
+        binding_epoch: NonZeroU64,
+    ) -> Self {
         Self {
             profile,
             composition,
+            binding_epoch,
             stale: Arc::default(),
         }
     }
@@ -625,6 +698,22 @@ impl GatewayModeBindingV1 {
     pub(crate) fn stale_signal(&self) -> Arc<GatewayModeStaleSignalV1> {
         Arc::clone(&self.stale)
     }
+
+    /// The current execution mode `Session` discloses.
+    pub(crate) fn session_mode(&self) -> GatewaySessionModeV1 {
+        GatewaySessionModeV1 {
+            id: self.profile.id,
+            digest_hex: self.profile.digest.to_hex(),
+            binding_epoch: self.binding_epoch,
+            network_allowed: self.profile.record.network_allowed,
+            network_grants: self
+                .composition
+                .network_grants
+                .iter()
+                .map(|grant| grant.as_str())
+                .collect(),
+        }
+    }
 }
 
 /// Bind the opened store of `host` to the compiled profile `id`.
@@ -648,8 +737,9 @@ pub fn bind_gateway_mode_v1(
     installed_gateway_mode_profile_v1(id)
         .and_then(|profile| verify_predicates(&profile, &composition).map(|()| profile))
         .and_then(|profile| {
-            bind_store(host.gateway_mode_binding(), &profile)
-                .map(|_| GatewayModeBindingV1::new(profile, composition))
+            bind_store(host.gateway_mode_binding(), &profile).map(|record| {
+                GatewayModeBindingV1::new(profile, composition, record.binding_epoch())
+            })
         })
 }
 
@@ -963,7 +1053,7 @@ pub(crate) fn test_binding_of(
 ) -> GatewayModeBindingV1 {
     let profile = installed_gateway_mode_profile_v1(id)
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
-    GatewayModeBindingV1::new(profile, composition)
+    GatewayModeBindingV1::new(profile, composition, NonZeroU64::MIN)
 }
 
 /// Attach `host`'s adapter to the binding of `mode`, as `serve` does before

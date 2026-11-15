@@ -7,16 +7,17 @@ examples, and a frozen compatibility baseline. A client needs only that contract
 crate's Rust source.
 
 This process is not the product MVP. It serves Timeline creation, Event polling, authenticated
-`world.action.v1` proposals, Society Signals and the public Prediction Ledger. Every loopback
+`world.action.v1` proposals, Society Signals, the public Prediction Ledger and the Principal's own
+`GET /v1/session` (see [Session](#session)). Every loopback
 operation except `/health` and the public Ledger reads is protected by the host-pinned Local
 Principal (see [Local Principal](#local-principal)): `GatewayAuthenticationAdapter`
 implementations establish minimized `AuthenticatedPrincipalResultV1` evidence, and
 `GatewayAuthorization` evaluates the pinned Principal, consent, capability, delegation, expiry
 and revocation state. A host without a provisioned Local Principal answers every protected
-operation `401 unauthenticated`. The Wave 9 resource
-families (session, Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections,
-ensembles, Replays, evidence, exports, consent revocation and erasure) are Draft operations of the
-contract that their owner tickets (#302 to #309) will serve. WebSocket streaming remains deferred.
+operation `401 unauthenticated`. The other Wave 9 resource
+families (Scenario Rooms, Preferences, OptionSpecs, Decision Previews, Projections, ensembles,
+Replays, evidence, exports, consent revocation and erasure) are Draft operations of the contract
+that their owner tickets (#303 to #309) will serve. WebSocket streaming remains deferred.
 
 ## Run
 
@@ -79,12 +80,14 @@ Gateway is stopped; nothing is provisioned implicitly. Its one credential,
 principal_id = "01JC0GATEWAYQ0CA1PR1NC1PA1"
 trust_domain = "local"
 actor_entity_ids = ["01JC0GATEWAYQ0CA1ACT0R0000"]
-operations = ["timeline.create", "timeline.events.read", "timeline.signals.append"]
+operations = ["session.read", "timeline.create", "timeline.events.read", "timeline.signals.append"]
 ```
 
-The grantable operations are `timeline.create`, `timeline.events.read`,
-`timeline.signals.append`, `ledger.predictions.create` and `world.action.v1.submit`. Encrypt it
-like the Fork-admission credentials and provision:
+The grantable operations are `session.read`, `timeline.create`, `timeline.events.read`,
+`timeline.signals.append`, `ledger.predictions.create` and `world.action.v1.submit`, plus the
+Principal network capability `gateway.network.v1` (ADR-134 §4), which authorizes no operation in v1
+and only makes the Session report `network: capability-granted` in Local mode. Encrypt it like the
+Fork-admission credentials and provision:
 
 ```bash
 systemd-creds encrypt --name=pigloros.local-principal \
@@ -101,6 +104,19 @@ with the authority it holds and, when another writer recorded a revocation, rebu
 authority from the record, so the next request is answered `403 revoked`. A signal's `entity_id`
 must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
 host answers every protected route `401` before reading the request body.
+
+### Session
+
+`GET /v1/session` (#1362) is a protected read like every other operation: the request names its
+actor, and the Principal's grant must cover that actor and `session.read`. The answer is derived
+by the host alone: the Principal's ID and the actors of its grant, the names of every grantable
+operation and capability its recorded grant covers for that actor (decided by the same evaluator
+as every request, recording nothing), its consents (none: a Local Principal grant binds no
+consent), the current execution mode with the operator's `--network-grant` values and the
+Principal's network posture (`absent` in Air-Gapped mode; `capability-granted` in Local mode only
+with `gateway.network.v1`, otherwise `denied`), and the EPF1 `execution_profile`, `unavailable`
+until #461. `generation` is the head position of the recorded authority chain, so it advances with
+every grant or revocation. The contract's `Session` schema states the provenance digest.
 
 **One Principal per database.** A database holds exactly one Local Principal, and rotation or a
 changed grant is not supported yet. Provisioning a different document is refused with

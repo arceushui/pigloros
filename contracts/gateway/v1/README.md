@@ -32,9 +32,17 @@ Every operation has an `operationId` and an `x-pigloros-status`:
 ## Schemas and media types
 
 - Every component schema has a stable `$id` of the form `urn:pigloros:gateway:v1:schema:<name>`.
-  Draft schemas carry `x-pigloros-maturity: draft`. Every Draft resource read composes the
-  resource envelope (schema ID, resource ID, revision or generation, provenance, `mode_profile`,
-  `execution_profile` and capability-filtered availability).
+  Draft schemas carry `x-pigloros-maturity: draft`. `Session` and every Draft resource read
+  compose the resource envelope (schema ID, resource ID, revision or generation, provenance,
+  `mode_profile`, `execution_profile` and capability-filtered availability, whose withheld
+  reasons are `unknown`, `unauthorized`, `revoked`, `deleted` and `unavailable`). The envelope and
+  the schemas it reaches are frozen with `GET /v1/session` (#1362), so every Draft resource
+  composes the frozen envelope.
+- `GET /v1/session` is served (#1362): the acting Principal's own Session, derived by the host
+  from its recorded grant, the bound execution mode and the authority evaluator, never from the
+  request. It requires the `session.read` grant like any protected operation.
+  `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on;
+  a client accepts both.
 - `mode_profile` is the Gateway execution-mode profile (GMP1, ADR-134) the resource was produced
   under: its ID (`gateway-mode-local-v1` or `gateway-mode-air-gapped-v1`), mode, digest and the
   store `binding_epoch` recorded in the producing commit's evidence. Only `Session` reports the

@@ -4,6 +4,7 @@
 //! schema string, the family, the counts and texts, every route, and that each `{timeline}`
 //! follows a capture. A payload outside the grammar is `None`, which is `payload-invalid`.
 
+use piglor_gateway::mode_profile::GatewayModeProfileIdV1;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -38,8 +39,24 @@ pub(super) struct SubCaseV2 {
 pub(super) enum CompositionV2 {
     /// No host authorizer.
     Open,
-    /// The production serve composition with a fixture Local Principal document.
+    /// The production serve composition with a fixture Local Principal document, over a
+    /// store bound to the Local execution mode.
     Authorized,
+    /// The same composition over a store bound to the Air-Gapped execution mode.
+    #[serde(rename = "authorized-air-gapped")]
+    AuthorizedAirGapped,
+}
+
+impl CompositionV2 {
+    /// The execution mode the store of an authorized composition is bound to; `None` for the
+    /// open Gateway, which binds none.
+    pub(super) const fn mode(self) -> Option<GatewayModeProfileIdV1> {
+        match self {
+            Self::Open => None,
+            Self::Authorized => Some(GatewayModeProfileIdV1::Local),
+            Self::AuthorizedAirGapped => Some(GatewayModeProfileIdV1::AirGapped),
+        }
+    }
 }
 
 /// The router of the same Gateway an exchange is sent through.
@@ -95,60 +112,79 @@ impl ExchangeV2 {
 
     /// The route of the path, which [`parse`] has checked.
     pub(super) fn route(&self) -> RouteV2 {
-        route_of(&self.path).unwrap_or(RouteV2::Health)
+        route_of(&self.path).unwrap_or(ROUTES[0])
     }
 }
 
-/// The routes of the documented Gateway route table (requirements section 2).
+/// One route of the documented Gateway route table (requirements section 2).
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum RouteV2 {
-    Health,
-    Ledger,
-    Create,
-    Events,
-    Signals,
-    Actions,
+pub(super) struct RouteV2 {
+    /// The path without its query; [`TIMELINE_SLOT`] stands for one non-empty segment.
+    path: &'static str,
+    /// The capability an attempt must hold for the route.
+    capability: &'static str,
+    /// Whether a `201` response of the route commits one Event.
+    commits: bool,
 }
 
+/// The route table of the requirements text, section 2, in its order.
+const ROUTES: [RouteV2; 7] = [
+    RouteV2::new("/health", "gateway.health.read", false),
+    RouteV2::new("/v1/ledger", "gateway.ledger.read", false),
+    RouteV2::new("/v1/timelines", "timeline.create", false),
+    RouteV2::new(
+        "/v1/timelines/{timeline}/events",
+        "timeline.events.read",
+        false,
+    ),
+    RouteV2::new(
+        "/v1/timelines/{timeline}/signals",
+        "timeline.signals.append",
+        true,
+    ),
+    RouteV2::new(
+        "/v1/timelines/{timeline}/actions",
+        "world.action.v1.submit",
+        true,
+    ),
+    RouteV2::new("/v1/session", "session.read", false),
+];
+
 impl RouteV2 {
+    const fn new(path: &'static str, capability: &'static str, commits: bool) -> Self {
+        Self {
+            path,
+            capability,
+            commits,
+        }
+    }
+
     /// The capability an attempt must hold for the route.
     pub(super) const fn capability(self) -> &'static str {
-        match self {
-            Self::Health => "gateway.health.read",
-            Self::Ledger => "gateway.ledger.read",
-            Self::Create => "timeline.create",
-            Self::Events => "timeline.events.read",
-            Self::Signals => "timeline.signals.append",
-            Self::Actions => "world.action.v1.submit",
-        }
+        self.capability
     }
 
     /// Whether a `201` response of the route commits one Event.
     pub(super) const fn commits(self) -> bool {
-        match self {
-            Self::Signals | Self::Actions => true,
-            Self::Health | Self::Ledger | Self::Create | Self::Events => false,
-        }
+        self.commits
+    }
+
+    /// Whether `base`, a path without its query, names this route: the exact path, or for a
+    /// Timeline route its prefix, one non-empty segment and its suffix.
+    fn matches(self, base: &str) -> bool {
+        self.path
+            .split_once(TIMELINE_SLOT)
+            .map_or(base == self.path, |(prefix, suffix)| {
+                base.strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .is_some_and(|timeline| !timeline.is_empty() && !timeline.contains('/'))
+            })
     }
 }
 
 fn route_of(path: &str) -> Option<RouteV2> {
     let base = path.split('?').next().unwrap_or_default();
-    match base {
-        "/health" => Some(RouteV2::Health),
-        "/v1/ledger" => Some(RouteV2::Ledger),
-        "/v1/timelines" => Some(RouteV2::Create),
-        _ => base
-            .strip_prefix("/v1/timelines/")
-            .and_then(|rest| rest.split_once('/'))
-            .filter(|(timeline, _)| !timeline.is_empty())
-            .and_then(|(_, tail)| match tail {
-                "events" => Some(RouteV2::Events),
-                "signals" => Some(RouteV2::Signals),
-                "actions" => Some(RouteV2::Actions),
-                _ => None,
-            }),
-    }
+    ROUTES.into_iter().find(|route| route.matches(base))
 }
 
 /// Printable ASCII of `minimum..=maximum` bytes; `space` admits the space character.

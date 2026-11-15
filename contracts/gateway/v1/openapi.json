@@ -739,15 +739,22 @@
     "/v1/session": {
       "get": {
         "operationId": "getSession",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#302",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "session"
+        "description": "Read the authenticated Principal's own session (#302, ADR-134 §5): its entities, the effective grants the host derives from its recorded authority, its consent, the current execution mode with the operator network grants and the Principal's network posture, and the EPF1 execution profile. Nothing is echoed from the request: the acting entity only selects the decision. The read is protected like every other operation: the Local Principal's grant must cover `session.read` for the acting entity.",
+        "parameters": [
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it. Without it the read is `401 unauthenticated`."
+          }
         ],
-        "description": "Draft (#302): Read the authenticated Principal, effective grants and consent, execution mode, profile and safe availability. Authority is server-derived. Not served yet; only its golden examples validate. #302 turns it into a served, drift-checked operation.",
         "responses": {
           "200": {
             "description": "The caller's own session.",
@@ -760,7 +767,7 @@
             }
           },
           "401": {
-            "description": "`unauthenticated`.",
+            "description": "`unauthenticated`: the host has no Local Principal, or the request names no actor.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -770,7 +777,35 @@
             }
           },
           "403": {
-            "description": "`revoked`: the session authority was revoked.",
+            "description": "`unauthorized` (no grant covers the actor and `session.read`) or `revoked` (the session authority was revoked or expired).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded` (retryable): the caller or the host reached its denial-record bound for the current window. The denial is not recorded individually and not answered as a denial; the bound's suppressed denials are counted in a durable per-window marker.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily-unavailable`: a host that cannot vouch for its revocation state or record the denial evidence.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3476,7 +3511,6 @@
       },
       "Digest": {
         "$id": "urn:pigloros:gateway:v1:schema:digest",
-        "x-pigloros-maturity": "draft",
         "type": "string",
         "minLength": 64,
         "maxLength": 64,
@@ -3494,7 +3528,6 @@
       },
       "DomainKey": {
         "$id": "urn:pigloros:gateway:v1:schema:domain-key",
-        "x-pigloros-maturity": "draft",
         "type": "string",
         "minLength": 1,
         "maxLength": 128,
@@ -3512,7 +3545,6 @@
       },
       "ExecutionProfileId": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile-id",
-        "x-pigloros-maturity": "draft",
         "enum": [
           "replay-v1",
           "deterministic-local-v1",
@@ -3523,7 +3555,6 @@
       },
       "ExecutionProfile": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "The ADR-104 EPF1 execution profile a resource was produced under, or its explicit absence. It never carries the serving mode, which is `mode_profile`. Until #461 installs an EPF1 every Gateway resource reports `state: unavailable` with `reason: not-installed`. When `installed`, `profile_id` is the ADR-058 family and `profile_digest` the raw EPF1 digest; the resource envelope constrains `profile_id` to the servable set of its mode.",
@@ -3610,7 +3641,6 @@
       },
       "GatewayModeProfileId": {
         "$id": "urn:pigloros:gateway:v1:schema:gateway-mode-profile-id",
-        "x-pigloros-maturity": "draft",
         "enum": [
           "gateway-mode-air-gapped-v1",
           "gateway-mode-local-v1"
@@ -3619,7 +3649,6 @@
       },
       "ModeProfileIdentity": {
         "$id": "urn:pigloros:gateway:v1:schema:mode-profile-identity",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "description": "The members that identify one GMP1 binding: its kind, profile, mode, digest and store binding epoch. `mode_profile_digest` is BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), recomputable from `execution-mode-profiles.json`. `mode` pairs with `mode_profile_id`. The schemas that compose it close themselves.",
         "required": [
@@ -3695,7 +3724,6 @@
       },
       "ModeProfile": {
         "$id": "urn:pigloros:gateway:v1:schema:mode-profile",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "description": "The GMP1 a resource was produced under (ADR-134 §5). A resource materialized from committed Events or stored revisions reports the binding epoch recorded in its producing commit's evidence; a resource computed per request reports the epoch current when it is computed. The history record of an epoch never changes, so the disclosure stays stable across later rotation or migration. Only Session reports the current mode.",
         "allOf": [
@@ -3707,7 +3735,6 @@
       },
       "SessionModeProfile": {
         "$id": "urn:pigloros:gateway:v1:schema:session-mode-profile",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "description": "The current GMP1 binding of the serving store, with the operator's network grants and this Principal's network posture (ADR-134 §5). `network` is `absent` in Air-Gapped mode; in Local mode it is `capability-granted` only when the GMP1 allows network and the Principal holds the capability `gateway.network.v1`, otherwise `denied`. `gateway.network.v1` authorizes no operation in v1. Clients should show `network_grants` next to `network`, so an operator-exposed spectator or OwnTracks ingress stays visible when the Principal's own network is `denied`.",
         "allOf": [
@@ -3814,7 +3841,6 @@
       },
       "ProvenanceReference": {
         "$id": "urn:pigloros:gateway:v1:schema:provenance-reference",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "The digest of the resource's provenance record and its origin class. Provenance describes lineage only; it is not a signature, conformance or calibration claim.",
@@ -3837,10 +3863,9 @@
       },
       "Availability": {
         "$id": "urn:pigloros:gateway:v1:schema:availability",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
-        "description": "Capability-filtered availability. Each withheld member names why it is absent, so unknown, unauthorized, deleted and unavailable stay distinct; an `available` resource withholds nothing.",
+        "description": "Capability-filtered availability. Each withheld member names why it is absent, so unknown, unauthorized, revoked, deleted and unavailable stay distinct; an `available` resource withholds nothing.",
         "required": [
           "state",
           "withheld"
@@ -3873,6 +3898,7 @@
                   "enum": [
                     "unknown",
                     "unauthorized",
+                    "revoked",
                     "deleted",
                     "unavailable"
                   ]
@@ -3905,9 +3931,8 @@
       },
       "ResourceEnvelope": {
         "$id": "urn:pigloros:gateway:v1:schema:resource-envelope",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "The members every Draft resource carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the GMP1 `mode_profile` it was produced under (Session: the current binding), the EPF1-only `execution_profile` and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
+        "description": "The members every enveloped resource (Session and each Draft resource) carries: its schema identifier, resource ID, exactly one of an immutable `revision` or a monotonic `generation`, a provenance reference, the GMP1 `mode_profile` it was produced under (Session: the current binding), the EPF1-only `execution_profile` and capability-filtered availability. Ordering uses Timeline sequence, Fork generation and schema ordinals, never wall time. Each resource schema composes this envelope and closes itself with `unevaluatedProperties`.",
         "required": [
           "schema_id",
           "id",
@@ -4137,9 +4162,8 @@
       },
       "Session": {
         "$id": "urn:pigloros:gateway:v1:schema:session",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "The authenticated Principal's own session: effective grants, consent, the current execution mode (`mode_profile`, with the operator network grants and this Principal's network posture) and the EPF1 execution profile. `generation` is the authority generation; it advances on every grant, consent or revocation change.",
+        "description": "The authenticated Principal's own session: its entities, effective grants, consent, the current execution mode (`mode_profile`, with the operator network grants and this Principal's network posture) and the EPF1 execution profile. `id` is the Principal's ID. `generation` is the authority generation: the head position of the Principal's recorded authority chain plus the head of its consent Timeline (0 when its grant binds none), so it advances on every grant, consent or revocation change and never uses wall time. `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewaySession.v1` || 0x00 || the 16 Principal ID bytes || `generation` as a big-endian u64 || the ASCII `mode_profile.mode_profile_digest` || `mode_profile.binding_epoch` as a big-endian u64), and its origin is `host-derived`. `contract.contract_version` is `1.0.0-draft` until Wave 9 acceptance and `1.0.0` from then on; a client accepts both.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -4190,7 +4214,7 @@
             "items": {
               "$ref": "urn:pigloros:gateway:v1:schema:domain-key"
             },
-            "description": "The effective capabilities derived by the Gateway; a client never supplies a trusted capability. The DomainKey `gateway.network.v1` is the Principal network capability (ADR-134 §4): it authorizes no operation in v1 and only decides the `mode_profile.network` disclosure; it is granted only through explicit-grant provisioning, never an operator flag."
+            "description": "The names of the operations and capabilities the Principal's recorded grant covers for the acting entity, sorted, as the host's own authority evaluator decides them; a client never supplies a trusted capability. The DomainKey `gateway.network.v1` is the Principal network capability (ADR-134 §4): it authorizes no operation in v1 and only decides the `mode_profile.network` disclosure; it is granted only through explicit-grant provisioning, never an operator flag."
           },
           "consents": {
             "type": "array",
@@ -4205,7 +4229,8 @@
               ],
               "properties": {
                 "consent_ref": {
-                  "$ref": "urn:pigloros:gateway:v1:schema:ulid"
+                  "$ref": "urn:pigloros:gateway:v1:schema:ulid",
+                  "description": "The EventId (ULID) of the consent's `consent.granted.v1` Event (D7)."
                 },
                 "state": {
                   "enum": [
@@ -4231,7 +4256,11 @@
                 "const": "v1"
               },
               "contract_version": {
-                "const": "1.0.0-draft"
+                "enum": [
+                  "1.0.0-draft",
+                  "1.0.0"
+                ],
+                "description": "The contract version the Gateway serves: `1.0.0-draft` until Wave 9 acceptance, then `1.0.0`."
               }
             }
           }
@@ -7007,7 +7036,7 @@
       "scope": "structural",
       "origin": "code",
       "source": "pos-core MAX_AUTHORITY_TEXT_BYTES; ADR-064 owner IDs 1-128 bytes; identifiers are ASCII, so maxLength in characters is the byte bound",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -7064,7 +7093,7 @@
       "scope": "structural",
       "origin": "code",
       "source": "pos-core MAX_AUTHORITY_SCOPE_MEMBERS",
-      "surface": "draft",
+      "surface": "served",
       "direction": "response",
       "enforced_by": {
         "schema": [
@@ -7078,7 +7107,7 @@
       "scope": "structural",
       "origin": "code",
       "source": "pos-core MAX_AUTHORITY_SELECTORS",
-      "surface": "draft",
+      "surface": "served",
       "direction": "response",
       "enforced_by": {
         "schema": [
@@ -7092,7 +7121,7 @@
       "scope": "structural",
       "origin": "code",
       "source": "pos-core MAX_CAPABILITY_CONSENT_REFERENCES",
-      "surface": "draft",
+      "surface": "served",
       "direction": "response",
       "enforced_by": {
         "schema": [
@@ -7106,7 +7135,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "response",
       "enforced_by": {
         "schema": [
