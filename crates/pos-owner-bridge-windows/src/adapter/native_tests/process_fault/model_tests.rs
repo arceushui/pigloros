@@ -957,6 +957,7 @@ fn modeled_load_phase_absence_resamples_until_its_mark_or_deadline_ends() -> Tes
             .surface
             .finish()
             .map_err(pos_owner_bridge::SurfaceError::error)?;
+        drop(sink);
         fixture.retire(driver, Err(ERROR), None);
         root.remove()?;
     }
