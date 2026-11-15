@@ -103,15 +103,19 @@ fn provider_binary(admitted: &AdmittedSelectorProvider) -> TestResult<PathBuf> {
         )?
         .object()
         .content_digest();
+    Ok(Path::new(SANDBOX_ARTIFACT_ROOT)
+        .join("providers")
+        .join(hex_name(&digest)))
+}
+
+/// The lowercase hexadecimal name of an installed object.
+fn hex_name(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let name: String = digest
+    digest
         .iter()
         .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
         .map(char::from)
-        .collect();
-    Ok(Path::new(SANDBOX_ARTIFACT_ROOT)
-        .join("providers")
-        .join(name))
+        .collect()
 }
 
 /// Bind against the staged SIC1, running as the provider binary itself.
