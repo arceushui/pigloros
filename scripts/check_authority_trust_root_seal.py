@@ -68,10 +68,8 @@ SEAL_RETURN = re.compile(
     r"\bpub\s+(?:(?:const|async|unsafe|extern\s+\"[^\"]*\")\s+)*fn\b[^{;]*?->[^{;]*"
     rf"\b{SEAL_NAME}\b"
 )
-TRAIT_RETURN = re.compile(
-    rf"\bpub\s+trait\b[^{{]*\{{[^}}]*?\bfn\b[^{{;]*?->[^{{;]*\b{SEAL_NAME}\b"
-)
-ENUM_BODY = re.compile(rf"\bpub\s+enum\b[^{{]*\{{[^}}]*\b{SEAL_NAME}\b")
+PUBLIC_BODY = re.compile(r"\bpub\s+(trait|enum)\b[^{;]*\{")
+BODY_RETURN = re.compile(rf"\bfn\b[^{{;]*?->[^{{;]*\b{SEAL_NAME}\b")
 ALIAS = re.compile(rf"\btype\s+\w+(?:<[^>]*>)?\s*=[^;]*\b{SEAL_NAME}\b")
 ADMISSION_HOLDERS = (
     "apps/pos-experiment/Cargo.toml",
@@ -132,6 +130,21 @@ def _pos_core_leak(compact: str) -> bool:
     return "*" in compact or SEAL_MODULE.search(compact) is not None
 
 
+def _public_bodies(code: str, keyword: str) -> list[str]:
+    """Return the brace-balanced bodies of every `pub trait` or `pub enum` in `code`."""
+    bodies: list[str] = []
+    for match in PUBLIC_BODY.finditer(code):
+        if match.group(1) != keyword:
+            continue
+        depth = 1
+        index = match.end()
+        while index < len(code) and depth:
+            depth += {"{": 1, "}": -1}.get(code[index], 0)
+            index += 1
+        bodies.append(code[match.end() : index])
+    return bodies
+
+
 def _leaks(name: str, code: str) -> list[str]:
     found: list[str] = []
     for statement in PUBLIC_USE.findall(code):
@@ -140,9 +153,11 @@ def _leaks(name: str, code: str) -> list[str]:
             found.append(f"{name}: re-exports the pos_core crate")
         elif SEAL.search(statement) or _pos_core_leak(compact):
             found.append(f"{name}: re-exports the authority trust-root seal")
-    if PUBLIC_ITEM.search(code) or ENUM_BODY.search(code) or ALIAS.search(code):
+    enum_leak = any(SEAL.search(body) for body in _public_bodies(code, "enum"))
+    if PUBLIC_ITEM.search(code) or enum_leak or ALIAS.search(code):
         found.append(f"{name}: exposes the authority trust-root seal from a public item")
-    if SEAL_RETURN.search(code) or TRAIT_RETURN.search(code):
+    trait_leak = any(BODY_RETURN.search(body) for body in _public_bodies(code, "trait"))
+    if SEAL_RETURN.search(code) or trait_leak:
         found.append(f"{name}: returns the authority trust-root seal from a public fn")
     return found
 
