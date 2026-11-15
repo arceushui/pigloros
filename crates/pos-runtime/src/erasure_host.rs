@@ -718,19 +718,22 @@ impl<'host> HostedCoordinatorPortV1<'host> {
         request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.authority_view()
-            .and_then(|view| match self.topology_candidate.as_ref() {
-                Some(candidate) => self.authority.verified_topology_observation_for_candidate(
-                    view.as_ref(),
-                    request,
-                    manifest,
-                    candidate,
-                ),
-                None => {
+        self.authority_view().and_then(|view| {
+            self.topology_candidate.as_ref().map_or_else(
+                || {
                     self.authority
                         .verified_topology_observation(view.as_ref(), request, manifest)
-                }
-            })
+                },
+                |candidate| {
+                    self.authority.verified_topology_observation_for_candidate(
+                        view.as_ref(),
+                        request,
+                        manifest,
+                        candidate,
+                    )
+                },
+            )
+        })
     }
 
     /// The read-only authority view of the current store snapshot.
