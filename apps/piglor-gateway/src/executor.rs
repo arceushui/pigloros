@@ -79,7 +79,7 @@ macro_rules! submit {
     }};
 }
 
-pub(crate) mod scenario_room;
+pub mod scenario_room;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

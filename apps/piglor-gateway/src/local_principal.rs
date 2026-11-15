@@ -218,7 +218,13 @@ impl LocalPrincipalProvisionV1 {
         operations: impl IntoIterator<Item = GatewayOperationV1>,
         consent: Option<LocalConsentDraftV1>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
-        Self::try_new_provisioned(principal, actor_entity_ids, operations, consent, None)
+        Self::try_new_provisioned(
+            principal,
+            actor_entity_ids,
+            operations,
+            consent.as_ref(),
+            None,
+        )
     }
 
     /// [`Self::try_new`], also recording `governance_record` as the host's
@@ -253,22 +259,16 @@ impl LocalPrincipalProvisionV1 {
         principal: &PrincipalRefV1,
         actor_entity_ids: impl IntoIterator<Item = EntityId>,
         operations: impl IntoIterator<Item = GatewayOperationV1>,
-        consent: Option<LocalConsentDraftV1>,
+        consent: Option<&LocalConsentDraftV1>,
         governance_record: Option<EntityId>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
         let mut actors = actor_entity_ids.into_iter().collect::<Vec<_>>();
         actors.sort_unstable();
         actors.dedup();
         let operations = sorted_operations(operations);
-        let registry_digest = registry_digest(
-            principal,
-            &actors,
-            &operations,
-            consent.as_ref(),
-            governance_record,
-        );
+        let registry_digest =
+            registry_digest(principal, &actors, &operations, consent, governance_record);
         consent
-            .as_ref()
             .map_or(Ok(Vec::new()), |consent| {
                 governed(consent, &actors, &operations)
             })
@@ -288,7 +288,6 @@ impl LocalPrincipalProvisionV1 {
                 .map_err(|_| LocalPrincipalErrorV1::Invalid)
                 .and_then(|grant| {
                     consent
-                        .as_ref()
                         .map_or(Ok(Vec::new()), |consent| {
                             consented_grants(
                                 principal,
@@ -375,7 +374,13 @@ impl LocalPrincipalProvisionV1 {
             .ok_or(LocalPrincipalErrorV1::Invalid)
             .and_then(
                 |(((principal, actors), operations), (consent, governance))| {
-                    Self::try_new_provisioned(&principal, actors, operations, consent, governance)
+                    Self::try_new_provisioned(
+                        &principal,
+                        actors,
+                        operations,
+                        consent.as_ref(),
+                        governance,
+                    )
                 },
             )
     }

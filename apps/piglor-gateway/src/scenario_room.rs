@@ -106,7 +106,8 @@ impl From<RoomStoreErrorV1> for ProblemV1 {
                 StatusCode::TOO_MANY_REQUESTS,
                 "the room or request Timeline reached its Event ceiling (permanent)",
             ),
-            RoomStoreErrorV1::ModeUnavailable | RoomStoreErrorV1::Store(_) => {
+            RoomStoreErrorV1::Store(error) => return Self::from(GatewayError::Store(error)),
+            RoomStoreErrorV1::ModeUnavailable => {
                 return Self::new(
                     Code::TemporarilyUnavailable,
                     StatusCode::SERVICE_UNAVAILABLE,

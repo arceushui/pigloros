@@ -97,7 +97,7 @@ mod served {
                 GatewayOperationV1::CREATE_TIMELINE,
                 GatewayOperationV1::READ_EVENTS,
             ]),
-            Some(LocalConsentDraftV1 {
+            Some(&LocalConsentDraftV1 {
                 subject: id(ACTOR)?,
                 grantee: id(ACTOR)?,
                 grants: vec![LocalConsentGrantDraftV1 {
