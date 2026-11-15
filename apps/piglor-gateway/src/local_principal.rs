@@ -516,16 +516,19 @@ pub fn provision_local_consents(
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
+    // A Timeline outside the verified topology is fenced from a direct
+    // lookup, so the consent Timeline's existence is read from the listing.
     let existing = host
-        .command_sender()
-        .and_then(|mut sender| sender.timeline(timeline))
+        .read_sender()
+        .and_then(|mut reads| reads.timelines())
+        .map(|timelines| timelines.iter().any(|known| known.id() == timeline))
         .map_err(|_| LocalPrincipalErrorV1::Unavailable);
     let recorded = match existing {
-        Ok(Some(_)) => host
+        Ok(true) => host
             .read_sender()
             .and_then(|mut reads| reads.read_bounded(timeline, SeqRange::all(), consent_bounds()))
             .map_err(|_| LocalPrincipalErrorV1::Unavailable),
-        Ok(None) => Ok(Vec::new()),
+        Ok(false) => Ok(Vec::new()),
         Err(error) => Err(error),
     };
     recorded.and_then(|recorded| {
@@ -3521,7 +3524,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let mut host = sqlite_host(path)?;
         let timeline = local_principal_consent_timeline();
-        let events = if host.command_sender()?.timeline(timeline)?.is_some() {
+        let listed = host.read_sender()?.timelines()?;
+        let events = if listed.iter().any(|known| known.id() == timeline) {
             host.read_sender()?
                 .read_bounded(timeline, SeqRange::all(), consent_bounds())?
                 .into_iter()
