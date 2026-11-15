@@ -239,7 +239,8 @@ fn retained_objects_are_idempotent_and_bounded_on_both_adapters() -> TestResult 
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
-    retain_contract(&mut pos_store::sqlite::SqliteStore::open(path)?)
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    retain_contract(&mut store)
 }
 
 fn key_identity() -> KeyIdentityV1 {
@@ -415,7 +416,8 @@ fn owner_effects_commit_with_their_owner_result_on_both_adapters() -> TestResult
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
-    owner_effect_contract(&mut pos_store::sqlite::SqliteStore::open(path)?)
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    owner_effect_contract(&mut store)
 }
 
 fn sweep_contract(store: &mut impl LocalErasureStore) -> TestResult {
@@ -466,7 +468,8 @@ fn sweep_deletes_only_unkept_retained_objects_of_the_named_tags() -> TestResult 
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
-    sweep_contract(&mut pos_store::sqlite::SqliteStore::open(path)?)
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    sweep_contract(&mut store)
 }
 
 #[test]
@@ -548,7 +551,8 @@ fn sweep_never_takes_an_object_the_evidence_path_wrote_first() -> TestResult {
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
-    coordinator_object_survives_sweep(&mut pos_store::sqlite::SqliteStore::open(path)?)
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    coordinator_object_survives_sweep(&mut store)
 }
 
 fn unbound_registry_refuses(store: &mut impl LocalErasureStore) -> TestResult {
@@ -578,7 +582,8 @@ fn a_tombstone_without_a_key_registry_fails_alike_on_both_adapters() -> TestResu
     let path = path
         .to_str()
         .ok_or("temporary database path is not UTF-8")?;
-    unbound_registry_refuses(&mut pos_store::sqlite::SqliteStore::open(path)?)
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    unbound_registry_refuses(&mut store)
 }
 
 /// A write from another connection makes the installed inventory stale. The
