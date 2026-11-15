@@ -6264,6 +6264,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "getrandom 0.4.3",
  "indexmap",
  "pos-conformance",
  "pos-core",
@@ -6275,6 +6276,7 @@ dependencies = [
  "pos-store",
  "pos-time",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
