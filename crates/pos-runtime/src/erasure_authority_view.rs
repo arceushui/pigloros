@@ -13,7 +13,11 @@ use pos_core::{
 /// trusted on its own (ADR-136 companion §2.2). The view has no write, commit
 /// or index-repair method, so an authority cannot change any durable record
 /// through it.
-pub trait ErasureAuthorityReadViewV1 {
+///
+/// The trait is sealed and its one implementation is private: only the
+/// execution host builds a view, from its own adapter snapshot, so no caller
+/// can hand an authority fabricated evidence.
+pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
     /// The generation of the complete erasure inventory in this snapshot.
     fn snapshot_generation(&self) -> ErasureReferenceV1;
 
@@ -30,19 +34,27 @@ pub trait ErasureAuthorityReadViewV1 {
     fn store_identity(&self) -> Option<Hash>;
 }
 
-/// The view over one adapter [`ErasureAuthoritySnapshotV1`].
+mod view_sealed {
+    /// Keeps the view closed: only the execution host's snapshot view
+    /// implements it.
+    pub trait Sealed {}
+}
+
+/// The view over one adapter [`ErasureAuthoritySnapshotV1`], built only by
+/// the execution host.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasureAuthoritySnapshotViewV1 {
+pub(crate) struct ErasureAuthoritySnapshotViewV1 {
     snapshot: ErasureAuthoritySnapshotV1,
 }
 
 impl ErasureAuthoritySnapshotViewV1 {
     /// Wrap one adapter snapshot.
-    #[must_use]
-    pub const fn new(snapshot: ErasureAuthoritySnapshotV1) -> Self {
+    pub(crate) const fn new(snapshot: ErasureAuthoritySnapshotV1) -> Self {
         Self { snapshot }
     }
 }
+
+impl view_sealed::Sealed for ErasureAuthoritySnapshotViewV1 {}
 
 impl ErasureAuthorityReadViewV1 for ErasureAuthoritySnapshotViewV1 {
     fn snapshot_generation(&self) -> ErasureReferenceV1 {

@@ -11,7 +11,7 @@ use ciborium::value::Value;
 use super::{
     array, bytes32, decode_limited, digest, domain_digest, encode_limited, evidence::string,
     header, strictly_increasing, text, uint, unsigned, ArtifactDataClassV1, ErasureArtifactClassV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureReferenceV1, ErasureScopeV1,
     ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
 };
 use crate::ids::{EntityId, TimelineId};
@@ -286,8 +286,91 @@ pub fn local_erasure_owner_ref_v1(
 pub fn local_erasure_coordinator_v1(
     store_identity: ErasureReferenceV1,
 ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-    encode_limited(&Value::Array(vec![digest(store_identity)]), KIB)
-        .map(|bytes| ErasureReferenceV1::from_digest(domain_digest("ELCOORD1", &bytes)))
+    tagged("ELCOORD1", vec![digest(store_identity)])
+}
+
+/// `CA(tag, fields)`: the domain-tagged digest of one canonical array.
+fn tagged(tag: &str, fields: Vec<Value>) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    encode_limited(&Value::Array(fields), KIB)
+        .map(|bytes| ErasureReferenceV1::from_digest(domain_digest(tag, &bytes)))
+}
+
+/// `CA("ERSUB1", [principal_ref, actor_entity])`, the minimized subject of
+/// one acting entity of one Local Principal (ADR-136 §4).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_subject_v1(
+    principal_ref: ErasureReferenceV1,
+    actor_entity: EntityId,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged(
+        "ERSUB1",
+        vec![
+            digest(principal_ref),
+            bytes_value(&actor_entity.inner().to_bytes()),
+        ],
+    )
+}
+
+/// `CA("ELRQR1", [principal_ref])`, the ERQ1 requester of one Local
+/// Principal (ADR-136 §4).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_requester_v1(
+    principal_ref: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELRQR1", vec![digest(principal_ref)])
+}
+
+/// `CA("ELBODY1", [scope class code])`, the ELIDEM1 body digest of one
+/// request body (ADR-136 §4). `impact_acknowledged` is the constant `true`,
+/// so the scope class is the whole body.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_body_digest_v1(
+    scope: ErasureScopeV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ELBODY1", vec![uint(scope.code())])
+}
+
+/// The `erasure_id` of one submission: the 128-bit prefix of
+/// `CA("ELID1", [principal_ref, actor_entity, idempotency_key_digest])`,
+/// read as a ULID (ADR-136 §4). Its time bits carry no meaning.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_id_v1(
+    principal_ref: ErasureReferenceV1,
+    actor_entity: EntityId,
+    idempotency_key_digest: ErasureReferenceV1,
+) -> Result<ulid::Ulid, ErasureErrorV1> {
+    tagged(
+        "ELID1",
+        vec![
+            digest(principal_ref),
+            bytes_value(&actor_entity.inner().to_bytes()),
+            digest(idempotency_key_digest),
+        ],
+    )
+    .map(|reference| {
+        let mut prefix = [0; 16];
+        prefix.copy_from_slice(&reference.digest()[..16]);
+        ulid::Ulid::from_bytes(prefix)
+    })
+}
+
+/// `CA("ERQ1-ID", [erasure_id])`, the ERQ1 request reference of one
+/// `erasure_id` (ADR-136 §4).
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_request_v1(
+    erasure_id: ulid::Ulid,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    tagged("ERQ1-ID", vec![bytes_value(&erasure_id.to_bytes())])
 }
 
 /// One ELB1 owner row: an acknowledgement class served by one owner.

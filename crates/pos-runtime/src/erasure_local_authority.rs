@@ -1,9 +1,12 @@
 //! The single-host Local/Air-Gapped erasure authority (ADR-136).
 //!
-//! This slice holds the composition-time verification of the installed
-//! ELB1/ELB1S bundle against the profile's TPS1 anchor and the store
-//! (ADR-136 §4, *Bundle*). The authority, executor, signer and driver of
-//! ADR-136 §1 are later slices of the same module.
+//! This module holds the ELP1 policy compiled into this binary and the
+//! composition-time verification of the installed ELB1/ELB1S bundle against
+//! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*). The
+//! authority, executor, signer and driver of ADR-136 §1 are later slices of
+//! the same module.
+
+mod policy;
 
 use std::sync::Arc;
 
@@ -18,6 +21,12 @@ use pos_crypto::signing::{verify, verifying_key_from_public_key};
 use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
 
 use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1};
+
+pub use policy::{
+    compiled_local_erasure_policy_reference_v1, compiled_local_erasure_policy_v1,
+    LOCAL_ERASURE_AUTO_RETRY_MAX_V1, LOCAL_ERASURE_MAX_REPREPARE_V1,
+    LOCAL_ERASURE_QUOTA_ATTEMPTS_V1, LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
+};
 
 /// The record tag of retained TPS1 evidence in the erasure object store.
 const RETAINED_TPS1_TAG: &str = "TPS1";
@@ -42,8 +51,9 @@ pub enum LocalErasureCompositionErrorV1 {
     /// ELB1 or ELB1S is not canonical, ELB1S names another bundle, no TPS1
     /// root carries the `issued_by` key id, or the root signature is invalid.
     BundleInvalid,
-    /// The bundle names another policy, executor, Local Principal registry,
-    /// store identity or live signer key than this binary and store, or the
+    /// The bundle names another policy than the one compiled into this
+    /// binary, or another executor, Local Principal registry, store identity
+    /// or live signer key than this deployment and store, or the
     /// store identity or key registry cannot be read.
     BundleMismatch,
     /// The installed TPS1 revokes the bundle root or the bundle signer.
@@ -82,8 +92,6 @@ pub struct LocalErasureCompositionInputsV1<'a> {
     /// The authority registry digest of the Local Principal the store
     /// records.
     pub authority_registry_digest: ErasureReferenceV1,
-    /// `CA(ELP1)` of the policy compiled into this binary.
-    pub policy: ErasureReferenceV1,
     /// The composed executor, or `None` for a root that composes no
     /// executor and therefore skips the `execution_binding` check.
     pub execution_binding: Option<&'a LocalErasureExecutionBindingV1>,
@@ -95,8 +103,10 @@ impl ErasureCoordinatorCompositionV1 {
     ///
     /// The bundle must be signed, over `["ELB1-SIG", 1, CA(ELB1)]`, by the
     /// current TPS1 root its `issued_by` names; neither that root nor the
-    /// signer may be revoked; its Local Principal registry digest, policy,
-    /// execution binding and store identity must equal this deployment's;
+    /// signer may be revoked; its policy must be
+    /// [`compiled_local_erasure_policy_v1`]; its Local Principal registry
+    /// digest, execution binding and store identity must equal this
+    /// deployment's;
     /// and the key registry must hold its role-2 signer key live, not
     /// destroyed. When the store holds any erasure request, every retained
     /// TPS1 must verify under the pinned operator key.
@@ -172,7 +182,8 @@ fn verified_bundle(
         .and_then(|bundle| {
             let binds_deployment = bundle.authority_registry_digest
                 == inputs.authority_registry_digest
-                && bundle.policy == inputs.policy
+                && compiled_local_erasure_policy_reference_v1()
+                    .is_ok_and(|policy| bundle.policy == policy)
                 && inputs
                     .execution_binding
                     .is_none_or(|binding| *binding == bundle.execution_binding);

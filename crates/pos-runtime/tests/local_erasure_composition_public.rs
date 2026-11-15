@@ -24,6 +24,7 @@ use pos_core::{
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
 use pos_runtime::{
+    compiled_local_erasure_policy_reference_v1, compiled_local_erasure_policy_v1,
     ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
     ErasureExecutionHostV1, LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1,
 };
@@ -40,7 +41,6 @@ const BUNDLE_ROOT: &str = "erasure-bundle/root-1";
 const OTHER_ROOT: &str = "erasure-bundle/root-2";
 const SIGNER_OWNER: &str = "local-erasure-signer";
 const STORE_IDENTITY: [u8; 32] = [0x51; 32];
-const POLICY: [u8; 32] = [0x52; 32];
 const REGISTRY: [u8; 32] = [0x55; 32];
 
 fn operator() -> SigningKey {
@@ -120,7 +120,8 @@ fn bundle() -> LocalErasureBundleV1 {
         store_identity: ErasureReferenceV1::from_digest(STORE_IDENTITY),
         authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
         host_timelines: Vec::new(),
-        policy: ErasureReferenceV1::from_digest(POLICY),
+        policy: compiled_local_erasure_policy_reference_v1()
+            .unwrap_or(ErasureReferenceV1::from_digest([0; 32])),
         owners: Vec::new(),
         execution_binding: execution_binding(),
         signer_identity: LocalErasureSignerIdentityV1 {
@@ -175,7 +176,6 @@ struct Case {
     trust: CurrentTrustPolicyV1,
     operator_public_key: [u8; 32],
     authority_registry_digest: ErasureReferenceV1,
-    policy: ErasureReferenceV1,
     execution_binding: Option<LocalErasureExecutionBindingV1>,
 }
 
@@ -195,7 +195,6 @@ impl Case {
             trust: trust(revoked)?,
             operator_public_key: operator().verifying_key().to_bytes(),
             authority_registry_digest: ErasureReferenceV1::from_digest(REGISTRY),
-            policy: ErasureReferenceV1::from_digest(POLICY),
             execution_binding: Some(execution_binding()),
         })
     }
@@ -214,7 +213,6 @@ impl Case {
                 trust: &self.trust,
                 operator_public_key: self.operator_public_key,
                 authority_registry_digest: self.authority_registry_digest,
-                policy: self.policy,
                 execution_binding: self.execution_binding.as_ref(),
             },
             store,
@@ -246,7 +244,9 @@ fn a_key_less_root_skips_only_the_execution_binding() -> TestResult {
     let mut case = Case::signed(&other, &bundle_root(), &[])?;
     case.execution_binding = None;
     assert!(case.compose(&mut provisioned_store()?).is_ok());
-    case.policy = ErasureReferenceV1::from_digest([0x99; 32]);
+    other.policy = ErasureReferenceV1::from_digest([0x99; 32]);
+    let mut case = Case::signed(&other, &bundle_root(), &[])?;
+    case.execution_binding = None;
     assert_eq!(
         case.refusal(&mut provisioned_store()?),
         Some(LocalErasureCompositionErrorV1::BundleMismatch)
@@ -349,8 +349,9 @@ fn a_bundle_for_another_policy_or_executor_is_a_mismatch() -> TestResult {
         case.refusal(&mut store),
         Some(LocalErasureCompositionErrorV1::BundleMismatch)
     );
-    let mut case = Case::valid()?;
-    case.policy = ErasureReferenceV1::from_digest([0x99; 32]);
+    let mut repoliced = bundle();
+    repoliced.policy = ErasureReferenceV1::from_digest([0x99; 32]);
+    let case = Case::signed(&repoliced, &bundle_root(), &[])?;
     assert_eq!(
         case.refusal(&mut store),
         Some(LocalErasureCompositionErrorV1::BundleMismatch)
@@ -740,5 +741,43 @@ fn an_operator_key_rotation_closes_a_store_with_requests_until_restored() -> Tes
     case.trust = trust(&[])?;
     case.operator_public_key = restored;
     assert!(case.compose(&mut store).is_ok());
+    Ok(())
+}
+
+#[test]
+fn the_compiled_policy_carries_the_owner_constants() -> TestResult {
+    let policy = compiled_local_erasure_policy_v1();
+    assert_eq!(
+        policy.retained_classes,
+        [
+            pos_core::ArtifactDataClassV1::PublicRecord,
+            pos_core::ArtifactDataClassV1::AggregateData,
+            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
+        ]
+    );
+    assert!(policy.classification.is_empty());
+    assert_eq!(
+        (
+            policy.auto_retry_max,
+            policy.quota_attempts,
+            policy.store_request_reserve,
+            policy.max_reprepare,
+        ),
+        (3, 64, 512, 3)
+    );
+    // The encoded ELP1 carries the owner's attempt window, 2 + 16,384.
+    let encoded: ciborium::value::Value =
+        ciborium::from_reader(policy.to_canonical_cbor()?.as_slice())?;
+    let ciborium::value::Value::Array(fields) = encoded else {
+        return Err("ELP1 is not an array".into());
+    };
+    assert_eq!(
+        fields.get(4),
+        Some(&ciborium::value::Value::Integer(16_386.into()))
+    );
+    assert_eq!(
+        compiled_local_erasure_policy_reference_v1()?,
+        policy.reference()?
+    );
     Ok(())
 }

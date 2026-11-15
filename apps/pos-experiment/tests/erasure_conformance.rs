@@ -25,24 +25,27 @@ use pos_core::erasure::{
     ErasureScopeExtensionV1, ErasureVerifiedTopologyObservationV1,
 };
 use pos_core::{
-    CanonicalBytes, EntityId, ErasureAuthoritySnapshotV1, ErasurePersistenceInventorySnapshotV1,
-    EventDraft, Kind, Seq, TimelineId, TimelineMeta,
+    CanonicalBytes, EntityId, ErasureRecoveryLimitsV1, EventDraft, Kind, Seq, TimelineId,
+    TimelineMeta,
 };
 use pos_experiment::erasure_conformance::{
     case_obligations, ErasureCaseCatalogueV1, ErasureCaseDigestV1, ErasureCaseErrorV1,
     ErasureCaseRecordV1, ErasureCaseRunV1, ErasureCaseV1,
 };
 use pos_runtime::{
-    ErasureAuthoritySnapshotViewV1, ErasureCoordinatorAuthorityV1, ErasureHostStatusV1,
+    ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1,
+    ErasureHostStatusV1,
 };
 use pos_store::StoreConfig;
 use serde_json::{json, Value};
 
-/// An empty authority view for calling an authority directly.
-fn view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
-    ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
-        .and_then(|inventory| ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None))
-        .map(ErasureAuthoritySnapshotViewV1::new)
+/// The host-built authority view of an empty store, for calling an
+/// authority directly.
+fn view() -> Result<impl ErasureAuthorityReadViewV1, ErasureHostErrorV1> {
+    ErasureRecoveryLimitsV1::from_maximum_requests(1)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+        .and_then(|limits| ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits))
+        .and_then(|mut host| host.authority_view())
 }
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;

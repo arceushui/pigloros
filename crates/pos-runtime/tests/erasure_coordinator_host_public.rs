@@ -12,31 +12,31 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthoritySnapshotV1,
-    ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
-    ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureCorrectionProvenanceInputV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistenceInventorySnapshotV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
-    ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, EventDraft, EventReadBounds,
-    Kind, SeqRange, TimelineId, TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
+    ErasureVerifiedTopologyObservationV1, EventDraft, EventReadBounds, Kind, SeqRange, TimelineId,
+    TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
-    ClosedErasureCoordinatorAuthorityV1, ErasureAuthorityReadViewV1,
-    ErasureAuthoritySnapshotViewV1, ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
-    ErasureExecutionHostV1, ErasureHostStatusV1,
+    ClosedErasureCoordinatorAuthorityV1, ErasureAuthorityReadViewV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
 };
 
-/// An empty authority view for calling an authority directly.
-fn view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
-    ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
-        .and_then(|inventory| ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None))
-        .map(ErasureAuthoritySnapshotViewV1::new)
+/// The host-built authority view of an empty store, for calling an
+/// authority directly.
+fn view() -> Result<impl ErasureAuthorityReadViewV1, ErasureHostErrorV1> {
+    ErasureRecoveryLimitsV1::from_maximum_requests(1)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+        .and_then(|limits| ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits))
+        .and_then(|mut host| host.authority_view())
 }
 use pos_store::StoreConfig;
 
@@ -4678,7 +4678,7 @@ fn authority_calls_read_the_current_store_snapshot() -> Result<(), Box<dyn std::
     let before = read(&mut peer)?;
     assert_eq!(before.0.inventory().request_heads().len(), 1);
     assert!(before.2.is_some());
-    let view = ErasureAuthoritySnapshotViewV1::new(before.0.clone());
+    let view = host.authority_view()?;
     let members = (
         view.snapshot_generation(),
         view.topology().len(),

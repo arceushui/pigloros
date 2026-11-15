@@ -2913,6 +2913,24 @@ impl ErasureExecutionHostV1 {
         })
     }
 
+    /// The read-only authority view of this ready host's current store
+    /// snapshot: the same view the host passes into every authority method
+    /// (ADR-136 companion §2.6).
+    ///
+    /// Only the host builds a view, so a caller can evaluate an authority
+    /// over the store's real evidence but can never hand it fabricated
+    /// evidence.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] for a host that is
+    /// not ready, or the payload-free error of an unreadable snapshot.
+    pub fn authority_view(
+        &mut self,
+    ) -> Result<impl ErasureAuthorityReadViewV1 + use<>, ErasureHostErrorV1> {
+        self.ready_state()
+            .and_then(|_| self.host_authority_view().map_err(map_erasure_error))
+    }
+
     /// The read-only authority view of the current store snapshot, for an
     /// authority call made outside the coordinator port.
     fn host_authority_view(&mut self) -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
