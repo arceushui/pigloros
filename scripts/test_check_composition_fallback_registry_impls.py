@@ -123,7 +123,49 @@ def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         )
 
 
+def check_prefilter() -> None:
+    """Strip only files that contain a guarded token, and still reject a guarded violation.
+
+    The prefilter is exact because stripping comments only removes text, so a file
+    whose raw bytes name no guarded token cannot match after stripping.
+    """
+    import check_composition_fallback_registry_impls as checker
+
+    stripped: list[str] = []
+    original = checker.strip_comments
+
+    def recording(text: str) -> str:
+        stripped.append(text)
+        return original(text)
+
+    files = {
+        "crates/pos-state/src/forged.rs": "struct S;\nimpl CompositionFallbackRegistryV1 for S {}\n",
+        # Rule 4 rejects any target_os in a registry module, which is always read.
+        "crates/pos-store/src/composition_fallback_registry/mod.rs": (
+            '#[cfg(target_os = "linux")]\nfn f() {}\n'
+        ),
+        "crates/pos-state/src/plain.rs": "// plain\nfn plain() {}\n",
+    }
+    checker.strip_comments = recording
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            found = checker.violations(root)
+    finally:
+        checker.strip_comments = original
+    for relative in ("crates/pos-state/src/forged.rs", "crates/pos-store/src/composition_fallback_registry/mod.rs"):
+        if not any(finding.startswith(relative + ":") for finding in found):
+            raise SystemExit(f"prefilter hid the violation in {relative}: {found}")
+    if sorted(stripped) != sorted(files[relative] for relative in ("crates/pos-state/src/forged.rs", "crates/pos-store/src/composition_fallback_registry/mod.rs")):
+        raise SystemExit(f"prefilter stripped a file without a guarded token: {stripped}")
+
+
 def main() -> None:
+    check_prefilter()
     accepted = run(ALLOWED)
     if accepted.returncode != 0:
         raise SystemExit(f"allowed layout was rejected:\n{accepted.stderr}")
