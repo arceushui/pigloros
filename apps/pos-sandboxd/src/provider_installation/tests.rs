@@ -522,12 +522,27 @@ fn the_digest_is_checked_before_the_value_rules() -> TestResult {
 fn artifact_root(document: &[u8], mode: u32) -> TestResult<(tempfile::TempDir, File, u32)> {
     let directory = tempfile::tempdir()?;
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))?;
-    let path = directory.path().join("provider-installation.cbor");
-    fs::write(&path, document)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
-    let root = File::open(directory.path())?;
-    let owner = root.metadata()?.uid();
+    write_file(
+        &directory.path().join("provider-installation.cbor"),
+        document,
+        mode,
+    )?;
+    let (root, owner) = held(directory.path())?;
     Ok((directory, root, owner))
+}
+
+/// Write `bytes` to `path` and give it `mode`.
+fn write_file(path: &Path, bytes: &[u8], mode: u32) -> TestResult {
+    fs::write(path, bytes)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+/// The directory at `path`, held, and its owner.
+fn held(path: &Path) -> TestResult<(File, u32)> {
+    let root = File::open(path)?;
+    let owner = root.metadata()?.uid();
+    Ok((root, owner))
 }
 
 fn opened(
@@ -683,9 +698,7 @@ fn write_key(directory: &Path, seed: &[u8], mode: u32) -> TestResult {
     let keys = directory.join("provider-keys");
     let mode_before = fs::metadata(&keys)?.permissions().mode();
     fs::set_permissions(&keys, fs::Permissions::from_mode(0o700))?;
-    let path = keys.join(KEY_FILE);
-    fs::write(&path, seed)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+    write_file(&keys.join(KEY_FILE), seed, mode)?;
     fs::set_permissions(&keys, fs::Permissions::from_mode(mode_before))?;
     Ok(())
 }
