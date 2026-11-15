@@ -32,7 +32,7 @@ const MAPPING_PROFILE_VERSION: u64 = 6;
 // Buffer sizes are plain literals, so no arithmetic mutant can survive in
 // them; the assertions tie each one to the bounds it is derived from.
 //
-// CAP1 upper bound: record head, magic and version 7, profile 35, five
+// CAP1 upper bound: record head and magic 7, version 1, profile 35, five
 // hashes 170, two texts 2 * 130, rows head 2, 64 rows of 52 bytes and two
 // 5-byte schema IDs.
 const MAX_ENCODED_BYTES: usize = 3_813;
