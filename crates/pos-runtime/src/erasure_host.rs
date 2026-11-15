@@ -641,10 +641,11 @@ pub struct ErasureCoordinatorCompositionV1 {
     local_submission: Option<LocalErasureSubmissionBindingV1>,
 }
 
-/// What the host needs to build a Local erasure submission (ADR-136 §6):
-/// the Local Principal root grant and its authority Timeline, the verified
-/// bundle's registry digest, and the compiled policy and its request-head
-/// reserve. Only a verified Local composition carries it.
+/// What the host needs to build a Local erasure submission (ADR-136 §6).
+///
+/// It holds the Local Principal root grant and its authority Timeline, the
+/// verified bundle's registry digest, and the compiled policy and its
+/// request-head reserve. Only a verified Local composition carries it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalErasureSubmissionBindingV1 {
     pub(crate) principal_grant: Hash,
@@ -786,8 +787,10 @@ pub(crate) enum LocalSubjectRefusalV1 {
 }
 
 /// Whether a request of this lifecycle has not reached its first receipt
-/// (ADR-136 §6). No destruction attempt can be admitted before attempt
-/// admission lands, so a `partial-failure` request never has an active one.
+/// (ADR-136 §6).
+///
+/// No destruction attempt can be admitted before attempt admission lands,
+/// so a `partial-failure` request never has an active one.
 pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
     matches!(
         lifecycle,
@@ -799,9 +802,11 @@ pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
     )
 }
 
-/// The ADR-136 §6 admission checks of one more request of `subject` over
-/// the installed requests: one pre-terminal request per subject, and the
-/// per-subject lifetime quota `floor((maximum_requests - reserve) / A)`.
+/// The ADR-136 §6 admission checks of one more request of `subject`.
+///
+/// Over the installed requests, the subject may have no pre-terminal
+/// request, and fewer than its lifetime quota
+/// `floor((maximum_requests - reserve) / A)`.
 pub(crate) fn local_subject_admission<'state>(
     states: impl Iterator<Item = &'state ErasureVerifiedStateV1>,
     subject: ErasureReferenceV1,
@@ -8526,7 +8531,8 @@ mod tests {
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             );
             let first = port.authority_view()?;
-            assert!(Rc::ptr_eq(&first, &port.authority_view()?));
+            let second = port.authority_view()?;
+            assert_eq!(first.snapshot_generation(), second.snapshot_generation());
         }
         assert_eq!(store.authority_snapshot_calls, 1);
 
