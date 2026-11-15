@@ -32,36 +32,72 @@ use super::{
     SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
 
-const fn column(
-    name: &'static str,
-    kind: &'static str,
-    not_null: bool,
-    primary_key: bool,
-) -> SqliteSchemaColumn {
-    SqliteSchemaColumn {
-        name,
-        kind,
-        not_null,
-        primary_key,
-    }
-}
-
 /// The three revision tables, created and validated exactly.
 pub(super) const GATEWAY_REVISION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     SqliteSchemaTable {
         name: "gateway_revisions",
         columns_query: "PRAGMA table_info(gateway_revisions)",
         columns: &[
-            column("kind", "INTEGER", true, true),
-            column("resource_id", "BLOB", true, true),
-            column("revision", "INTEGER", true, true),
-            column("subject", "BLOB", true, false),
-            column("digest", "BLOB", true, false),
-            column("principal_id", "BLOB", true, false),
-            column("mode_profile_id", "TEXT", true, false),
-            column("mode_profile_digest", "BLOB", true, false),
-            column("binding_epoch", "INTEGER", true, false),
-            column("content", "BLOB", true, false),
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "resource_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "revision",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "subject",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "principal_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "mode_profile_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "mode_profile_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "binding_epoch",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "content",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
         constraints: &[
             "CHECK (kind IN (1, 2))",
@@ -79,11 +115,36 @@ pub(super) const GATEWAY_REVISION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         name: "gateway_revision_tombstones",
         columns_query: "PRAGMA table_info(gateway_revision_tombstones)",
         columns: &[
-            column("kind", "INTEGER", true, true),
-            column("resource_id", "BLOB", true, true),
-            column("revision", "INTEGER", true, true),
-            column("subject", "BLOB", true, false),
-            column("digest", "BLOB", true, false),
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "resource_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "revision",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "subject",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
         constraints: &[
             "CHECK (kind IN (1, 2))",
@@ -97,12 +158,42 @@ pub(super) const GATEWAY_REVISION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         name: "gateway_revision_requests",
         columns_query: "PRAGMA table_info(gateway_revision_requests)",
         columns: &[
-            column("principal_id", "BLOB", true, true),
-            column("kind", "INTEGER", true, true),
-            column("key_digest", "BLOB", true, true),
-            column("resource_id", "BLOB", true, false),
-            column("revision", "INTEGER", true, false),
-            column("request_digest", "BLOB", true, false),
+            SqliteSchemaColumn {
+                name: "principal_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "key_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "resource_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "revision",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "request_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
         constraints: &[
             "CHECK (length(principal_id) = 16)",
@@ -214,9 +305,11 @@ fn read_state(
         |row| <RevisionRowV1>::try_from(row),
     )
     .optional()
-    .and_then(|row| match row {
-        Some(row) => Ok(present_state(key, row).map(Some)),
-        None => read_tombstone(conn, key).map(Ok),
+    .and_then(|row| {
+        row.map_or_else(
+            || read_tombstone(conn, key).map(Ok),
+            |row| Ok(present_state(key, row).map(Some)),
+        )
     })
 }
 
@@ -352,9 +445,11 @@ fn commit_in_transaction(
     attached: Option<NonZeroU64>,
     draft: &GatewayRevisionDraftV1,
 ) -> RevisionStep<GatewayRevisionCommitV1> {
-    read_request(conn, draft).and_then(|stored| match stored {
-        Some(stored) => replay(conn, stored, draft),
-        None => admit(conn, attached, draft),
+    read_request(conn, draft).and_then(|stored| {
+        stored.map_or_else(
+            || admit(conn, attached, draft),
+            |stored| replay(conn, stored, draft),
+        )
     })
 }
 

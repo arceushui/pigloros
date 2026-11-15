@@ -4888,6 +4888,16 @@ mod tests {
     }
 
     #[test]
+    fn expired_gateway_revision_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let operation: super::RevisionOperationV1<()> = Box::new(|_port| Ok(()));
+        assert_expired(
+            Command::Action(Box::new(super::RevisionCommand { operation, reply })),
+            receiver,
+        );
+    }
+
+    #[test]
     fn expired_action_receipt_purge_replies() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
