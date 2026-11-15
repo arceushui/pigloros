@@ -1649,5 +1649,5 @@ fn a_release_that_ends_past_the_deadline_is_no_barrier_failure() {
         released_by(Instant::now()),
         Err(BarrierError::ExpiredAfterRelease)
     ));
-    assert!(released_by(Instant::now() + Duration::from_secs(60)).is_ok());
+    assert!(released_by(Instant::now() + Duration::from_mins(1)).is_ok());
 }

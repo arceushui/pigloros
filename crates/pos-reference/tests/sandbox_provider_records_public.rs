@@ -145,6 +145,17 @@ fn sdy1_matches_the_oracle_and_the_decoder() -> TestResult {
     assert_eq!(decoded, response);
     decoded.verify_signature(&signing_key().verifying_key())?;
     assert_eq!(decoded.request_id, [1; 16]);
+    assert_eq!(decoded.response_digest(), response.response_digest());
+    assert_ne!(decoded.response_digest(), [0; 32]);
+    assert_eq!(decoded.signature(), response.signature());
+    signing_key().verifying_key().verify_strict(
+        &[
+            b"PiglorOS.SDY1.Signature.v1\0".as_slice(),
+            &decoded.response_digest(),
+        ]
+        .concat(),
+        &ed25519_dalek::Signature::from_bytes(&decoded.signature()),
+    )?;
     assert_eq!(decoded.active_apt1_digest, [5; 32]);
     Ok(())
 }
@@ -163,6 +174,16 @@ fn spe1_refusals_of_every_operation_match_the_oracle_and_the_decoder() -> TestRe
         assert_eq!(decoded.operation, Some(operation));
         assert_eq!(decoded.attempt_id, fields.attempt_id);
         assert_eq!(decoded.safe_detail, None);
+        assert_eq!(decoded.error_digest(), error.error_digest());
+        assert_eq!(decoded.signature(), error.signature());
+        signing_key().verifying_key().verify_strict(
+            &[
+                b"PiglorOS.SPE1.Signature.v1\0".as_slice(),
+                &decoded.error_digest(),
+            ]
+            .concat(),
+            &ed25519_dalek::Signature::from_bytes(&decoded.signature()),
+        )?;
     }
     // An unidentified encoding failure and a detailed unknown attempt.
     let unidentified = SandboxProviderErrorFields {
