@@ -158,8 +158,9 @@ pub(super) struct RouteV2 {
     path: &'static str,
     /// The capability an attempt must hold for the route.
     capability: &'static str,
-    /// Whether a `201` response of the route commits one Event.
-    commits: bool,
+    /// The Events a `201` response of the route commits: a room create or derive appends its
+    /// request claim and the revision.
+    events: u64,
 }
 
 /// The route table of the requirements text, section 2, in its order.
@@ -167,57 +168,57 @@ const ROUTES: [RouteV2; 11] = [
     RouteV2 {
         path: "/health",
         capability: "gateway.health.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/ledger",
         capability: "gateway.ledger.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines",
         capability: "timeline.create",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/events",
         capability: "timeline.events.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/signals",
         capability: "timeline.signals.append",
-        commits: true,
+        events: 1,
     },
     RouteV2 {
         path: "/v1/timelines/{timeline}/actions",
         capability: "world.action.v1.submit",
-        commits: true,
+        events: 1,
     },
     RouteV2 {
         path: "/v1/session",
         capability: "session.read",
-        commits: false,
+        events: 0,
     },
     RouteV2 {
         path: "/v1/me/consent-revocations",
         capability: "consent.revoke",
-        commits: true,
+        events: 1,
     },
     RouteV2 {
         path: "/v1/scenario-rooms",
         capability: "scenario-room.create",
-        commits: true,
+        events: 2,
     },
     RouteV2 {
         path: "/v1/scenario-rooms/{room}/revisions",
         capability: "scenario-room.derive",
-        commits: true,
+        events: 2,
     },
     RouteV2 {
         path: "/v1/scenario-rooms/{room}/revisions/{revision}",
         capability: "scenario-room.read",
-        commits: false,
+        events: 0,
     },
 ];
 
@@ -227,9 +228,9 @@ impl RouteV2 {
         self.capability
     }
 
-    /// Whether a `201` response of the route commits one Event.
-    pub(super) const fn commits(self) -> bool {
-        self.commits
+    /// The Events a `201` response of the route commits.
+    pub(super) const fn events(self) -> u64 {
+        self.events
     }
 
     /// Whether `base`, a path without its query, names this route: as many `/`-separated
@@ -397,8 +398,8 @@ mod tests {
         capabilities.sort_unstable();
         assert_eq!(generator_capabilities(), capabilities);
         assert_eq!(
-            ROUTES.map(RouteV2::commits),
-            [false, false, false, false, true, true, false, true, true, true, false]
+            ROUTES.map(RouteV2::events),
+            [0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 0]
         );
     }
 

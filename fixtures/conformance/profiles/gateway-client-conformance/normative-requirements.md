@@ -87,7 +87,7 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   Timeline; the consent-bound grant is issued at position 1 of its own authority Timeline, so
   the Principal's Session generation is 3 until the consent is revoked.
 - `authorized-rooms`: the `authorized` composition (#303) whose fixture Local Principal is
-  granted `timeline.create`, `session.read`, `scenario-room.create` (resource `scenario-room`,
+  granted `timeline.create`, `session.read`, `consent.revoke`, `scenario-room.create` (resource `scenario-room`,
   action `create`), `scenario-room.derive` (resource `scenario-room.revision`, action `derive`)
   and `scenario-room.read` (resource `scenario-room.revisions`, action `read`), records the
   single-participant governance record `01JC0GATEWAYW90G0VERN00001`, and binds one consent of
@@ -107,22 +107,27 @@ identical actions of one sub-case are an exact retry.
 
 The observation of a sent exchange is `{"status": <code>, "body": <body>}`. The body is
 `{"json": <value>}` when the response bytes are one JSON value, else the string `"non-json"`.
-The value is normalized; the identities, cursors and messages the documentation does not fix
-are permitted nondeterministic operational fields:
+The value is normalized. First, every text value equal to the consent or room the sub-case has
+captured so far (including by this exchange) becomes the slot literal `"{consent}"` or
+`"{room}"`, so a response echoing the captured consent or room is pinned and an echo of any
+other value stays raw. Then the identities, cursors and messages the documentation does not
+fix are permitted nondeterministic operational fields:
 
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
   becomes `"<cursor>"`;
 - a member `detail` with a text value becomes `"<message>"`;
-- in a member `id`, `consent_ref`, `room_id`, `privacy_export_ref`, `timeline_id`, `event_id`
-  or `instance` with a text value, every `/`-separated segment that is a ULID becomes
-  `<ulid>`, so such a member that is a ULID becomes `"<ulid>"` (a routed problem names its
-  route template and carries no ID; only the path of a request no route serves can carry one);
-- a member `correlation_id` whose value is 32 lowercase hex digits becomes `"<correlation>"`,
-  and a member `descriptor_hash` whose value is 64 lowercase hex digits becomes `"<hash>"` (a
-  room's correlation ID is drawn per room, and its descriptor hash covers it);
-- the member `digest` of a member `provenance` whose `origin` is `principal-authored`, when its
-  value is 64 lowercase hex digits, becomes `"<hash>"` (a room revision's provenance covers its
-  descriptor hash and Event ID); a `host-derived` provenance digest stays as it is.
+- in a member `id`, `consent_ref`, `timeline_id`, `event_id` or `instance` with a text value,
+  every `/`-separated segment that is a ULID becomes `<ulid>`, so such a member that is a ULID
+  becomes `"<ulid>"` (a routed problem names its route template and carries no ID; only the
+  path of a request no route serves can carry one);
+- a member `correlation_id` whose value is 32 lowercase hex digits, not all zero, becomes
+  `"<correlation>"`, and a member `descriptor_hash` whose value is 64 lowercase hex digits, not
+  all zero, becomes `"<hash>"` (a room's correlation ID is drawn per room, and its descriptor
+  hash covers it);
+- in an object whose `schema_id` is `urn:pigloros:gateway:v1:schema:scenario-room-revision`,
+  the `digest` of its member `provenance`, when it is 64 lowercase hex digits not all zero,
+  becomes `"<hash>"` (a room revision's provenance covers its descriptor hash and Event ID);
+  every other provenance digest, such as a Session's, stays as it is.
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
@@ -142,9 +147,10 @@ has a `canary` (whether the canary bytes occur in any spectator response body), 
 observation list). A `namespaced-failure` family returns its family failure when every
 exchange matches and no canary is present, else `subcase-mismatch`.
 
-Usage: one execution step per sent exchange, the response body bytes as output bytes, and one
-Event per `201` response of the signals, actions, revoke, rooms or revisions route. The other
-counters are 0.
+Usage: one execution step per sent exchange, the response body bytes as output bytes, and
+the Events each `201` response commits: one for the signals, actions and revoke routes, and two
+(the request claim and the revision) for the rooms and revisions routes. The other counters
+are 0.
 
 ## 6. Families
 
@@ -158,8 +164,12 @@ counters are 0.
   it governs and is revoked exactly once; on `authorized-rooms` a Scenario Room naming the
   Principal's consent (captured from its Session) is created as revision 1 (`201`), an exact
   retry answers the same revision (`200`), the revision reads back (`200`), and a derive from
-  revision 1 commits revision 2 as the third Event of the room Timeline (`201`), each with the
-  plugin composition hash and the rule set hash ADR-041 amendment A4 states.
+  revision 1 commits revision 2 as the third Event of the room Timeline (`201`), each echoing
+  the captured room and consent and carrying the plugin composition hash and the rule set
+  hash ADR-041 amendment A4 states; the sub-case's one idempotency key used for a different
+  create is the `409` `idempotency-conflict` problem, a derive repeated from the same parent
+  answers the head (`200`, the ADR-041 section 7 duplicate) and a different derive from that
+  non-head parent is the `409` `append-conflict` problem.
 - **denied** (`capability-denied`): an action without a host authorizer is the `401`
   `unauthenticated` problem and an action the fixture authority does not grant is the `403`
   `unauthorized` problem, each followed by an empty poll (denial without state change); a route
@@ -167,10 +177,14 @@ counters are 0.
   without the actor header is the `401` `unauthenticated` problem; a Session read without the
   actor header on the `authorized` Gateway, and one on the `open` Gateway (which has no
   Principal), is the `401` `unauthenticated` problem; a room whose `privacy_export_ref` names a
-  consent the Principal does not hold is the `403` `consent-invalid` problem.
+  consent the Principal does not hold is the `403` `consent-invalid` problem, one naming its
+  consent after the consent is revoked is the `403` `revoked` problem, and one whose persona the
+  grant's actors do not cover is the `403` `unauthorized` problem.
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are the `400`
   `invalid-request` problem; a Timeline ID that is not a ULID is `400` `invalid-request`;
-  integer action `params` are the `422` `admission-rejected` problem, and nothing is committed.
+  integer action `params` are the `422` `admission-rejected` problem, and nothing is committed;
+  a room naming a governance record the host does not record is the `422`
+  `admission-rejected` problem.
 - **resource-exhaustion** (`resource-limit`): 64 root Timelines are created and the 65th is the
   `429` `resource-limit-exceeded` problem.
 - **deletion-redaction:** public-listener redaction. A canary Society Signal is committed

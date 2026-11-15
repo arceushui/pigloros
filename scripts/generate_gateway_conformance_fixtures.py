@@ -96,9 +96,10 @@ PRINCIPAL_GRANTS = ["session.read", "timeline.create", "timeline.events.read"]
 # consent governs `timeline.create`.
 CONSENTED_GRANTS = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
 # The operations the `authorized-rooms` fixture Principal is granted (#303), sorted; its one
-# consent, export permitted, governs `timeline.create` and is named as a room's
-# `privacy_export_ref`.
+# consent, export permitted, governs `timeline.create`, is named as a room's
+# `privacy_export_ref` and may be revoked.
 ROOM_GRANTS = [
+    "consent.revoke",
     "scenario-room.create",
     "scenario-room.derive",
     "scenario-room.read",
@@ -126,8 +127,9 @@ ROUTE_CAPABILITY = {
     "revision": "scenario-room.read",
 }
 CAPABILITIES = tuple(sorted(ROUTE_CAPABILITY.values()))
-# The routes whose `201` response commits one Event (requirements section 5).
-COMMITTING_ROUTES = ("signals", "actions", "revoke", "rooms", "revisions")
+# The Events a `201` response of a route commits (requirements section 5): a room create or
+# derive appends its request claim and the revision.
+COMMITTED_EVENTS = {"signals": 1, "actions": 1, "revoke": 1, "rooms": 2, "revisions": 2}
 MAX_TIMELINES = 64  # README "Timeline bound"
 EVENT_LIMIT = 100  # README "Polling": limit defaults to and may not exceed 100
 
@@ -354,7 +356,7 @@ def consent_revocation_body(generation: int) -> dict:
     )
     return {
         "availability": {"state": "available", "withheld": []},
-        "consent_ref": "<ulid>",
+        "consent_ref": "{consent}",
         "execution_profile": {
             "profile_kind": "epf1",
             "reason": "not-installed",
@@ -391,6 +393,9 @@ def revoke(expect: dict) -> Exchange:
 
 ROOMS_PATH = "/v1/scenario-rooms"
 ROOM_REVISIONS_PATH = f"{ROOMS_PATH}/{{room}}/revisions"
+# The problem `instance` of the derive route: its route template.
+ROOM_REVISIONS_INSTANCE = f"{ROOMS_PATH}/{{room_id}}/revisions"
+ROOM_REVISION_SCHEMA = "urn:pigloros:gateway:v1:schema:scenario-room-revision"
 ROOM_PLUGIN = {"plugin_id": "gateway-world-actions", "version": "0.1.0"}
 # The Event types the reviewed host catalogue entry of the room plugin owns.
 ROOM_PLUGIN_EVENT_TYPES = ["world.action.v1"]
@@ -424,17 +429,22 @@ def room_rules(value_micro: int) -> list[dict]:
     return [{"rule_id": "gateway-world-actions.nudge.scale", "value_micro": value_micro}]
 
 
-def room_descriptor(value_micro: int, privacy_export_ref: str = "{consent}") -> dict:
-    """The fixture room's `ScenarioRoomInput`: one persona (the fixture actor) and one society
-    participant, the fixture plugin and one rule of it, the recorded governance record and the
-    consent the last `consent` capture named."""
+def room_descriptor(
+    value_micro: int,
+    privacy_export_ref: str = "{consent}",
+    governance_ref: str = GOVERNANCE,
+    persona: str = ACTOR,
+) -> dict:
+    """The fixture room's `ScenarioRoomInput`: one persona (by default the fixture actor) and
+    one society participant, the fixture plugin and one rule of it, the governance record (by
+    default the recorded one) and the consent (by default the last `consent` capture)."""
     return {
-        "governance_ref": GOVERNANCE,
+        "governance_ref": governance_ref,
         "initial_conditions": [{"dimension": "trust", "entity_id": SOCIETY, "value_micro": 600000}],
         "intervention_policy": 1,
         "max_ticks": 600,
         "participants": [
-            {"entity_id": ACTOR, "kind": "persona"},
+            {"entity_id": persona, "kind": "persona"},
             {"entity_id": SOCIETY, "kind": "society"},
         ],
         "plugins": [ROOM_PLUGIN],
@@ -449,17 +459,18 @@ def room_descriptor(value_micro: int, privacy_export_ref: str = "{consent}") -> 
 
 def room_revision_body(revision: int, value_micro: int, seq: int) -> dict:
     """The `ScenarioRoomRevision` the contract prescribes for a fixture room revision committed
-    at `seq` of its room Timeline, under the Local binding at epoch 1. The room ID, the
-    Timeline and Event IDs, the consent, the correlation ID, the descriptor hash and the
-    provenance digest (which covers the descriptor hash) are run-local and normalized."""
-    descriptor = room_descriptor(value_micro, "<ulid>")
+    at `seq` of its room Timeline, under the Local binding at epoch 1. It echoes the captured
+    room as its `id` and `room_id` and the captured consent as its `privacy_export_ref`; the
+    Timeline and Event IDs, the correlation ID, the descriptor hash and the provenance digest
+    (which covers the descriptor hash) are run-local and normalized."""
+    descriptor = room_descriptor(value_micro)
     descriptor.update(
         {
             "correlation_id": "<correlation>",
             "descriptor_hash": "<hash>",
             "plugin_composition_hash": plugin_composition_hash(),
             "revision": revision,
-            "room_id": "<ulid>",
+            "room_id": "{room}",
             "rule_set_hash": golden.blake3(jcs(room_rules(value_micro))).hex(),
         }
     )
@@ -479,7 +490,7 @@ def room_revision_body(revision: int, value_micro: int, seq: int) -> dict:
             "reason": "not-installed",
             "state": "unavailable",
         },
-        "id": "<ulid>",
+        "id": "{room}",
         "mode_profile": {
             "binding_epoch": 1,
             "mode": "local",
@@ -490,21 +501,46 @@ def room_revision_body(revision: int, value_micro: int, seq: int) -> dict:
         "parent_revision": None if revision == 1 else revision - 1,
         "provenance": {"digest": "<hash>", "origin": "principal-authored"},
         "revision": revision,
-        "schema_id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
+        "schema_id": ROOM_REVISION_SCHEMA,
     }
 
 
-def create_room(expect: dict, capture: bool = False, privacy_export_ref: str = "{consent}") -> Exchange:
+def create_room(
+    expect: dict, capture: bool = False, value_micro: int = 250000, **descriptor: str
+) -> Exchange:
     return Exchange(
         "loopback",
         "POST",
         ROOMS_PATH,
         expect,
         actor=True,
-        body={"descriptor": room_descriptor(250000, privacy_export_ref)},
+        body={"descriptor": room_descriptor(value_micro, **descriptor)},
         has_body=True,
         capture="room" if capture else None,
     )
+
+
+def derive_room(expect: dict, value_micro: int, parent_revision: int = 1) -> Exchange:
+    return Exchange(
+        "loopback",
+        "POST",
+        ROOM_REVISIONS_PATH,
+        expect,
+        actor=True,
+        body={"descriptor": room_descriptor(value_micro), "parent_revision": parent_revision},
+        has_body=True,
+    )
+
+
+def room_session(*consents: str) -> Exchange:
+    """The `authorized-rooms` Principal's Session, capturing its consent: the capture is
+    observed with the slot it fills, so the consent reads `{consent}`."""
+    listed = [
+        {"consent_ref": "{consent}", "export_permitted": True, "state": state}
+        for state in consents
+    ]
+    body = session_body("gateway-mode-local-v1", "local", "denied", ROOM_GRANTS, 3, listed)
+    return session(observed(200, json_body(body)), capture="consent")
 
 
 def room_exchanges() -> list[Exchange]:
@@ -512,11 +548,8 @@ def room_exchanges() -> list[Exchange]:
     read back, and derived to revision 2, the third Event of its room Timeline after the
     derive's request claim."""
     created = room_revision_body(1, 250000, 1)
-    session_grants = session_body("gateway-mode-local-v1", "local", "denied", ROOM_GRANTS, 3, [
-        {"consent_ref": "<ulid>", "export_permitted": True, "state": "granted"}
-    ])
     return [
-        session(observed(200, json_body(session_grants)), capture="consent"),
+        room_session("granted"),
         create_room(observed(201, json_body(created)), capture=True),
         create_room(observed(200, json_body(created))),
         Exchange(
@@ -526,15 +559,23 @@ def room_exchanges() -> list[Exchange]:
             observed(200, json_body(created)),
             actor=True,
         ),
-        Exchange(
-            "loopback",
-            "POST",
-            ROOM_REVISIONS_PATH,
-            observed(201, json_body(room_revision_body(2, 500000, 3))),
-            actor=True,
-            body={"descriptor": room_descriptor(500000), "parent_revision": 1},
-            has_body=True,
-        ),
+        derive_room(observed(201, json_body(room_revision_body(2, 500000, 3))), 500000),
+    ]
+
+
+def room_conflict_exchanges() -> list[Exchange]:
+    """#303: the sub-case's one idempotency key used for a different create is
+    `409 idempotency-conflict`; a derive repeated from the same parent hashes like the head and
+    answers it (`200`, the ADR-041 section 7 duplicate), and a different derive from that
+    non-head parent is `409 append-conflict`."""
+    derived = observed(200, json_body(room_revision_body(2, 500000, 3)))
+    return [
+        room_session("granted"),
+        create_room(observed(201, json_body(room_revision_body(1, 250000, 1))), capture=True),
+        create_room(routed_problem(409, "idempotency-conflict", ROOMS_PATH), value_micro=1),
+        derive_room(observed(201, json_body(room_revision_body(2, 500000, 3))), 500000),
+        derive_room(derived, 500000),
+        derive_room(problem(409, "append-conflict", ROOM_REVISIONS_INSTANCE), 750000),
     ]
 
 
@@ -702,6 +743,12 @@ def positive_subcases() -> list[SubCase]:
             "authorized-rooms",
             room_exchanges(),
         ),
+        SubCase(
+            "pos.9",
+            "a reused key and a stale parent conflict, and a repeated derive answers the head",
+            "authorized-rooms",
+            room_conflict_exchanges(),
+        ),
     ]
 
 
@@ -709,8 +756,9 @@ def consent_revocation_exchanges() -> list[Exchange]:
     """#309: the consent governs Timeline creation until it is revoked; the revocation is
     recorded once (`201`), answered with its original on a retry (`200`), and the Session then
     discloses it revoked and no longer lists the operation."""
-    granted = [{"consent_ref": "<ulid>", "export_permitted": False, "state": "granted"}]
-    revoked = [{"consent_ref": "<ulid>", "export_permitted": False, "state": "revoked"}]
+    # The capturing Session is observed with the slot it fills, so the consent reads `{consent}`.
+    granted = [{"consent_ref": "{consent}", "export_permitted": False, "state": "granted"}]
+    revoked = [{"consent_ref": "{consent}", "export_permitted": False, "state": "revoked"}]
     without_create = [grant for grant in CONSENTED_GRANTS if grant != "timeline.create"]
     local = ("gateway-mode-local-v1", "local", "denied")
     return [
@@ -783,6 +831,25 @@ def denied_subcases() -> list[SubCase]:
                 )
             ],
         ),
+        SubCase(
+            "den.8",
+            "a room naming a revoked consent is refused as revoked",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                revoke(observed(201, json_body(consent_revocation_body(2)))),
+                create_room(routed_problem(403, "revoked", ROOMS_PATH)),
+            ],
+        ),
+        SubCase(
+            "den.9",
+            "a room whose persona the grant does not cover is unauthorized",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                create_room(routed_problem(403, "unauthorized", ROOMS_PATH), persona=BODY),
+            ],
+        ),
     ]
 
 
@@ -827,6 +894,17 @@ def malformed_subcases() -> list[SubCase]:
                 create("mal-4", actor=True),
                 action(routed_problem(422, "admission-rejected", ACTIONS_PATH), params=[1, 2]),
                 poll(EMPTY_PAGE, actor=True),
+            ],
+        ),
+        SubCase(
+            "mal.5",
+            "a room naming a governance record the host does not record is rejected",
+            "authorized-rooms",
+            [
+                room_session("granted"),
+                create_room(
+                    routed_problem(422, "admission-rejected", ROOMS_PATH), governance_ref=BODY
+                ),
             ],
         ),
     ]
@@ -1257,28 +1335,35 @@ def check_signal_payloads() -> None:
 
 
 # The members whose ULID segments are permitted nondeterministic operational fields.
-ULID_KEYS = (
-    "id",
-    "instance",
-    "consent_ref",
-    "room_id",
-    "privacy_export_ref",
-    "timeline_id",
-    "event_id",
-)
+ULID_KEYS = ("id", "instance", "consent_ref", "timeline_id", "event_id")
+# `n` lowercase hex digits, not all zero (the contract's hash and correlation ID patterns).
+NONZERO_HEX = "(?!0+$)[0-9a-f]{{{}}}"
+
+
+def substitute(value: object, captured: dict[str, str]) -> object:
+    """Every text value equal to a captured value becomes its slot literal (`{consent}`,
+    `{room}`), before the normalization, so an echo of a captured value is pinned."""
+    if isinstance(value, dict):
+        return {name: substitute(item, captured) for name, item in value.items()}
+    if isinstance(value, list):
+        return [substitute(item, captured) for item in value]
+    if isinstance(value, str):
+        return next((slot for slot, text in captured.items() if text == value), value)
+    return value
 
 
 def normalize(value: object, key: str | None = None) -> object:
     """The normalization of the requirements text, on a parsed JSON response value."""
     if isinstance(value, dict):
         members = {name: normalize(item, name) for name, item in value.items()}
+        provenance = members.get("provenance")
         if (
-            key == "provenance"
-            and members.get("origin") == "principal-authored"
-            and isinstance(members.get("digest"), str)
-            and re.fullmatch("[0-9a-f]{64}", members["digest"])
+            members.get("schema_id") == ROOM_REVISION_SCHEMA
+            and isinstance(provenance, dict)
+            and isinstance(provenance.get("digest"), str)
+            and re.fullmatch(NONZERO_HEX.format(64), provenance["digest"])
         ):
-            members["digest"] = "<hash>"
+            members["provenance"] = {**provenance, "digest": "<hash>"}
         return members
     if isinstance(value, list):
         return [normalize(item) for item in value]
@@ -1291,9 +1376,9 @@ def normalize(value: object, key: str | None = None) -> object:
             return "/".join(
                 "<ulid>" if re.fullmatch(ULID_PATTERN, part) else part for part in value.split("/")
             )
-        if key == "correlation_id" and re.fullmatch("[0-9a-f]{32}", value):
+        if key == "correlation_id" and re.fullmatch(NONZERO_HEX.format(32), value):
             return "<correlation>"
-        if key == "descriptor_hash" and re.fullmatch("[0-9a-f]{64}", value):
+        if key == "descriptor_hash" and re.fullmatch(NONZERO_HEX.format(64), value):
             return "<hash>"
     return value
 
@@ -1322,33 +1407,48 @@ def check_normalization() -> None:
         "next_cursor": "v1.x",
     }:
         raise SystemExit("the normalization accepts a non-ULID")
+    room_id, consent = "01ARZ3NDEKTSV4RRFFQ69G5FAW", "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+    captured = {"{consent}": consent, "{room}": room_id}
     room = {
-        "room_id": ulid,
-        "privacy_export_ref": ulid,
+        "schema_id": ROOM_REVISION_SCHEMA,
+        "id": room_id,
+        "descriptor": {
+            "room_id": room_id,
+            "privacy_export_ref": consent,
+            "governance_ref": ulid,
+            "correlation_id": "5f" * 16,
+            "descriptor_hash": "ab" * 32,
+            "rule_set_hash": "ab" * 32,
+        },
         "commit": {"timeline_id": ulid, "event_id": ulid},
-        "correlation_id": "5f" * 16,
-        "descriptor_hash": "ab" * 32,
         "provenance": {"digest": "cd" * 32, "origin": "principal-authored"},
-        "session": {"provenance": {"digest": "cd" * 32, "origin": "host-derived"}},
-        "rule_set_hash": "ab" * 32,
     }
-    if normalize(room) != {
-        "room_id": "<ulid>",
-        "privacy_export_ref": "<ulid>",
+    if normalize(substitute(room, captured)) != {
+        "schema_id": ROOM_REVISION_SCHEMA,
+        "id": "{room}",
+        "descriptor": {
+            "room_id": "{room}",
+            "privacy_export_ref": "{consent}",
+            "governance_ref": ulid,
+            "correlation_id": "<correlation>",
+            "descriptor_hash": "<hash>",
+            "rule_set_hash": "ab" * 32,
+        },
         "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>"},
-        "correlation_id": "<correlation>",
-        "descriptor_hash": "<hash>",
         "provenance": {"digest": "<hash>", "origin": "principal-authored"},
-        "session": {"provenance": {"digest": "cd" * 32, "origin": "host-derived"}},
-        "rule_set_hash": "ab" * 32,
     }:
         raise SystemExit("the room normalization rules are broken")
-    # A malformed correlation ID or hash stays raw.
-    if normalize({"correlation_id": "5F" * 16, "descriptor_hash": "ab"}) != {
-        "correlation_id": "5F" * 16,
-        "descriptor_hash": "ab",
-    }:
-        raise SystemExit("the room normalization accepts a malformed value")
+    # An echo of another room or consent, an all-zero or malformed hash or correlation ID,
+    # and a provenance digest outside a room revision stay raw.
+    for kept in (
+        {"room_id": ulid, "privacy_export_ref": ulid},
+        {"correlation_id": "0" * 32, "descriptor_hash": "0" * 64},
+        {"correlation_id": "5F" * 16, "descriptor_hash": "ab"},
+        {"schema_id": ROOM_REVISION_SCHEMA, "provenance": {"digest": "0" * 64}},
+        {"provenance": {"digest": "cd" * 32, "origin": "principal-authored"}},
+    ):
+        if normalize(substitute(kept, captured)) != kept:
+            raise SystemExit(f"the room normalization changes {kept}")
     for constant in (ACTOR, BODY, ENTITY, ulid_text(PRINCIPAL_BYTES)):
         if not re.fullmatch(ULID_PATTERN, constant):
             raise SystemExit(f"{constant} is not a ULID")
@@ -1411,8 +1511,8 @@ def check_routes_and_usage() -> None:
                     continue
                 needed.add(ROUTE_CAPABILITY[route])
                 steps += 1
-                if exchange.expect.get("status") == 201 and route in COMMITTING_ROUTES:
-                    events += 1
+                if exchange.expect.get("status") == 201:
+                    events += COMMITTED_EVENTS.get(route, 0)
             for exchange in sub.exchanges:
                 if exchange.expect == REFUSED and ROUTE_CAPABILITY[route_of(exchange.path)] in needed:
                     raise SystemExit(f"{sub.id}: a refused route's capability is held")

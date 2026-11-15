@@ -36,7 +36,7 @@ use super::payload::{
     ROOM_SLOT, TIMELINE_SLOT,
 };
 use super::{ACTOR_ENTITY_ID, GOVERNANCE_RECORD_ID};
-use crate::observation_v1;
+use crate::{observation_v1, substitute_captured_v1};
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -232,9 +232,10 @@ fn bind_mode(
 /// `authorized` and `authorized-air-gapped` may create Timelines, read their Events and read
 /// their own Session, and hold no action, signal or network grant. `authorized-consented` may
 /// also revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
-/// creation. `authorized-rooms` may create Timelines, read its Session and create, derive and
-/// read Scenario Rooms; it records the fixture governance record, and its one consent governs
-/// Timeline creation and permits export, so a room may name it as its `privacy_export_ref`.
+/// creation. `authorized-rooms` may create Timelines, read its Session, revoke a consent and
+/// create, derive and read Scenario Rooms; it records the fixture governance record, and its
+/// one consent governs Timeline creation and permits export, so a room may name it as its
+/// `privacy_export_ref`.
 fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
     let consent = |export_permitted| LocalConsentDraftV1 {
         subject: actor,
@@ -260,6 +261,7 @@ fn document(composition: CompositionV2, actor: EntityId) -> FixtureDocument {
             vec![
                 GatewayOperationV1::CREATE_TIMELINE,
                 GatewayOperationV1::READ_SESSION,
+                GatewayOperationV1::REVOKE_CONSENT,
                 GatewayOperationV1::CREATE_SCENARIO_ROOM,
                 GatewayOperationV1::DERIVE_SCENARIO_ROOM,
                 GatewayOperationV1::READ_SCENARIO_ROOM,
@@ -394,6 +396,17 @@ struct Slots {
 }
 
 impl Slots {
+    /// The `(slot, value)` pairs of the captured consent and room that later responses echo.
+    fn captured(&self) -> Vec<(&'static str, &str)> {
+        [
+            (CONSENT_SLOT, self.consent.as_deref()),
+            (ROOM_SLOT, self.room.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(slot, value)| value.map(|value| (slot, value)))
+        .collect()
+    }
+
     /// Fill the slot `capture` names from the response `parsed`.
     fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
         let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
@@ -463,7 +476,7 @@ async fn exchange_all(
                 .unwrap_or_default();
             run.steps += 1;
             run.output_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            run.events += u64::from(status == 201 && route.is_some_and(RouteV2::commits));
+            run.events += route.filter(|_| status == 201).map_or(0, RouteV2::events);
             if exchange.router == RouterV2::Spectator {
                 present |= subcase
                     .canary
@@ -472,7 +485,10 @@ async fn exchange_all(
             }
             let parsed = serde_json::from_slice::<Value>(&bytes).ok();
             slots.capture(exchange.capture(), parsed.as_ref());
-            observation_v1(status, parsed)
+            observation_v1(
+                status,
+                parsed.map(|value| substitute_captured_v1(value, &slots.captured())),
+            )
         } else {
             json!({"refused": "capability-denied"})
         };

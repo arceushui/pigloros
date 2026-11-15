@@ -1,13 +1,15 @@
 //! The response normalization of the requirements text (section 4).
 //!
-//! The contract fixes neither Timeline, Event and room IDs, nor cursors, nor problem detail
-//! text, nor a room's correlation ID and the hashes that cover it, so they are permitted
-//! nondeterministic operational fields: a ULID member (`id`, `consent_ref`, `room_id`,
-//! `privacy_export_ref`, `timeline_id`, `event_id`), a `next_cursor` member that is a
-//! well-formed cursor, a well-formed `correlation_id` or `descriptor_hash`, the digest of a
-//! `principal-authored` provenance and every problem `detail` text member are replaced by
-//! placeholders, and every ULID segment of a problem `instance` path becomes `<ulid>`. Every
-//! other value stays as it is, so a malformed ID, cursor or hash cannot match.
+//! A text value equal to a value the sub-case captured becomes its slot literal (`{consent}`,
+//! `{room}`), so an echo of a captured consent or room is pinned. The contract fixes neither
+//! Timeline and Event IDs, nor cursors, nor problem detail text, nor a room's correlation ID and
+//! the hashes that cover it, so they are permitted nondeterministic operational fields: a ULID
+//! `id`, `consent_ref`, `timeline_id` or `event_id` member, a `next_cursor` member that is a
+//! well-formed cursor, a `correlation_id` or `descriptor_hash` of lowercase hex digits that are
+//! not all zero, such a provenance digest of a Scenario Room revision, and every problem
+//! `detail` text member are replaced by placeholders, and every ULID segment of a problem
+//! `instance` path becomes `<ulid>`. Every other value stays as it is, so a malformed ID,
+//! cursor or hash, or an echo of another consent or room, cannot match.
 
 use serde_json::{json, Value};
 
@@ -25,30 +27,56 @@ pub fn observation_v1(status: u16, parsed: Option<Value>) -> Value {
     json!({"status": status, "body": body})
 }
 
+/// The `schema_id` of a Scenario Room revision, whose provenance digest covers its run-local
+/// descriptor hash and Event ID.
+const ROOM_REVISION_SCHEMA: &str = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
+
 /// Normalize one parsed JSON response value.
 #[must_use]
 pub fn normalize_response_v1(value: Value) -> Value {
     normalize(value, None)
 }
 
+/// Replace every text value of `value` equal to a captured value by its slot literal:
+/// `captured` holds `(slot, captured value)` pairs, such as `("{room}", <the room ID>)`.
+#[must_use]
+pub fn substitute_captured_v1(value: Value, captured: &[(&str, &str)]) -> Value {
+    match value {
+        Value::Object(members) => Value::Object(
+            members
+                .into_iter()
+                .map(|(name, member)| (name, substitute_captured_v1(member, captured)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| substitute_captured_v1(item, captured))
+                .collect(),
+        ),
+        Value::String(text) => Value::String(
+            captured
+                .iter()
+                .find(|(_, value)| *value == text)
+                .map_or(text, |(slot, _)| (*slot).to_owned()),
+        ),
+        other => other,
+    }
+}
+
 fn normalize(value: Value, key: Option<&str>) -> Value {
     match value {
         Value::Object(members) => {
-            // The provenance of a room revision covers its run-local descriptor hash.
-            let authored = key == Some("provenance")
-                && members.get("origin").and_then(Value::as_str) == Some("principal-authored");
+            let revision =
+                members.get("schema_id").and_then(Value::as_str) == Some(ROOM_REVISION_SCHEMA);
             Value::Object(
                 members
                     .into_iter()
                     .map(|(name, member)| {
-                        let normalized = match member {
-                            Value::String(text)
-                                if authored && name == "digest" && is_hex(&text, 64) =>
-                            {
-                                Value::from("<hash>")
-                            }
-                            member => normalize(member, Some(&name)),
-                        };
+                        let mut normalized = normalize(member, Some(&name));
+                        if revision && name == "provenance" {
+                            mask_digest(&mut normalized);
+                        }
                         (name, normalized)
                     })
                     .collect(),
@@ -67,13 +95,12 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
 
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
-        Some(
-            "id" | "instance" | "consent_ref" | "room_id" | "privacy_export_ref" | "timeline_id"
-            | "event_id",
-        ) => normalize_ulid_segments(&text),
+        Some("id" | "instance" | "consent_ref" | "timeline_id" | "event_id") => {
+            normalize_ulid_segments(&text)
+        }
         Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
-        Some("correlation_id") if is_hex(&text, 32) => "<correlation>".to_owned(),
-        Some("descriptor_hash") if is_hex(&text, 64) => "<hash>".to_owned(),
+        Some("correlation_id") if is_nonzero_hex(&text, 32) => "<correlation>".to_owned(),
+        Some("descriptor_hash") if is_nonzero_hex(&text, 64) => "<hash>".to_owned(),
         Some("detail") => "<message>".to_owned(),
         _ => text,
     }
@@ -103,6 +130,22 @@ fn is_cursor(text: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The `digest` of a room revision's provenance becomes `<hash>` when it is a hash.
+fn mask_digest(provenance: &mut Value) {
+    if let Some(digest) = provenance
+        .get_mut("digest")
+        .filter(|digest| digest.as_str().is_some_and(|text| is_nonzero_hex(text, 64)))
+    {
+        *digest = Value::from("<hash>");
+    }
+}
+
+/// `length` lowercase hex digits that are not all zero, as the contract's hash and
+/// correlation ID patterns require.
+fn is_nonzero_hex(text: &str, length: usize) -> bool {
+    is_hex(text, length) && text.bytes().any(|byte| byte != b'0')
 }
 
 /// `length` lowercase hex digits.

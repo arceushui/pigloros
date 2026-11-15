@@ -154,7 +154,10 @@ PLACEHOLDERS = {
     "<cursor>": SAMPLE_CURSOR,
     "<message>": "message",
     "<correlation>": "5f" * 16,
-    "<hash>": "0" * 64,
+    "<hash>": "ab" * 32,
+    # A captured consent or room echoed by a later response.
+    "{consent}": SAMPLE_ULID,
+    "{room}": SAMPLE_ULID,
 }
 
 

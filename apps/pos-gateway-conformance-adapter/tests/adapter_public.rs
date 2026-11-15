@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use pos_gateway_conformance_adapter::{
-    executor_declaration, exit_code, normalize_response_v1, observation_v1, run, AdapterRunErrorV1,
-    ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS, CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID,
-    SCHEMA_ID, SUBCASE_MISMATCH,
+    executor_declaration, exit_code, normalize_response_v1, observation_v1, run,
+    substitute_captured_v1, AdapterRunErrorV1, ABI_MAJOR, ABI_MINOR, CAPABILITY_IDS,
+    CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -552,57 +552,67 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
 }
 
 #[test]
-fn normalization_replaces_only_well_formed_room_identities_and_hashes() {
+fn normalization_pins_captured_echoes_and_replaces_only_well_formed_room_hashes() {
     let ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let room = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    let consent = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    let captured = [("{consent}", consent), ("{room}", room)];
+    let schema = "urn:pigloros:gateway:v1:schema:scenario-room-revision";
     let hash = "ab".repeat(32);
-    let correlation = "5f".repeat(16);
+    let normalized = |value: Value| normalize_response_v1(substitute_captured_v1(value, &captured));
     assert_eq!(
-        normalize_response_v1(json!({
-            "id": ulid,
+        normalized(json!({
+            "schema_id": schema,
+            "id": room,
             "descriptor": {
-                "room_id": ulid,
-                "privacy_export_ref": ulid,
+                "room_id": room,
+                "privacy_export_ref": consent,
                 "governance_ref": ulid,
-                "correlation_id": correlation,
+                "correlation_id": "5f".repeat(16),
                 "descriptor_hash": hash,
                 "rule_set_hash": hash,
             },
-            "commit": {"timeline_id": ulid, "event_id": ulid},
+            "commit": {"timeline_id": ulid, "event_id": ulid, "seq": 1},
             "provenance": {"digest": hash, "origin": "principal-authored"},
         })),
         json!({
-            "id": "<ulid>",
+            "schema_id": schema,
+            "id": "{room}",
             "descriptor": {
-                "room_id": "<ulid>",
-                "privacy_export_ref": "<ulid>",
+                "room_id": "{room}",
+                "privacy_export_ref": "{consent}",
                 "governance_ref": ulid,
                 "correlation_id": "<correlation>",
                 "descriptor_hash": "<hash>",
                 "rule_set_hash": hash,
             },
-            "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>"},
+            "commit": {"timeline_id": "<ulid>", "event_id": "<ulid>", "seq": 1},
             "provenance": {"digest": "<hash>", "origin": "principal-authored"},
         })
     );
-    // A host-derived provenance digest is deterministic, and a digest elsewhere, a malformed
-    // hash or correlation ID, or a non-text digest stays as it is.
+    // An echo of another room or consent, an all-zero or malformed hash or correlation ID, and
+    // a provenance digest outside a room revision or that is no hash stay as they are.
     for kept in [
-        json!({"provenance": {"digest": hash, "origin": "host-derived"}}),
-        json!({"provenance": {"digest": hash}}),
-        json!({"digest": hash, "origin": "principal-authored"}),
-        json!({"evidence": {"digest": hash, "origin": "principal-authored"}}),
-        json!({"provenance": {"digest": "AB".repeat(32), "origin": "principal-authored"}}),
-        json!({"provenance": {"digest": "ab".repeat(31), "origin": "principal-authored"}}),
-        json!({"provenance": {"digest": 1, "origin": "principal-authored"}}),
-        json!({"provenance": {"origin": hash}}),
-        json!({"correlation_id": "5F".repeat(16)}),
-        json!({"correlation_id": "5f".repeat(17)}),
-        json!({"correlation_id": "5g".repeat(16)}),
-        json!({"descriptor_hash": correlation}),
-        json!({"descriptor_hash": "ab".repeat(33)}),
+        json!({"room_id": ulid, "privacy_export_ref": ulid, "items": [ulid, 1]}),
+        json!({"correlation_id": "0".repeat(32), "descriptor_hash": "0".repeat(64)}),
+        json!({"correlation_id": "5F".repeat(16), "descriptor_hash": "AB".repeat(32)}),
+        json!({"correlation_id": "5f".repeat(17), "descriptor_hash": "ab".repeat(33)}),
+        json!({"correlation_id": "5g".repeat(16), "descriptor_hash": "ag".repeat(32)}),
+        json!({"provenance": {"digest": hash, "origin": "principal-authored"}}),
+        json!({"schema_id": "urn:other", "provenance": {"digest": hash}}),
+        json!({"schema_id": schema, "provenance": {"digest": "0".repeat(64)}}),
+        json!({"schema_id": schema, "provenance": {"digest": "ab".repeat(31)}}),
+        json!({"schema_id": schema, "provenance": {"digest": 1}}),
+        json!({"schema_id": schema, "provenance": {"origin": "principal-authored"}}),
+        json!({"schema_id": schema, "provenance": hash}),
+        json!({"schema_id": schema, "evidence": {"digest": hash}}),
     ] {
-        assert_eq!(normalize_response_v1(kept.clone()), kept, "{kept}");
+        assert_eq!(normalized(kept.clone()), kept, "{kept}");
     }
+    assert_eq!(
+        substitute_captured_v1(json!([room, {"a": consent}, ulid, null]), &captured),
+        json!(["{room}", {"a": "{consent}"}, ulid, null])
+    );
 }
 
 #[test]
