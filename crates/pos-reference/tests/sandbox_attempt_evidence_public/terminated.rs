@@ -820,7 +820,7 @@ fn tme1_encoder_applies_the_decoder_rules() -> TestResult {
     Ok(())
 }
 
-fn expect(accepted: bool) -> Result<(), ProtocolError> {
+const fn expect(accepted: bool) -> Result<(), ProtocolError> {
     if accepted {
         Ok(())
     } else {

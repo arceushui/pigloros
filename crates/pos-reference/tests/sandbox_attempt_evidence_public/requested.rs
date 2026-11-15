@@ -656,7 +656,7 @@ fn vector_c_with(
     status: u64,
     list: usize,
     name: &str,
-    value: Option<Value>,
+    value: Option<&Value>,
 ) -> TestResult<Vec<u8>> {
     super::oracle::edit(&unhex(RQE1_C)?, |fields| {
         fields[4] = integer(status);
@@ -664,8 +664,8 @@ fn vector_c_with(
             return Err("property list".into());
         };
         entries.retain_mut(|entry| match entry {
-            Value::Array(parts) if parts[0] == text(name) => value.clone().is_some_and(|value| {
-                parts[1] = value;
+            Value::Array(parts) if parts[0] == text(name) => value.is_some_and(|value| {
+                parts[1] = value.clone();
                 true
             }),
             _ => true,
@@ -733,7 +733,7 @@ fn rqe1_r10_rule_3_a_verified_readback_has_the_stdio_values() -> TestResult {
         (6, "StandardError", null(), true),
     ] {
         assert_eq!(
-            decode(&vector_c_with(0, list, name, value.clone())?),
+            decode(&vector_c_with(0, list, name, value.as_ref())?),
             if verified {
                 Ok(())
             } else {
@@ -743,7 +743,10 @@ fn rqe1_r10_rule_3_a_verified_readback_has_the_stdio_values() -> TestResult {
         );
         // A mismatch records whatever was read back under the right code.
         if value.is_some() {
-            assert_eq!(decode(&vector_c_with(2, list, name, value)?), Ok(()));
+            assert_eq!(
+                decode(&vector_c_with(2, list, name, value.as_ref())?),
+                Ok(())
+            );
         }
     }
     Ok(())
