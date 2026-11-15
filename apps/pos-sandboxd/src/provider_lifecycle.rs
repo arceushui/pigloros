@@ -108,18 +108,18 @@ impl SystemdProviderLifecycle {
     /// Returns [`ProviderLifecycleError::Unavailable`] when the runtime cannot
     /// be built or the system bus is unavailable or not a Unix socket.
     pub fn connect() -> Result<Self, ProviderLifecycleError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|_| ProviderLifecycleError::Unavailable)?;
-        let transport = runtime
-            .block_on(SystemdTransientUnitTransport::connect_system())
-            .map_err(|_| ProviderLifecycleError::Unavailable)?;
-        Ok(Self::from_parts(
-            runtime,
-            transport,
-            Box::new(CgroupRoot::system),
-        ))
+            .map_err(|_| ProviderLifecycleError::Unavailable)
+            .and_then(|runtime| {
+                let transport = runtime.block_on(SystemdTransientUnitTransport::connect_system());
+                transport
+                    .map_err(|_| ProviderLifecycleError::Unavailable)
+                    .map(|transport| {
+                        Self::from_parts(runtime, transport, Box::new(CgroupRoot::system))
+                    })
+            })
     }
 
     const fn from_parts(
@@ -173,7 +173,8 @@ impl SystemdProviderLifecycle {
             }
         }
         for family in ProviderUnitFamily::ALL {
-            if !self.observe(family).await?.is_empty() {
+            let remaining = self.observe(family).await;
+            if remaining.map(|units| units.is_empty()) != Ok(true) {
                 return Err(ProviderLifecycleError::ResidualResource);
             }
         }

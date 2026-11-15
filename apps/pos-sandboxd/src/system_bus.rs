@@ -433,6 +433,12 @@ impl SystemdTransientUnitTransport {
         Self::from_connection(connection).await
     }
 
+    /// The retained connection, for fault-injection tests.
+    #[cfg(test)]
+    pub(crate) const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     pub(crate) async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {

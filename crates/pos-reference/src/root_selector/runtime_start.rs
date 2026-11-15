@@ -62,13 +62,17 @@ pub(super) fn start_provider_runtime(
     admitted: &AdmittedSelectorProvider,
     executable_digest: ExecutableDigest,
 ) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
-    terminate_stale_runtimes(port)?;
-    remove_stale_endpoints(admitted)?;
-    let slot = ProviderRuntimeSlot::allocate(admitted)?;
-    let binary = admitted_provider_binary(admitted)?;
-    let observed = start_slot(port, &slot, &binary)?;
-    verify_started_process(&observed, &binary, executable_digest)?;
-    admit_started_runtime(admitted, slot, &observed)
+    terminate_stale_runtimes(port)
+        .and_then(|()| remove_stale_endpoints(admitted))
+        .and_then(|()| ProviderRuntimeSlot::allocate(admitted))
+        .and_then(|slot| admitted_provider_binary(admitted).map(|binary| (slot, binary)))
+        .and_then(|(slot, binary)| {
+            start_slot(port, &slot, &binary)
+                .and_then(|observed| {
+                    verify_started_process(&observed, &binary, executable_digest).map(|()| observed)
+                })
+                .and_then(|observed| admit_started_runtime(admitted, slot, &observed))
+        })
 }
 
 fn deadline_after(bound: Duration) -> Result<Instant, SelectorBoundaryError> {
@@ -86,12 +90,15 @@ const fn require(condition: bool) -> Result<(), SelectorBoundaryError> {
 }
 
 fn terminate_stale_runtimes(port: &dyn ProviderLifecyclePort) -> Result<(), SelectorBoundaryError> {
-    let challenge = ObservationChallenge::fresh()?;
-    let deadline = deadline_after(STALE_TERMINATION_BOUND)?;
-    let observed = port
-        .terminate_stale_runtimes(challenge, deadline)
-        .map_err(selector_unavailable)?;
-    require(observed.challenge() == challenge)
+    ObservationChallenge::fresh()
+        .and_then(|challenge| {
+            deadline_after(STALE_TERMINATION_BOUND).map(|deadline| (challenge, deadline))
+        })
+        .and_then(|(challenge, deadline)| {
+            port.terminate_stale_runtimes(challenge, deadline)
+                .map_err(selector_unavailable)
+                .and_then(|observed| require(observed.challenge() == challenge))
+        })
 }
 
 fn start_slot(
@@ -99,17 +106,21 @@ fn start_slot(
     slot: &ProviderRuntimeSlot,
     binary: &AdmittedProviderBinary,
 ) -> Result<StartedRuntimeObservation, SelectorBoundaryError> {
-    let challenge = ObservationChallenge::fresh()?;
-    let target = RuntimeSlotTarget::new(challenge, slot, binary);
-    let deadline = deadline_after(RUNTIME_START_BOUND)?;
-    let observed = port
-        .start_provider_runtime(&target, deadline)
-        .map_err(selector_unavailable)?;
-    require(
-        observed.challenge() == challenge
-            && observed.lifecycle_scope_id() == slot.lifecycle_scope_id(),
-    )?;
-    Ok(observed)
+    ObservationChallenge::fresh()
+        .and_then(|challenge| {
+            deadline_after(RUNTIME_START_BOUND).map(|deadline| (challenge, deadline))
+        })
+        .and_then(|(challenge, deadline)| {
+            port.start_provider_runtime(&RuntimeSlotTarget::new(challenge, slot, binary), deadline)
+                .map_err(selector_unavailable)
+                .and_then(|observed| {
+                    require(
+                        observed.challenge() == challenge
+                            && observed.lifecycle_scope_id() == slot.lifecycle_scope_id(),
+                    )
+                    .map(|()| observed)
+                })
+        })
 }
 
 /// R11 §5.0 step 7: the observed main process, as the kernel reports it.
@@ -120,11 +131,14 @@ fn verify_started_process(
 ) -> Result<(), SelectorBoundaryError> {
     let pid = observed.main_pid();
     let ticks = observed.main_start_time_ticks();
-    require(process_start_time_ticks(pid)? == ticks)?;
-    require(process_control_group(pid)? == observed.control_group().as_str())?;
-    require(executable_digest(pid, binary.length())? == binary.digest())?;
-    // The same process, not a recycled PID, owned the executable just hashed.
-    require(process_start_time_ticks(pid)? == ticks)
+    let same_process = || process_start_time_ticks(pid).and_then(|now| require(now == ticks));
+    same_process()
+        .and_then(|()| process_control_group(pid))
+        .and_then(|cgroup| require(cgroup == observed.control_group().as_str()))
+        .and_then(|()| executable_digest(pid, binary.length()))
+        .and_then(|digest| require(digest == binary.digest()))
+        // The same process, not a recycled PID, owned the executable just hashed.
+        .and_then(|()| same_process())
 }
 
 pub(super) fn process_control_group(pid: NonZeroU64) -> Result<String, SelectorBoundaryError> {
@@ -153,9 +167,10 @@ pub(super) fn proc_executable_digest(
 
 fn bounded_digest(source: impl Read, length: u64) -> Result<[u8; 32], SelectorBoundaryError> {
     let mut hasher = blake3::Hasher::new();
-    let copied =
-        io::copy(&mut source.take(length.saturating_add(1)), &mut hasher).map_err(io_error)?;
-    require(copied == length).map(|()| *hasher.finalize().as_bytes())
+    io::copy(&mut source.take(length.saturating_add(1)), &mut hasher)
+        .map_err(io_error)
+        .and_then(|copied| require(copied == length))
+        .map(|()| *hasher.finalize().as_bytes())
 }
 
 fn remove_stale_endpoints(
@@ -172,22 +187,38 @@ fn remove_stale_endpoint(
     endpoint: &Path,
     owner: u32,
 ) -> Result<(), SelectorBoundaryError> {
-    let relative = endpoint.strip_prefix("/").map_err(artifact_invalid)?;
-    let parent_relative = relative
-        .parent()
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-    let leaf = relative
-        .file_name()
-        .map(OsString::from)
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-    let root = File::open(ancestry_root).map_err(io_error)?;
-    let parent = open_directory_chain(root, parent_relative, owner)?;
-    let Some(identity) = stale_socket(&parent, &leaf, owner)? else {
-        return Ok(());
-    };
-    require_refused(&ancestry_root.join(relative))?;
-    validate_listener_parent(&ancestry_root.join(parent_relative), &parent, owner)?;
-    remove_matching_socket(&parent, &leaf, identity, owner)
+    endpoint
+        .strip_prefix("/")
+        .ok()
+        .and_then(|relative| {
+            relative
+                .parent()
+                .zip(relative.file_name().map(OsString::from))
+                .map(|(parent_relative, leaf)| (relative, parent_relative, leaf))
+        })
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        .and_then(|(relative, parent_relative, leaf)| {
+            File::open(ancestry_root)
+                .map_err(io_error)
+                .and_then(|root| open_directory_chain(root, parent_relative, owner))
+                .and_then(|parent| {
+                    stale_socket(&parent, &leaf, owner).and_then(|stale| {
+                        stale.map_or(Ok(()), |identity| {
+                            require_refused(&ancestry_root.join(relative))
+                                .and_then(|()| {
+                                    validate_listener_parent(
+                                        &ancestry_root.join(parent_relative),
+                                        &parent,
+                                        owner,
+                                    )
+                                })
+                                .and_then(|()| {
+                                    remove_matching_socket(&parent, &leaf, identity, owner)
+                                })
+                        })
+                    })
+                })
+        })
 }
 
 /// `None` when the leaf is absent; otherwise its identity, which must be a
@@ -206,18 +237,21 @@ fn stale_socket(
 /// A non-blocking `connect()` must fail with exactly `ECONNREFUSED`: no
 /// process listens on the leaf any more.
 fn require_refused(path: &Path) -> Result<(), SelectorBoundaryError> {
-    let address = SocketAddrUnix::new(path).map_err(artifact_invalid)?;
-    let socket = socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-        None,
-    )
-    .map_err(io_error)?;
-    match connect(&socket, &address) {
-        Err(rustix::io::Errno::CONNREFUSED) => Ok(()),
-        _ => Err(SelectorBoundaryError::ArtifactInvalid),
-    }
+    SocketAddrUnix::new(path)
+        .map_err(artifact_invalid)
+        .and_then(|address| {
+            socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+                None,
+            )
+            .map_err(io_error)
+            .and_then(|socket| match connect(&socket, &address) {
+                Err(rustix::io::Errno::CONNREFUSED) => Ok(()),
+                _ => Err(SelectorBoundaryError::ArtifactInvalid),
+            })
+        })
 }
 
 /// R11 §5.0 step 8: only the observed main process may answer.
@@ -228,11 +262,16 @@ fn admit_started_runtime(
 ) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
     let pid = observed.main_pid().get();
     let ticks = observed.main_start_time_ticks();
-    let transport = ProviderTransport::for_started_runtime(admitted, pid, ticks)?;
-    let ids = fresh_synchronization_ids()?;
-    synchronize_fixed_provider(&transport, admitted, ids)?;
-    let runtime = slot.bind_observed_process(pid, ticks)?;
-    Ok((transport, runtime))
+    ProviderTransport::for_started_runtime(admitted, pid, ticks)
+        .and_then(|transport| {
+            fresh_synchronization_ids()
+                .and_then(|ids| synchronize_fixed_provider(&transport, admitted, ids))
+                .map(|()| transport)
+        })
+        .and_then(|transport| {
+            slot.bind_observed_process(pid, ticks)
+                .map(|runtime| (transport, runtime))
+        })
 }
 
 #[cfg(test)]
