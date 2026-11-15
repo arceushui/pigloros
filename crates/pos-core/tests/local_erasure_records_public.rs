@@ -1117,3 +1117,119 @@ fn records_match_hand_written_golden_vectors() -> TestResult {
     );
     Ok(())
 }
+
+fn receipt_input(
+    policy: ErasureReferenceV1,
+    signature: ErasureReferenceV1,
+) -> pos_core::ErasureReceiptInputV1 {
+    use pos_core::{
+        ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
+        ErasureArtifactTransitionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+        ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInventoriesV1, ErasureReplayClaimV1,
+        ErasureRequiredTargetV1,
+    };
+    let target = |seed: u8| ErasureRequiredTargetV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: reference(seed),
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest: reference(seed.wrapping_add(1)),
+        replica_set: reference(90),
+        replica_id: reference(91),
+    };
+    let inventory = |category, target, owner, seed: u8| ErasureInventoryResultV1 {
+        category,
+        target,
+        transition: ErasureArtifactTransitionV1 {
+            from: ErasureReplayClaimV1::Exact,
+            to: ErasureReplayClaimV1::StructuralOnly,
+            reason: reference(seed),
+            owner,
+            acknowledgements: reference(seed.wrapping_add(1)),
+            provenance: reference(seed.wrapping_add(2)),
+        },
+        retained_disclosure: reference(seed.wrapping_add(3)),
+    };
+    let (replica, backup) = (target(10), target(20));
+    pos_core::ErasureReceiptInputV1 {
+        request: reference(1),
+        terminal_state: reference(2),
+        coordinator: reference(3),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 5,
+        acknowledgements: vec![
+            ErasureAcknowledgementV1 {
+                obligation: reference(130),
+                target: replica,
+                owner: reference(100),
+                evidence: reference(140),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            },
+            ErasureAcknowledgementV1 {
+                obligation: reference(131),
+                target: backup,
+                owner: reference(101),
+                evidence: reference(141),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            },
+        ],
+        frozen_targets: vec![replica, backup],
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: vec![inventory(
+                ErasureInventoryCategoryV1::Replica,
+                replica,
+                reference(100),
+                110,
+            )],
+            backups: vec![inventory(
+                ErasureInventoryCategoryV1::Backup,
+                backup,
+                reference(101),
+                120,
+            )],
+        },
+        replay_claim: ErasureReplayClaimV1::StructuralOnly,
+        policy,
+        trust: reference(5),
+        provenance: reference(6),
+        issue_position: 7,
+        signature,
+        receipt_digest: reference(0),
+    }
+}
+
+#[test]
+fn receipt_body_is_the_erc1_array_without_its_self_binding_fields() -> TestResult {
+    let receipt = pos_core::ErasureReceiptV1::new(receipt_input(reference(4), reference(8)))?;
+    let body = pos_core::local_erasure_receipt_body_v1(&receipt)?;
+    let erc1: Value = ciborium::from_reader(receipt.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(mut expected) = erc1 else {
+        return Err("ERC1 is not an array".into());
+    };
+    assert_eq!(expected.len(), 19);
+    expected.drain(16..18);
+    assert_eq!(
+        body,
+        encode(&Value::Array(vec![
+            Value::Text("ERCB1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Array(expected),
+        ]))?
+    );
+    let mut domain = b"ERCB1\0".to_vec();
+    domain.extend_from_slice(&body);
+    assert_eq!(
+        pos_core::local_erasure_receipt_body_reference_v1(&receipt)?,
+        ErasureReferenceV1::from_digest(*blake3::hash(&domain).as_bytes())
+    );
+
+    // The receipt's own signature is outside the preimage; its policy is in.
+    let resigned = pos_core::ErasureReceiptV1::new(receipt_input(reference(4), reference(9)))?;
+    assert_eq!(pos_core::local_erasure_receipt_body_v1(&resigned)?, body);
+    let repoliced = pos_core::ErasureReceiptV1::new(receipt_input(reference(14), reference(8)))?;
+    assert_ne!(pos_core::local_erasure_receipt_body_v1(&repoliced)?, body);
+    Ok(())
+}

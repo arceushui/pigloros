@@ -3824,6 +3824,7 @@ pub use authority_snapshot::{
 };
 pub use local_records::{
     local_erasure_bundle_signing_message_v1, local_erasure_owner_ref_v1,
+    local_erasure_receipt_body_reference_v1, local_erasure_receipt_body_v1,
     local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
     LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
     LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
