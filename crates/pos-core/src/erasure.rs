@@ -7681,9 +7681,9 @@ mod coverage_paths {
         let mut topology = vec![TimelineId::new(), TimelineId::new()];
         topology.sort_unstable();
         let inventory = ErasureVerifiedEmptyInventoryQueryV1::new(
-            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), topology.clone(), 0)?,
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), topology.clone(), 4)?,
         )
-        .verified_inventory_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())?;
+        .verified_inventory(4)?;
         assert!(topology
             .iter()
             .all(|timeline| inventory.records_timeline(*timeline)));
