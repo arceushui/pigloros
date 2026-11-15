@@ -211,8 +211,9 @@ versioned hooks once:
 git config core.hooksPath .githooks
 ```
 
-Both hooks fail closed if Trunk is unavailable. Trunk's own git-hook actions are
-disabled in `.trunk/trunk.yaml` so that Trunk never repoints `core.hooksPath`.
+Both hooks fail closed if Trunk is unavailable whenever there is something to
+check. Trunk's own git-hook actions are disabled in `.trunk/trunk.yaml` so that
+Trunk never repoints `core.hooksPath`.
 
 - **pre-commit:** `cargo fmt --check`, the full Trunk check of the staged
   changes (every enabled linter and formatter, check-only), a staged

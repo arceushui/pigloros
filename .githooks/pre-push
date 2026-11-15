@@ -3,31 +3,33 @@
 # Install: git config core.hooksPath .githooks
 set -euo pipefail
 
-if ! command -v trunk >/dev/null 2>&1; then
-    echo "pre-push: Trunk is required for the pushed-range check; install it before pushing" >&2
-    exit 1
-fi
-
-zero_sha=0000000000000000000000000000000000000000
-
 # Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on
 # stdin. Keep every ref update that pushes commits and drop deletions (local
-# sha all zeros), which push nothing to check. A new remote branch (remote sha
-# all zeros) stays in the list: Trunk then checks the files changed since the
-# merge-base with the upstream default branch.
+# sha all zeros, of any length so SHA-1 and SHA-256 repositories both work),
+# which push nothing to check. A new remote branch (remote sha all zeros)
+# stays in the list: Trunk then checks the files changed since the merge-base
+# with the upstream default branch.
 pushed_refs=$(mktemp)
 trap 'rm -f "$pushed_refs"' EXIT
 while read -r local_ref local_sha remote_ref remote_sha; do
-    if [ "$local_sha" = "$zero_sha" ]; then
-        echo "pre-push: skip deletion of $remote_ref"
-        continue
-    fi
+    case $local_sha in
+        *[!0]*) ;;
+        *)
+            echo "pre-push: skip deletion of $remote_ref"
+            continue
+            ;;
+    esac
     printf '%s %s %s %s\n' "$local_ref" "$local_sha" "$remote_ref" "$remote_sha" >>"$pushed_refs"
 done
 
 if [ ! -s "$pushed_refs" ]; then
     echo "pre-push: no commits pushed; nothing to check"
     exit 0
+fi
+
+if ! command -v trunk >/dev/null 2>&1; then
+    echo "pre-push: Trunk is required for the pushed-range check; install it before pushing" >&2
+    exit 1
 fi
 
 echo "pre-push: trunk check (all enabled linters and formatters, pushed commits, no fixes)"
