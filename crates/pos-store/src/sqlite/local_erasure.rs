@@ -248,8 +248,8 @@ fn insert_retained(
             connection
                 .execute(
                     "INSERT INTO erasure_retained_objects (reference_digest, tag)
-                     SELECT ?1, ?2 WHERE ?3 = 1",
-                    params![reference.digest().as_slice(), object.tag(), inserted],
+                     SELECT ?1, ?2 WHERE ?3",
+                    params![reference.digest().as_slice(), object.tag(), inserted == 1],
                 )
                 .map_err(map_erasure_receipt_failure)
         })
