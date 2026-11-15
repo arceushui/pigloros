@@ -101,8 +101,8 @@ impl From<RoomStoreErrorV1> for ProblemV1 {
             ),
             RoomStoreErrorV1::EventCeiling => (
                 Code::ResourceLimitExceeded,
-                StatusCode::CONFLICT,
-                "the room or the request Timeline reached its Event ceiling",
+                StatusCode::TOO_MANY_REQUESTS,
+                "the room or request Timeline reached its Event ceiling (permanent)",
             ),
             RoomStoreErrorV1::ModeUnavailable | RoomStoreErrorV1::Store(_) => {
                 return Self::new(

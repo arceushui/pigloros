@@ -236,6 +236,10 @@ mod served {
             created["descriptor"]["rule_set_hash"],
             golden("scenario-room-create")?["descriptor"]["rule_set_hash"]
         );
+        assert_eq!(
+            created["descriptor"]["plugin_composition_hash"],
+            "361f956939882f237b9bedde8cfb696bafed4edc7102abc753100eeea2b28842"
+        );
         assert_eq!(created["parent_revision"], Value::Null);
         assert_eq!(
             created["mode_profile"]["mode_profile_id"],
@@ -527,7 +531,11 @@ mod served {
                 StatusCode::TOO_MANY_REQUESTS,
                 false,
             ),
-            (RoomStoreErrorV1::EventCeiling, StatusCode::CONFLICT, false),
+            (
+                RoomStoreErrorV1::EventCeiling,
+                StatusCode::TOO_MANY_REQUESTS,
+                false,
+            ),
             (
                 RoomStoreErrorV1::ModeUnavailable,
                 StatusCode::SERVICE_UNAVAILABLE,

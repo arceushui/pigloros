@@ -80,8 +80,12 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   Timeline's lifetime (no ADR-038 retention window applies to it). A refused request, a stale
   derive and a ceiling refusal claim nothing, so the key stays free for another request. A new
   room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
-  room. The request Timeline holds at most `events_per_timeline` claims, after which a new room
-  or derive is a permanent `409 resource-limit-exceeded`.
+  room. A creation claims on the host's request Timeline (at most one claim per room, so the
+  root-Timeline ceiling of 64 keeps it far below its Event ceiling); a derive claims on the room's
+  own Timeline, which holds its claims and revisions, so a room holds at most half of
+  `events_per_timeline` revisions. A ceiling is a permanent `429 resource-limit-exceeded`
+  (`retryable: false`), as on every other route. Finding a claim reads its Timeline once, since
+  the host has no entity index.
 - A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
   `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a

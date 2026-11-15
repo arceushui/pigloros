@@ -892,7 +892,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
+            "description": "`idempotency-conflict`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -912,7 +912,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, 64 rooms), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota. A room's creation claims on the host's request Timeline, which the root-Timeline ceiling keeps far below its own Event ceiling.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1034,7 +1034,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1054,7 +1054,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
+            "description": "`resource-limit-exceeded`. Permanent and not retryable: the host reached its root-Timeline ceiling (`root_timelines`, 64 rooms), or the room reached its Event ceiling (`events_per_timeline`; a room holds a derive's claim and its revision, so at most half as many revisions). Retryable, with `Retry-After`: the denial-record bound or a per-Principal admission or concurrency quota. A room's creation claims on the host's request Timeline, which the root-Timeline ceiling keeps far below its own Event ceiling.",
             "content": {
               "application/problem+json": {
                 "schema": {

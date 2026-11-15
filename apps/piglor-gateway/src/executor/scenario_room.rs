@@ -272,7 +272,7 @@ fn create_room(
     // Every refusal of the input is answered before the claim.
     admit_room(EntityId::new(), input.clone(), admission)
         .and_then(|_| {
-            claim_request(host, claim, admission, |host| {
+            claim_request(host, claim, admission, ClaimPlace::Requests, |host| {
                 require_root_headroom(host, admission)
             })
         })
@@ -335,8 +335,8 @@ fn derive_room(
                 Err(RoomStoreErrorV1::StaleParent)
             }
         }),
-        None => claim_request(host, claim, admission, |_| {
-            require_event_headroom(revisions.len(), admission)
+        None => claim_request(host, claim, admission, ClaimPlace::Room(timeline), |_| {
+            Ok(())
         })
         .and_then(|causation| append_revision(host, timeline, &candidate, causation, admission)),
     }
@@ -382,15 +382,39 @@ fn require_event_headroom(owned: usize, admission: &RoomAdmissionV1) -> RoomResu
     }
 }
 
+/// Where a claim is recorded: a room's creation claims on the host's
+/// request Timeline, a derive on the room's own Timeline. Creations are
+/// bounded by the root-Timeline ceiling, so the request Timeline never fills;
+/// a room holds its derive claims next to its revisions.
+#[derive(Clone, Copy)]
+enum ClaimPlace {
+    Requests,
+    Room(TimelineId),
+}
+
+impl ClaimPlace {
+    /// The Events a new claim adds with what it is for: a creation's claim
+    /// alone (its room has its own Timeline), a derive's claim and revision.
+    const fn events(self) -> usize {
+        match self {
+            Self::Requests => 1,
+            Self::Room(_) => 2,
+        }
+    }
+}
+
 /// Claim `claim`'s key for its request and return the claim's `EventId`.
 ///
 /// A key already claimed for the same request returns its claim (a retry);
-/// for another request it is a conflict. A new claim commits only after
-/// `headroom` admits what the request will create.
+/// for another request it is a conflict. A new claim commits only after the
+/// Event ceiling and `headroom` admit what the request will create. The
+/// lookup reads the claim Timeline once (the host has no entity index), so
+/// it costs one read of at most `events_per_timeline` Events.
 fn claim_request(
     host: &mut ErasureExecutionHostV1,
     claim: &RoomClaimV1,
     admission: &RoomAdmissionV1,
+    place: ClaimPlace,
     headroom: impl FnOnce(&mut ErasureExecutionHostV1) -> RoomResult<()>,
 ) -> RoomResult<EventId> {
     // The claim acts as an entity named by its key, so claims stay apart.
@@ -402,34 +426,42 @@ fn claim_request(
         Kind::new(ROOM_REQUEST_EVENT_TYPE),
         CanonicalBytes::from_vec(claim.request_digest.to_vec()),
     );
-    find_root(host, ROOM_REQUESTS_TIMELINE)
-        .and_then(|requests| {
-            requests
-                .as_ref()
-                .map_or(Ok(Vec::new()), |requests| {
-                    read_events(host, requests.id(), ROOM_REQUEST_EVENT_TYPE, CLAIM_BYTES)
-                })
-                .map(|claims| (requests, claims))
+    let located = match place {
+        ClaimPlace::Requests => find_root(host, ROOM_REQUESTS_TIMELINE)
+            .map(|requests| requests.map(|timeline| timeline.id())),
+        ClaimPlace::Room(timeline) => Ok(Some(timeline)),
+    };
+    located
+        .and_then(|timeline| {
+            timeline
+                .map_or(Ok(Vec::new()), |timeline| read_all(host, timeline))
+                .map(|events| (timeline, events))
         })
-        .and_then(
-            |(requests, claims)| match claims.iter().find(|event| event.entity == entity) {
+        .and_then(|(timeline, events)| {
+            let claimed = events.iter().find(|event| {
+                event.event_type.as_str() == ROOM_REQUEST_EVENT_TYPE && event.entity == entity
+            });
+            match claimed {
                 Some(claimed) if claimed.payload.as_slice() == claim.request_digest => {
                     Ok(claimed.id)
                 }
                 Some(_) => Err(RoomStoreErrorV1::IdempotencyConflict),
-                None => require_event_headroom(claims.len(), admission)
+                None => require_event_headroom(events.len() + place.events() - 1, admission)
                     .and_then(|()| headroom(host))
                     .and_then(|()| {
-                        requests.map_or_else(
-                            || create_root(host, ROOM_REQUESTS_TIMELINE, admission),
+                        timeline.map_or_else(
+                            || {
+                                create_root(host, ROOM_REQUESTS_TIMELINE, admission)
+                                    .map(|requests| requests.id())
+                            },
                             Ok,
                         )
                     })
-                    .and_then(|requests| {
+                    .and_then(|timeline| {
                         host.command_sender()
                             .and_then(|mut sender| {
                                 sender.append_bounded(
-                                    requests.id(),
+                                    timeline,
                                     std::slice::from_ref(&draft),
                                     admission.max_events,
                                 )
@@ -442,12 +474,9 @@ fn claim_request(
                             .map(|event| event.id)
                             .ok_or(RoomStoreErrorV1::EventCeiling)
                     }),
-            },
-        )
+            }
+        })
 }
-
-/// The bytes of one claim payload: the 32-byte request digest.
-const CLAIM_BYTES: usize = 32;
 
 /// An append identity the worker already used: impossible while the worker
 /// serializes every room operation and checks before it appends.
@@ -547,6 +576,19 @@ fn read_events(
                 .filter(|event| event.event_type.as_str() == event_type)
                 .collect()
         })
+        .map_err(RoomStoreErrorV1::from)
+}
+
+/// Every Event of a room or the request Timeline: revisions and claims.
+fn read_all(host: &mut ErasureExecutionHostV1, timeline: TimelineId) -> RoomResult<Vec<Event>> {
+    let bounds = EventReadBounds::new(
+        MAX_ROOM_DESCRIPTOR_BYTES_V1,
+        ROOM_REVISION_EVENT_TYPE.len(),
+        0,
+        usize::MAX,
+    );
+    host.read_sender()
+        .and_then(|mut sender| sender.read_bounded(timeline, SeqRange::all(), bounds))
         .map_err(RoomStoreErrorV1::from)
 }
 

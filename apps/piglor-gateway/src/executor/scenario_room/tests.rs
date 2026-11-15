@@ -178,6 +178,11 @@ fn a_room_is_created_retried_derived_and_read() -> TestResult {
     assert_eq!(stored.seq.as_u64(), 1);
     assert_eq!(stored.produced_under.0, GatewayModeProfileIdV1::Local);
     assert_eq!(stored.produced_under.2.get(), 1);
+    // The served descriptor is exactly the stored payload's JSON.
+    assert_eq!(
+        crate::scenario_room::revision_json(stored)["descriptor"],
+        serde_json::from_slice::<serde_json::Value>(stored.descriptor.payload())?
+    );
     let room = stored.descriptor.room_id();
     // An exact retry returns the room; the same key with another request
     // is a conflict.
@@ -240,9 +245,13 @@ fn a_claim_finishes_its_interrupted_room() -> TestResult {
     let admission = admission()?;
     // A claim whose room Timeline exists without its revision (an attempt
     // the host interrupted) is finished in that Timeline.
-    let causation = ok(claim_request(&mut host, &claim(2, 2), &admission, |_| {
-        Ok(())
-    }))?;
+    let causation = ok(claim_request(
+        &mut host,
+        &claim(2, 2),
+        &admission,
+        ClaimPlace::Requests,
+        |_| Ok(()),
+    ))?;
     let room = EntityId::from_ulid(causation.inner());
     let timeline = ok(create_root(
         &mut host,
@@ -257,9 +266,13 @@ fn a_claim_finishes_its_interrupted_room() -> TestResult {
         (timeline.id(), room)
     );
     // A claim with no Timeline yet creates it.
-    let causation = ok(claim_request(&mut host, &claim(3, 3), &admission, |_| {
-        Ok(())
-    }))?;
+    let causation = ok(claim_request(
+        &mut host,
+        &claim(3, 3),
+        &admission,
+        ClaimPlace::Requests,
+        |_| Ok(()),
+    ))?;
     assert_eq!(
         shape(&ok(create(&mut host, 3, 3, 3, &admission)?)?),
         (true, EntityId::from_ulid(causation.inner()), 1)
@@ -357,40 +370,22 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
         max_timelines: 2,
         ..admission()?
     };
-    let causation = ok(claim_request(&mut host, &claim(4, 4), &two, |_| Ok(())))?;
+    let causation = ok(claim_request(
+        &mut host,
+        &claim(4, 4),
+        &two,
+        ClaimPlace::Requests,
+        |_| Ok(()),
+    ))?;
     drop(ok(create_root(&mut host, "other", &two))?);
+    // The claim already exists, so its retry runs no headroom check and
+    // meets the ceiling when it creates the room's Timeline.
+    drop(causation);
     assert_eq!(
-        refusal(create_and_finish(
-            &mut host,
-            EntityId::from_ulid(causation.inner()),
-            &two
-        )?),
+        refusal(create(&mut host, 4, 4, 4, &two)?),
         "TimelineCeiling"
     );
     Ok(())
-}
-
-/// Finish the claim of `room_id` with no Timeline yet, past the headroom
-/// check, as a retry after another writer took the last root does.
-fn create_and_finish(
-    host: &mut ErasureExecutionHostV1,
-    room_id: EntityId,
-    admission: &RoomAdmissionV1,
-) -> Result<RoomResult<RoomOutcomeV1>, ulid::DecodeError> {
-    let input = input(4)?;
-    Ok(
-        admit_room(room_id, input, admission).and_then(|descriptor| {
-            create_root(host, &room_timeline_name(room_id), admission).and_then(|timeline| {
-                append_revision(
-                    host,
-                    timeline.id(),
-                    &descriptor,
-                    EventId::from_ulid(room_id.inner()),
-                    admission,
-                )
-            })
-        }),
-    )
 }
 
 #[test]
