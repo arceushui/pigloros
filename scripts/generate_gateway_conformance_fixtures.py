@@ -92,6 +92,9 @@ MODE_PROFILE_DIGESTS = {
 }
 # The operations the fixture Local Principal is granted, sorted: what its Session discloses.
 PRINCIPAL_GRANTS = ["session.read", "timeline.create", "timeline.events.read"]
+# The operations the `authorized-consented` fixture Principal is granted (#309), sorted; its one
+# consent governs `timeline.create`.
+CONSENTED_GRANTS = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
 CURSOR_PATTERN = f"v1\\.[0-9a-f]{{64}}\\.{ULID_PATTERN}\\.[1-9][0-9]*"
 
 # The route of a request path (query removed) and the capability it needs (section "Routes").
@@ -103,6 +106,7 @@ ROUTE_CAPABILITY = {
     "signals": "timeline.signals.append",
     "actions": "world.action.v1.submit",
     "session": "session.read",
+    "revoke": "consent.revoke",
 }
 CAPABILITIES = tuple(sorted(ROUTE_CAPABILITY.values()))
 MAX_TIMELINES = 64  # README "Timeline bound"
@@ -116,6 +120,7 @@ def route_of(path: str) -> str | None:
         "/v1/ledger": "ledger",
         "/v1/timelines": "create",
         "/v1/session": "session",
+        "/v1/me/consent-revocations": "revoke",
     }
     if base in fixed:
         return fixed[base]
@@ -173,7 +178,9 @@ class Exchange:
     actor: bool = False
     body: object = None
     has_body: bool = False
-    capture: bool = False
+    # The slot this exchange's response fills: `timeline` (its `id`) or `consent` (the
+    # `consent_ref` of its first consent).
+    capture: str | None = None
 
     def payload(self) -> dict:
         value: dict = {
@@ -186,8 +193,8 @@ class Exchange:
             value["actor"] = True
         if self.has_body:
             value["body"] = self.body
-        if self.capture:
-            value["capture"] = "timeline"
+        if self.capture is not None:
+            value["capture"] = self.capture
         return value
 
 
@@ -255,30 +262,38 @@ def ulid_text(data: bytes) -> str:
     return "".join(CROCKFORD[(value >> (5 * (25 - index))) & 31] for index in range(26))
 
 
-def session_body(mode_profile_id: str, mode: str, network: str) -> dict:
-    """The `Session` the contract prescribes for the fixture Local Principal: generation 1 (its
-    one grant is issued at authority position 1 and binds no consent), binding epoch 1, no
-    operator network grant, and the provenance digest of the `Session` schema description."""
+def session_body(
+    mode_profile_id: str,
+    mode: str,
+    network: str,
+    grants: list[str] | None = None,
+    generation: int = 1,
+    consents: list[dict] | None = None,
+) -> dict:
+    """The `Session` the contract prescribes for the fixture Local Principal: by default
+    generation 1 (its one grant is issued at authority position 1 and binds no consent), binding
+    epoch 1, no operator network grant, and the provenance digest of the `Session` schema
+    description."""
     principal = ulid_text(PRINCIPAL_BYTES)
     digest = MODE_PROFILE_DIGESTS[mode_profile_id]
     record = (
         b"PiglorOS.GatewaySession.v1\x00"
         + PRINCIPAL_BYTES
-        + (1).to_bytes(8, "big")
+        + generation.to_bytes(8, "big")
         + digest.encode("ascii")
         + (1).to_bytes(8, "big")
     )
     return {
         "availability": {"state": "available", "withheld": []},
-        "consents": [],
+        "consents": [] if consents is None else consents,
         "contract": {"api_major": "v1", "contract_version": "1.0.0-draft"},
         "execution_profile": {
             "profile_kind": "epf1",
             "reason": "not-installed",
             "state": "unavailable",
         },
-        "generation": 1,
-        "grants": PRINCIPAL_GRANTS,
+        "generation": generation,
+        "grants": PRINCIPAL_GRANTS if grants is None else grants,
         "id": "<ulid>",
         "mode_profile": {
             "binding_epoch": 1,
@@ -295,8 +310,58 @@ def session_body(mode_profile_id: str, mode: str, network: str) -> dict:
     }
 
 
-def session(expect: dict, actor: bool = True) -> Exchange:
-    return Exchange("loopback", "GET", "/v1/session", expect, actor=actor)
+def session(expect: dict, actor: bool = True, capture: str | None = None) -> Exchange:
+    return Exchange("loopback", "GET", "/v1/session", expect, actor=actor, capture=capture)
+
+
+def consent_revocation_body(generation: int) -> dict:
+    """The `ConsentRevocation` the contract prescribes for the `authorized-consented` fixture
+    Principal's one consent, revoked at consent Timeline sequence 2 (its `generation`), under the
+    Local binding at epoch 1, with the provenance digest of the `ConsentRevocation` schema
+    description."""
+    digest = MODE_PROFILE_DIGESTS["gateway-mode-local-v1"]
+    record = (
+        b"PiglorOS.GatewayConsentRevocation.v1\x00"
+        + PRINCIPAL_BYTES
+        + generation.to_bytes(8, "big")
+        + digest.encode("ascii")
+        + (1).to_bytes(8, "big")
+    )
+    return {
+        "availability": {"state": "available", "withheld": []},
+        "consent_ref": "<ulid>",
+        "execution_profile": {
+            "profile_kind": "epf1",
+            "reason": "not-installed",
+            "state": "unavailable",
+        },
+        "future_protected_work": "denied",
+        "generation": generation,
+        "id": "<ulid>",
+        "mode_profile": {
+            "binding_epoch": 1,
+            "mode": "local",
+            "mode_profile_digest": digest,
+            "mode_profile_id": "gateway-mode-local-v1",
+            "profile_kind": "gateway-mode-v1",
+        },
+        "provenance": {"digest": golden.blake3(record).hex(), "origin": "host-derived"},
+        "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
+        "state": "revoked",
+    }
+
+
+def revoke(expect: dict) -> Exchange:
+    """Revoke the consent the last `consent` capture named, as the fixture actor."""
+    return Exchange(
+        "loopback",
+        "POST",
+        "/v1/me/consent-revocations",
+        expect,
+        actor=True,
+        body={"consent_ref": "{consent}"},
+        has_body=True,
+    )
 
 
 REFUSED = {"refused": "capability-denied"}
@@ -331,7 +396,7 @@ def create(
         actor=actor,
         body={"name": name},
         has_body=True,
-        capture=capture,
+        capture="timeline" if capture else None,
     )
 
 
@@ -451,6 +516,33 @@ def positive_subcases() -> list[SubCase]:
                 )
             ],
         ),
+        SubCase(
+            "pos.7",
+            "a revoked consent stops the operation it governs and is revoked exactly once",
+            "authorized-consented",
+            consent_revocation_exchanges(),
+        ),
+    ]
+
+
+def consent_revocation_exchanges() -> list[Exchange]:
+    """#309: the consent governs Timeline creation until it is revoked; the revocation is
+    recorded once (`201`), answered with its original on a retry (`200`), and the Session then
+    discloses it revoked and no longer lists the operation."""
+    granted = [{"consent_ref": "<ulid>", "export_permitted": False, "state": "granted"}]
+    revoked = [{"consent_ref": "<ulid>", "export_permitted": False, "state": "revoked"}]
+    without_create = [grant for grant in CONSENTED_GRANTS if grant != "timeline.create"]
+    local = ("gateway-mode-local-v1", "local", "denied")
+    return [
+        session(
+            observed(200, json_body(session_body(*local, CONSENTED_GRANTS, 3, granted))),
+            capture="consent",
+        ),
+        create("pos-7", capture=False, actor=True),
+        revoke(observed(201, json_body(consent_revocation_body(2)))),
+        revoke(observed(200, json_body(consent_revocation_body(2)))),
+        create("pos-7", capture=False, actor=True, expect=routed_problem(403, "revoked", "/v1/timelines")),
+        session(observed(200, json_body(session_body(*local, without_create, 4, revoked)))),
     ]
 
 
@@ -799,7 +891,7 @@ def family_schema(family: str) -> dict:
             "path": {"type": "string", "pattern": "^/[!-~]{0,255}$"},
             "actor": {"const": True},
             "body": {},
-            "capture": {"const": "timeline"},
+            "capture": {"enum": ["timeline", "consent"]},
             "expect": {"$ref": "#/$defs/observation"},
         },
     }
@@ -810,7 +902,9 @@ def family_schema(family: str) -> dict:
         "properties": {
             "id": {"type": "string", "pattern": f"^{ID_PREFIX[family]}\\.[0-9]+$"},
             "title": {"type": "string", "pattern": "^[ -~]{1,160}$"},
-            "composition": {"enum": ["open", "authorized", "authorized-air-gapped"]},
+            "composition": {
+                "enum": ["open", "authorized", "authorized-air-gapped", "authorized-consented"]
+            },
             "exchanges": {
                 "type": "array",
                 "minItems": 1,
@@ -976,7 +1070,7 @@ def normalize(value: object, key: str | None = None) -> object:
             return "<cursor>"
         if key == "detail":
             return "<message>"
-        if key in ("id", "instance"):
+        if key in ("id", "instance", "consent_ref"):
             return "/".join(
                 "<ulid>" if re.fullmatch(ULID_PATTERN, part) else part for part in value.split("/")
             )
@@ -1033,19 +1127,22 @@ def check_routes_and_usage() -> None:
         needed: set[str] = set()
         steps = events = 0
         for sub in SUBCASES[family]():
-            captured = False
+            captured = consent_captured = False
             for exchange in sub.exchanges:
                 route = route_of(exchange.path)
                 if route is None:
                     raise SystemExit(f"{sub.id}: {exchange.path} is no Gateway route")
                 if "{timeline}" in exchange.path and not captured:
                     raise SystemExit(f"{sub.id}: a Timeline is used before it is captured")
-                captured = captured or exchange.capture
+                if "{consent}" in json.dumps(exchange.body) and not consent_captured:
+                    raise SystemExit(f"{sub.id}: a consent is used before it is captured")
+                captured = captured or exchange.capture == "timeline"
+                consent_captured = consent_captured or exchange.capture == "consent"
                 if exchange.expect == REFUSED:
                     continue
                 needed.add(ROUTE_CAPABILITY[route])
                 steps += 1
-                if exchange.expect.get("status") == 201 and route in ("signals", "actions"):
+                if exchange.expect.get("status") == 201 and route in ("signals", "actions", "revoke"):
                     events += 1
             for exchange in sub.exchanges:
                 if exchange.expect == REFUSED and ROUTE_CAPABILITY[route_of(exchange.path)] in needed:

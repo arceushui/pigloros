@@ -19,7 +19,8 @@ A case payload is RFC 8785 JSON with exactly the members `schema`
 `exchanges` (1 to 128), and
 optionally `canary` (1 to 64 printable ASCII bytes). An exchange has exactly `router`
 (`loopback` or `spectator`), `method` (`GET` or `POST`), `path`, `expect`, and optionally
-`actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"`). An
+`actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"` or
+`"consent"`). An
 optional member that is null is the same as an absent one. A `title` is 1 to 160 printable ASCII
 bytes (space allowed), a `path` 1 to 256 printable ASCII bytes without space, and a sub-case `id`
 is the family prefix, a dot and one or more decimal digits. A payload outside
@@ -38,11 +39,15 @@ The path without its query names one route; any other path is outside the gramma
 | signals | `POST /v1/timelines/:id/signals` | `timeline.signals.append` |
 | actions | `POST /v1/timelines/:id/actions` | `world.action.v1.submit` |
 | session | `GET /v1/session` | `session.read` |
+| revoke | `POST /v1/me/consent-revocations` | `consent.revoke` |
 
 An exchange whose route capability the attempt does not hold is not sent; its observation is
 `{"refused": "capability-denied"}`. The literal `{timeline}` in a path is replaced by the `id`
-of the response of the last earlier sent exchange of the sub-case that sets `capture`; a path that
-uses it before any capture is outside the grammar. A capturing exchange that is refused captures
+of the response of the last earlier sent exchange of the sub-case that sets `capture` to
+`timeline`; a path that uses it before any such capture is outside the grammar. The literal
+`{consent}` in a request body is replaced by the `consent_ref` of the first member of
+`consents` of the response of the last earlier sent exchange that sets `capture` to `consent`;
+a body that uses it before any such capture is outside the grammar. A capturing exchange that is refused captures
 nothing, and a captured response with no text `id` leaves the slot empty, so the exchanges that use
 it cannot match.
 
@@ -68,6 +73,12 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   `x-piglor-actor-entity: 01JC0GATEWAYF1XTVREACT0R00`.
 - `authorized-air-gapped`: the same composition over a store bound to the Air-Gapped execution
   mode `gateway-mode-air-gapped-v1`.
+- `authorized-consented`: the `authorized` composition (#309) whose fixture Local Principal is
+  also granted `consent.revoke` (resource `consent`, action `revoke`) and binds one consent of
+  the fixture actor to itself, purpose `operation`, data category `timeline`, export not
+  permitted, so it governs `timeline.create`. The consent is recorded at sequence 1 of the Principal's consent
+  Timeline; the consent-bound grant is issued at position 1 of its own authority Timeline, so
+  the Principal's Session generation is 3 until the consent is revoked.
 
 A request `body` is sent as compact JSON with `content-type: application/json`. Every request
 carries `idempotency-key: <sub-case id>`; routes without an idempotency key ignore it, and two
@@ -83,9 +94,10 @@ are permitted nondeterministic operational fields:
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
   becomes `"<cursor>"`;
 - a member `detail` with a text value becomes `"<message>"`;
-- in a member `id` or `instance` with a text value, every `/`-separated segment that is a ULID
-  becomes `<ulid>`, so an `id` that is a ULID becomes `"<ulid>"` (a routed problem names its
-  route template and carries no ID; only the path of a request no route serves can carry one).
+- in a member `id`, `consent_ref` or `instance` with a text value, every `/`-separated segment
+  that is a ULID becomes `<ulid>`, so an `id` or `consent_ref` that is a ULID becomes
+  `"<ulid>"` (a routed problem names its route template and carries no ID; only the path of a
+  request no route serves can carry one).
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
@@ -106,7 +118,7 @@ observation list). A `namespaced-failure` family returns its family failure when
 exchange matches and no canary is present, else `subcase-mismatch`.
 
 Usage: one execution step per sent exchange, the response body bytes as output bytes, and one
-Event per `201` response of the signals or actions route. The other counters are 0.
+Event per `201` response of the signals, actions or revoke route. The other counters are 0.
 
 ## 6. Families
 

@@ -32,7 +32,8 @@ pub const ABI_MINOR: u16 = 0;
 pub const SCHEMA_ID: &str = "pigloros.gateway-client-conformance.case.v2";
 
 /// The route capabilities the adapter implements, sorted.
-pub const CAPABILITY_IDS: [&str; 7] = [
+pub const CAPABILITY_IDS: [&str; 8] = [
+    "consent.revoke",
     "gateway.health.read",
     "gateway.ledger.read",
     "session.read",

@@ -5,7 +5,7 @@ use crate::{
     operation::{
         AppendSignalOperation, CreatePredictionOperation, CreateScenarioRoomOperation,
         CreateTimelineOperation, DeriveScenarioRoomOperation, OperationAuthority,
-        ReadScenarioRoomOperation, ReadSessionOperation,
+        ReadScenarioRoomOperation, ReadSessionOperation, RevokeConsentOperation,
     },
     problem::{
         method_not_allowed, not_routed, problem_instance, ContractJson, ContractPath,
@@ -165,6 +165,7 @@ fn loopback_routes() -> Router<AppState> {
             "/v1/scenario-rooms/{room_id}/revisions/{revision}",
             get(get_scenario_room_revision),
         )
+        .route("/v1/me/consent-revocations", post(post_consent_revocation))
 }
 
 /// Every router answers unknown paths, unserved methods and every failure with a problem body
@@ -183,7 +184,7 @@ fn finish(routes: Router<AppState>, state: AppState, max_body_bytes: usize) -> R
 }
 
 /// The protected loopback routes, by method and route template.
-const PROTECTED_ROUTES: [(&str, &str); 9] = [
+const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/ledger/predictions"),
     ("POST", "/v1/timelines"),
     ("GET", "/v1/timelines/{timeline_id}/events"),
@@ -193,6 +194,7 @@ const PROTECTED_ROUTES: [(&str, &str); 9] = [
     ("POST", "/v1/scenario-rooms"),
     ("POST", "/v1/scenario-rooms/{room_id}/revisions"),
     ("GET", "/v1/scenario-rooms/{room_id}/revisions/{revision}"),
+    ("POST", "/v1/me/consent-revocations"),
 ];
 
 /// Answer every protected route of an unprovisioned host `401` before its
@@ -726,6 +728,38 @@ fn room_response(
     })
 }
 
+/// The body of `POST /v1/me/consent-revocations` (#309): the consent the
+/// acting Principal revokes, named by its `consent.granted.v1` `EventId`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentRevocationRequestV1 {
+    consent_ref: ulid::Ulid,
+}
+
+/// `POST /v1/me/consent-revocations` (#309): revoke one of the acting
+/// Principal's own consents under the permit of its `consent.revoke`
+/// decision; `201` for a recorded revocation, `200` for the original one.
+async fn post_consent_revocation(
+    State(state): State<AppState>,
+    IdempotencyKey(key): IdempotencyKey,
+    authority: OperationAuthority<RevokeConsentOperation>,
+    ContractJson(body): ContractJson<ConsentRevocationRequestV1>,
+) -> Result<Response, GatewayError> {
+    let permit = authority.authorize(&state.gateway, None).await?;
+    let outcome = state
+        .gateway
+        .revoke_consent_v1(permit, pos_core::EventId::from_ulid(body.consent_ref), &key)
+        .await?;
+    Ok(match outcome {
+        crate::authorization::ConsentRevocationOutcomeV1::Recorded(body) => {
+            (StatusCode::CREATED, Json(body)).into_response()
+        }
+        crate::authorization::ConsentRevocationOutcomeV1::Original(body) => {
+            (StatusCode::OK, Json(body)).into_response()
+        }
+    })
+}
+
 async fn post_ledger_prediction(
     State(state): State<AppState>,
     authority: OperationAuthority<CreatePredictionOperation>,
@@ -1166,7 +1200,7 @@ mod tests {
             ledger_write: LedgerWriteMode::Disabled,
         });
         let timeline = TimelineId::new().to_string();
-        for (method, route) in PROTECTED_ROUTES {
+        for &(method, route) in PROTECTED_ROUTES {
             // Each request is one its handler would refuse first with `400`:
             // a malformed body, or for the read a page limit of zero.
             let query = if method == "GET" { "?limit=0" } else { "" };

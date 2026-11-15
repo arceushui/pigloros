@@ -11,11 +11,12 @@
 //! authorization seam, so an unprovisioned host answers it `401` before any
 //! lookup and a denial is answered only once its evidence is recorded.
 //!
-//! - `generation` is the head position of the pinned authority chain plus
+//! - `generation` is the head position of the pinned authority (its chain,
+//!   plus its consent-bound chain when its provisioning binds consents) plus
 //!   the head of the Principal's consent Timeline (D8). Each consent is named
-//!   by the `EventId` of its `consent.granted.v1` Event (D7). A Local
-//!   Principal grant binds no consent (D4 provisions explicit operation
-//!   grants only), so its consent head is 0 and its consents are empty.
+//!   by the `EventId` of its `consent.granted.v1` Event (D7) and is `revoked`
+//!   from its ADR-039 fence on (#309). A Principal whose provisioning binds no
+//!   consent has a consent head of 0 and no consents.
 //! - `provenance.digest` is the BLAKE3 of the disclosed facts the Session is
 //!   derived from (see `PROVENANCE_DOMAIN`), so a client recomputes it.
 //! - `execution_profile` is the EPF1 profile, `unavailable` until #461.
@@ -28,7 +29,7 @@ use serde_json::{json, Value};
 
 use super::{
     GatewayAuthorization, GatewayAuthorizationDecision, GatewayAuthorizationRequest,
-    GatewayOperationV1,
+    GatewayConsentedAuthorityV1, GatewayConsentsV1, GatewayOperationV1,
 };
 use crate::{
     mode_profile::{GatewaySessionModeV1, GATEWAY_NETWORK_CAPABILITY_V1},
@@ -56,7 +57,8 @@ struct GatewaySessionV1 {
     entity_ids: Vec<EntityId>,
     /// The served operations and capabilities the grant covers, sorted.
     grants: Vec<&'static str>,
-    /// The head position of the pinned authority chain.
+    /// The head position of the pinned authority: its chain plus its
+    /// consent-bound chain.
     authority_head: Seq,
     /// The head of the Principal's consent Timeline; 0 when it has none.
     consent_head: Seq,
@@ -149,6 +151,9 @@ impl GatewayAuthorization {
     pub(crate) fn session_json(&self, decision: &GatewayAuthorizationDecision) -> Option<Value> {
         let pinned = self.pinned();
         let authority = pinned.view.authority();
+        let consented = pinned.consented.as_ref();
+        let consent_chain_head = consented.map_or(0, GatewayConsentedAuthorityV1::head_position);
+        let consents = consented.and_then(GatewayConsentedAuthorityV1::consents);
         let entity_ids = authority
             .chain()
             .grants()
@@ -177,9 +182,25 @@ impl GatewayAuthorization {
                         })
                         .map(GatewayOperationV1::name)
                         .collect(),
-                    authority_head: authority.head_position(),
-                    consent_head: Seq::ZERO,
-                    consents: Vec::new(),
+                    authority_head: Seq::from_u64(
+                        authority
+                            .head_position()
+                            .as_u64()
+                            .saturating_add(consent_chain_head),
+                    ),
+                    consent_head: consents.map_or(Seq::ZERO, GatewayConsentsV1::head),
+                    consents: consents.map_or_else(Vec::new, |consents| {
+                        consents
+                            .of_party(actor)
+                            .map(|consent| {
+                                (
+                                    consent.consent_ref(),
+                                    consent.revocation().is_some(),
+                                    consent.export_permitted(),
+                                )
+                            })
+                            .collect()
+                    }),
                     mode,
                 }
                 .to_json()

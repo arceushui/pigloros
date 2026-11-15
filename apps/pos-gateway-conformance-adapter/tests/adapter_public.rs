@@ -383,6 +383,10 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("slot before capture", |p| {
             first_exchange(p)["path"] = json!("/v1/timelines/{timeline}/events");
         }),
+        case("consent before capture", |p| {
+            first_exchange(p)["path"] = json!("/v1/me/consent-revocations");
+            first_exchange(p)["body"] = json!({"consent_ref": "{consent}"});
+        }),
     ]
 }
 
@@ -527,6 +531,7 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
             "instance": format!("/v1/timelines/{ulid}/not-a-ulid/events"),
             "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": ulid}, {"consent_ref": "not-a-ulid"}],
         })),
         json!({
             "events": [{"id": "<ulid>", "entity": ulid, "seq": 1, "ok": true, "none": null}],
@@ -535,6 +540,7 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
             "instance": "/v1/timelines/<ulid>/not-a-ulid/events",
             "error": "kept",
             "name": ulid,
+            "consents": [{"consent_ref": "<ulid>"}, {"consent_ref": "not-a-ulid"}],
         })
     );
 }

@@ -11,7 +11,8 @@ use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
 use piglor_gateway::local_principal::{
-    local_gateway, provision_local_principal, LocalPrincipalProvisionV1,
+    local_gateway, provision_on_host, LocalConsentDraftV1, LocalConsentGrantDraftV1,
+    LocalPrincipalProvisionV1,
 };
 use piglor_gateway::mode_profile::{
     bind_gateway_mode_v1, GatewayModeBindingV1, GatewayModeProfileIdV1, GatewayServeCompositionV1,
@@ -24,14 +25,15 @@ use piglor_ledger::LedgerView;
 use pos_core::{EntityId, ErasureRecoveryLimitsV1, PrincipalRefV1};
 use pos_reference::evaluator::ResourceUsage;
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
-use pos_store::{sqlite::SqliteStore, StoreConfig};
+use pos_store::StoreConfig;
 use serde_json::{json, Map, Value};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
 use super::payload::{
-    CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, TIMELINE_SLOT,
+    CaptureV2, CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, CONSENT_SLOT,
+    TIMELINE_SLOT,
 };
 use super::ACTOR_ENTITY_ID;
 use crate::observation_v1;
@@ -155,16 +157,17 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// The Gateway of a composition (requirements section 3), with the store file it serves when
 /// it has one.
 ///
-/// `open` is the unprotected in-process harness Gateway. `authorized` and
-/// `authorized-air-gapped` are the production serve composition (#1361, #1360): the first
-/// `serve` binds a fresh `SQLite` store to the Local or the Air-Gapped execution mode, a fixture
-/// Local Principal document is provisioned into it with the production
-/// `provision_local_principal`, and the Gateway is composed over that store by `local_gateway`
-/// under that binding, which requires the recorded Principal for every protected operation.
+/// `open` is the unprotected in-process harness Gateway. `authorized`,
+/// `authorized-air-gapped` and `authorized-consented` are the production serve composition
+/// (#1361, #1360, #309): the first `serve` binds a fresh `SQLite` store to the Local or the
+/// Air-Gapped execution mode, a fixture Local Principal document is provisioned into it with
+/// the production `provision_on_host`, and the Gateway is composed over that store by
+/// `local_gateway` under that binding, which requires the recorded Principal for every
+/// protected operation.
 fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
-    composition
-        .mode()
-        .map_or_else(open_gateway, authorized_gateway)
+    composition.mode().map_or_else(open_gateway, |id| {
+        authorized_gateway(id, composition == CompositionV2::AuthorizedConsented)
+    })
 }
 
 /// The unprotected in-process harness Gateway of the `open` composition.
@@ -174,12 +177,16 @@ fn open_gateway() -> Option<(Gateway, Option<ScratchStore>)> {
         .map(|gateway| (gateway, None))
 }
 
-/// The production serve composition over a fresh store bound to the execution mode `id`.
-fn authorized_gateway(id: GatewayModeProfileIdV1) -> Option<(Gateway, Option<ScratchStore>)> {
+/// The production serve composition over a fresh store bound to the execution mode `id`,
+/// whose fixture Principal binds a consent when `consented`.
+fn authorized_gateway(
+    id: GatewayModeProfileIdV1,
+    consented: bool,
+) -> Option<(Gateway, Option<ScratchStore>)> {
     let store = ScratchStore::new();
     store_host(&store)
         .and_then(|mut host| bind_mode(&mut host, id))
-        .and_then(|_| provision_store(&store))
+        .and_then(|_| provision_store(&store, consented))
         .and_then(|()| store_host(&store))
         .and_then(|mut host| {
             bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
@@ -221,29 +228,40 @@ fn bind_mode(
 
 /// Provision the fixture Local Principal of the authorized compositions into `store`: it may
 /// create Timelines, read their Events and read its own Session as the fixture actor, and holds
-/// no action, signal or network grant. Only its document is fixture data.
-fn provision_store(store: &ScratchStore) -> Option<()> {
+/// no action, signal or network grant. When `consented` (`authorized-consented`) it may also
+/// revoke a consent, and its one consent, by the fixture actor to itself, governs Timeline
+/// creation. Only its document is fixture data.
+fn provision_store(store: &ScratchStore, consented: bool) -> Option<()> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
         .zip(entity(ACTOR_ENTITY_ID))
         .and_then(|(principal, actor)| {
-            LocalPrincipalProvisionV1::try_new(
+            let operations = [
+                GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
+                GatewayOperationV1::READ_SESSION,
+            ];
+            let consent = consented.then(|| LocalConsentDraftV1 {
+                subject: actor,
+                grantee: actor,
+                grants: vec![LocalConsentGrantDraftV1 {
+                    purpose: "operation".to_owned(),
+                    data_categories: vec!["timeline".to_owned()],
+                    export_permitted: false,
+                }],
+            });
+            let revoke = consented.then_some(GatewayOperationV1::REVOKE_CONSENT);
+            LocalPrincipalProvisionV1::try_new_with_consent(
                 &principal,
                 [actor],
-                [
-                    GatewayOperationV1::CREATE_TIMELINE,
-                    GatewayOperationV1::READ_EVENTS,
-                    GatewayOperationV1::READ_SESSION,
-                ],
+                operations.into_iter().chain(revoke),
+                consent,
             )
             .ok()
         })
         .and_then(|provision| {
-            SqliteStore::open(&store.path_text())
-                .ok()
-                .and_then(|mut opened| provision_local_principal(&mut opened, &provision).ok())
+            store_host(store).and_then(|mut host| provision_on_host(&mut host, &provision).ok())
         })
-        .map(drop)
 }
 
 /// One sub-case's `SQLite` file in the temporary directory, removed with its journal files when
@@ -283,13 +301,17 @@ impl Drop for ScratchStore {
 /// The header that carries the idempotency key of every request.
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
-/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID. Every
-/// request carries the sub-case ID as its idempotency key; routes without one ignore it.
-fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<Body> {
-    let body = exchange
-        .body
-        .as_ref()
-        .map_or_else(Body::empty, |value| Body::from(value.to_string()));
+/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured Timeline ID
+/// and `{consent}` by the captured consent. Every request carries the sub-case ID as its
+/// idempotency key; routes without one ignore it.
+fn request(exchange: &ExchangeV2, slots: &Slots, key: &str) -> Request<Body> {
+    let body = exchange.body.as_ref().map_or_else(Body::empty, |value| {
+        Body::from(
+            value
+                .to_string()
+                .replace(CONSENT_SLOT, slots.consent.as_deref().unwrap_or_default()),
+        )
+    });
     let mut request = Request::new(body);
     *request.method_mut() = match exchange.method {
         MethodV2::Get => Method::GET,
@@ -297,7 +319,7 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<
     };
     let path = exchange
         .path
-        .replace(TIMELINE_SLOT, timeline.unwrap_or_default());
+        .replace(TIMELINE_SLOT, slots.timeline.as_deref().unwrap_or_default());
     *request.uri_mut() = Uri::try_from(path).unwrap_or_default();
     if exchange.body.is_some() {
         request.headers_mut().insert(
@@ -316,6 +338,30 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<
             .map(|value| (HeaderName::from_static(IDEMPOTENCY_KEY_HEADER), value)),
     );
     request
+}
+
+/// The captured values a sub-case's later exchanges name.
+#[derive(Default)]
+struct Slots {
+    timeline: Option<String>,
+    consent: Option<String>,
+}
+
+impl Slots {
+    /// Fill the slot `capture` names from the response `parsed`.
+    fn capture(&mut self, capture: Option<CaptureV2>, parsed: Option<&Value>) {
+        let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        match capture {
+            Some(CaptureV2::Timeline) => {
+                self.timeline = text(parsed.and_then(|value| value.get("id")))
+            }
+            Some(CaptureV2::Consent) => {
+                self.consent =
+                    text(parsed.and_then(|value| value.pointer("/consents/0/consent_ref")));
+            }
+            None => {}
+        }
+    }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -342,7 +388,7 @@ async fn exchange_all(
     independent: bool,
 ) -> SubCaseRunV2 {
     let (loopback, spectator) = routers(&gateway);
-    let mut timeline: Option<String> = None;
+    let mut slots = Slots::default();
     let mut observations = Vec::with_capacity(subcase.exchanges.len());
     let mut run = SubCaseRunV2 {
         record: Value::Null,
@@ -362,7 +408,7 @@ async fn exchange_all(
                 RouterV2::Spectator => spectator.clone(),
             };
             let Ok(response) = service
-                .oneshot(request(exchange, timeline.as_deref(), &subcase.id))
+                .oneshot(request(exchange, &slots, &subcase.id))
                 .await;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)
@@ -378,13 +424,7 @@ async fn exchange_all(
                     .is_some_and(|canary| contains(&bytes, canary.as_bytes()));
             }
             let parsed = serde_json::from_slice::<Value>(&bytes).ok();
-            if exchange.captures() {
-                timeline = parsed
-                    .as_ref()
-                    .and_then(|value| value.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
+            slots.capture(exchange.capture(), parsed.as_ref());
             observation_v1(status, parsed)
         } else {
             json!({"refused": "capability-denied"})

@@ -1,8 +1,9 @@
 //! The case payload grammar of the requirements text (sections 1 and 2).
 //!
 //! The payload decodes into these exact records (no unknown member), then [`parse`] checks the
-//! schema string, the family, the counts and texts, every route, and that each `{timeline}`
-//! follows a capture. A payload outside the grammar is `None`, which is `payload-invalid`.
+//! schema string, the family, the counts and texts, every route, and that each `{timeline}` and
+//! each `{consent}` follows its capture. A payload outside the grammar is `None`, which is
+//! `payload-invalid`.
 
 use piglor_gateway::mode_profile::GatewayModeProfileIdV1;
 use serde::Deserialize;
@@ -12,6 +13,8 @@ use super::SCHEMA_ID;
 
 /// The literal a path names the captured Timeline by.
 pub(super) const TIMELINE_SLOT: &str = "{timeline}";
+/// The literal a request body names the captured consent by.
+pub(super) const CONSENT_SLOT: &str = "{consent}";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +48,10 @@ pub(super) enum CompositionV2 {
     /// The same composition over a store bound to the Air-Gapped execution mode.
     #[serde(rename = "authorized-air-gapped")]
     AuthorizedAirGapped,
+    /// The Local composition with a fixture Local Principal document whose one consent
+    /// governs Timeline creation (#309).
+    #[serde(rename = "authorized-consented")]
+    AuthorizedConsented,
 }
 
 impl CompositionV2 {
@@ -53,7 +60,7 @@ impl CompositionV2 {
     pub(super) const fn mode(self) -> Option<GatewayModeProfileIdV1> {
         match self {
             Self::Open => None,
-            Self::Authorized => Some(GatewayModeProfileIdV1::Local),
+            Self::Authorized | Self::AuthorizedConsented => Some(GatewayModeProfileIdV1::Local),
             Self::AuthorizedAirGapped => Some(GatewayModeProfileIdV1::AirGapped),
         }
     }
@@ -80,7 +87,10 @@ pub(super) enum MethodV2 {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum CaptureV2 {
+    /// The `id` of the response fills [`TIMELINE_SLOT`].
     Timeline,
+    /// The `consent_ref` of the response's first consent fills [`CONSENT_SLOT`].
+    Consent,
 }
 
 /// One HTTP exchange and its expected observation.
@@ -108,9 +118,16 @@ impl ExchangeV2 {
         self.actor.is_some()
     }
 
-    /// Whether the exchange captures the Timeline ID of its response.
-    pub(super) const fn captures(&self) -> bool {
-        self.capture.is_some()
+    /// The slot the exchange's response fills, if any.
+    pub(super) const fn capture(&self) -> Option<CaptureV2> {
+        self.capture
+    }
+
+    /// Whether the request body names the captured consent.
+    fn uses_consent(&self) -> bool {
+        self.body
+            .as_ref()
+            .is_some_and(|body| body.to_string().contains(CONSENT_SLOT))
     }
 
     /// The route [`parse`] matched the path to; every parsed exchange has one.
@@ -131,7 +148,7 @@ pub(super) struct RouteV2 {
 }
 
 /// The route table of the requirements text, section 2, in its order.
-const ROUTES: [RouteV2; 7] = [
+const ROUTES: [RouteV2; 8] = [
     RouteV2 {
         path: "/health",
         capability: "gateway.health.read",
@@ -166,6 +183,11 @@ const ROUTES: [RouteV2; 7] = [
         path: "/v1/session",
         capability: "session.read",
         commits: false,
+    },
+    RouteV2 {
+        path: "/v1/me/consent-revocations",
+        capability: "consent.revoke",
+        commits: true,
     },
 ];
 
@@ -214,7 +236,8 @@ fn subcase_id_is_valid(id: &str, prefix: &str) -> bool {
 
 /// Whether every exchange is in the grammar; each one's route is recorded as it is matched.
 fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
-    let mut captured = false;
+    let mut timeline = false;
+    let mut consent = false;
     (1..=128).contains(&exchanges.len())
         && exchanges.iter_mut().all(|exchange| {
             exchange.route = route_of(&exchange.path);
@@ -222,8 +245,10 @@ fn exchanges_are_valid(exchanges: &mut [ExchangeV2]) -> bool {
                 && printable(&exchange.path, 1, 256, false)
                 && exchange.route.is_some()
                 && exchange.actor != Some(false)
-                && (captured || !exchange.path.contains(TIMELINE_SLOT));
-            captured |= exchange.captures();
+                && (timeline || !exchange.path.contains(TIMELINE_SLOT))
+                && (consent || !exchange.uses_consent());
+            timeline |= matches!(exchange.capture, Some(CaptureV2::Timeline));
+            consent |= matches!(exchange.capture, Some(CaptureV2::Consent));
             valid
         })
 }
@@ -318,7 +343,7 @@ mod tests {
         assert_eq!(generator_capabilities(), capabilities);
         assert_eq!(
             ROUTES.map(RouteV2::commits),
-            [false, false, false, false, true, true, false]
+            [false, false, false, false, true, true, false, true]
         );
     }
 
