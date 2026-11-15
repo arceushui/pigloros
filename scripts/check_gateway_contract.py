@@ -51,6 +51,13 @@ fixtures disagree:
    frozen example under `compatibility/examples/` is still valid. Every
    served operation is frozen, and parameters are declared per operation with a `schema`.
 
+10. the Gateway execution-mode profile declaration `execution-mode-profiles.json` (ADR-134
+    §3) is valid for its closed schema `execution-mode-profiles.schema.json`, its `profiles`
+    are sorted by identifier bytes, and every `mode_profile` or `produced_under_mode_profiles`
+    entry of a golden example names the golden digest of its profile
+    (`GOLDEN_MODE_PROFILE_DIGESTS`, recomputed from the declaration by the `piglor-gateway`
+    build and its golden tests).
+
 `--append-only <git-ref>` also requires `compatibility/` to have only gained entries since the
 merge base of HEAD with `<git-ref>` (CI passes `origin/main`), so a change cannot loosen the
 baseline together with the contract.
@@ -100,6 +107,15 @@ COMPATIBILITY = CONTRACT / "compatibility"
 APPEND = "--append-only"
 BASELINE = COMPATIBILITY / "baseline.json"
 FROZEN_EXAMPLES = COMPATIBILITY / "examples"
+MODE_PROFILES = CONTRACT / "execution-mode-profiles.json"
+MODE_PROFILES_SCHEMA = CONTRACT / "execution-mode-profiles.schema.json"
+# The ADR-134 §2 BLAKE3 digest of each declared profile's canonical record, under its own
+# domain; a reviewed change re-pins it together with the `piglor-gateway` golden tests.
+GOLDEN_MODE_PROFILE_DIGESTS = {
+    "gateway-mode-air-gapped-v1":
+        "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+    "gateway-mode-local-v1": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+}
 
 SCHEMA_ID_PREFIX = "urn:pigloros:gateway:v1:schema:"
 PROBLEM_TYPE_PREFIX = "urn:pigloros:gateway:v1:problem:"
@@ -655,6 +671,7 @@ def check_example(
     response = example["response"]
     errors = contract.response_errors(operation, response["status"], response["body"], template)
     errors += fork_ordinal_errors(response["body"])
+    errors += mode_profile_errors(response["body"])
     if errors:
         raise ContractError(f"{name}: response invalid: {errors[:3]}")
 
@@ -1220,6 +1237,42 @@ def check_appended(old: object, new: object, where: str = "baseline", key: str =
         raise ContractError(f"{where}: a frozen value changed")
 
 
+def check_mode_profiles(declaration: object, schema: dict) -> int:
+    """The execution-mode profile declaration is valid, sorted and holds the golden profiles."""
+    errors = [
+        f"{'/'.join(map(str, error.absolute_path)) or '$'}: {error.message}"
+        for error in Draft202012Validator(schema).iter_errors(declaration)
+    ]
+    if errors:
+        raise ContractError(f"execution-mode profile declaration: {errors[:3]}")
+    profiles = declaration["profiles"]  # type: ignore[index]
+    identifiers = [profile["mode_profile_id"] for profile in profiles]
+    if [identifier.encode() for identifier in identifiers] != sorted(
+        identifier.encode() for identifier in identifiers
+    ):
+        raise ContractError("execution-mode profile declaration: profiles are not sorted")
+    if set(identifiers) != set(GOLDEN_MODE_PROFILE_DIGESTS):
+        raise ContractError("execution-mode profile declaration: profiles are not the golden set")
+    return len(identifiers)
+
+
+def mode_profile_errors(value: object, where: str = "$") -> list[str]:
+    """Every disclosed execution-mode profile of a body names its golden digest."""
+    errors = []
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            errors += mode_profile_errors(item, f"{where}/{index}")
+    elif isinstance(value, dict):
+        identifier = value.get("mode_profile_id")
+        if identifier is not None and value.get("mode_profile_digest") != (
+            GOLDEN_MODE_PROFILE_DIGESTS.get(identifier)
+        ):
+            errors.append(f"{where}: mode_profile_digest is not the golden {identifier} digest")
+        for key, item in value.items():
+            errors += mode_profile_errors(item, f"{where}/{key}")
+    return errors
+
+
 def git(root: Path, *arguments: str) -> bytes:
     result = subprocess.run(
         ["git", "-C", str(root), *arguments], capture_output=True, check=False
@@ -1329,6 +1382,8 @@ def main(argv: list[str] | None = None) -> int:
         contract = Contract(load(OPENAPI), load(PROBLEM_TYPES))  # type: ignore[arg-type]
         check_description(contract)
         check_registry(contract)
+        schema = load(MODE_PROFILES_SCHEMA)
+        profiles = check_mode_profiles(load(MODE_PROFILES), schema)  # type: ignore[arg-type]
         examples = check_examples(contract)
         exchanges = check_fixtures(contract)
         if arguments == ["--freeze"]:
@@ -1343,7 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
     limits = len(contract.document["x-pigloros-limits"])
     print(
         f"Gateway v1 contract OK: {examples} examples, {exchanges} served exchanges, "
-        f"{drafts} Draft operations, {limits} limits, {frozen} frozen v1 examples, "
+        f"{drafts} Draft operations, {limits} limits, {profiles} execution-mode profiles, "
+        f"{frozen} frozen v1 examples, "
         f"{compared} frozen files compared with the merge base."
     )
     return 0

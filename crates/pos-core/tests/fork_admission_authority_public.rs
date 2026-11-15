@@ -740,3 +740,21 @@ mod borrowed_pob1_parity {
         Ok(())
     }
 }
+
+/// ADR-134 §8: a stale mode binding keeps its own Fork-admission error, and
+/// any other failed mode check leaves the outcome indeterminate.
+#[test]
+fn a_failed_mode_check_maps_onto_the_closed_fork_admission_errors() {
+    assert_eq!(
+        pos_core::ForkAdmissionErrorV1::from(&pos_core::CoreError::ModeBindingStale),
+        pos_core::ForkAdmissionErrorV1::ModeBindingStale
+    );
+    assert_eq!(
+        pos_core::ForkAdmissionErrorV1::from(&pos_core::CoreError::Storage(String::new())),
+        pos_core::ForkAdmissionErrorV1::StorageIndeterminate
+    );
+    assert_eq!(
+        pos_core::ForkAdmissionErrorV1::ModeBindingStale as usize + 1,
+        pos_core::ForkAdmissionErrorV1::COUNT
+    );
+}

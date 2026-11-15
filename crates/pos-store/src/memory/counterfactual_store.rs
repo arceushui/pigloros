@@ -55,7 +55,7 @@
 //!   `Ok(None)`, even when the deleted Fork committed that generation, so a
 //!   recovering caller cannot mistake a deleted Fork for "nothing committed".
 //! - **Outcome unknown.** Backend failures map through the crate's shared
-//!   `counterfactual_port_error`, so a `CoreError::StorageOutcomeUnknown`
+//!   `CounterfactualStoreErrorV1::from`, so a `CoreError::StorageOutcomeUnknown`
 //!   would surface as `OutcomeUnknown`. `MemoryStore` never produces one on
 //!   these paths: every fallible step runs on staged copies, and installing
 //!   is infallible, so a write either commits entirely or fails having
@@ -130,7 +130,7 @@ use pos_core::{
 };
 
 use super::{MemoryStore, TimelineState};
-use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+use crate::COUNTERFACTUAL_SEAL;
 
 mod classified;
 mod dependency;
@@ -267,6 +267,8 @@ struct ForkEntriesV1<'s> {
     fork_event_origins: &'s mut HashMap<EventId, EventOriginRecordV1>,
     hasher: &'s dyn Hasher,
     key_registry: Option<&'s pos_core::KeyRegistryStateV1>,
+    /// The Gateway mode-binding epochs each staged append compares.
+    mode: super::gateway_mode_binding::MemoryModeAppendV1,
 }
 
 impl ForkEntriesV1<'_> {
@@ -287,6 +289,7 @@ impl ForkEntriesV1<'_> {
             timeline: self.timeline.timeline.clone(),
             events: Vec::new(),
             chain_head: self.timeline.chain_head,
+            commit_epochs: Vec::new(),
         };
         drafts
             .drafts()
@@ -297,6 +300,7 @@ impl ForkEntriesV1<'_> {
                     draft,
                     self.hasher,
                     self.key_registry,
+                    self.mode,
                 )
                 .map(drop)
             })
@@ -306,7 +310,7 @@ impl ForkEntriesV1<'_> {
                 head,
                 provenance: Vec::new(),
             })
-            .map_err(|error| counterfactual_port_error(&error))
+            .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
     }
 
     /// Install a staged Tick's Events on the Fork Timeline, and the `EOR1` and
@@ -322,6 +326,7 @@ impl ForkEntriesV1<'_> {
         self.timeline.chain_head = staged.chain_head;
         self.timeline.timeline.head = staged.timeline.head;
         self.timeline.events.extend(staged.events);
+        self.timeline.commit_epochs.extend(staged.commit_epochs);
         self.install_provenance(provenance);
     }
 
@@ -345,7 +350,7 @@ fn stage_tick(
     drafts: &PipelineDraftBatchV1,
 ) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
     crate::ensure_non_geographic_drafts(drafts.drafts(), entries.fork)
-        .map_err(|error| counterfactual_port_error(&error))
+        .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
         .and_then(|()| entries.stage_events(drafts))
 }
 
@@ -394,7 +399,7 @@ fn fenced_result<T, E: From<CounterfactualStoreErrorV1>>(
     result: Result<Result<T, E>, CoreError>,
 ) -> Result<T, E> {
     result
-        .map_err(|error| E::from(counterfactual_port_error(&error)))
+        .map_err(|error| E::from(pos_core::CounterfactualStoreErrorV1::from(&error)))
         .and_then(std::convert::identity)
 }
 
@@ -434,7 +439,7 @@ fn staged_tick_head(staged: &TimelineState) -> Result<Seq, CoreError> {
 impl MemoryStore {
     fn ensure_visible_fork(&self, fork: TimelineId) -> Result<(), CounterfactualStoreErrorV1> {
         self.ensure_generic_timeline_visibility(fork)
-            .map_err(|error| counterfactual_port_error(&error))
+            .map_err(|error| pos_core::CounterfactualStoreErrorV1::from(&error))
             .and_then(|()| {
                 if self.state(fork).timeline.meta.fork_point.is_some() {
                     Ok(())
@@ -472,6 +477,7 @@ impl MemoryStore {
         fork: TimelineId,
     ) -> Result<ForkEntriesV1<'_>, CounterfactualStoreErrorV1> {
         self.ensure_visible_fork(fork)?;
+        let mode = self.mode_binding.append_mode();
         let Self {
             ref mut timelines,
             ref mut counterfactual_forks,
@@ -495,6 +501,7 @@ impl MemoryStore {
                 fork_event_origins,
                 hasher,
                 key_registry: key_registry.as_ref(),
+                mode,
             })
             .ok_or(CounterfactualStoreErrorV1::ForkNotFound)
     }
@@ -1057,5 +1064,62 @@ mod tests {
                 head: Seq::from_u64(3)
             })
         );
+    }
+
+    /// A published Fork on a store bound at epoch 1 (ADR-134 §8).
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bound_published_store() -> (MemoryStore, TimelineId) {
+        use pos_core::{GatewayModeBindingHostV1, GatewayModeBindingPortV1};
+
+        let mut store = MemoryStore::new();
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+        let profile = ok(pos_core::GatewayModeProfileRefV1::try_new(
+            "gateway-mode-local-v1",
+            [1; 32],
+        ));
+        ok(store.bind_empty_store_mode(GatewayModeBindingHostV1::new().authorize_bind(profile)));
+        let root = ok(store.create_timeline("counterfactual-root")).id();
+        ok(store.append(root, &[draft(0)]));
+        let fork = ok(store.fork(root, Seq::from_u64(1), "counterfactual-fork")).id();
+        ok(store.publish_counterfactual_facts(fork, facts()));
+        (store, fork)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_stale_or_unattached_writer_installs_no_tick() {
+        let (mut store, fork) = bound_published_store();
+        let command = command(fork);
+        let off_epoch = [None, std::num::NonZeroU64::new(2)];
+        let before = snapshot(&store, fork);
+        for attached in off_epoch {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                store.commit_counterfactual_invalidation(&command),
+                Err(CounterfactualStoreErrorV1::ModeBindingStale)
+            );
+            assert_eq!(snapshot(&store, fork), before);
+        }
+
+        store
+            .mode_binding
+            .attach_epoch_for_test(std::num::NonZeroU64::new(1));
+        let receipt = match ok(store.commit_counterfactual_invalidation(&command)) {
+            CounterfactualInvalidationOutcomeV1::Committed(receipt) => receipt,
+            other @ CounterfactualInvalidationOutcomeV1::InvalidationConflict(_) => {
+                std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
+            }
+        };
+        let expected = receipt.tick_basis(receipt.first_tick_head());
+        let drafts = ok(PipelineDraftBatchV1::try_new(vec![draft(2)]));
+        let committed = snapshot(&store, fork);
+        for attached in off_epoch {
+            store.mode_binding.attach_epoch_for_test(attached);
+            assert_eq!(
+                store.append_counterfactual_tick(fork, &expected, &drafts),
+                Err(CounterfactualStoreErrorV1::ModeBindingStale)
+            );
+            assert_eq!(snapshot(&store, fork), committed);
+        }
     }
 }

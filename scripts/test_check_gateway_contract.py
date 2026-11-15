@@ -339,18 +339,178 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "unbounded map"):
             checker.check_description(contract(document=document))
 
-    def test_local_mode_never_claims_an_air_gapped_profile(self) -> None:
+    def test_the_execution_profile_is_epf1_only(self) -> None:
         subject = contract()
         schema = {"$ref": "urn:pigloros:gateway:v1:schema:execution-profile"}
-        air = {
-            "mode": "air-gapped",
-            "profile_id": "deterministic-air-gapped-v1",
+        unavailable = {"profile_kind": "epf1", "state": "unavailable", "reason": "not-installed"}
+        installed = {
+            "profile_kind": "epf1",
+            "state": "installed",
+            "profile_id": "live-local-v1",
             "profile_digest": "0" * 64,
-            "network": "absent",
         }
+        self.assertEqual(subject.schema_errors(unavailable, schema), [])
+        self.assertEqual(subject.schema_errors(installed, schema), [])
+        for invalid in (
+            {**unavailable, "profile_id": "live-local-v1"},
+            {**unavailable, "profile_digest": "0" * 64},
+            {key: value for key, value in unavailable.items() if key != "reason"},
+            {**installed, "reason": "not-installed"},
+            {key: value for key, value in installed.items() if key != "profile_digest"},
+            {**unavailable, "mode": "local"},
+            {**unavailable, "network": "denied"},
+            {**unavailable, "profile_kind": "gateway-mode-v1"},
+            {**installed, "profile_id": "gateway-mode-local-v1"},
+        ):
+            self.assertTrue(subject.schema_errors(invalid, schema), invalid)
+
+    def test_local_mode_never_claims_an_air_gapped_profile(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/PreferenceRevision"}
+        body = example("draft-preference-get")["response"]["body"]
+        self.assertEqual(body["mode_profile"]["mode"], "local")
+        self.assertEqual(subject.schema_errors(body, schema), [])
+        installed = {"profile_kind": "epf1", "state": "installed", "profile_digest": "0" * 64}
+        for profile_id in ("replay-v1", "deterministic-local-v1", "live-local-v1"):
+            served = {**body, "execution_profile": {**installed, "profile_id": profile_id}}
+            self.assertEqual(subject.schema_errors(served, schema), [])
+        air_profile = {**installed, "profile_id": "deterministic-air-gapped-v1"}
+        self.assertTrue(subject.schema_errors({**body, "execution_profile": air_profile}, schema))
+        air_mode = {
+            **body["mode_profile"],
+            "mode": "air-gapped",
+            "mode_profile_id": "gateway-mode-air-gapped-v1",
+            "mode_profile_digest": checker.GOLDEN_MODE_PROFILE_DIGESTS[
+                "gateway-mode-air-gapped-v1"
+            ],
+        }
+        self.assertEqual(subject.schema_errors({**body, "mode_profile": air_mode}, schema), [])
+        self.assertEqual(
+            subject.schema_errors({**body, "mode_profile": air_mode,
+                                   "execution_profile": air_profile}, schema),
+            [],
+        )
+        local_only = {**installed, "profile_id": "live-local-v1"}
+        self.assertTrue(subject.schema_errors({**body, "mode_profile": air_mode,
+                                               "execution_profile": local_only}, schema))
+        self.assertTrue(subject.schema_errors(
+            {**body, "mode_profile": {**body["mode_profile"], "mode": "air-gapped"}}, schema))
+
+    def test_a_resource_discloses_its_produced_under_mode_profile(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/PreferenceRevision"}
+        body = example("draft-preference-get")["response"]["body"]
+        mode = body["mode_profile"]
+        self.assertTrue(subject.schema_errors(
+            {key: value for key, value in body.items() if key != "mode_profile"}, schema))
+        for invalid in (
+            {**mode, "network": "denied"},
+            {**mode, "network_grants": []},
+            {**mode, "binding_epoch": 0},
+            {**mode, "profile_kind": "epf1"},
+            {**mode, "mode_profile_id": "deterministic-local-v1"},
+            {key: value for key, value in mode.items() if key != "binding_epoch"},
+        ):
+            self.assertTrue(subject.schema_errors({**body, "mode_profile": invalid}, schema),
+                            invalid)
+
+    def test_only_the_session_reports_the_current_network_posture(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/Session"}
+        local = example("draft-session-local")["response"]["body"]
+        air = example("draft-session-air-gapped")["response"]["body"]
+        self.assertEqual(subject.schema_errors(local, schema), [])
         self.assertEqual(subject.schema_errors(air, schema), [])
-        self.assertTrue(subject.schema_errors({**air, "network": "denied"}, schema))
-        self.assertTrue(subject.schema_errors({**air, "mode": "local"}, schema))
+        self.assertEqual(air["mode_profile"]["network"], "absent")
+        granted = {**local["mode_profile"], "network": "capability-granted",
+                   "network_grants": ["owntracks", "public-read-only"]}
+        self.assertEqual(subject.schema_errors({**local, "mode_profile": granted}, schema), [])
+        for invalid in (
+            {**local["mode_profile"], "network": "absent"},
+            {**local["mode_profile"], "network_grants": ["ledger"]},
+            {**local["mode_profile"], "network_grants": ["owntracks", "owntracks"]},
+            {key: value for key, value in local["mode_profile"].items() if key != "network"},
+        ):
+            self.assertTrue(subject.schema_errors({**local, "mode_profile": invalid}, schema),
+                            invalid)
+        for invalid in (
+            {**air["mode_profile"], "network": "denied"},
+            {**air["mode_profile"], "network_grants": ["owntracks"]},
+        ):
+            self.assertTrue(subject.schema_errors({**air, "mode_profile": invalid}, schema),
+                            invalid)
+
+    def test_an_export_lists_every_produced_under_mode_profile(self) -> None:
+        subject = contract()
+        schema = {"$ref": "#/components/schemas/Export"}
+        body = example("draft-export-exported")["response"]["body"]
+        self.assertEqual(subject.schema_errors(body, schema), [])
+        self.assertTrue(subject.schema_errors(
+            {key: value for key, value in body.items()
+             if key != "produced_under_mode_profiles"}, schema))
+        entry = body["produced_under_mode_profiles"][0]
+        self.assertTrue(subject.schema_errors(
+            {**body, "produced_under_mode_profiles": [entry, entry]}, schema))
+        self.assertTrue(subject.schema_errors(
+            {**body, "produced_under_mode_profiles": [{**entry, "mode": "local"}]}, schema))
+        self.assertTrue(subject.schema_errors(
+            {**body, "produced_under_mode_profiles": [entry] * 65}, schema))
+
+    def test_a_disclosed_mode_profile_names_its_golden_digest(self) -> None:
+        body = example("draft-export-exported")["response"]["body"]
+        self.assertEqual(checker.mode_profile_errors(body), [])
+        forged = copy.deepcopy(body)
+        forged["produced_under_mode_profiles"][0]["mode_profile_digest"] = "0" * 64
+        self.assertEqual(len(checker.mode_profile_errors(forged)), 1)
+        forged = copy.deepcopy(body)
+        forged["mode_profile"]["mode_profile_id"] = "gateway-mode-air-gapped-v1"
+        self.assertTrue(checker.mode_profile_errors(forged))
+        operations = checker.operations_by_id(contract())
+        session = example("draft-session-local")
+        session["response"]["body"]["mode_profile"]["mode_profile_digest"] = "1" * 64
+        with self.assertRaisesRegex(checker.ContractError, "golden gateway-mode-local-v1"):
+            checker.check_example(contract(), operations, "forged", session)
+
+    def test_the_execution_mode_profile_declaration_is_closed_and_golden(self) -> None:
+        declaration = checker.load(checker.MODE_PROFILES)
+        schema = checker.load(checker.MODE_PROFILES_SCHEMA)
+        self.assertEqual(checker.check_mode_profiles(declaration, schema), 2)
+        self.assertEqual(
+            [profile["mode_profile_id"] for profile in declaration["profiles"]],
+            sorted(checker.GOLDEN_MODE_PROFILE_DIGESTS),
+        )
+
+        def rejected(mutate, message: str = "declaration") -> None:
+            changed = copy.deepcopy(declaration)
+            mutate(changed)
+            with self.assertRaisesRegex(checker.ContractError, message):
+                checker.check_mode_profiles(changed, schema)
+
+        rejected(lambda d: d.update(extra=1))
+        rejected(lambda d: d["profiles"][0].update(profile_digest="0" * 64))
+        rejected(lambda d: d.update(lifecycle="Draft"))
+        rejected(lambda d: d.update(magic="EPF1"))
+        rejected(lambda d: d["profiles"].append(
+            {**d["profiles"][1], "mode_profile_id": "gateway-mode-third-v1"}))
+        rejected(lambda d: d["profiles"].pop())
+        rejected(lambda d: d["profiles"][0].update(previous_mode_profile_digest="A" * 64))
+        rejected(lambda d: d["profiles"][0].update(previous_mode_profile_digest="0" * 63))
+        rejected(lambda d: d["profiles"][0].update(semantic_version="01.0.0"))
+        rejected(lambda d: d["profiles"][0].update(mode="local"))
+        rejected(lambda d: d["profiles"][0].update(network_allowed=True))
+        rejected(lambda d: d["profiles"][0].update(
+            ingress=["loopback-http", "public-read-only", "fork-admission-socket"]))
+        rejected(lambda d: d["profiles"][1].update(ingress=["public-read-only", "loopback-http",
+                                                            "fork-admission-socket"]))
+        rejected(lambda d: d["profiles"][1].update(revocation_freshness="current-by-construction"))
+        rejected(lambda d: d["profiles"][0].update(registration_profile_id="live-local-v1"))
+        rejected(lambda d: d["profiles"][1].update(registration_profile_id=None))
+        rejected(lambda d: d["profiles"][1].update(startup_predicates=["linux"]))
+        rejected(lambda d: d["profiles"].reverse(), "not sorted")
+        valid_rotation = copy.deepcopy(declaration)
+        valid_rotation["profiles"][1].update(
+            semantic_version="1.1.0", previous_mode_profile_digest="a" * 64)
+        self.assertEqual(checker.check_mode_profiles(valid_rotation, schema), 2)
 
     def test_a_resource_has_exactly_one_ordinal_and_no_unknown_member(self) -> None:
         subject = contract()
