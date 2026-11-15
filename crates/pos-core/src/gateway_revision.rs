@@ -313,7 +313,7 @@ impl GatewayRevisionDraftV1 {
     ) -> Result<Self, GatewayRevisionErrorV1> {
         (1..=MAX_GATEWAY_REVISION_CONTENT_BYTES)
             .contains(&content.len())
-            .then(|| Self {
+            .then_some(Self {
                 idempotency,
                 resource_id,
                 parent,
