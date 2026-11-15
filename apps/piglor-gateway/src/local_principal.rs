@@ -3433,11 +3433,11 @@ mod tests {
         Ok(())
     }
 
-    /// The consent lookup #303 checks a room's consent reference with
-    /// re-reads the consent Timeline: a revocation by another writer is
-    /// seen.
+    /// A permit's decision pins the consent Timeline as the store holds it:
+    /// a revocation another serving process recorded is seen by the next
+    /// decision.
     #[tokio::test]
-    async fn the_current_consent_lookup_reads_the_consent_timeline() -> TestResult {
+    async fn a_decision_pins_the_current_consent_timeline() -> TestResult {
         let directory = tempfile::tempdir()?;
         let path = sqlite_path(&directory)?;
         bind_local(&path)?;
@@ -3447,17 +3447,14 @@ mod tests {
         let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
         let consent_ref =
             pos_core::EventId::from_ulid(Ulid::from_string(consent.as_str().unwrap_or_default())?);
-        let current = gateway
-            .consent_current(actor, consent_ref)
-            .await?
-            .ok_or("the consent is held")?;
-        assert!(current.revocation().is_none());
-        assert_eq!(
-            gateway
-                .consent_current(EntityId::new(), consent_ref)
-                .await?,
-            None
-        );
+        let read = || {
+            gateway.authorize_operation(GatewayOperationV1::READ_SESSION, Some(actor), None, None)
+        };
+        let permit = read().await?;
+        assert!(gateway
+            .consent_pinned(&permit, consent_ref)
+            .is_some_and(|consent| consent.revocation().is_none()));
+        drop(permit);
         // Another serving process revokes it.
         assert_eq!(
             revoke_with(&other_app, actor, &consent, "elsewhere")
@@ -3465,17 +3462,12 @@ mod tests {
                 .0,
             StatusCode::CREATED
         );
-        let revoked = gateway
-            .consent_current(actor, consent_ref)
-            .await?
-            .ok_or("still held")?;
-        assert!(revoked.revocation().is_some());
-        let open = Gateway::unprotected_for_harness(memory_host()?)?;
-        assert!(matches!(
-            open.consent_current(actor, consent_ref).await,
-            Err(GatewayError::AuthorizationUnavailable)
-        ));
-        for gateway in [gateway, other, open] {
+        let permit = read().await?;
+        assert!(gateway
+            .consent_pinned(&permit, consent_ref)
+            .is_some_and(|consent| consent.revocation().is_some()));
+        drop(permit);
+        for gateway in [gateway, other] {
             gateway.shutdown().await?;
             drop(gateway);
         }

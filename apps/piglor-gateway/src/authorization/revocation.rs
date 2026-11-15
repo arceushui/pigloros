@@ -126,42 +126,11 @@ impl ConsentRevocationV1 {
 }
 
 impl Gateway {
-    /// The consent `consent_ref` of the acting Principal as its consent
-    /// Timeline holds it now, when `actor` is its subject or grantee (#309;
-    /// the consent lookup #303 checks a room's consent reference with).
-    ///
-    /// The host first brings its pinned authority current with the store,
-    /// so a revocation recorded by any writer is seen. Do not call it while
-    /// holding an operation permit: bringing the authority current may take
-    /// the commit fence exclusively.
-    ///
-    /// # Errors
-    /// Returns [`GatewayError::AuthorizationUnavailable`] (`401`) on a
-    /// composition without an authorizer, and
-    /// [`GatewayError::AuthorizationEvidenceUnavailable`] (`503`) when the
-    /// host cannot read its authority or consent Timeline.
-    pub(crate) async fn consent_current(
-        &self,
-        actor: EntityId,
-        consent_ref: EventId,
-    ) -> Result<Option<GatewayConsentV1>, GatewayError> {
-        let Some(authorization) = self.authorization.clone() else {
-            return Err(GatewayError::AuthorizationUnavailable);
-        };
-        let current = self.bring_current(&authorization).await;
-        current
-            .map_err(|_| GatewayError::AuthorizationEvidenceUnavailable)
-            .map(|()| {
-                authorization
-                    .principal_consents()
-                    .and_then(|(consents, _)| consents.named_for(actor, consent_ref))
-            })
-    }
-
     /// The consent `consent_ref` of the acting Principal as the decision of
     /// `permit` pinned it, when the decision's actor is its subject or
     /// grantee (#309; the lookup #303 checks a room's consent reference
-    /// with while it holds its operation permit).
+    /// with under its operation permit, and the one a revocation checks its
+    /// consent with).
     ///
     /// It reads the pin without refreshing it: the decision brought the pin
     /// current with the store, and the permit's commit fence keeps any
@@ -202,15 +171,16 @@ impl Gateway {
         let actor = permit
             .decision()
             .map(super::GatewayAuthorizationDecision::actor_entity_id);
-        // The revocation waits for every operation admitted before it,
-        // including its own admission.
-        drop(permit);
         let Some((authorization, actor)) = self.authorization.clone().zip(actor) else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
-        if self.consent_current(actor, consent_ref).await?.is_none() {
+        // The decision brought the pin current with the consent Timeline.
+        if self.consent_pinned(&permit, consent_ref).is_none() {
             return Err(GatewayError::ResourceUnavailable);
         }
+        // The revocation waits for every operation admitted before it,
+        // including its own admission.
+        drop(permit);
         let _fence = authorization.exclusive_fence().await;
         let (consents, principal) = self.current_consents(&authorization).await?;
         let revocation_key = revocation_key(principal, actor, key);
