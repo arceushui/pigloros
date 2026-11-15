@@ -934,8 +934,8 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
     assert!(seen[0].1 > Instant::now());
-    let requested = handed.lock().map_err(|error| error.to_string())?;
-    assert_eq!(*requested, vec![crate::test_fixtures::RQE1_DIGEST]);
+    let requested = handed.lock().map_err(|error| error.to_string())?.clone();
+    assert_eq!(requested, vec![crate::test_fixtures::RQE1_DIGEST]);
     Ok(())
 }
 
@@ -956,8 +956,9 @@ async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
         .barrier
         .requested
         .lock()
-        .map_err(|error| error.to_string())?;
-    assert_eq!(*requested, vec![expected]);
+        .map_err(|error| error.to_string())?
+        .clone();
+    assert_eq!(requested, vec![expected]);
     Ok(())
 }
 
