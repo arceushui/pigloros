@@ -1196,3 +1196,51 @@ fn a_foreign_adapter_or_registry_revision_is_refused() -> TestResult {
     assert_nothing_created(&world);
     Ok(())
 }
+
+/// ADR-129 R6.2(8), I23 metadata case: the metadata grant is admitted by its
+/// as-issued binding, so a revocation of another grant on the same authority
+/// Timeline (which re-stamps every loaded grant) leaves it usable, while the
+/// revoked grant itself and a grant outside the installed set are refused.
+#[test]
+fn a_sibling_revocation_leaves_the_untouched_metadata_grant_usable() -> TestResult {
+    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
+    world.revoke(1, 3, 1)?;
+    let restamped = world.domain.store.load_authority(LEAF)?;
+    assert_ne!(
+        restamped.chain().grants()[0].binding_digest()?,
+        world.grants[0].binding_digest()?
+    );
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::Bootstrapped
+    );
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::ResolvedOriginal
+    );
+    world.revoke(0, 5, 2)?;
+    assert_unavailable(&mut world)?;
+    Ok(())
+}
+
+#[test]
+fn a_metadata_grant_outside_the_installed_registry_is_refused() -> TestResult {
+    let mut world = World::new(&[LEAF, OTHER_LEAF])?;
+    let other_only = AuthorityRegistrySnapshotV1::try_new(
+        REGISTRY,
+        vec![world.owner.registry_binding_digest()],
+        vec![world.grants[1].binding_digest()?],
+        vec![],
+    )?;
+    let mut authority = installed(world.owner.clone(), other_only, AUDIENCE, &[500]);
+    assert_eq!(
+        world.open_as(request()?, &mut authority),
+        Err(Error::EvidenceUnavailable)
+    );
+    assert_nothing_created(&world);
+    assert_eq!(
+        world.open(request()?)?,
+        CommunityDomainOpenedV1::Bootstrapped
+    );
+    Ok(())
+}

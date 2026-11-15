@@ -823,6 +823,37 @@ impl PersistedAuthorityV1 {
     pub const fn head_position(&self) -> Seq {
         self.head_position
     }
+
+    /// Each chain grant's as-issued CPG1 binding, in chain order (ADR-129
+    /// R6.2(5)).
+    ///
+    /// A loaded chain carries the current revocation epoch and fence. The
+    /// as-issued form has no fence and the epoch its authority Timeline had
+    /// at issuance, which is the number of that Timeline's revocations fenced
+    /// before the grant's issuance position: issuing requires the current
+    /// epoch, and every revocation fences above the head.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::InvalidEncoding`] if a grant cannot encode.
+    pub fn issued_binding_digests(&self) -> Result<Vec<Hash>, AuthorityErrorV1> {
+        self.chain
+            .grants()
+            .iter()
+            .map(|grant| {
+                let epoch = self
+                    .revocations
+                    .iter()
+                    .filter(|revocation| {
+                        revocation.authority_timeline() == grant.issuance_timeline()
+                            && revocation.fence_position() < grant.issuance_seq()
+                    })
+                    .count() as u64;
+                grant
+                    .with_persisted_revocation(epoch, None)
+                    .binding_digest()
+            })
+            .collect()
+    }
 }
 
 impl AuthorityPersistenceStateV1 {
