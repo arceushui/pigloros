@@ -30,13 +30,13 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.event.pull_request.head
 # Universal newlines keep the same program across LF and CRLF checkouts.
 PRODUCER_SHA256 = {
     "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
-    "scripts/qemu-closure-evidence.sh": "6720b38b6e0d5d9dc061d28b68234ff114aada14d02acc4c882ee0f4cf4c185d",
-    "scripts/check_qemu_closure_evidence.py": "16683bfbc823519db213e575c1f7f170c5aef8d7df1f4a1a79e34857dc03e9b5",
-    "deploy/nixos/flake.nix": "4a67c05abc63cc21cdcfd0c22c156a813320d0b4dca6c9dfcf98eaa08372d8c0",
+    "scripts/qemu-closure-evidence.sh": "0e597b8e8ca19f01b3e9dd77efebbeed5a06cfb71c7ebd5c4d5ca185df1ba0bb",
+    "scripts/check_qemu_closure_evidence.py": "26a0261013dad048f4eb02329b1d42a4c71d8f885fc0bba6e2a08ce89f47ea29",
+    "deploy/nixos/flake.nix": "cb21f5011b0e1c1d319a55f6d01b89427de4a19346b8a05c3c778a9d4ab4e999",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
-    "deploy/nixos/modules/mountfsd-activation.nix": "8e354c20c711e100cd6b512cb45cc999a3cd06a81e1352f9412277f4787120e6",
-    "deploy/nixos/qemu-evidence/guest.nix": "092f64b7702959d985890d39b138b05a68d714edb6e2fe1fe107fcad32b51562",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "ff9cf51f671cdc774f1b249baf2bf310ea1e0b8ca662a985c562792ee94250b9",
+    "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
+    "deploy/nixos/qemu-evidence/guest.nix": "9ffdc5f1cbf8f6b24917838fa024638347d7c996fda82ce0500b135d24bc0c92",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "45aa1339be390fc65474787eb6935b0797b774926a50f0198a687be378421b06",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "d755a5f97a8c7865bc3f5f73b731098df03382577f02ae7087a3596ef8f5a5a7",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}

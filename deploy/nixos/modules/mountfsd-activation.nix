@@ -17,6 +17,12 @@
 }:
 let
   cfg = config.piglor.mountfsdActivation;
+  # A flake-relative path is a subpath of the whole-repository source. Copy
+  # the certificate alone so the kernel depends on its bytes only.
+  certificate = builtins.path {
+    path = cfg.rootHashCertificate;
+    name = baseNameOf cfg.rootHashCertificate;
+  };
 in
 {
   options.piglor.mountfsdActivation = {
@@ -29,9 +35,17 @@ in
         through CONFIG_SYSTEM_TRUSTED_KEYS (ADR-087 Part C.1).
       '';
     };
+
+    rootHashCertificateFile = lib.mkOption {
+      type = lib.types.path;
+      readOnly = true;
+      description = "The standalone store copy of rootHashCertificate that the kernel compiles in.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    piglor.mountfsdActivation.rootHashCertificateFile = certificate;
+
     # ADR-087's kernel facts are audited against the Linux 6.12 LTS line.
     boot.kernelPackages = pkgs.linuxPackages_6_12;
 
@@ -45,7 +59,7 @@ in
           # `option` accepts their absence, never an enabled value.
           DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING = option no;
           DM_VERITY_VERIFY_ROOTHASH_SIG_PLATFORM_KEYRING = option no;
-          SYSTEM_TRUSTED_KEYS = freeform "${cfg.rootHashCertificate}";
+          SYSTEM_TRUSTED_KEYS = freeform "${certificate}";
         };
       }
     ];

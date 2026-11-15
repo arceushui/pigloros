@@ -47,7 +47,7 @@
           kernel = "${config.boot.kernelPackages.kernel}";
           systemd = "${config.systemd.package}";
           qemu = "${config.virtualisation.qemu.package}";
-          trustedCertificate = "${config.piglor.mountfsdActivation.rootHashCertificate}";
+          trustedCertificate = "${config.piglor.mountfsdActivation.rootHashCertificateFile}";
         }
       ) guests;
     };

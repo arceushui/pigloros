@@ -18,7 +18,9 @@ packaged NixOS 26.05 closure and on both architectures:
 
 scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
-itself, independently of the kernel. Usage:
+itself, independently of the kernel. A published artifact can be checked
+again: its checker-verdict.json and SHA256SUMS sit beside guest/ and host/.
+Usage:
 
   check_qemu_closure_evidence.py --architecture ARCH --certificate PEM \
       --flake-lock LOCK --verdict OUT EVIDENCE_DIR
@@ -51,7 +53,9 @@ VERITY_FALLBACKS = (
 CONTEXT_OPTIONS = ("SECONDARY_TRUSTED_KEYRING", "INTEGRITY_PLATFORM_KEYRING", "MODULE_SIG")
 USERSPACE_VERITY_KEYS = {"systemd.allow_userspace_verity", "rd.systemd.allow_userspace_verity"}
 REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
-FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "accel", "nic", "net", "netdev"}
+FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "accel", "net", "netdev"}
+# The workflow writes these beside guest/ and host/ after the check.
+SEAL_FILES = {"checker-verdict.json", "SHA256SUMS"}
 FORBIDDEN_EXACT = {"SYSTEMD_PROC_CMDLINE", "SYSTEMD_VERITY_SHARING"}
 FORBIDDEN_PREFIX = "SYSTEMD_MOUNTFSD_"
 STATIC_VERITY_DIRS = ("/etc/verity.d", "/run/verity.d", "/usr/local/lib/verity.d", "/usr/lib/verity.d")
@@ -59,7 +63,7 @@ CONTAINER_MARKERS = ("/run/systemd/container", "/run/host/container-manager")
 HOST_FILES = {
     "flake-metadata.json", "store-paths.json", "path-info.json", "toplevel-closure.json",
     "system-trusted-keys.pem", "runner", "serial-console.log", "qemu-argv", "qemu-exe",
-    "vm-exit-status",
+    "qemu-net-dev", "vm-exit-status",
 }
 GUEST_FILES = {
     "status", "uname-machine", "uname-release", "systemctl-version", "current-system",
@@ -196,9 +200,10 @@ class Evidence:
         self.processes = self._inventory()
 
     def _inventory(self) -> list[str]:
-        top = sorted(path.name for path in self.root.iterdir())
-        if top != ["guest", "host"]:
-            raise EvidenceError(f"evidence root must hold exactly guest/ and host/, found {top}")
+        top = {path.name for path in self.root.iterdir()}
+        if not {"guest", "host"} <= top <= {"guest", "host"} | SEAL_FILES \
+                or any((self.root / name).is_dir() for name in top & SEAL_FILES):
+            raise EvidenceError(f"evidence root must hold guest/ and host/, found {sorted(top)}")
         for name, expected in (("host", HOST_FILES), ("guest", GUEST_FILES | {"processes"})):
             found = {path.name for path in (self.root / name).iterdir()}
             if found != expected:
@@ -241,6 +246,16 @@ def tab_fields(line: str, count: int, name: str) -> list[str]:
     if len(fields) != count:
         raise EvidenceError(f"malformed {name} line: {line!r}")
     return fields
+
+
+def tab_map(text: str, name: str) -> dict[str, str]:
+    result = {}
+    for line in text.splitlines():
+        key, value = tab_fields(line, 2, name)
+        if key in result:
+            raise EvidenceError(f"{name} repeats {key}")
+        result[key] = value
+    return result
 
 
 def store_info(evidence: Evidence, name: str) -> dict:
@@ -301,7 +316,7 @@ def check_store_identity(evidence: Evidence, architecture: str, lock: dict) -> d
 def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     if evidence.line("guest/uname-machine") != architecture:
         raise EvidenceError("the guest architecture differs from the job architecture")
-    runner = dict(tab_fields(line, 2, "runner") for line in evidence.text("host/runner").splitlines())
+    runner = tab_map(evidence.text("host/runner"), "runner")
     if sorted(runner) != ["dev-kvm", "uname"] or not runner["uname"].endswith(" " + architecture):
         raise EvidenceError("the runner record does not show the job architecture")
     if evidence.line("host/vm-exit-status") != "0" or evidence.line("guest/status") != "complete":
@@ -313,11 +328,17 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     executable = f"{paths['qemu']}/bin/qemu-system-{architecture}"
     if evidence.line("host/qemu-exe") != executable or argv[0] != executable:
         raise EvidenceError("the running QEMU is not the recorded package's system emulator")
-    accelerator = None
+    accelerator, nics, kernels, appends = None, [], [], []
     for index, flag in enumerate(argv[1:], start=1):
         value = argv[index + 1] if index + 1 < len(argv) else ""
         if flag.lstrip("-") in FORBIDDEN_QEMU_OPTIONS and flag.startswith("-"):
             raise EvidenceError(f"QEMU option {flag} is not allowed in the evidence boot")
+        if flag in ("-nic", "--nic"):
+            nics.append(value)
+        if flag in ("-kernel", "--kernel"):
+            kernels.append(value)
+        if flag in ("-append", "--append"):
+            appends.append(value)
         if flag in ("-device", "--device") and value.split(",", 1)[0].startswith("virtio-net"):
             raise EvidenceError("the evidence guest must have no network device")
         if flag in ("-machine", "--machine", "-M"):
@@ -329,12 +350,21 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     # QEMU merges repeated -machine options; the last accel= wins.
     if accelerator != "tcg":
         raise EvidenceError(f"QEMU's effective accelerator is {accelerator!r}, not tcg")
+    if nics != ["none"]:
+        raise EvidenceError("QEMU must run with exactly one -nic none")
+    init = f"init={paths['toplevel']}/init"
+    if kernels != [f"{paths['toplevel']}/kernel"] or len(appends) != 1 \
+            or appends[0].split().count(init) != 1:
+        raise EvidenceError("QEMU did not boot the recorded toplevel's kernel and init")
+    interfaces = [line.split(":", 1)[0].strip() for line in evidence.text("host/qemu-net-dev").splitlines()[2:]]
+    if interfaces != ["lo"]:
+        raise EvidenceError(f"QEMU's network namespace has interfaces {interfaces}, not only lo")
     if evidence.line("guest/detect-virt-vm") != "qemu":
         raise EvidenceError("the guest does not detect TCG QEMU virtualization")
     return {"accelerator": accelerator, "virtualization": "qemu", "runner": runner}
 
 
-def check_command_line(evidence: Evidence) -> str:
+def check_command_line(evidence: Evidence, toplevel: str) -> str:
     """ADR-087 Part C.3: the provider's strict command-line precondition."""
     raw = evidence.raw("guest/proc-cmdline")
     if any(byte > 0x7E or (byte < 0x20 and byte not in b"\t\n\r") for byte in raw):
@@ -343,6 +373,8 @@ def check_command_line(evidence: Evidence) -> str:
     if any(character in line for character in "\"'\\"):
         raise EvidenceError("the kernel command line has a quote or backslash")
     words = [word for word in re.split(r"[ \t\n\r]", line) if word]
+    if words.count(f"init={toplevel}/init") != 1:
+        raise EvidenceError("the kernel command line does not start the recorded toplevel")
     matches = [word for word in words
                if word.split("=", 1)[0].replace("-", "_") in USERSPACE_VERITY_KEYS]
     if matches != [REQUIRED_USERSPACE_VERITY_WORD]:
@@ -463,8 +495,7 @@ def check_mountfsd(evidence: Evidence, systemd: str) -> dict:
         for line in evidence.text("guest/container-markers").splitlines()
     ] != [[marker, "absent"] for marker in CONTAINER_MARKERS]:
         raise EvidenceError("the evidence guest runs in a container")
-    init = dict(tab_fields(line, 2, "pid1-namespaces")
-                for line in evidence.text("guest/pid1-namespaces").splitlines())
+    init = tab_map(evidence.text("guest/pid1-namespaces"), "pid1-namespaces")
     daemon, worker = f"{systemd}/lib/systemd/systemd-mountfsd", f"{systemd}/lib/systemd/systemd-mountwork"
     executables = {}
     for pid in evidence.processes:
@@ -479,8 +510,7 @@ def check_mountfsd(evidence: Evidence, systemd: str) -> dict:
                  for entry in environ.split(b"\0")[:-1]]
         if forbidden(names):
             raise EvidenceError(f"mountfsd process {pid} sets {forbidden(names)}")
-        namespaces = dict(tab_fields(line, 2, "namespaces")
-                          for line in evidence.text(f"{base}/namespaces").splitlines())
+        namespaces = tab_map(evidence.text(f"{base}/namespaces"), "namespaces")
         if sorted(init) != ["mnt", "pid", "user"] or sorted(namespaces) != sorted(init) \
                 or namespaces["pid"] != init["pid"] or namespaces["user"] != init["user"]:
             raise EvidenceError(f"mountfsd process {pid} is not in the host PID and user namespaces")
@@ -503,7 +533,7 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict) -
         "architecture": architecture,
         **identity,
         **check_runner(evidence, architecture, paths),
-        "kernel_command_line": check_command_line(evidence),
+        "kernel_command_line": check_command_line(evidence, paths["toplevel"]),
         "kernel_config": check_kernel_config(evidence, paths["trustedCertificate"]),
         "certificate_key_description": description,
         "builtin_trusted_keys": check_keyring(evidence, description),

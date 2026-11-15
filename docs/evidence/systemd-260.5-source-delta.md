@@ -29,6 +29,8 @@ repeated.
 - Three commits change code that a `MountImage` call reaches. None changes an
   accepted ADR-087 decision. They are listed below with their effect on the
   #444 evidence.
+- One manual-page commit documents that mountfsd trusts the kernel's GPT parser.
+  ADR-087 already compares the GPT set on the provider side.
 - One nixpkgs patch adds a fifth `verity.d` directory. The evidence lane
   records it.
 
@@ -45,7 +47,7 @@ build.
 | Audited base | tag `v260.2`, commit `f1d0952a125b96b7ab2f1ff29a87448ade8ac29b` |
 | Packaged source | tag `v260.5`, commit `84ff4f0dff41c26472cd48c4c4955c2d77f5ac08` (2026-09-10) |
 | Intermediate tags | `v260.3` `7bb0511adaba8e447d53df9b10c70ef6299fbd36`, `v260.4` `ad47ad9cee96df6bb955eef20d6fa2443b235500` |
-| Commits | 574 from v260.2 to v260.5: 158 to v260.3, 227 to v260.4, 189 to v260.5 |
+| Commits | 574 from v260.2 to v260.5: 158 in v260.2..v260.3, 227 in v260.3..v260.4 and 189 in v260.4..v260.5 |
 | Build options | nixpkgs leaves the meson options `mountfsd` and `default-mountfsd-trusted-directories` at their defaults (enabled, and `false`) |
 
 Git blob identities in both tags:
@@ -65,8 +67,9 @@ Git blob identities in both tags:
 Method: `git diff`, `git log` and `git rev-parse <tag>:<path>` over a clone of
 `https://github.com/systemd/systemd`, restricted to `src/mountfsd`,
 `src/shared/{dissect-image,image-policy,loop-util,mount-util,cryptsetup-util,discover-image}.*`,
-`src/repart`, `src/basic/{proc-cmdline,constants,env-util,mountpoint-util}.*`,
-`src/libsystemd/sd-varlink` and `units/`. Function identity was checked by
+`src/shared/nsresource.*`, `src/nsresourced`, `src/repart`,
+`src/basic/{proc-cmdline,constants,env-util,mountpoint-util,namespace-util}.*`,
+`src/libsystemd/sd-varlink`, `units/` and `man/systemd-mountfsd.service.xml`. Function identity was checked by
 extracting each function body from both tags.
 
 ## nixpkgs patches
@@ -100,6 +103,10 @@ partition scanning. The refactor of `probe_sector_size_harder()` into
 for the provider's input. #444 part (b) confirms it on the packaged closure
 (owner decision Q8.4).
 
+The same commit adds the `LOOP_DEVICE_MAY_POPULATE_PARTITION_TABLE` flag to
+`loop-util.h`. It only matters for block-device input, and mountwork does not
+pass it.
+
 ### `713420401df53189de820bc599a47ad1897d8e9a` (v260.4): dissect-image: don't assert() on partition geometry from blkid
 
 [Commit](https://github.com/systemd/systemd/commit/713420401df53189de820bc599a47ad1897d8e9a).
@@ -119,6 +126,15 @@ This only narrows what a failed attempt leaves behind. #444 part (b) records
 the failure-closure cases on this build, and part (c) records resource
 absence.
 
+### `963fd1447be548cb6acf0d7d828a3b7512fcff37` (v260.5): man: note that GPT is implicitly trusted by sd-mountfsd
+
+[Commit](https://github.com/systemd/systemd/commit/963fd1447be548cb6acf0d7d828a3b7512fcff37).
+Documentation only. `systemd-mountfsd.service(8)` now states that the kernel
+parses the image's GPT and that mountfsd applies no policy or checks around
+it. This matches ADR-087's design rather than changing it. The provider
+compares the exact GPT set against SIM1 before the call (§2 step 1) and reads
+it back after activation (§2 step 6, #440).
+
 ## Shared code with no effect on `MountImage`
 
 | Commit (tag) | Change | Why it does not apply |
@@ -129,6 +145,9 @@ absence.
 | [`30debb884217b002a2ab7d97d86677020f711a9a`](https://github.com/systemd/systemd/commit/30debb884217b002a2ab7d97d86677020f711a9a), [`34e2caea8bee1ed6965c03ed73b18e17ea1c79c9`](https://github.com/systemd/systemd/commit/34e2caea8bee1ed6965c03ed73b18e17ea1c79c9) (v260.4), [`5b6a24ea78388e97cfb4ddf214ca67a9f4aac31f`](https://github.com/systemd/systemd/commit/5b6a24ea78388e97cfb4ddf214ca67a9f4aac31f) (v260.5) | mount-util: `get_sub_mounts()` and sub-mount cloning | Used by sysext and the service executor. `mountwork.c` does not call them. |
 | [`5936a0ee5dff014a1f2d7d489d787a0bd264aaf6`](https://github.com/systemd/systemd/commit/5936a0ee5dff014a1f2d7d489d787a0bd264aaf6) (v260.4) | env-util: NUL-terminate the `replace_env_argv()` output | `ExecStart=` variable expansion. The upstream mountfsd unit uses none. |
 | [`0b0e27bc109829c41d9a6db11b850d4649f76843`](https://github.com/systemd/systemd/commit/0b0e27bc109829c41d9a6db11b850d4649f76843) (v260.4) | cryptsetup: skip LUKS2 tokens with JSON errors | LUKS2 tokens only. SIM1 images carry no LUKS partition. |
+
+| [`fa393cb85d808dd54f6261ca4ac38ef78823c37c`](https://github.com/systemd/systemd/commit/fa393cb85d808dd54f6261ca4ac38ef78823c37c), [`5caeb684527a196b46790684c80db13ca0f80250`](https://github.com/systemd/systemd/commit/5caeb684527a196b46790684c80db13ca0f80250) (v260.3) | namespace-util: a complete range assertion in `is_our_namespace()` and a NULL-safe log argument; other `src/basic` assertions | Assertions and logging only. |
+| [`6089849fa379717ee606cdd47891938efafe6478`](https://github.com/systemd/systemd/commit/6089849fa379717ee606cdd47891938efafe6478) (v260.4), [`1248eed00864ec1ded8992b51ad6b8511afc166a`](https://github.com/systemd/systemd/commit/1248eed00864ec1ded8992b51ad6b8511afc166a) (v260.5) | sd-event rate limits use `CLOCK_BOOTTIME`; nsresourced no longer reads a moved-out pointer | Timer clock and the user-namespace daemon. `MountImage` of a DDI by a root peer uses neither. |
 
 `src/shared/discover-image.c` also changed, in `image_make()` (symlinks to raw
 images) and in image cloning (`machine:` commits

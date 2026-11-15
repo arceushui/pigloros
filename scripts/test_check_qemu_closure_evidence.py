@@ -45,6 +45,11 @@ CMDLINE = (
     f"init={PATHS['toplevel']}/init loglevel=4 lsm=landlock,yama,bpf "
     "systemd.allow_userspace_verity=0 console=ttyS0\n"
 )
+NET_DEV = (
+    "Inter-|   Receive                            |  Transmit\n"
+    " face |bytes    packets errs drop fifo frame compressed multicast|bytes\n"
+    "    lo:       0       0    0    0    0     0          0         0        0\n"
+)
 NS = "pid\tpid:[4026531836]\nuser\tuser:[4026531837]\nmnt\tmnt:[4026531841]\n"
 
 
@@ -68,7 +73,9 @@ def qemu_argv(architecture: str, *extra: str) -> bytes:
     argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", "-machine", machine[architecture],
             "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
             "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,mount_tag=nix-store",
-            "-machine", "accel=tcg", "-no-reboot", *extra]
+            "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
+            "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
+            "-machine", "accel=tcg", "-nic", "none", "-no-reboot", *extra]
     return b"".join(argument.encode() + b"\0" for argument in argv)
 
 
@@ -84,6 +91,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "host/serial-console.log": "[    0.000000] Booting Linux\n",
         "host/qemu-argv": qemu_argv(architecture),
         "host/qemu-exe": f"{PATHS['qemu']}/bin/qemu-system-{architecture}\n",
+        "host/qemu-net-dev": NET_DEV,
         "host/vm-exit-status": "0\n",
         "guest/status": "complete\n",
         "guest/uname-machine": f"{architecture}\n",
@@ -284,6 +292,12 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(verdict["nixpkgs"]["narHash"], checker.PINNED_NIXPKGS_NAR_HASH)
                 self.assertEqual(verdict["kernel_command_line"], CMDLINE.rstrip("\n"))
 
+    def test_sealed_evidence_can_be_checked_again(self):
+        def sealed(files):
+            files["checker-verdict.json"] = "{}"
+            files["SHA256SUMS"] = "0  ./host/runner\n"
+        self.assertEqual(self.verdict(change=sealed)["accelerator"], "tcg")
+
     def test_fallbacks_recorded_as_not_set_still_hold(self):
         def not_set(files):
             files["guest/kernel-config"] += "".join(
@@ -298,21 +312,23 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(self.verdict(change=extra)["builtin_trusted_keys"]), 2)
 
     def test_inventory_refuses_missing_extra_and_non_regular_entries(self):
-        def symlink(files):
+        def without_status(files):
             files.pop("guest/status")
         changes = [
             lambda f: f.pop("guest/verity-d"),
             lambda f: f.pop("host/qemu-argv"),
             lambda f: f.update({"guest/fabricated": "x"}),
             lambda f: f.update({"host/extra": "x"}),
-            lambda f: f.update({"checker-verdict.json": "{}"}),
+            lambda f: f.update({"fabricated.json": "{}"}),
+            lambda f: f.update({"SHA256SUMS/x": "{}"}),
+            lambda f: f.pop("host/runner") and f.update({"host/runner.d/x": "x"}),
             lambda f: f.update({"guest/processes/abc/exe": DAEMON + "\n"}),
             lambda f: f.pop("guest/processes/311/environ"),
         ]
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
-        root = self.evidence(change=symlink)
+        root = self.evidence(change=without_status)
         os.symlink("/etc/hostname", root / "guest/status")
         with self.assertRaises(checker.EvidenceError):
             checker.check(root, "x86_64", CERTIFICATE, FLAKE_LOCK)
@@ -378,6 +394,17 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "--accel", "tcg")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-netdev", "user,id=n0")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-nic", "user")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-nic", "none")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-nic\0none\0", b"")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-kernel", "/boot/vmlinuz")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                f"{PATHS['toplevel']}/kernel".encode(), f"{store('other')}/kernel".encode())}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                f"init={PATHS['toplevel']}/init".encode(), b"init=/bin/sh")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-append", "init=/bin/sh")}),
+            lambda f: f.update({"host/qemu-net-dev": NET_DEV + "  eth0: 0 0 0 0 0 0 0 0 0\n"}),
+            lambda f: f.update({"host/qemu-net-dev": NET_DEV.replace("lo:", "eth0:")}),
+            lambda f: f.update({"host/runner": f["host/runner"] + "dev-kvm\tcrw-rw-rw- root kvm\n"}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-net-pci,netdev=n0")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "accel=tcg,,kvm")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64")[:-1]}),
@@ -391,8 +418,9 @@ class EvidenceTests(unittest.TestCase):
                 self.refuses(change)
 
     def test_command_line_follows_the_strict_provider_rule(self):
+        init = f"init={PATHS['toplevel']}/init "
         for line in (
-            "init=/x console=ttyS0\n",
+            "console=ttyS0\n",
             "systemd.allow_userspace_verity=1\n",
             "systemd.allow_userspace_verity=0 systemd.allow_userspace_verity=0\n",
             "systemd.allow_userspace_verity=0 rd.systemd.allow_userspace_verity=1\n",
@@ -407,10 +435,14 @@ class EvidenceTests(unittest.TestCase):
             "systemd.allow_userspace_verity=0 x=é\n",
         ):
             with self.subTest(line=line):
-                self.refuses(lambda f, line=line: f.update({"guest/proc-cmdline": line}))
+                self.refuses(lambda f, line=line: f.update({"guest/proc-cmdline": init + line}))
         for line in ("systemd.allow_userspace_verity=0\n", "a\tsystemd.allow_userspace_verity=0\r\nb\n"):
             with self.subTest(line=line):
-                self.verdict(change=lambda f, line=line: f.update({"guest/proc-cmdline": line}))
+                self.verdict(change=lambda f, line=line: f.update({"guest/proc-cmdline": init + line}))
+        for line in ("systemd.allow_userspace_verity=0\n", init + init + "systemd.allow_userspace_verity=0\n",
+                     f"init={store('other')}/init systemd.allow_userspace_verity=0\n"):
+            with self.subTest(line=line):
+                self.refuses(lambda f, line=line: f.update({"guest/proc-cmdline": line}))
 
     def test_kernel_configuration_is_exact(self):
         sig = "CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG=y\n"
@@ -507,6 +539,8 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"guest/processes/311/namespaces": NS.replace("4026531836", "4026532000")}),
             lambda f: f.update({"guest/processes/311/namespaces": NS.replace("4026531837", "4026532000")}),
             lambda f: f.update({"guest/processes/311/namespaces": "pid\tpid:[4026531836]\n"}),
+            lambda f: f.update({"guest/processes/311/namespaces": NS + "pid\tpid:[4026531836]\n"}),
+            lambda f: f.update({"guest/pid1-namespaces": NS + "user\tuser:[4026531837]\n"}),
             lambda f: f.update({"guest/detect-virt-container": "systemd-nspawn\n"}),
             lambda f: f.update({"guest/container-markers": f["guest/container-markers"].replace(
                 "container\tabsent", "container\tpresent")}),

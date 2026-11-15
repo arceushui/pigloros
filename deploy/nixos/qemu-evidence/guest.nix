@@ -51,8 +51,10 @@ in
     qemu.networkingOptions = lib.mkForce [ ];
     # TCG only: the later -machine accel= replaces the default kvm:tcg list.
     # -no-reboot turns a guest reboot or panic into a QEMU exit.
+    # -nic none: without it QEMU adds its default user-mode NIC.
     qemu.options = [
       "-machine accel=tcg"
+      "-nic none"
       "-no-reboot"
     ];
   };
@@ -60,10 +62,9 @@ in
   systemd.services.piglor-qemu-evidence = {
     description = "Record #444 packaged-closure evidence";
     wantedBy = [ "multi-user.target" ];
-    after = [
-      "multi-user.target"
-      "systemd-mountfsd.socket"
-    ];
+    # Not After=multi-user.target: the target is ordered after the units it
+    # wants, so that would be an ordering cycle.
+    after = [ "systemd-mountfsd.socket" ];
     unitConfig = {
       RequiresMountsFor = [ "/tmp/xchg" ];
       SuccessAction = "poweroff";

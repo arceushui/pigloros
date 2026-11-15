@@ -40,9 +40,10 @@ if [[ ${#keyrings[@]} -ne 1 ]]; then
   exit 1
 fi
 keyring="$((16#${keyrings[0]}))"
+read -r -a members <<<"$(keyctl rlist "${keyring}")"
 {
   printf '%s\t%s\n' "${keyring}" "$(keyctl rdescribe "${keyring}")"
-  for member in $(keyctl rlist "${keyring}"); do
+  for member in "${members[@]}"; do
     printf '%s\t%s\n' "${member}" "$(keyctl rdescribe "${member}")"
   done
 } >builtin-trusted-keys

@@ -100,6 +100,8 @@ boot() {
   fi
   cat "/proc/${qemu_pid}/cmdline" >"${out}/host/qemu-argv"
   readlink "/proc/${qemu_pid}/exe" >"${out}/host/qemu-exe"
+  # The interfaces of QEMU's own network namespace.
+  cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
   wait "${launcher}" || status=$?
   printf '%s\n' "${status}" >"${out}/host/vm-exit-status"
   tail -n 200 "${out}/host/serial-console.log"
