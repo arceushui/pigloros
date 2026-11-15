@@ -957,7 +957,7 @@ fn compiled_profile_of(
 
 /// ADR-134 §4 and D6: a profile without network refuses a Local Principal
 /// whose grant `names_network`.
-fn refuse_principal_network(
+const fn refuse_principal_network(
     profile: &GatewayModeProfileV1,
     names_network: bool,
 ) -> Result<(), GatewayModeErrorV1> {

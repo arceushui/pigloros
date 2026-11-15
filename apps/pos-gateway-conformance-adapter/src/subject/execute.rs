@@ -255,7 +255,7 @@ fn provision_store(store: &ScratchStore, consented: bool) -> Option<()> {
                 &principal,
                 [actor],
                 operations.into_iter().chain(revoke),
-                consent,
+                consent.as_ref(),
             )
             .ok()
         })
