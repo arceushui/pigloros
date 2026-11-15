@@ -81,15 +81,15 @@ fn target() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes(bytes))
 }
 
-fn other_timeline() -> TimelineId {
+const fn other_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([0x2f; 16]))
 }
 
-fn authority_timeline() -> TimelineId {
+const fn authority_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([7; 16]))
 }
 
-fn actor() -> EntityId {
+const fn actor() -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes([8; 16]))
 }
 
@@ -156,7 +156,7 @@ fn oracle_nonce(
     Ok(*adr_h("AuthenticationNonce", &preimage).as_bytes())
 }
 
-fn initializer() -> Source {
+const fn initializer() -> Source {
     Source::Initializer(ArtifactRefV1 {
         schema_id: 0x4353_0001,
         byte_length: 42,
@@ -184,7 +184,7 @@ fn transition() -> Operation {
     }
 }
 
-fn fork_source(parent: TimelineId) -> Source {
+const fn fork_source(parent: TimelineId) -> Source {
     Source::Fork {
         timeline: parent,
         cut: Seq::from_u64(0),
@@ -501,7 +501,14 @@ fn derivation_follows_the_closed_action_table() -> TestResult {
     ]
     .map(Action::as_str);
     assert_eq!(actions, ALL_ACTIONS);
+    Ok(())
+}
 
+/// A5.1 and I5: every shape outside the table, and any zero Timeline or
+/// operation identity, is `InvalidBinding` before any authority call.
+#[test]
+fn derivation_refuses_every_shape_outside_the_table() {
+    let parent = other_timeline();
     let zero = TimelineId::from_ulid(Ulid::from_bytes([0; 16]));
     for invalid in [
         Operation::Initialize {
@@ -584,7 +591,6 @@ fn derivation_follows_the_closed_action_table() -> TestResult {
     ] {
         assert_eq!(Request::derive(&invalid), Err(Error::InvalidBinding));
     }
-    Ok(())
 }
 
 /// R6.2(2) and I30: FAP1, registry and attestation pins and disjoint Fork
@@ -1147,7 +1153,19 @@ fn member_requests_use_the_call_timeline_member_and_constraint() -> TestResult {
         );
     }
 
-    // Retire and reset use no State, so no member request is built.
+    Ok(())
+}
+
+/// A5.2(4): retire and reset use no State, so no member request is built.
+#[test]
+fn retire_and_reset_calls_admit_no_member_request() -> TestResult {
+    let release = implementation(3)?;
+    let member = CommunityMemberBindingV1::new(member_input(&release))?;
+    let member_grant = grant(1, 1, 0, &member_scope(target(), &release)?)?;
+    let admin_grant = grant(3, 3, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let mut world = World::new(&[member_grant.clone(), admin_grant.clone()])?;
+    let member_chain = world.store.load_authority(member_grant.grant_id())?;
+    let admin_chain = world.store.load_authority(admin_grant.grant_id())?;
     for operation in [retire(), reset()] {
         let request = Request::derive(&operation)?;
         let credential = world.credential(&operation)?;

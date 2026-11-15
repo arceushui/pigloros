@@ -30,7 +30,7 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
-fn entity(value: u8) -> EntityId {
+const fn entity(value: u8) -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes([value; 16]))
 }
 
@@ -69,7 +69,7 @@ fn adr_h(m: &str, preimage: &[u8]) -> Hash {
     Hash::from_bytes(*blake3::hash(&input).as_bytes())
 }
 
-fn row(digest: u8, actor: u8) -> Row {
+const fn row(digest: u8, actor: u8) -> Row {
     Row {
         principal_digest: hash(digest),
         actor_entity_id: entity(actor),
@@ -390,7 +390,7 @@ fn stable_member_digest_hashes_the_stable_entry_and_exact_imk1() -> TestResult {
 const REGISTRY: Hash = hash(31);
 const POLICY: Hash = hash(32);
 
-fn authority_timeline() -> TimelineId {
+const fn authority_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([7; 16]))
 }
 
