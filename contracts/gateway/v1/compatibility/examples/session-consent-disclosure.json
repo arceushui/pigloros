@@ -1,0 +1,67 @@
+{
+  "name": "session-consent-disclosure",
+  "operation_id": "getSession",
+  "request": {
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 200,
+    "body": {
+      "schema_id": "urn:pigloros:gateway:v1:schema:session",
+      "id": "01JC0GATEWAYW90PR1NC1PA1A1",
+      "generation": 3,
+      "provenance": {
+        "digest": "18fc673cb20f4cd199af3c17322b8cab69860186952f5af8b25319c59b4df017",
+        "origin": "host-derived"
+      },
+      "mode_profile": {
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": "gateway-mode-local-v1",
+        "mode": "local",
+        "mode_profile_digest": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+        "binding_epoch": 1,
+        "network_grants": [],
+        "network": "denied"
+      },
+      "execution_profile": {
+        "profile_kind": "epf1",
+        "state": "unavailable",
+        "reason": "not-installed"
+      },
+      "availability": {
+        "state": "available",
+        "withheld": []
+      },
+      "principal": {
+        "principal_id": "01JC0GATEWAYW90PR1NC1PA1A1",
+        "entity_ids": [
+          "01JC0GATEWAYF1XTVREACT0R00"
+        ]
+      },
+      "grants": [
+        "session.read",
+        "timeline.create",
+        "timeline.events.read"
+      ],
+      "consents": [
+        {
+          "consent_ref": "01JC0GATEWAYW90C0NSENT0001",
+          "state": "granted",
+          "export_permitted": true
+        },
+        {
+          "consent_ref": "01JC0GATEWAYW90C0NSENT0002",
+          "state": "revoked",
+          "export_permitted": false
+        }
+      ],
+      "contract": {
+        "api_major": "v1",
+        "contract_version": "1.0.0-draft"
+      }
+    }
+  }
+}
