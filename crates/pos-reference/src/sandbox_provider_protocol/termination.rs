@@ -727,19 +727,24 @@ impl TerminationFacts {
     /// R10 §4.8 requires at this progress, or one of KOE1 `work` and
     /// `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
-        let released = matches!(self.progress, AttemptProgressCode::Released);
         self.unit_evidence_missing()
-            || (released
-                && (self.unit.is_none()
-                    || self.service.is_none()
-                    || self.ending.is_none()
-                    || self.output_capture.is_none()
-                    || self.adapter_input_complete.is_none()))
+            || self.released_evidence_missing()
             || (!matches!(self.progress, AttemptProgressCode::NotStarted)
                 && self.start_job.is_none())
             || (self.unit.is_none()
                 && matches!(self.observed, KernelObservationFacts::Observed { .. }))
             || self.work_presence_differs()
+    }
+
+    /// A released attempt lacks its unit, service, ending, capture or stdin
+    /// feed (R9 §4.6.3 and R10 §4.8).
+    const fn released_evidence_missing(&self) -> bool {
+        matches!(self.progress, AttemptProgressCode::Released)
+            && (self.unit.is_none()
+                || self.service.is_none()
+                || self.ending.is_none()
+                || self.output_capture.is_none()
+                || self.adapter_input_complete.is_none())
     }
 
     /// The snapshots and the deadline follow the unit (R9 §4.6.3).
@@ -809,13 +814,19 @@ impl TerminationFacts {
     }
 
     fn ipc_failed(&self) -> bool {
+        self.launch_channel_failed()
+            || self
+                .local_network_termination
+                .is_some_and(LocalNetworkTerminationCode::channel_fault)
+    }
+
+    /// A channel failed before the release: a stdio channel (R10 §4.1) or
+    /// the launcher barrier.
+    fn launch_channel_failed(&self) -> bool {
         matches!(self.launch_failure, Some(LaunchFailure::StdioChannelFailed))
             || self
                 .barrier_failure
                 .is_some_and(BarrierFailure::channel_fault)
-            || self
-                .local_network_termination
-                .is_some_and(LocalNetworkTerminationCode::channel_fault)
     }
 
     fn protocol_failed(&self) -> bool {
@@ -842,9 +853,7 @@ impl TerminationFacts {
     }
 
     fn transfer_failed(&self) -> bool {
-        !self.input_complete
-            || self.adapter_input_complete == Some(false)
-            || self.output_transfer_complete == Some(false)
+        self.transfer_incomplete()
             || self.ending.is_some_and(EndingCode::protocol_failure)
             || matches!(
                 self.local_network_termination,
@@ -857,6 +866,14 @@ impl TerminationFacts {
                 && self
                     .output_capture
                     .is_some_and(|capture| !(capture.complete_frame || capture.ceiling_reached)))
+    }
+
+    /// The input transfer, the stdin feed (R10 §4.5) or a started output
+    /// transfer is incomplete.
+    fn transfer_incomplete(&self) -> bool {
+        !self.input_complete
+            || self.adapter_input_complete == Some(false)
+            || self.output_transfer_complete == Some(false)
     }
 
     fn candidates(&self, contradicted: bool) -> TerminalCandidates {
