@@ -15,14 +15,16 @@ use pos_core::community_lifecycle::{
 };
 use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    EntityId, Hash, ImplementationKeyV1, PrincipalRefV1, Seq, TimelineId,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, EntityId, Hash, ImplementationKeyV1, PrincipalRefV1, Seq, TimelineId,
 };
 use ulid::Ulid;
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
+
+const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
@@ -118,7 +120,7 @@ fn oracle(input: &Input) -> Fallible<Vec<u8>> {
 
 #[test]
 fn cap1_encodes_the_thirteen_adr_fields_and_its_digest() -> TestResult {
-    let catalogue = Catalogue::new(input())?;
+    let catalogue = Catalogue::new(&SEAL, input())?;
     let encoded = catalogue.to_canonical_cbor();
     assert_eq!(encoded, oracle(&input())?);
     assert_eq!(catalogue.digest(), adr_h("CAP1", &encoded));
@@ -130,7 +132,7 @@ fn cap1_encodes_the_thirteen_adr_fields_and_its_digest() -> TestResult {
 
 #[test]
 fn cap1_maps_only_its_listed_principals_to_actors() -> TestResult {
-    let catalogue = Catalogue::new(input())?;
+    let catalogue = Catalogue::new(&SEAL, input())?;
     assert_eq!(catalogue.actor_for(hash(2)), Some(entity(3)));
     assert_eq!(catalogue.actor_for(hash(4)), Some(entity(5)));
     for absent in [1, 3, 5] {
@@ -147,7 +149,7 @@ fn cap1_text_and_row_bounds_hold_at_the_limit_and_one_over() -> TestResult {
         actor_rows: (1..=64).map(|value| row(value, value)).collect(),
         ..input()
     };
-    let widest = Catalogue::new(at_limit.clone())?;
+    let widest = Catalogue::new(&SEAL, at_limit.clone())?;
     let encoded = widest.to_canonical_cbor();
     assert_eq!(encoded, oracle(&at_limit)?);
     assert!(encoded.len() <= MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1);
@@ -170,7 +172,7 @@ fn cap1_text_and_row_bounds_hold_at_the_limit_and_one_over() -> TestResult {
             ..input()
         },
     ] {
-        assert_eq!(Catalogue::new(bounded), Err(Error::BoundsExceeded));
+        assert_eq!(Catalogue::new(&SEAL, bounded), Err(Error::BoundsExceeded));
     }
     Ok(())
 }
@@ -231,7 +233,7 @@ fn cap1_refuses_zero_links_bad_rows_and_an_invalid_trust_scope() {
             ..input()
         },
     ] {
-        assert_eq!(Catalogue::new(invalid), Err(Error::InvalidBinding));
+        assert_eq!(Catalogue::new(&SEAL, invalid), Err(Error::InvalidBinding));
     }
 }
 
@@ -239,6 +241,7 @@ fn cap1_refuses_zero_links_bad_rows_and_an_invalid_trust_scope() {
 #[test]
 fn attestation_digest_reproduces_vector_v6() -> TestResult {
     let snapshot = AuthorityRegistrySnapshotV1::try_new(
+        &SEAL,
         Hash::from_bytes([0x44; 32]),
         vec![hash(1)],
         vec![Hash::from_bytes([0x55; 32])],
@@ -261,7 +264,7 @@ fn attestation_digest_reproduces_vector_v6() -> TestResult {
 #[test]
 fn attestation_digest_binds_every_sorted_binding_and_the_registry() -> TestResult {
     let snapshot = |registry: u8, bindings: Vec<Hash>| {
-        AuthorityRegistrySnapshotV1::try_new(hash(registry), vec![hash(1)], bindings, vec![])
+        AuthorityRegistrySnapshotV1::try_new(&SEAL, hash(registry), vec![hash(1)], bindings, vec![])
     };
     let both = snapshot(2, vec![hash(3), hash(4)])?;
     let oracle = encode(&Value::Array(vec![
@@ -479,6 +482,7 @@ fn issued_bindings_undo_the_revocation_re_stamp_in_chain_order() -> TestResult {
     let leaf_revocation = revocation(&early_leaf, 6, 2)?;
     let all = [&sibling, &root, &early_leaf, &late_leaf];
     let registry = AuthorityRegistrySnapshotV1::try_new(
+        &SEAL,
         REGISTRY,
         vec![hash(40)],
         sorted_bindings(&all)?,
@@ -527,13 +531,15 @@ fn issued_bindings_undo_the_revocation_re_stamp_in_chain_order() -> TestResult {
 #[test]
 fn capability_bindings_return_the_sorted_attested_set() -> TestResult {
     let snapshot = AuthorityRegistrySnapshotV1::try_new(
+        &SEAL,
         REGISTRY,
         vec![hash(40)],
         vec![hash(2), hash(9)],
         vec![],
     )?;
     assert_eq!(snapshot.capability_bindings(), &[hash(2), hash(9)]);
-    let empty = AuthorityRegistrySnapshotV1::try_new(REGISTRY, vec![hash(40)], vec![], vec![])?;
+    let empty =
+        AuthorityRegistrySnapshotV1::try_new(&SEAL, REGISTRY, vec![hash(40)], vec![], vec![])?;
     assert!(empty.capability_bindings().is_empty());
     Ok(())
 }

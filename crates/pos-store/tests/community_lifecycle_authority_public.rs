@@ -23,10 +23,11 @@ use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, EntityId,
-    Hash, ImplementationKeyV1, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConsentEvidenceV1, EntityId, Hash, ImplementationKeyV1, PrincipalRefV1, Seq, TimelineId,
+    WallTime,
 };
 use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
@@ -40,6 +41,8 @@ use ulid::Ulid;
 
 type Fallible<T> = Result<T, Box<dyn StdError>>;
 type TestResult = Fallible<()>;
+
+const SEAL: AuthorityTrustRootSealV1 = AuthorityTrustRootSealV1::for_composition_root();
 
 const REGISTRY: Hash = Hash::from_bytes([31; 32]);
 const POLICY_REVISION: Hash = Hash::from_bytes([32; 32]);
@@ -96,7 +99,17 @@ fn caller() -> Fallible<PrincipalRefV1> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ]
+        })
+        .map(char::from)
+        .collect()
 }
 
 fn unhex(value: &str) -> Fallible<Vec<u8>> {
@@ -275,6 +288,7 @@ fn snapshot(grants: &[&CapabilityGrantV1]) -> Fallible<AuthorityRegistrySnapshot
         .collect::<Result<Vec<_>, _>>()?;
     bindings.sort_unstable();
     Ok(AuthorityRegistrySnapshotV1::try_new(
+        &SEAL,
         REGISTRY,
         vec![hash(41)],
         bindings,
@@ -321,6 +335,7 @@ fn install(
     samples: &[u64],
 ) -> Fallible<CommunityLifecycleAuthorityV1> {
     Ok(CommunityLifecycleAuthorityV1::new(
+        &SEAL,
         CommunityLifecycleAuthorityInputV1 {
             catalogue,
             authentication_policy: fap1(SEED)?,
@@ -359,7 +374,7 @@ impl World {
             let permit = host.authorize_grant(grant)?;
             store.issue_capability_grant(permit, grant)?;
         }
-        let catalogue = CommunityAuthorityCatalogueV1::new(catalogue_input(&attestation)?)?;
+        let catalogue = CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?;
         let digest = catalogue.digest();
         Ok(Self {
             store,
@@ -585,8 +600,9 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
                    forks: Vec<ForkAuthenticationPolicyV1>|
      -> Fallible<Result<CommunityLifecycleAuthorityV1, Error>> {
         Ok(CommunityLifecycleAuthorityV1::new(
+            &SEAL,
             CommunityLifecycleAuthorityInputV1 {
-                catalogue: CommunityAuthorityCatalogueV1::new(input)?,
+                catalogue: CommunityAuthorityCatalogueV1::new(&SEAL, input)?,
                 authentication_policy: fap1(SEED)?,
                 attestation,
                 fork_admission_policies: forks,
@@ -595,6 +611,7 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
         ))
     };
     let foreign_registry = AuthorityRegistrySnapshotV1::try_new(
+        &SEAL,
         hash(34),
         vec![hash(41)],
         attestation.capability_bindings().to_vec(),
@@ -662,15 +679,17 @@ fn an_authorized_initialize_binds_the_exact_request_and_refs() -> TestResult {
 
     let mut evidence_input = b"pigloros/authenticated-principal-evidence/v1".to_vec();
     evidence_input.extend_from_slice(&credential);
-    let authenticated =
-        AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+    let authenticated = AuthenticatedPrincipalResultV1::try_from_draft(
+        &SEAL,
+        AuthenticatedPrincipalDraftV1 {
             principal: caller()?,
             adapter_id: ADAPTER.to_owned(),
             assurance: AssuranceLevelV1::try_new(2)?,
             issued_at: WallTime::from_micros(ISSUED),
             expires_at: WallTime::from_micros(EXPIRES),
             binding_digest: Hash::from_bytes(*blake3::hash(&evidence_input).as_bytes()),
-        })?;
+        },
+    )?;
     let expected = AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
         authenticated,
         actor_entity_id: actor(),
@@ -808,7 +827,7 @@ fn every_credential_defect_gives_12() -> TestResult {
     // No trusted wall sample.
     let attestation = snapshot(&[&leaf])?;
     let mut silent = install(
-        CommunityAuthorityCatalogueV1::new(catalogue_input(&attestation)?)?,
+        CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?,
         attestation,
         &[],
     )?;
@@ -828,7 +847,7 @@ fn credential_validity_holds_from_issue_until_expiry() -> TestResult {
     let request = Request::derive(&initialize())?;
     let credential = world.credential(&initialize())?;
     let mut authority = install(
-        CommunityAuthorityCatalogueV1::new(catalogue_input(&attestation)?)?,
+        CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?,
         attestation,
         &[ISSUED - 1, ISSUED, EXPIRES - 1, EXPIRES],
     )?;

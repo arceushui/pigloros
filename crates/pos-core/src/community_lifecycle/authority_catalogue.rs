@@ -11,8 +11,8 @@
 
 use super::{digest, is_valid_community_id_v1, record_prefix, CommunityLifecycleErrorV1 as Error};
 use crate::{
-    encode_bytes, encode_hash, encode_head, AuthorityRegistrySnapshotV1, EntityId, Hash,
-    MAX_AUTHORITY_TEXT_BYTES,
+    encode_bytes, encode_hash, encode_head, AuthorityRegistrySnapshotV1, AuthorityTrustRootSealV1,
+    EntityId, Hash, MAX_AUTHORITY_TEXT_BYTES,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -69,14 +69,27 @@ pub struct CommunityAuthorityCatalogueInputV1 {
 pub struct CommunityAuthorityCatalogueV1(CommunityAuthorityCatalogueInputV1);
 
 impl CommunityAuthorityCatalogueV1 {
-    /// Validate every CAP1 field bound.
+    /// Validate every CAP1 field bound. Only the trusted composition root,
+    /// which holds the [`AuthorityTrustRootSealV1`], builds a CAP1 (#1374):
+    ///
+    /// ```compile_fail,E0061
+    /// use pos_core::community_lifecycle::{
+    ///     CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
+    /// };
+    /// fn forge(input: CommunityAuthorityCatalogueInputV1) {
+    ///     let _ = CommunityAuthorityCatalogueV1::new(input);
+    /// }
+    /// ```
     ///
     /// # Errors
     /// Returns `InvalidBinding` for a zero digest, revision, principal or
     /// actor, unordered or repeated actor rows, or a trust scope outside the
     /// `plugin_trust` identifier grammar; `BoundsExceeded` for an empty or
     /// over-128-byte audience and for zero or more than 64 actor rows.
-    pub fn new(input: CommunityAuthorityCatalogueInputV1) -> Result<Self> {
+    pub fn new(
+        _seal: &AuthorityTrustRootSealV1,
+        input: CommunityAuthorityCatalogueInputV1,
+    ) -> Result<Self> {
         if !(1..=MAX_AUTHORITY_TEXT_BYTES).contains(&input.audience.len())
             || !(1..=MAX_COMMUNITY_ACTOR_ROWS_V1).contains(&input.actor_rows.len())
         {

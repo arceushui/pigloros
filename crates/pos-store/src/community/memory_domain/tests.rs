@@ -1232,6 +1232,7 @@ fn a_sibling_revocation_leaves_the_untouched_metadata_grant_usable() -> TestResu
 fn a_metadata_grant_outside_the_installed_registry_is_refused() -> TestResult {
     let mut world = World::new(&[LEAF, OTHER_LEAF])?;
     let other_only = AuthorityRegistrySnapshotV1::try_new(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         REGISTRY,
         vec![world.owner.registry_binding_digest()],
         vec![world.grants[1].binding_digest()?],

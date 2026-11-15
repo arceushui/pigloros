@@ -35,15 +35,15 @@ use pos_core::fork_authentication::{
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1,
-    EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
+    AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
+    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
 };
 
-use super::attestation::evaluation_snapshot;
+use super::attestation::{evaluation_snapshot, OWNER_SEAL};
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
 const EXECUTION_CATEGORY: &str = "community.execution-state";
@@ -298,7 +298,22 @@ pub struct CommunityLifecycleAuthorityV1 {
 }
 
 impl CommunityLifecycleAuthorityV1 {
-    /// Install the authority at the trusted composition root.
+    /// Install the authority at the trusted composition root, which alone
+    /// holds the [`AuthorityTrustRootSealV1`] (#1374). Without the seal it
+    /// cannot be installed:
+    ///
+    /// ```compile_fail,E0061
+    /// use pos_core::trusted_clock::TrustedWallSourceV1;
+    /// use pos_store::community::{
+    ///     CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
+    /// };
+    /// fn forge(
+    ///     input: CommunityLifecycleAuthorityInputV1,
+    ///     wall: impl TrustedWallSourceV1 + 'static,
+    /// ) {
+    ///     let _ = CommunityLifecycleAuthorityV1::new(input, wall);
+    /// }
+    /// ```
     ///
     /// # Errors
     /// Returns `InvalidBinding` (a composition refusal, R6.2(2)) when the
@@ -306,6 +321,7 @@ impl CommunityLifecycleAuthorityV1 {
     /// digest or attestation digest differs from CAP1's, or any community
     /// adapter key also appears in an installed Fork-admission FAP1.
     pub fn new(
+        _seal: &AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
         wall: impl TrustedWallSourceV1 + 'static,
     ) -> Result<Self, Error> {
@@ -393,6 +409,7 @@ impl CommunityLifecycleAuthorityV1 {
                     .zip(AssuranceLevelV1::try_new(record.assurance).ok())
                     .and_then(|(binding_digest, assurance)| {
                         AuthenticatedPrincipalResultV1::try_from_draft(
+                            &OWNER_SEAL,
                             AuthenticatedPrincipalDraftV1 {
                                 principal: record.principal.clone(),
                                 adapter_id: record.adapter_id.clone(),

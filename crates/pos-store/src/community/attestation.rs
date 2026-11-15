@@ -10,7 +10,16 @@
 //! bindings. Store contents are never a trust root: a grant that was not
 //! attested at composition gives no snapshot.
 
-use pos_core::{AuthorityRegistrySnapshotV1, CapabilityGrantV1, Hash, PersistedAuthorityV1};
+use pos_core::{
+    AuthorityRegistrySnapshotV1, AuthorityTrustRootSealV1, CapabilityGrantV1, Hash,
+    PersistedAuthorityV1,
+};
+
+/// The community owner's own trust-root seal. The owner is inside the
+/// trusted boundary (ADR-129 A5.9): it builds the per-request snapshot and
+/// the verified authentication result itself, and never returns the seal.
+pub(super) const OWNER_SEAL: AuthorityTrustRootSealV1 =
+    AuthorityTrustRootSealV1::for_composition_root();
 
 /// The snapshot one request is evaluated against, or `None` when any chain
 /// grant's as-issued binding is not attested by `attestation`.
@@ -45,6 +54,7 @@ pub(super) fn evaluation_snapshot(
         .and_then(|mut current| {
             current.sort_unstable();
             AuthorityRegistrySnapshotV1::try_new(
+                &OWNER_SEAL,
                 registry_digest,
                 vec![authentication_binding],
                 current,
