@@ -167,7 +167,9 @@ pub(super) fn proc_executable_digest(
 
 fn bounded_digest(source: impl Read, length: u64) -> Result<[u8; 32], SelectorBoundaryError> {
     let mut hasher = blake3::Hasher::new();
-    io::copy(&mut source.take(length.saturating_add(1)), &mut hasher)
+    let mut bounded = source.take(length.saturating_add(1));
+    let copied = io::copy(&mut bounded, &mut hasher);
+    copied
         .map_err(io_error)
         .and_then(|copied| require(copied == length))
         .map(|()| *hasher.finalize().as_bytes())
