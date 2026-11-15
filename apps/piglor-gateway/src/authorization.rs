@@ -1365,6 +1365,13 @@ impl GatewayAuthorization {
         Arc::clone(&self.commit_lock).read_owned().await
     }
 
+    /// Whether a writer (a revocation's exclusive fence) is queued behind
+    /// the current readers, so no new reader is admitted.
+    #[cfg(test)]
+    pub(crate) fn fence_writer_waits(&self) -> bool {
+        self.commit_lock.try_read().is_err()
+    }
+
     /// Persist every immutable record behind the current authority view in
     /// the admission store and load the chain back as the store resolves it.
     ///

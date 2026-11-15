@@ -44,7 +44,8 @@ mod served {
     use axum::{body::Body, http::Request, Router};
     use piglor_ledger::LedgerView;
     use pos_core::{
-        AuthorityPersistencePortV1, AuthorizationDenialEvidenceV1, EntityId, PrincipalRefV1,
+        AuthorityPersistencePortV1, AuthorizationDenialEvidenceV1, AuthorizationOutcomeV1,
+        EntityId, PrincipalRefV1,
     };
     use pos_runtime::{ErasureCoordinatorCompositionV1, ScenarioRoomLimitV1};
     use pos_store::{sqlite::SqliteStore, StoreConfig};
@@ -587,8 +588,10 @@ mod served {
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("consent-invalid"))
         );
-        // A create admitted before the revocation holds its permit; the
-        // revocation waits for it, then the next create is refused.
+        // A create admitted before the revocation holds its permit. The
+        // revocation reaches the commit fence and waits there: a writer is
+        // queued behind the permit's read guard. The create still commits
+        // on its pin, and releasing its permit lets the revocation through.
         let permit = served
             .gateway
             .authorize_operation(
@@ -598,6 +601,11 @@ mod served {
                 None,
             )
             .await?;
+        let authorization = served
+            .gateway
+            .authorization
+            .clone()
+            .ok_or("the composition has an authorizer")?;
         let app = served.app.clone();
         let consent = served.consent.clone();
         let revocation = tokio::spawn(async move {
@@ -611,22 +619,23 @@ mod served {
             .map(|(status, _)| status)
             .map_err(|error| error.to_string())
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !revocation.is_finished(),
-            "the revocation waits for the permit"
-        );
+        while !authorization.fence_writer_waits() {
+            assert!(
+                !revocation.is_finished(),
+                "the revocation waits for the permit"
+            );
+            tokio::task::yield_now().await;
+        }
         let body = json!({"descriptor": served.descriptor(2)});
         let admitted = served
             .gateway
             .create_scenario_room(
-                &permit,
+                permit,
                 "admitted",
                 parse_create(&body).map_err(|_| "parse")?,
             )
             .await;
         assert!(matches!(admitted, Ok(RoomOutcomeV1::Committed(_))));
-        drop(permit);
         assert_eq!(revocation.await??, StatusCode::CREATED);
         let (status, problem) = post(
             &served.app,
@@ -651,6 +660,24 @@ mod served {
             (StatusCode::FORBIDDEN, &json!("revoked"))
         );
         served.gateway.shutdown().await?;
+        // Each consent refusal left its ADN1 record before it was answered.
+        let outcomes = SqliteStore::open(&served.path)?
+            .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?
+            .into_iter()
+            .filter_map(|(_, evidence)| match evidence {
+                AuthorizationDenialEvidenceV1::Denial(record) => Some(record.outcome()),
+                AuthorizationDenialEvidenceV1::Suppressed(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes,
+            [
+                AuthorizationOutcomeV1::ConsentMissing,
+                AuthorizationOutcomeV1::ConsentMissing,
+                AuthorizationOutcomeV1::RevokedAtFence,
+                AuthorizationOutcomeV1::RevokedAtFence,
+            ]
+        );
         Ok(())
     }
 

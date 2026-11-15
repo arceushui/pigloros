@@ -664,9 +664,7 @@ async fn create_scenario_room(
             &state.gateway,
             personas,
             move |gateway, permit| async move {
-                let outcome = gateway.create_scenario_room(&permit, &key, request).await;
-                drop(permit);
-                Ok(outcome)
+                Ok(gateway.create_scenario_room(permit, &key, request).await)
             },
         )
         .await?;
@@ -689,11 +687,9 @@ async fn derive_scenario_room(
             &state.gateway,
             personas,
             move |gateway, permit| async move {
-                let outcome = gateway
-                    .derive_scenario_room(&permit, room_id, &key, request)
-                    .await;
-                drop(permit);
-                Ok(outcome)
+                Ok(gateway
+                    .derive_scenario_room(permit, room_id, &key, request)
+                    .await)
             },
         )
         .await?;

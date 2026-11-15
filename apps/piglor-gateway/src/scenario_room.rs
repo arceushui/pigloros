@@ -9,7 +9,9 @@
 //! descriptor and the committed Event receipt.
 
 use axum::http::StatusCode;
-use pos_core::{EntityId, EventId, Hash};
+use std::sync::Arc;
+
+use pos_core::{AuthorityErrorV1, AuthorizationOutcomeV1, EntityId, EventId, Hash};
 use pos_runtime::{
     HostCatalogueEntryV1, RoomInitialConditionV1, RoomParticipantKindV1, RoomParticipantV1,
     RoomPluginRefV1, RoomRuleV1, ScenarioRoomCatalogueV1, ScenarioRoomDescriptorV1,
@@ -24,7 +26,7 @@ use crate::{
         StoredRoomRevisionV1,
     },
     problem::{ProblemCodeV1, ProblemV1},
-    Gateway, GatewayError, GatewayOperationPermitV1,
+    Gateway, GatewayAuthorization, GatewayError, GatewayOperationPermitV1, PendingAuthorityDenial,
 };
 
 /// The `$id` of the served `ScenarioRoomRevision` schema.
@@ -45,10 +47,6 @@ pub(crate) enum RoomFailureV1 {
     Gateway(GatewayError),
     /// The request does not match its schema.
     Invalid,
-    /// `privacy_export_ref` names no consent the acting Principal holds.
-    ConsentInvalid,
-    /// `privacy_export_ref` names a consent that was revoked.
-    ConsentRevoked,
     /// The store refused the operation.
     Store(RoomStoreErrorV1),
 }
@@ -67,16 +65,6 @@ impl From<RoomFailureV1> for ProblemV1 {
                 ProblemCodeV1::InvalidRequest,
                 StatusCode::BAD_REQUEST,
                 "the Scenario Room request does not match its schema",
-            ),
-            RoomFailureV1::ConsentInvalid => Self::new(
-                ProblemCodeV1::ConsentInvalid,
-                StatusCode::FORBIDDEN,
-                "the room's privacy_export_ref names no consent the Principal holds",
-            ),
-            RoomFailureV1::ConsentRevoked => Self::new(
-                ProblemCodeV1::Revoked,
-                StatusCode::FORBIDDEN,
-                "the room's privacy_export_ref names a revoked consent",
             ),
             RoomFailureV1::Store(error) => Self::from(error),
         }
@@ -471,56 +459,99 @@ impl Gateway {
             .map_err(RoomFailureV1::Store)
     }
 
-    /// The consent `privacy_export_ref` names, as the decision of `permit`
-    /// pinned it (#303 decision 2a): it must be a consent the acting
-    /// Principal holds and that is not revoked. It is checked under the
-    /// permit, so a revocation waits for the operation and takes effect
-    /// before the next one.
-    fn require_room_consent(
+    /// The denial of the consent `privacy_export_ref` names, as the
+    /// decision of `permit` pinned it (#303 decision 2a), with the authorizer
+    /// to record it: a consent the acting Principal does not hold is
+    /// `consent-invalid` (ADN1 outcome `ConsentMissing`), a revoked one
+    /// `revoked` (`RevokedAtFence`). A composition that protects nothing has
+    /// no decision and so no consent to check.
+    fn room_consent_denial(
         &self,
         permit: &GatewayOperationPermitV1,
         input: &ScenarioRoomInputV1,
-    ) -> Result<(), RoomFailureV1> {
-        match self.consent_pinned(permit, EventId::from_ulid(input.privacy_export_ref.inner())) {
-            None => Err(RoomFailureV1::ConsentInvalid),
-            Some(consent) if consent.revocation().is_some() => Err(RoomFailureV1::ConsentRevoked),
-            Some(_) => Ok(()),
+    ) -> Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)> {
+        let consent =
+            self.consent_pinned(permit, EventId::from_ulid(input.privacy_export_ref.inner()));
+        let refusal = match consent {
+            None => Some((
+                AuthorizationOutcomeV1::ConsentMissing,
+                AuthorityErrorV1::ConsentMissing,
+            )),
+            Some(consent) if consent.revocation().is_some() => Some((
+                AuthorizationOutcomeV1::RevokedAtFence,
+                AuthorityErrorV1::RevokedAtFence,
+            )),
+            Some(_) => None,
+        };
+        self.authorization
+            .clone()
+            .zip(permit.decision())
+            .zip(refusal)
+            .and_then(|((authorization, decision), (outcome, error))| {
+                GatewayAuthorization::deny_at_commit_fence(decision, outcome, Some(error))
+                    .map(|pending| (authorization, pending))
+            })
+    }
+
+    /// Run a room write under `permit`, after its consent check. A consent
+    /// denial releases the permit first, then is recorded as ADN1 denial
+    /// evidence (under the denial-record bounds) and answered.
+    async fn room_write(
+        &self,
+        permit: GatewayOperationPermitV1,
+        input: &ScenarioRoomInputV1,
+        operation: RoomOperationV1,
+    ) -> Result<RoomOutcomeV1, RoomFailureV1> {
+        if let Some((authorization, pending)) = self.room_consent_denial(&permit, input) {
+            drop(permit);
+            return Err(RoomFailureV1::Gateway(
+                self.recorded_denial(&authorization, pending).await,
+            ));
         }
+        let outcome = self.room_operation(operation).await;
+        drop(permit);
+        outcome
     }
 
     /// Create revision 1 of a room under the `permit` of its decision.
     pub(crate) async fn create_scenario_room(
         &self,
-        permit: &GatewayOperationPermitV1,
+        permit: GatewayOperationPermitV1,
         key: &str,
         request: ParsedRoomRequestV1,
     ) -> Result<RoomOutcomeV1, RoomFailureV1> {
-        self.require_room_consent(permit, &request.input)?;
-        let claim = claim(permit, "create", None, key, request.request_digest);
-        self.room_operation(RoomOperationV1::Create {
+        let claim = claim(&permit, "create", None, key, request.request_digest);
+        let input = request.input;
+        let operation = RoomOperationV1::Create {
             claim,
-            input: Box::new(request.input),
-        })
-        .await
+            input: Box::new(input.clone()),
+        };
+        self.room_write(permit, &input, operation).await
     }
 
     /// Derive the next revision of `room_id` under the `permit` of its decision.
     pub(crate) async fn derive_scenario_room(
         &self,
-        permit: &GatewayOperationPermitV1,
+        permit: GatewayOperationPermitV1,
         room_id: EntityId,
         key: &str,
         request: ParsedRoomRequestV1,
     ) -> Result<RoomOutcomeV1, RoomFailureV1> {
-        self.require_room_consent(permit, &request.input)?;
-        let claim = claim(permit, "derive", Some(room_id), key, request.request_digest);
-        self.room_operation(RoomOperationV1::Derive {
+        let claim = claim(
+            &permit,
+            "derive",
+            Some(room_id),
+            key,
+            request.request_digest,
+        );
+        let input = request.input;
+        let operation = RoomOperationV1::Derive {
             claim,
             room_id,
             parent_revision: request.parent_revision,
-            input: Box::new(request.input),
-        })
-        .await
+            input: Box::new(input.clone()),
+        };
+        self.room_write(permit, &input, operation).await
     }
 
     /// Read revision `revision` of `room_id`.
