@@ -840,22 +840,11 @@ impl crate::InstalledPluginFactoryV1 for RoomTestFactory {
 }
 
 #[test]
-fn a_host_catalogue_entry_describes_its_one_plugin_without_registering_it() -> TestResult {
-    let catalogue = crate::HostCatalogueEntryV1::<RoomTestFactory>::scenario_room_catalogue_v1(
-        &"gateway-test-actions.v1",
-    );
+fn a_foreign_factory_is_not_the_reviewed_host_catalogue_entry() {
+    let refused = crate::HostCatalogueEntryV1::<RoomTestFactory>::gateway()
+        .scenario_room_catalogue_v1(&"gateway-test-actions.v1");
     assert_eq!(
-        catalogue.resolve(&RoomPluginRefV1 {
-            plugin_id: "gateway-test-actions".to_owned(),
-            version: "0.1.0".to_owned(),
-        }),
-        Ok(capability_set_hash_v1(
-            [Kind::new("gateway-test-actions.v1")].iter()
-        ))
+        refused.err().map(|error| error.to_string()),
+        Some(RuntimeError::from(crate::OutputAdmissionErrorV1::PluginMismatch).to_string())
     );
-    assert_eq!(
-        catalogue.resolve(&plugin("world")),
-        Err(ScenarioRoomErrorV1::PluginNotBundled)
-    );
-    Ok(())
 }
