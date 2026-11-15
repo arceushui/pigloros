@@ -15,6 +15,11 @@ on:
         required: false
         default: ""
         type: string
+      re:
+        description: Optional mutant-name regex (passed as --re)
+        required: false
+        default: ""
+        type: string
       per_shard:
         description: Target mutants per shard (sharding only; limits unchanged)
         required: false
@@ -25,7 +30,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mutation-777-${{ inputs.package }}-${{ inputs.files }}
+  group: mutation-777-${{ inputs.package }}-${{ inputs.files }}-${{ inputs.re }}
   cancel-in-progress: false
 
 env:
@@ -35,6 +40,7 @@ env:
   CARGO_BUILD_JOBS: "1"
   AUDIT_PACKAGE: ${{ inputs.package }}
   AUDIT_FILES: ${{ inputs.files }}
+  AUDIT_RE: ${{ inputs.re }}
 
 jobs:
   mutation-baseline:
@@ -74,6 +80,7 @@ jobs:
             test -f "$f"
             file_args+=(--file "$f")
           done
+          if [[ -n "$AUDIT_RE" ]]; then file_args+=(--re "$AUDIT_RE"); fi
           git ls-files -z Cargo.toml Cargo.lock rust-toolchain.toml .cargo apps crates \
             | xargs -0 sha256sum > "${RUNNER_TEMP}/mutation-source.sha256"
           cargo mutants --package "$AUDIT_PACKAGE" "${file_args[@]}" --all-features \
@@ -145,6 +152,7 @@ jobs:
           for f in $AUDIT_FILES; do
             file_args+=(--file "$f")
           done
+          if [[ -n "$AUDIT_RE" ]]; then file_args+=(--re "$AUDIT_RE"); fi
           set +e
           timeout --foreground 60m cargo mutants \
             --package "$AUDIT_PACKAGE" \
