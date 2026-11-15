@@ -29,16 +29,23 @@ pub const MAX_COMMUNITY_ACTOR_ROWS_V1: usize = 64;
 const MAPPING_PROFILE: &str = "pos.community.authority-mapping";
 const MAPPING_PROFILE_VERSION: u64 = 6;
 
-// An upper bound: record head and magic 7, version 1, profile 35, five
+// Buffer sizes are plain literals, so no arithmetic mutant can survive in
+// them; the assertions tie each one to the bounds it is derived from.
+//
+// CAP1 upper bound: record head, magic and version 7, profile 35, five
 // hashes 170, two texts 2 * 130, rows head 2, 64 rows of 52 bytes and two
 // 5-byte schema IDs.
-const MAX_ENCODED_BYTES: usize = 7 + 1 + 35 + 170 + 260 + 2 + MAX_COMMUNITY_ACTOR_ROWS_V1 * 52 + 10;
+const MAX_ENCODED_BYTES: usize = 3_813;
+// The attestation preimage: array head 1, registry hash 34, bindings head 3
+// and at most 128 bindings of 34 bytes.
+const ATTESTATION_PREIMAGE_BYTES: usize = 4_390;
+// The nonce preimage: array head 1, H(CAP1) 34 and three authority texts of
+// at most 128 bytes with a 2-byte head each.
+const NONCE_PREIMAGE_BYTES: usize = 425;
+const _: () = assert!(MAX_COMMUNITY_ACTOR_ROWS_V1 == 64);
+const _: () = assert!(MAX_AUTHORITY_TEXT_BYTES == 128);
+const _: () = assert!(crate::MAX_AUTHORITY_REGISTRY_BINDINGS == 128);
 const _: () = assert!(MAX_ENCODED_BYTES <= MAX_COMMUNITY_AUTHORITY_CATALOGUE_BYTES_V1);
-// The attestation preimage holds at most the 128 attested bindings.
-const ATTESTATION_PREIMAGE_BYTES: usize = 1 + 34 + 3 + crate::MAX_AUTHORITY_REGISTRY_BINDINGS * 34;
-// The nonce preimage holds one hash and three authority texts of at most 128
-// bytes each.
-const NONCE_PREIMAGE_BYTES: usize = 1 + 34 + 3 * (2 + MAX_AUTHORITY_TEXT_BYTES);
 
 /// One CAP1 actor row: the installed actor entity for one principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
