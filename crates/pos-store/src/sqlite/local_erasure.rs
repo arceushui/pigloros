@@ -31,20 +31,12 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(map_erasure_receipt_failure)
             .and_then(|transaction| {
-                sqlite_erasure_inventory_snapshot(&transaction, limits)
-                    .and_then(|inventory| {
-                        timeline_rows(&transaction, limits).and_then(|timelines| {
-                            read_store_identity(&transaction).and_then(|identity| {
-                                ErasureAuthoritySnapshotV1::new(inventory, timelines, identity)
-                            })
-                        })
-                    })
-                    .and_then(|snapshot| {
-                        transaction
-                            .commit()
-                            .map(|()| snapshot)
-                            .map_err(map_erasure_receipt_failure)
-                    })
+                authority_snapshot_in(&transaction, limits).and_then(|snapshot| {
+                    transaction
+                        .commit()
+                        .map(|()| snapshot)
+                        .map_err(map_erasure_receipt_failure)
+                })
             })
     }
 
@@ -140,6 +132,21 @@ impl SqliteStore {
             .and_then(|registry| self.save_key_registry_in_transaction(&registry).ok())
             .ok_or(ErasureErrorV1::KeyDestructionFailed)
     }
+}
+
+/// Read the inventory, every Timeline row and the store identity inside one
+/// caller-owned read transaction, so all three describe one store state.
+fn authority_snapshot_in(
+    transaction: &rusqlite::Transaction<'_>,
+    limits: ErasureRecoveryLimitsV1,
+) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+    sqlite_erasure_inventory_snapshot(transaction, limits).and_then(|inventory| {
+        timeline_rows(transaction, limits).and_then(|timelines| {
+            read_store_identity(transaction).and_then(|identity| {
+                ErasureAuthoritySnapshotV1::new(inventory, timelines, identity)
+            })
+        })
+    })
 }
 
 /// Run one write in its own immediate transaction, or a savepoint inside an
@@ -319,9 +326,9 @@ fn delete_retained(
 mod tests {
     use super::*;
 
-    /// The inventory and the Timeline rows come from one read transaction, so
-    /// a Timeline another connection commits between the two reads is in
-    /// neither.
+    /// The production snapshot reads all its parts in the one transaction it
+    /// is given: a Timeline another connection commits after that
+    /// transaction's read snapshot began is in none of them.
     #[test]
     fn authority_snapshot_reads_share_one_read_transaction(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -336,12 +343,21 @@ mod tests {
         let transaction = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let inventory = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
+        let started: i64 =
+            transaction.query_row("SELECT count(*) FROM timelines", [], |row| row.get(0))?;
         SqliteStore::open(path)?.create_timeline("during")?;
-        let rows = timeline_rows(&transaction, limits)?;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(inventory.topology().len(), 1);
-        assert!(ErasureAuthoritySnapshotV1::new(inventory, rows, None).is_ok());
+        let snapshot = authority_snapshot_in(&transaction, limits)?;
+        assert_eq!(started, 1);
+        assert_eq!(snapshot.inventory().topology().len(), 1);
+        assert_eq!(snapshot.timelines().len(), 1);
+        drop(transaction);
+        assert_eq!(
+            store
+                .local_erasure_authority_snapshot(limits)?
+                .timelines()
+                .len(),
+            2
+        );
         Ok(())
     }
 }

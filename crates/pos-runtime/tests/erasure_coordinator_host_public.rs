@@ -189,22 +189,24 @@ impl Default for TestAuthority {
 }
 
 impl TestAuthority {
+    /// The view log; a poisoned lock aborts the test instead of hiding calls.
+    fn view_log(&self) -> std::sync::MutexGuard<'_, Vec<ViewRecord>> {
+        self.views.lock().unwrap_or_else(|_| {
+            std::panic::resume_unwind(Box::new("TestAuthority view log is poisoned"))
+        })
+    }
+
     fn record_view(&self, method: &'static str, view: &dyn ErasureAuthorityReadViewV1) {
-        if let Ok(mut views) = self.views.lock() {
-            views.push(ViewRecord {
-                method,
-                request_count: view.request_count(),
-                store_identity: view.store_identity(),
-                generation: view.snapshot_generation(),
-            });
-        }
+        self.view_log().push(ViewRecord {
+            method,
+            request_count: view.request_count(),
+            store_identity: view.store_identity(),
+            generation: view.snapshot_generation(),
+        });
     }
 
     fn view_records(&self) -> Vec<ViewRecord> {
-        self.views
-            .lock()
-            .map(|views| views.clone())
-            .unwrap_or_default()
+        self.view_log().clone()
     }
 
     fn set_timeline(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {

@@ -10,6 +10,7 @@ use pos_core::{
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, LocalOwnerEffectV1, Seq, TimelineId, TimelineMeta, TimelineMode,
     ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
+    LOCAL_OWNER_RESULT_MAX_BYTES_V1,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -39,6 +40,20 @@ fn record(tag: &str, value: u8) -> Result<Vec<u8>, std::num::TryFromIntError> {
         }
         bytes
     })
+}
+
+/// One canonical record `[tag, 1, bytes]` of exactly `total` bytes, padded
+/// by a byte string of 256 to 65,535 bytes.
+fn sized_record(tag: &str, total: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let header = 1 + 1 + tag.len() + 1 + 3;
+    let padding = u16::try_from(total.checked_sub(header).ok_or("record too small")?)?;
+    let mut bytes = vec![0x83, 0x60 | u8::try_from(tag.len())?];
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes.push(0x01);
+    bytes.push(0x59);
+    bytes.extend_from_slice(&padding.to_be_bytes());
+    bytes.resize(total, 0);
+    Ok(bytes)
 }
 
 fn address(bytes: &[u8]) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -287,15 +302,46 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         );
     }
 
-    // Each owner record has its own ADR-136 size bound.
-    let mut oversized = vec![0x83, 0x65];
-    oversized.extend_from_slice(b"ELAD1");
-    oversized.extend_from_slice(&[0x01, 0x59, 0x04, 0x00]);
-    oversized.resize(oversized.len() + LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 0);
+    // Each owner record has its own ADR-136 size bound: exactly the bound is
+    // admitted and one byte over is refused.
+    for (tag, bound, seed) in [
+        ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
+        ("ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 31),
+        ("ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 32),
+    ] {
+        let effect = |bytes: Vec<u8>| match tag {
+            "ELAD1" => LocalOwnerEffectV1::ArtifactDisposition(bytes),
+            "ELCG1" => LocalOwnerEffectV1::CacheGeneration(bytes),
+            _ => LocalOwnerEffectV1::Negative(bytes),
+        };
+        let at_bound = sized_record(tag, bound)?;
+        assert_eq!(at_bound.len(), bound);
+        let elo1 = record("ELO1", seed)?;
+        assert_eq!(
+            store.commit_local_owner_effect(effect(at_bound), &elo1)?,
+            address(&elo1)?
+        );
+        assert_eq!(
+            store.commit_local_owner_effect(
+                effect(sized_record(tag, bound + 1)?),
+                &record("ELO1", seed + 10)?
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+    let at_bound = sized_record("ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1)?;
+    assert_eq!(at_bound.len(), LOCAL_OWNER_RESULT_MAX_BYTES_V1);
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ArtifactDisposition(oversized),
-            &record("ELO1", 99)?
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 40)?),
+            &at_bound
+        )?,
+        address(&at_bound)?
+    );
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 41)?),
+            &sized_record("ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1 + 1)?
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
