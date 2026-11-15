@@ -65,9 +65,10 @@ mod compiled {
     include!(concat!(env!("OUT_DIR"), "/gateway_mode_profiles.rs"));
 }
 
-/// The Principal network capability (ADR-134 §4): a `DomainKey` that
-/// authorizes no operation in v1 and only selects the per-Principal Session
-/// `network` disclosure. It is granted only through explicit-grant
+/// The Principal network capability (ADR-134 §4), a `DomainKey`.
+///
+/// It authorizes no operation in v1 and only selects the per-Principal
+/// Session `network` disclosure. It is granted only through explicit-grant
 /// provisioning, as [`crate::GatewayOperationV1::NETWORK`].
 pub const GATEWAY_NETWORK_CAPABILITY_V1: &str = "gateway.network.v1";
 
