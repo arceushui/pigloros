@@ -4285,28 +4285,14 @@ impl Fixture {
                     } else {
                         self.evidence_complete = true;
                     }
-                    let owners = match phase {
-                        EarlyRendererPhase::Navigating => {
-                            self.surface.navigating_fault_owners_retained()
-                        }
-                        EarlyRendererPhase::AwaitingLoad => {
-                            self.surface.awaiting_load_fault_owners_retained()
-                        }
-                    };
+                    let owners = self.early_fault_owners_retained(phase);
                     assert!(
                         self.evidence_complete
                             && owners
                             && admission_blocked(&mut self.surface, &competing_spec()),
                         "early renderer owners or blocked admission missing"
                     );
-                    let owners_after = match phase {
-                        EarlyRendererPhase::Navigating => {
-                            self.surface.navigating_fault_owners_retained()
-                        }
-                        EarlyRendererPhase::AwaitingLoad => {
-                            self.surface.awaiting_load_fault_owners_retained()
-                        }
-                    };
+                    let owners_after = self.early_fault_owners_retained(phase);
                     assert!(
                         owners_after,
                         "early renderer owners changed during blocked admission"
@@ -4327,6 +4313,13 @@ impl Fixture {
                 Step::Done => return Err("early renderer driver ended without result".into()),
                 Step::Pending => pass(readiness::pump(&self.surface)),
             }
+        }
+    }
+
+    fn early_fault_owners_retained(&mut self, phase: EarlyRendererPhase) -> bool {
+        match phase {
+            EarlyRendererPhase::Navigating => self.surface.navigating_fault_owners_retained(),
+            EarlyRendererPhase::AwaitingLoad => self.surface.awaiting_load_fault_owners_retained(),
         }
     }
 
