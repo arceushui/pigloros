@@ -5,11 +5,20 @@
 //! root Timeline named [`ROOM_TIMELINE_PREFIX`] followed by the room ID;
 //! each revision is one `room.revision.v1` Event whose payload is the
 //! admitted ADR-041 descriptor, appended under its ADR-041 append identity
-//! (ADR-041 section 7). An `Idempotency-Key` is claimed first on the host's
-//! request Timeline: the claim's intent is the request digest, so an exact
-//! retry finds its claim, a different request under the same key is a
-//! conflict, and the revision a claim produced names the claim as its
-//! causation.
+//! (ADR-041 section 7).
+//!
+//! An `Idempotency-Key` is claimed on the host's request Timeline as one
+//! Event whose entity is derived from the key and whose payload is the
+//! request digest. Claims are looked up by that entity, not only by the
+//! ADR-038 append identity, so they last as long as the Timeline (the
+//! identity's retention, `APPEND_IDENTITY_RETENTION_MICROS`, does not end
+//! them). A new room's ID is its claim's `EventId`, so a retry finds the
+//! room, or the room Timeline an interrupted attempt left, by name.
+//!
+//! Everything that can refuse a request is checked before the claim commits:
+//! the bound mode, the input, governance, a stale or duplicate derive and
+//! the Timeline and Event ceilings. Only a host failure after the claim can
+//! leave a claim without its revision; the retry then finishes it.
 
 use std::{num::NonZeroU64, sync::Arc, time::Instant};
 
@@ -23,6 +32,8 @@ use pos_runtime::{
     ScenarioRoomErrorV1, ScenarioRoomInputV1, MAX_ROOM_DESCRIPTOR_BYTES_V1,
 };
 use tokio::sync::oneshot;
+
+use crate::mode_profile::GatewayModeProfileIdV1;
 
 use super::{
     await_command_result, host_error_to_core, CommandLifecycle, ExecutorState, ExecutorStore,
@@ -38,11 +49,11 @@ pub(crate) const ROOM_TIMELINE_PREFIX: &str = "scenario-room/";
 /// The name of the host's Scenario Room request Timeline.
 pub(crate) const ROOM_REQUESTS_TIMELINE: &str = "scenario-room-requests";
 
-/// One claimed `Idempotency-Key`: its append identity and the digest of the
-/// request it was first used with.
+/// One claimed `Idempotency-Key`: the keyed digest that names it and the
+/// digest of the request it was first used with.
 #[derive(Debug)]
 pub(crate) struct RoomClaimV1 {
-    pub(crate) identity: AppendIdentity,
+    pub(crate) key: [u8; 32],
     pub(crate) request_digest: [u8; 32],
 }
 
@@ -86,8 +97,9 @@ pub(crate) struct StoredRoomRevisionV1 {
     pub(crate) event_id: EventId,
     pub(crate) seq: Seq,
     pub(crate) generation: ErasureReferenceV1,
-    /// The binding epoch the commit recorded, with the profile bound then.
-    pub(crate) produced_under: (pos_core::GatewayModeProfileRefV1, NonZeroU64),
+    /// The profile bound at the epoch the commit recorded, its digest and
+    /// that epoch.
+    pub(crate) produced_under: (GatewayModeProfileIdV1, [u8; 32], NonZeroU64),
 }
 
 /// The outcome of one room operation.
@@ -113,8 +125,11 @@ pub(crate) enum RoomStoreErrorV1 {
     StaleParent,
     /// The `Idempotency-Key` was used for a different request.
     IdempotencyConflict,
-    /// A room or request Timeline, or the host, reached its ceiling.
-    LimitReached,
+    /// The host reached its root-Timeline ceiling; this is permanent.
+    TimelineCeiling,
+    /// A room or the request Timeline reached its Event ceiling; this is
+    /// permanent for that Timeline.
+    EventCeiling,
     /// The commit's binding epoch or profile cannot be read.
     ModeUnavailable,
     /// The store refused or failed the operation.
@@ -183,16 +198,37 @@ fn run_room_operation(
     admission: &RoomAdmissionV1,
 ) -> RoomResult<RoomOutcomeV1> {
     match operation {
-        RoomOperationV1::Create { claim, input } => create_room(host, &claim, *input, admission),
+        RoomOperationV1::Create { claim, input } => {
+            require_mode(host).and_then(|()| create_room(host, &claim, *input, admission))
+        }
         RoomOperationV1::Derive {
             claim,
             room_id,
             parent_revision,
             input,
-        } => derive_room(host, &claim, room_id, parent_revision, *input, admission),
+        } => require_mode(host)
+            .and_then(|()| derive_room(host, &claim, room_id, parent_revision, *input, admission)),
         RoomOperationV1::Read { room_id, revision } => room_revisions(host, room_id)
             .and_then(|(timeline, revisions)| existing_at(host, timeline, &revisions, revision)),
     }
+}
+
+/// The store must be bound to a known GMP1 profile before anything commits,
+/// so every revision can disclose the mode it was produced under.
+fn require_mode(host: &mut ErasureExecutionHostV1) -> RoomResult<()> {
+    host.gateway_mode_binding()
+        .load_mode_binding()
+        .ok()
+        .flatten()
+        .and_then(|record| {
+            record
+                .profile()
+                .profile_id()
+                .parse::<GatewayModeProfileIdV1>()
+                .ok()
+        })
+        .map(|_| ())
+        .ok_or(RoomStoreErrorV1::ModeUnavailable)
 }
 
 /// The existing revision `revision` of a room, counting from 1.
@@ -208,16 +244,16 @@ fn existing_at(
         .map(|stored| RoomOutcomeV1::Existing(Box::new(stored)))
 }
 
-fn create_room(
-    host: &mut ErasureExecutionHostV1,
-    claim: &RoomClaimV1,
+/// The descriptor of a new room, admitted under `room_id`.
+fn admit_room(
+    room_id: EntityId,
     input: ScenarioRoomInputV1,
     admission: &RoomAdmissionV1,
-) -> RoomResult<RoomOutcomeV1> {
+) -> RoomResult<ScenarioRoomDescriptorV1> {
     RoomCorrelationIdV1::generate()
         .and_then(|correlation_id| {
             ScenarioRoomDescriptorV1::admit_first(
-                EntityId::new(),
+                room_id,
                 correlation_id,
                 input,
                 &admission.catalogue,
@@ -225,34 +261,48 @@ fn create_room(
         })
         .map_err(RoomStoreErrorV1::from)
         .and_then(|descriptor| require_governance(descriptor, admission))
-        .and_then(|descriptor| {
-            claim_request(host, claim, admission).map(|claimed| (descriptor, claimed))
+}
+
+fn create_room(
+    host: &mut ErasureExecutionHostV1,
+    claim: &RoomClaimV1,
+    input: ScenarioRoomInputV1,
+    admission: &RoomAdmissionV1,
+) -> RoomResult<RoomOutcomeV1> {
+    // Every refusal of the input is answered before the claim.
+    admit_room(EntityId::new(), input.clone(), admission)
+        .and_then(|_| {
+            claim_request(host, claim, admission, |host| {
+                require_root_headroom(host, admission)
+            })
         })
-        .and_then(|(descriptor, claimed)| match claimed {
-            Claimed::New(causation) => create_and_append(host, &descriptor, causation, admission),
-            Claimed::Retry(causation) => {
-                revision_caused_by(host, causation).and_then(|existing| match existing {
-                    Some(existing) => Ok(RoomOutcomeV1::Existing(Box::new(existing))),
-                    // The claim committed but its room did not: finish it.
-                    None => create_and_append(host, &descriptor, causation, admission),
-                })
-            }
+        .and_then(|causation| {
+            let room_id = EntityId::from_ulid(causation.inner());
+            find_root(host, &room_timeline_name(room_id)).and_then(|existing| match existing {
+                // The claim's room exists: an exact retry, or a retry of an
+                // attempt the host interrupted after creating its Timeline.
+                Some(timeline) => read_revision_events(host, timeline.id()).and_then(|events| {
+                    if events.is_empty() {
+                        admit_room(room_id, input, admission).and_then(|descriptor| {
+                            append_revision(host, timeline.id(), &descriptor, causation, admission)
+                        })
+                    } else {
+                        existing_at(host, timeline.id(), &events, 1)
+                    }
+                }),
+                None => admit_room(room_id, input, admission).and_then(|descriptor| {
+                    create_root(host, &room_timeline_name(room_id), admission).and_then(
+                        |timeline| {
+                            append_revision(host, timeline.id(), &descriptor, causation, admission)
+                        },
+                    )
+                }),
+            })
         })
 }
 
-/// Create the room's Timeline and append its first revision.
-fn create_and_append(
-    host: &mut ErasureExecutionHostV1,
-    descriptor: &ScenarioRoomDescriptorV1,
-    causation: EventId,
-    admission: &RoomAdmissionV1,
-) -> RoomResult<RoomOutcomeV1> {
-    create_root(
-        host,
-        &format!("{ROOM_TIMELINE_PREFIX}{}", descriptor.room_id()),
-        admission,
-    )
-    .and_then(|timeline| append_revision(host, timeline.id(), descriptor, causation, admission))
+fn room_timeline_name(room_id: EntityId) -> String {
+    format!("{ROOM_TIMELINE_PREFIX}{room_id}")
 }
 
 fn derive_room(
@@ -273,57 +323,22 @@ fn derive_room(
                 .map_err(RoomStoreErrorV1::from)
         })
         .and_then(|candidate| require_governance(candidate, admission))?;
-    match claim_request(host, claim, admission)? {
-        Claimed::Retry(causation) => match revisions
-            .iter()
-            .find(|event| event.causation_id == Some(causation))
-        {
-            Some(event) => stored(host, timeline, event)
-                .map(|existing| RoomOutcomeV1::Existing(Box::new(existing))),
-            None => derive_at(
-                host,
-                timeline,
-                &revisions,
-                parent_revision,
-                &candidate,
-                causation,
-                admission,
-            ),
-        },
-        Claimed::New(causation) => derive_at(
-            host,
-            timeline,
-            &revisions,
-            parent_revision,
-            &candidate,
-            causation,
-            admission,
-        ),
-    }
-}
-
-/// Append `candidate` when `parent_revision` is the head. Otherwise it is
-/// the ADR-041 section 7 duplicate of the revision already derived from
-/// that parent, or a stale proposal.
-fn derive_at(
-    host: &mut ErasureExecutionHostV1,
-    timeline: TimelineId,
-    revisions: &[Event],
-    parent_revision: u64,
-    candidate: &ScenarioRoomDescriptorV1,
-    causation: EventId,
-    admission: &RoomAdmissionV1,
-) -> RoomResult<RoomOutcomeV1> {
     let next = parent_revision.saturating_add(1);
-    match revision_at(revisions, next) {
-        None => append_revision(host, timeline, candidate, causation, admission),
+    match revision_at(&revisions, next) {
+        // `parent_revision` is not the head: the ADR-041 section 7 duplicate
+        // of the revision already derived from it (which an exact retry also
+        // is), or a stale proposal. Neither claims the key.
         Some(derived) => descriptor_of(derived).and_then(|derived| {
             if derived.descriptor_hash() == candidate.descriptor_hash() {
-                existing_at(host, timeline, revisions, next)
+                existing_at(host, timeline, &revisions, next)
             } else {
                 Err(RoomStoreErrorV1::StaleParent)
             }
         }),
+        None => claim_request(host, claim, admission, |_| {
+            require_event_headroom(revisions.len(), admission)
+        })
+        .and_then(|causation| append_revision(host, timeline, &candidate, causation, admission)),
     }
 }
 
@@ -340,39 +355,106 @@ fn require_governance(
     }
 }
 
-enum Claimed {
-    /// The key is claimed for the first time by this Event.
-    New(EventId),
-    /// The key was already claimed for this request by this Event.
-    Retry(EventId),
+/// Room for a new room's Timeline, and the request Timeline if it is not
+/// there yet, under the host's root-Timeline ceiling.
+fn require_root_headroom(
+    host: &mut ErasureExecutionHostV1,
+    admission: &RoomAdmissionV1,
+) -> RoomResult<()> {
+    find_root(host, ROOM_REQUESTS_TIMELINE)
+        .and_then(|requests| {
+            root_count(host, admission).map(|roots| roots + usize::from(requests.is_none()) + 1)
+        })
+        .and_then(|needed| {
+            if needed <= admission.max_timelines {
+                Ok(())
+            } else {
+                Err(RoomStoreErrorV1::TimelineCeiling)
+            }
+        })
 }
 
+fn require_event_headroom(owned: usize, admission: &RoomAdmissionV1) -> RoomResult<()> {
+    if u64::try_from(owned).is_ok_and(|owned| owned < admission.max_events) {
+        Ok(())
+    } else {
+        Err(RoomStoreErrorV1::EventCeiling)
+    }
+}
+
+/// Claim `claim`'s key for its request and return the claim's `EventId`.
+///
+/// A key already claimed for the same request returns its claim (a retry);
+/// for another request it is a conflict. A new claim commits only after
+/// `headroom` admits what the request will create.
 fn claim_request(
     host: &mut ErasureExecutionHostV1,
     claim: &RoomClaimV1,
     admission: &RoomAdmissionV1,
-) -> RoomResult<Claimed> {
+    headroom: impl FnOnce(&mut ErasureExecutionHostV1) -> RoomResult<()>,
+) -> RoomResult<EventId> {
     // The claim acts as an entity named by its key, so claims stay apart.
     let mut entity = [0; 16];
-    entity.copy_from_slice(&claim.identity.dedup_key.as_bytes()[..16]);
+    entity.copy_from_slice(&claim.key[..16]);
+    let entity = EntityId::from_ulid(ulid::Ulid::from_bytes(entity));
     let draft = EventDraft::new(
-        EntityId::from_ulid(ulid::Ulid::from_bytes(entity)),
+        entity,
         Kind::new(ROOM_REQUEST_EVENT_TYPE),
         CanonicalBytes::from_vec(claim.request_digest.to_vec()),
     );
     find_root(host, ROOM_REQUESTS_TIMELINE)
-        .and_then(|requests| match requests {
-            Some(requests) => Ok(requests),
-            None => create_root(host, ROOM_REQUESTS_TIMELINE, admission),
-        })
         .and_then(|requests| {
-            append_identified(host, requests.id(), claim.identity, &draft, admission)
+            requests
+                .as_ref()
+                .map_or(Ok(Vec::new()), |requests| {
+                    read_events(host, requests.id(), ROOM_REQUEST_EVENT_TYPE, CLAIM_BYTES)
+                })
+                .map(|claims| (requests, claims))
         })
-        .and_then(|outcome| match outcome {
-            AppendOrDuplicateOutcome::Appended(event) => Ok(Claimed::New(event.id)),
-            AppendOrDuplicateOutcome::Duplicate { event_id } => Ok(Claimed::Retry(event_id)),
-            AppendOrDuplicateOutcome::Conflict => Err(RoomStoreErrorV1::IdempotencyConflict),
-        })
+        .and_then(
+            |(requests, claims)| match claims.iter().find(|event| event.entity == entity) {
+                Some(claimed) if claimed.payload.as_slice() == claim.request_digest => {
+                    Ok(claimed.id)
+                }
+                Some(_) => Err(RoomStoreErrorV1::IdempotencyConflict),
+                None => require_event_headroom(claims.len(), admission)
+                    .and_then(|()| headroom(host))
+                    .and_then(|()| {
+                        requests.map_or_else(
+                            || create_root(host, ROOM_REQUESTS_TIMELINE, admission),
+                            Ok,
+                        )
+                    })
+                    .and_then(|requests| {
+                        host.command_sender()
+                            .and_then(|mut sender| {
+                                sender.append_bounded(
+                                    requests.id(),
+                                    std::slice::from_ref(&draft),
+                                    admission.max_events,
+                                )
+                            })
+                            .map_err(RoomStoreErrorV1::from)
+                    })
+                    .and_then(|appended| {
+                        appended
+                            .and_then(|events| events.into_iter().next())
+                            .map(|event| event.id)
+                            .ok_or(RoomStoreErrorV1::EventCeiling)
+                    }),
+            },
+        )
+}
+
+/// The bytes of one claim payload: the 32-byte request digest.
+const CLAIM_BYTES: usize = 32;
+
+/// An append identity the worker already used: impossible while the worker
+/// serializes every room operation and checks before it appends.
+fn identity_reused() -> RoomStoreErrorV1 {
+    RoomStoreErrorV1::Store(CoreError::Storage(
+        "scenario room append identity already used".to_owned(),
+    ))
 }
 
 /// Append one identified Event under the owned-Event ceiling.
@@ -393,13 +475,10 @@ fn append_identified(
             )
         })
         .map_err(RoomStoreErrorV1::from)
-        .and_then(|outcome| outcome.ok_or(RoomStoreErrorV1::LimitReached))
+        .and_then(|outcome| outcome.ok_or(RoomStoreErrorV1::EventCeiling))
 }
 
-/// Append a revision under its ADR-041 append identity. The worker
-/// serializes every room operation and appends only after the head check,
-/// so the identity is always fresh here; a duplicate would mean another
-/// writer, which the host does not have.
+/// Append a revision under its ADR-041 append identity.
 fn append_revision(
     host: &mut ErasureExecutionHostV1,
     timeline: TimelineId,
@@ -424,37 +503,7 @@ fn append_revision(
         AppendOrDuplicateOutcome::Appended(event) => {
             stored(host, timeline, &event).map(|stored| RoomOutcomeV1::Committed(Box::new(stored)))
         }
-        _ => Err(RoomStoreErrorV1::Store(CoreError::Storage(
-            "room revision identity already used".to_owned(),
-        ))),
-    })
-}
-
-/// The revision a claim produced, on any room's Timeline.
-fn revision_caused_by(
-    host: &mut ErasureExecutionHostV1,
-    causation: EventId,
-) -> RoomResult<Option<StoredRoomRevisionV1>> {
-    host_timelines(host).and_then(|timelines| {
-        timelines
-            .iter()
-            .filter(|timeline| timeline.meta.name.starts_with(ROOM_TIMELINE_PREFIX))
-            .find_map(|room| {
-                read_revision_events(host, room.id())
-                    .map(|events| {
-                        events
-                            .into_iter()
-                            .find(|event| event.causation_id == Some(causation))
-                            .map(|event| (room.id(), event))
-                    })
-                    .transpose()
-            })
-            .transpose()
-            .and_then(|found| {
-                found
-                    .map(|(timeline, event)| stored(host, timeline, &event))
-                    .transpose()
-            })
+        _ => Err(identity_reused()),
     })
 }
 
@@ -463,7 +512,7 @@ fn room_revisions(
     host: &mut ErasureExecutionHostV1,
     room_id: EntityId,
 ) -> RoomResult<(TimelineId, Vec<Event>)> {
-    find_root(host, &format!("{ROOM_TIMELINE_PREFIX}{room_id}"))
+    find_root(host, &room_timeline_name(room_id))
         .and_then(|timeline| timeline.ok_or(RoomStoreErrorV1::NotFound))
         .and_then(|timeline| {
             read_revision_events(host, timeline.id()).map(|events| (timeline.id(), events))
@@ -474,18 +523,28 @@ fn read_revision_events(
     host: &mut ErasureExecutionHostV1,
     timeline: TimelineId,
 ) -> RoomResult<Vec<Event>> {
-    let bounds = EventReadBounds::new(
+    read_events(
+        host,
+        timeline,
+        ROOM_REVISION_EVENT_TYPE,
         MAX_ROOM_DESCRIPTOR_BYTES_V1,
-        ROOM_REVISION_EVENT_TYPE.len(),
-        0,
-        usize::MAX,
-    );
+    )
+}
+
+/// Every Event of `event_type` on `timeline`, in Timeline Order.
+fn read_events(
+    host: &mut ErasureExecutionHostV1,
+    timeline: TimelineId,
+    event_type: &str,
+    payload_bytes: usize,
+) -> RoomResult<Vec<Event>> {
+    let bounds = EventReadBounds::new(payload_bytes, event_type.len(), 0, usize::MAX);
     host.read_sender()
         .and_then(|mut sender| sender.read_bounded(timeline, SeqRange::all(), bounds))
         .map(|events| {
             events
                 .into_iter()
-                .filter(|event| event.event_type.as_str() == ROOM_REVISION_EVENT_TYPE)
+                .filter(|event| event.event_type.as_str() == event_type)
                 .collect()
         })
         .map_err(RoomStoreErrorV1::from)
@@ -539,7 +598,14 @@ fn stored(
                     history
                         .into_iter()
                         .find(|entry| entry.record().binding_epoch() == epoch)
-                        .map(|entry| (entry.record().profile().clone(), epoch))
+                        .and_then(|entry| {
+                            let profile = entry.record().profile();
+                            profile
+                                .profile_id()
+                                .parse::<GatewayModeProfileIdV1>()
+                                .ok()
+                                .map(|id| (id, profile.profile_digest(), epoch))
+                        })
                 })
         })
         .ok_or(RoomStoreErrorV1::ModeUnavailable);
@@ -563,6 +629,8 @@ fn host_timelines(host: &mut ErasureExecutionHostV1) -> RoomResult<Vec<Timeline>
         .map_err(RoomStoreErrorV1::from)
 }
 
+/// The root Timeline named `name`. The host has no name index, so this lists
+/// its Timelines, at most the root-Timeline ceiling of them.
 fn find_root(host: &mut ErasureExecutionHostV1, name: &str) -> RoomResult<Option<Timeline>> {
     host_timelines(host).map(|timelines| {
         timelines
@@ -571,23 +639,26 @@ fn find_root(host: &mut ErasureExecutionHostV1, name: &str) -> RoomResult<Option
     })
 }
 
+fn root_count(host: &mut ErasureExecutionHostV1, admission: &RoomAdmissionV1) -> RoomResult<usize> {
+    host.read_sender()
+        .and_then(|mut sender| sender.root_timeline_count_bounded(admission.max_timelines))
+        .map_err(RoomStoreErrorV1::from)
+}
+
 fn create_root(
     host: &mut ErasureExecutionHostV1,
     name: &str,
     admission: &RoomAdmissionV1,
 ) -> RoomResult<Timeline> {
-    host.read_sender()
-        .and_then(|mut sender| sender.root_timeline_count_bounded(admission.max_timelines))
-        .map_err(RoomStoreErrorV1::from)
-        .and_then(|roots| {
-            if roots < admission.max_timelines {
-                host.command_sender()
-                    .and_then(|mut sender| sender.create_timeline(name))
-                    .map_err(RoomStoreErrorV1::from)
-            } else {
-                Err(RoomStoreErrorV1::LimitReached)
-            }
-        })
+    root_count(host, admission).and_then(|roots| {
+        if roots < admission.max_timelines {
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline(name))
+                .map_err(RoomStoreErrorV1::from)
+        } else {
+            Err(RoomStoreErrorV1::TimelineCeiling)
+        }
+    })
 }
 
 #[cfg(test)]

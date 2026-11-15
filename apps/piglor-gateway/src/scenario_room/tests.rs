@@ -43,7 +43,9 @@ mod served {
 
     use axum::{body::Body, http::Request, Router};
     use piglor_ledger::LedgerView;
-    use pos_core::{EntityId, PrincipalRefV1};
+    use pos_core::{
+        AuthorityPersistencePortV1, AuthorizationDenialEvidenceV1, EntityId, PrincipalRefV1,
+    };
     use pos_runtime::{ErasureCoordinatorCompositionV1, ScenarioRoomLimitV1};
     use pos_store::{sqlite::SqliteStore, StoreConfig};
     use serde_json::{json, Value};
@@ -90,10 +92,16 @@ mod served {
         )?)
     }
 
-    /// A served Gateway over a bound `SQLite` store; keep the directory alive.
-    fn served(
-        provision: &LocalPrincipalProvisionV1,
-    ) -> TestResult<(Gateway, Router, tempfile::TempDir)> {
+    /// A served Gateway over a bound `SQLite` store, its router, the
+    /// directory to keep alive and the store's path.
+    struct Served {
+        gateway: Gateway,
+        app: Router,
+        _directory: tempfile::TempDir,
+        path: String,
+    }
+
+    fn served(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
         let directory = tempfile::tempdir()?;
         let path = directory
             .path()
@@ -108,7 +116,7 @@ mod served {
         provision_local_principal(&mut SqliteStore::open(&path)?, provision)?;
         let binding = test_binding(GatewayModeProfileIdV1::Local, []);
         let host = open_recovered_erasure_host(
-            StoreConfig::Sqlite { path },
+            StoreConfig::Sqlite { path: path.clone() },
             GatewayHostStoreV1::Standard,
             &ErasureCoordinatorCompositionV1::closed(),
         )?;
@@ -118,7 +126,12 @@ mod served {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
-        Ok((gateway, app, directory))
+        Ok(Served {
+            gateway,
+            app,
+            _directory: directory,
+            path,
+        })
     }
 
     async fn send(
@@ -126,7 +139,7 @@ mod served {
         method: &str,
         uri: &str,
         key: Option<&str>,
-        body: Option<&Value>,
+        body: Option<&str>,
     ) -> TestResult<(StatusCode, Value)> {
         let mut builder = Request::builder()
             .method(method)
@@ -137,7 +150,7 @@ mod served {
             builder = builder.header("idempotency-key", key);
         }
         let request =
-            builder.body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))?;
+            builder.body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))?;
         let response = app.clone().oneshot(request).await?;
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
@@ -145,6 +158,15 @@ mod served {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         ))
+    }
+
+    async fn post(
+        app: &Router,
+        uri: &str,
+        key: Option<&str>,
+        body: &Value,
+    ) -> TestResult<(StatusCode, Value)> {
+        send(app, "POST", uri, key, Some(&body.to_string())).await
     }
 
     fn descriptor(value_micro: i64) -> Value {
@@ -169,47 +191,82 @@ mod served {
         })
     }
 
+    /// The JSON type of `value`, and of each member or item below it: the
+    /// served body and a frozen golden example must agree on every member
+    /// and type (the contract checker validates the golden example against
+    /// the frozen schema).
+    fn shape(value: &Value) -> Value {
+        match value {
+            Value::Object(members) => Value::Object(
+                members
+                    .iter()
+                    .map(|(name, member)| (name.clone(), shape(member)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(shape).collect()),
+            Value::String(_) => json!("string"),
+            Value::Number(_) => json!("number"),
+            Value::Bool(_) => json!("bool"),
+            Value::Null => json!("null"),
+        }
+    }
+
+    fn golden(name: &str) -> TestResult<Value> {
+        let path = format!(
+            "{}/../../contracts/gateway/v1/compatibility/examples/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let example: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        Ok(example["response"]["body"].clone())
+    }
+
     #[tokio::test]
     async fn a_room_is_created_retried_read_and_derived_over_http() -> TestResult {
-        let (gateway, app, _directory) = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
-        let create = json!({"descriptor": descriptor(250_000)});
-        let (status, created) = send(
-            &app,
-            "POST",
-            "/v1/scenario-rooms",
-            Some("k-1"),
-            Some(&create),
-        )
-        .await?;
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+        let app = &served.app;
+        // The golden example's own request, so the served body has its shape.
+        let example: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/gateway/v1/compatibility/examples/scenario-room-create.json"
+        ))?;
+        let create = example["request"]["body"].clone();
+        let (status, created) = post(app, "/v1/scenario-rooms", Some("k-1"), &create).await?;
         assert_eq!(status, StatusCode::CREATED, "{created}");
-        assert_eq!(created["schema_id"], REVISION_SCHEMA_ID);
-        assert_eq!(created["revision"], 1);
+        assert_eq!(shape(&created), shape(&golden("scenario-room-create")?));
+        assert_eq!(
+            created["descriptor"]["rule_set_hash"],
+            golden("scenario-room-create")?["descriptor"]["rule_set_hash"]
+        );
         assert_eq!(created["parent_revision"], Value::Null);
         assert_eq!(
             created["mode_profile"]["mode_profile_id"],
             "gateway-mode-local-v1"
         );
         assert_eq!(created["mode_profile"]["binding_epoch"], 1);
-        assert_eq!(created["commit"]["event_schema_id"], "room.revision.v1");
-        assert_eq!(created["descriptor"]["participants"][0]["entity_id"], ACTOR);
         let room = created["id"].as_str().ok_or("room id")?.to_owned();
-        // An exact retry, with other member order, returns the same body.
+        // An exact retry, with its members reordered and other whitespace,
+        // returns the same body.
+        let members: Vec<String> = create["descriptor"]
+            .as_object()
+            .ok_or("the descriptor is an object")?
+            .iter()
+            .rev()
+            .map(|(name, member)| format!("{} : {member}", json!(name)))
+            .collect();
+        let reordered = format!("{{ \"descriptor\" : {{ {} }} }}", members.join(" , "));
         let (status, retried) = send(
-            &app,
+            app,
             "POST",
             "/v1/scenario-rooms",
             Some("k-1"),
-            Some(&create),
+            Some(&reordered),
         )
         .await?;
         assert_eq!((status, &retried), (StatusCode::OK, &created));
-        let other = json!({"descriptor": descriptor(1)});
-        let (status, conflict) = send(
-            &app,
-            "POST",
+        let (status, conflict) = post(
+            app,
             "/v1/scenario-rooms",
             Some("k-1"),
-            Some(&other),
+            &json!({"descriptor": descriptor(1)}),
         )
         .await?;
         assert_eq!(
@@ -217,16 +274,16 @@ mod served {
             (StatusCode::CONFLICT, &json!("idempotency-conflict"))
         );
         let read = format!("/v1/scenario-rooms/{room}/revisions/1");
-        let (status, body) = send(&app, "GET", &read, None, None).await?;
+        let (status, body) = send(app, "GET", &read, None, None).await?;
         assert_eq!((status, &body), (StatusCode::OK, &created));
         let missing = format!("/v1/scenario-rooms/{room}/revisions/9");
-        let (status, body) = send(&app, "GET", &missing, None, None).await?;
+        let (status, body) = send(app, "GET", &missing, None, None).await?;
         assert_eq!(
             (status, &body["code"]),
             (StatusCode::NOT_FOUND, &json!("not-found-or-unavailable"))
         );
         let (status, body) = send(
-            &app,
+            app,
             "GET",
             "/v1/scenario-rooms/lower/revisions/1",
             None,
@@ -239,52 +296,55 @@ mod served {
         );
         let revisions = format!("/v1/scenario-rooms/{room}/revisions");
         let derive = json!({"parent_revision": 1, "descriptor": descriptor(500_000)});
-        let (status, derived) = send(&app, "POST", &revisions, Some("k-2"), Some(&derive)).await?;
+        let (status, derived) = post(app, &revisions, Some("k-2"), &derive).await?;
         assert_eq!(
-            (status, &derived["revision"]),
-            (StatusCode::CREATED, &json!(2))
+            (status, &derived["revision"], &derived["parent_revision"]),
+            (StatusCode::CREATED, &json!(2), &json!(1))
         );
-        assert_eq!(derived["parent_revision"], 1);
-        let (status, duplicate) =
-            send(&app, "POST", &revisions, Some("k-3"), Some(&derive)).await?;
+        assert_eq!(shape(&derived), shape(&golden("scenario-room-derive")?));
+        let (status, duplicate) = post(app, &revisions, Some("k-3"), &derive).await?;
         assert_eq!((status, &duplicate), (StatusCode::OK, &derived));
         let stale = json!({"parent_revision": 1, "descriptor": descriptor(750_000)});
-        let (status, body) = send(&app, "POST", &revisions, Some("k-4"), Some(&stale)).await?;
+        let (status, body) = post(app, &revisions, Some("k-4"), &stale).await?;
         assert_eq!(
             (status, &body["code"]),
             (StatusCode::CONFLICT, &json!("append-conflict"))
         );
-        let (status, body) = send(
-            &app,
-            "POST",
-            &format!("/v1/scenario-rooms/{}/revisions", EntityId::new()),
-            Some("k-5"),
-            Some(&derive),
-        )
-        .await?;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-        let (status, body) = send(
-            &app,
-            "POST",
+        let unknown = format!("/v1/scenario-rooms/{}/revisions", EntityId::new());
+        let (status, body) = post(app, &unknown, Some("k-5"), &derive).await?;
+        assert_eq!(
+            (status, &body["code"]),
+            (StatusCode::NOT_FOUND, &json!("not-found-or-unavailable"))
+        );
+        let (status, body) = post(
+            app,
             "/v1/scenario-rooms/lower/revisions",
             Some("k-6"),
-            Some(&derive),
+            &derive,
         )
         .await?;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        gateway.shutdown().await?;
+        assert_eq!(
+            (status, &body["code"]),
+            (StatusCode::BAD_REQUEST, &json!("invalid-request"))
+        );
+        served.gateway.shutdown().await?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn malformed_uncovered_and_ungoverned_rooms_are_refused() -> TestResult {
-        let (gateway, app, _directory) = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+    async fn malformed_and_ungoverned_rooms_are_refused() -> TestResult {
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
         let with = |edit: fn(&mut Value)| {
             let mut body = json!({"descriptor": descriptor(1)});
             edit(&mut body["descriptor"]);
             body
         };
-        let cases: [(Value, StatusCode, &str); 11] = [
+        let too_many = json!((0..33)
+            .map(|n| json!({"plugin_id": format!("p{n}"), "version": "0.1.0"}))
+            .collect::<Vec<_>>());
+        let mut plugins = with(|_| {});
+        plugins["descriptor"]["plugins"] = too_many;
+        let cases = [
             (
                 with(|d| d["correlation_id"] = json!("5f".repeat(16))),
                 StatusCode::BAD_REQUEST,
@@ -321,11 +381,7 @@ mod served {
                 "invalid-request",
             ),
             (
-                with(|d| {
-                    d["plugins"] = json!((0..33)
-                        .map(|n| json!({"plugin_id": format!("p{n}"), "version": "0.1.0"}))
-                        .collect::<Vec<_>>())
-                }),
+                plugins,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "resource-limit-exceeded",
             ),
@@ -339,65 +395,98 @@ mod served {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "admission-rejected",
             ),
-            (
-                with(|d| d["participants"][1]["entity_id"] = json!("01JC0GATEWAYW90S0C1ETY0009")),
-                StatusCode::FORBIDDEN,
-                "unauthorized",
-            ),
         ];
         for (index, (body, status, code)) in cases.into_iter().enumerate() {
             let key = format!("refused-{index}");
             let (answered, problem) =
-                send(&app, "POST", "/v1/scenario-rooms", Some(&key), Some(&body)).await?;
+                post(&served.app, "/v1/scenario-rooms", Some(&key), &body).await?;
             assert_eq!(
                 (answered, problem["code"].as_str()),
                 (status, Some(code)),
                 "{index}: {problem}"
             );
         }
-        let (status, problem) = send(
-            &app,
-            "POST",
-            "/v1/scenario-rooms",
-            None,
-            Some(&json!({"descriptor": descriptor(1)})),
-        )
-        .await?;
+        let body = json!({"descriptor": descriptor(1)});
+        let (status, problem) = post(&served.app, "/v1/scenario-rooms", None, &body).await?;
         assert_eq!(
             (status, &problem["code"]),
             (StatusCode::BAD_REQUEST, &json!("invalid-request"))
         );
-        let room = EntityId::new();
-        let (status, _) = send(
-            &app,
-            "POST",
-            &format!("/v1/scenario-rooms/{room}/revisions"),
-            Some("bad-derive"),
-            Some(&json!({"descriptor": descriptor(1)})),
-        )
-        .await?;
+        let derive = format!("/v1/scenario-rooms/{}/revisions", EntityId::new());
+        let (status, _) = post(&served.app, &derive, Some("bad-derive"), &body).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        gateway.shutdown().await?;
+        served.gateway.shutdown().await?;
         Ok(())
     }
 
+    /// An uncovered persona is a recorded `403 unauthorized`: its ADN1
+    /// denial evidence is in the authority store before the answer.
     #[tokio::test]
-    async fn a_room_needs_its_grant_and_the_host_governance_record() -> TestResult {
-        let create = json!({"descriptor": descriptor(1)});
-        let (gateway, app, _directory) = served(&provision(
-            &[GatewayOperationV1::READ_SESSION],
-            Some(id(GOVERNANCE)?),
-        )?)?;
+    async fn an_uncovered_persona_is_a_recorded_denial() -> TestResult {
+        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+        let mut body = json!({"descriptor": descriptor(1)});
+        body["descriptor"]["participants"][1]["entity_id"] = json!("01JC0GATEWAYW90S0C1ETY0009");
         let (status, problem) =
-            send(&app, "POST", "/v1/scenario-rooms", Some("k"), Some(&create)).await?;
+            post(&served.app, "/v1/scenario-rooms", Some("persona"), &body).await?;
         assert_eq!(
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("unauthorized"))
         );
-        gateway.shutdown().await?;
-        let (gateway, app, _directory) = served(&provision(&ROOMS, None)?)?;
+        served.gateway.shutdown().await?;
+        let denials = SqliteStore::open(&served.path)?
+            .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?;
+        assert!(
+            matches!(
+                denials.as_slice(),
+                [(1, AuthorizationDenialEvidenceV1::Denial(_))]
+            ),
+            "{denials:?}"
+        );
+        Ok(())
+    }
+
+    /// Each route needs its own grant, and a room the host's governance
+    /// record does not name is refused.
+    #[tokio::test]
+    async fn every_room_operation_needs_its_grant_and_the_governance_record() -> TestResult {
+        let create = json!({"descriptor": descriptor(1)});
+        let full = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?)?;
+        let (_, created) = post(&full.app, "/v1/scenario-rooms", Some("k"), &create).await?;
+        let room = created["id"].as_str().ok_or("room id")?.to_owned();
+        full.gateway.shutdown().await?;
+        for granted in [&ROOMS[1..], &[ROOMS[0], ROOMS[2]][..], &ROOMS[..2]] {
+            let served = served(&provision(granted, Some(id(GOVERNANCE)?))?)?;
+            let derive = json!({"parent_revision": 1, "descriptor": descriptor(2)});
+            let answers = [
+                post(&served.app, "/v1/scenario-rooms", Some("k"), &create).await?,
+                post(
+                    &served.app,
+                    &format!("/v1/scenario-rooms/{room}/revisions"),
+                    Some("d"),
+                    &derive,
+                )
+                .await?,
+                send(
+                    &served.app,
+                    "GET",
+                    &format!("/v1/scenario-rooms/{room}/revisions/1"),
+                    None,
+                    None,
+                )
+                .await?,
+            ];
+            let refused = answers
+                .iter()
+                .filter(|(status, problem)| {
+                    *status == StatusCode::FORBIDDEN && problem["code"] == "unauthorized"
+                })
+                .count();
+            assert_eq!(refused, 1, "{answers:?}");
+            served.gateway.shutdown().await?;
+        }
+        let ungoverned = served(&provision(&ROOMS, None)?)?;
         let (status, problem) =
-            send(&app, "POST", "/v1/scenario-rooms", Some("k"), Some(&create)).await?;
+            post(&ungoverned.app, "/v1/scenario-rooms", Some("k"), &create).await?;
         assert_eq!(
             (status, &problem["code"]),
             (
@@ -405,7 +494,7 @@ mod served {
                 &json!("admission-rejected")
             )
         );
-        gateway.shutdown().await?;
+        ungoverned.gateway.shutdown().await?;
         Ok(())
     }
 
@@ -418,8 +507,7 @@ mod served {
             ledger_write: LedgerWriteMode::Disabled,
         });
         let create = json!({"descriptor": descriptor(1)});
-        let (status, problem) =
-            send(&app, "POST", "/v1/scenario-rooms", Some("k"), Some(&create)).await?;
+        let (status, problem) = post(&app, "/v1/scenario-rooms", Some("k"), &create).await?;
         assert_eq!(
             (status, &problem["code"]),
             (
@@ -433,36 +521,59 @@ mod served {
 
     #[test]
     fn every_store_refusal_has_its_problem() {
-        for (error, status) in [
+        for (error, status, retryable) in [
             (
-                RoomStoreErrorV1::LimitReached,
+                RoomStoreErrorV1::TimelineCeiling,
                 StatusCode::TOO_MANY_REQUESTS,
+                false,
             ),
+            (RoomStoreErrorV1::EventCeiling, StatusCode::CONFLICT, false),
             (
                 RoomStoreErrorV1::ModeUnavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
+                true,
             ),
-            (RoomStoreErrorV1::NotFound, StatusCode::NOT_FOUND),
+            (RoomStoreErrorV1::NotFound, StatusCode::NOT_FOUND, false),
             (
                 RoomStoreErrorV1::Room(ScenarioRoomErrorV1::LimitExceeded(
                     ScenarioRoomLimitV1::Revision,
                 )),
                 StatusCode::PAYLOAD_TOO_LARGE,
+                false,
             ),
             (
                 RoomStoreErrorV1::Room(ScenarioRoomErrorV1::EntropyUnavailable),
                 StatusCode::INTERNAL_SERVER_ERROR,
+                false,
             ),
             (
                 RoomStoreErrorV1::Room(ScenarioRoomErrorV1::RuleWithoutPlugin),
                 StatusCode::UNPROCESSABLE_ENTITY,
+                false,
             ),
         ] {
-            assert_eq!(
-                ProblemV1::from(RoomFailureV1::Store(error)).status(),
-                status
-            );
+            let problem = ProblemV1::from(RoomFailureV1::Store(error));
+            assert_eq!(problem.status(), status);
+            assert_eq!(problem.body("/")["retryable"], retryable, "{status}");
         }
+    }
+
+    #[test]
+    fn the_request_digest_is_canonical() -> TestResult {
+        let ordered: Value = serde_json::from_str(r#"{"a":[1,{"b":true,"c":null}],"z":"é"}"#)?;
+        let reordered: Value = serde_json::from_str(r#"{ "z":"é", "a":[1,{"c":null,"b":true}] }"#)?;
+        let mut text = String::new();
+        canonical_json(&ordered, &mut text);
+        assert_eq!(text, r#"{"a":[1,{"b":true,"c":null}],"z":"é"}"#);
+        assert_eq!(
+            request_digest("create", None, &ordered),
+            request_digest("create", None, &reordered)
+        );
+        assert_ne!(
+            request_digest("create", None, &ordered),
+            request_digest("derive", None, &ordered)
+        );
+        Ok(())
     }
 
     #[test]

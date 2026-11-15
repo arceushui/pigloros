@@ -1127,8 +1127,6 @@ impl GatewayAuthorization {
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
     }
 
-    /// The current pinned authority; replacement only swaps a complete
-    /// snapshot, so a poisoned lock still holds a whole one.
     /// The single-participant governance record the pinned leaf grant
     /// records, if any (#303 decision 1a).
     pub(crate) fn governance_record(&self) -> Option<EntityId> {
@@ -1147,6 +1145,8 @@ impl GatewayAuthorization {
             })
     }
 
+    /// The current pinned authority; replacement only swaps a complete
+    /// snapshot, so a poisoned lock still holds a whole one.
     fn pinned(&self) -> Arc<PinnedAuthorityV1> {
         Arc::clone(
             &self

@@ -73,6 +73,15 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   catalogue entry the Gateway ships (`gateway-world-actions` `0.1.0`). Each room is one Timeline,
   and the revision's `commit` is its `room.revision.v1` Event. The `privacy_export_ref` consent
   check follows with #309.
+- A malformed body, a missing or malformed `Idempotency-Key` and a malformed room ID are
+  `400 invalid-request` before the authority decision and before any lookup; every other
+  answer of a room operation follows the decision. An `Idempotency-Key` of a room operation is
+  claimed once, as a plain Event on the host's request Timeline, and stays claimed for that
+  Timeline's lifetime (no ADR-038 retention window applies to it). A refused request, a stale
+  derive and a ceiling refusal claim nothing, so the key stays free for another request. A new
+  room's ID is its claim's Event ID, so a retry after an interrupted attempt finishes the same
+  room. The request Timeline holds at most `events_per_timeline` claims, after which a new room
+  or derive is a permanent `409 resource-limit-exceeded`.
 - A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
   `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a

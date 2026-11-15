@@ -892,7 +892,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`.",
+            "description": "`idempotency-conflict`, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -912,7 +912,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1034,7 +1034,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1054,7 +1054,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2321,7 +2321,7 @@
       "ScenarioRoomRevision": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
         "type": "object",
-        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID).",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID), in lower-case hex.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"

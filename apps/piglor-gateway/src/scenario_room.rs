@@ -9,10 +9,11 @@
 //! descriptor and the committed Event receipt.
 
 use axum::http::StatusCode;
-use pos_core::{AppendDedupKey, AppendDedupScope, AppendIdentity, EntityId, EventId, Hash};
+use pos_core::{EntityId, EventId, Hash};
 use pos_runtime::{
     HostCatalogueEntryV1, RoomInitialConditionV1, RoomParticipantKindV1, RoomParticipantV1,
-    RoomPluginRefV1, RoomRuleV1, ScenarioRoomCatalogueV1, ScenarioRoomErrorV1, ScenarioRoomInputV1,
+    RoomPluginRefV1, RoomRuleV1, ScenarioRoomCatalogueV1, ScenarioRoomDescriptorV1,
+    ScenarioRoomErrorV1, ScenarioRoomInputV1,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -35,7 +36,6 @@ const RECEIPT_SCHEMA_ID: &str = "urn:pigloros:gateway:v1:schema:committed-event-
 /// `EventId`.
 const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.GatewayScenarioRoomRevision.v1\0";
 const CLAIM_KEY_CONTEXT: &str = "PiglorOS Gateway ScenarioRoomRequest v1";
-const CLAIM_SCOPE_CONTEXT: &str = "PiglorOS Gateway ScenarioRoomRequestScope v1";
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"PiglorOS.GatewayScenarioRoomRequest.v1\0";
 
 /// A Scenario Room failure as its public problem.
@@ -94,10 +94,15 @@ impl From<RoomStoreErrorV1> for ProblemV1 {
                 StatusCode::CONFLICT,
                 "the Idempotency-Key was used for a different request",
             ),
-            RoomStoreErrorV1::LimitReached => (
+            RoomStoreErrorV1::TimelineCeiling => (
                 Code::ResourceLimitExceeded,
                 StatusCode::TOO_MANY_REQUESTS,
-                "the room or host reached its Timeline or Event ceiling",
+                "the host reached its root-Timeline ceiling; a retry cannot succeed",
+            ),
+            RoomStoreErrorV1::EventCeiling => (
+                Code::ResourceLimitExceeded,
+                StatusCode::CONFLICT,
+                "the room or the request Timeline reached its Event ceiling",
             ),
             RoomStoreErrorV1::ModeUnavailable | RoomStoreErrorV1::Store(_) => {
                 return Self::new(
@@ -366,8 +371,43 @@ fn request_digest(operation: &str, room_id: Option<EntityId>, body: &Value) -> [
     hasher.update(operation.as_bytes());
     hasher.update(&[0]);
     hasher.update(&room_id.map_or([0; 16], |room| room.inner().to_bytes()));
-    hasher.update(body.to_string().as_bytes());
+    let mut canonical = String::new();
+    canonical_json(body, &mut canonical);
+    hasher.update(canonical.as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+/// The canonical text of `value`: object members sorted by name at every
+/// depth, no whitespace, strings and numbers as `serde_json` writes them.
+/// Member order and whitespace therefore never change a request digest.
+fn canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(members) => {
+            let mut names: Vec<&String> = members.keys().collect();
+            names.sort_unstable();
+            out.push('{');
+            for (index, name) in names.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::from(name.as_str()).to_string());
+                out.push(':');
+                canonical_json(&members[name], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
 }
 
 /// The claim of `key` for `operation` by the Principal `permit` admitted.
@@ -388,10 +428,7 @@ fn claim(
     material.extend_from_slice(&room_id.map_or([0; 16], |room| room.inner().to_bytes()));
     material.extend_from_slice(key.as_bytes());
     RoomClaimV1 {
-        identity: AppendIdentity::new(
-            AppendDedupKey::from_keyed_hash(blake3::derive_key(CLAIM_KEY_CONTEXT, &material)),
-            AppendDedupScope::from_keyed_hash(blake3::derive_key(CLAIM_SCOPE_CONTEXT, &principal)),
-        ),
+        key: blake3::derive_key(CLAIM_KEY_CONTEXT, &material),
         request_digest,
     }
 }
@@ -472,10 +509,9 @@ pub(crate) fn revision_response(outcome: &RoomOutcomeV1) -> (StatusCode, Value) 
     }
 }
 
-/// The `ScenarioRoomRevision` of one stored revision. Its descriptor is the
-/// admitted payload, which is RFC 8785 JSON by construction.
+/// The `ScenarioRoomRevision` of one stored revision.
 pub(crate) fn revision_json(stored: &StoredRoomRevisionV1) -> Value {
-    let descriptor: Value = serde_json::from_slice(stored.descriptor.payload()).unwrap_or_default();
+    let descriptor = descriptor_json(&stored.descriptor);
     let mode_profile = mode_profile_json(stored);
     let revision = stored.descriptor.revision().get();
     let timeline_id = stored.timeline.to_string();
@@ -515,23 +551,74 @@ pub(crate) fn revision_json(stored: &StoredRoomRevisionV1) -> Value {
 }
 
 /// The GMP1 `mode_profile` the revision's commit was produced under: the
-/// profile its recorded binding epoch names. Only the two GMP1 profiles are
-/// ever bound, so the identifier always parses.
+/// profile its recorded binding epoch names.
 fn mode_profile_json(stored: &StoredRoomRevisionV1) -> Value {
-    let (profile, epoch) = &stored.produced_under;
-    profile
-        .profile_id()
-        .parse::<crate::mode_profile::GatewayModeProfileIdV1>()
-        .map(|id| {
+    let (id, digest, epoch) = &stored.produced_under;
+    json!({
+        "profile_kind": "gateway-mode-v1",
+        "mode_profile_id": id.as_str(),
+        "mode": id.mode(),
+        "mode_profile_digest": hex(digest),
+        "binding_epoch": epoch.get(),
+    })
+}
+
+/// The `ScenarioRoomDescriptor` of an admitted revision, built from its
+/// fields: the members, values and canonical list order of its
+/// `room.revision.v1` payload.
+fn descriptor_json(descriptor: &ScenarioRoomDescriptorV1) -> Value {
+    let input = descriptor.input();
+    let plugins: Vec<Value> = input
+        .plugins
+        .iter()
+        .map(|plugin| json!({"plugin_id": plugin.plugin_id, "version": plugin.version}))
+        .collect();
+    let rules: Vec<Value> = input
+        .rules
+        .iter()
+        .map(|rule| json!({"rule_id": rule.rule_id, "value_micro": rule.value_micro}))
+        .collect();
+    let participants: Vec<Value> = input
+        .participants
+        .iter()
+        .map(|participant| {
             json!({
-                "profile_kind": "gateway-mode-v1",
-                "mode_profile_id": id.as_str(),
-                "mode": id.mode(),
-                "mode_profile_digest": hex(&profile.profile_digest()),
-                "binding_epoch": epoch.get(),
+                "entity_id": participant.entity_id.to_string(),
+                "kind": participant.kind.as_str(),
             })
         })
-        .unwrap_or_default()
+        .collect();
+    let initial_conditions: Vec<Value> = input
+        .initial_conditions
+        .iter()
+        .map(|condition| {
+            json!({
+                "entity_id": condition.entity_id.to_string(),
+                "dimension": condition.dimension,
+                "value_micro": condition.value_micro,
+            })
+        })
+        .collect();
+    json!({
+        "room_id": descriptor.room_id().to_string(),
+        "revision": descriptor.revision().get(),
+        "schema_version": input.schema_version,
+        "tick_duration_ms": input.tick_duration_ms,
+        "max_ticks": input.max_ticks,
+        "scheduler_seed": hex(&input.scheduler_seed),
+        "scheduler_policy": input.scheduler_policy,
+        "intervention_policy": input.intervention_policy,
+        "plugins": plugins,
+        "rules": rules,
+        "participants": participants,
+        "initial_conditions": initial_conditions,
+        "governance_ref": input.governance_ref.to_string(),
+        "privacy_export_ref": input.privacy_export_ref.to_string(),
+        "correlation_id": hex(descriptor.correlation_id().as_bytes()),
+        "plugin_composition_hash": hex(descriptor.plugin_composition_hash().as_bytes()),
+        "rule_set_hash": hex(descriptor.rule_set_hash().as_bytes()),
+        "descriptor_hash": hex(descriptor.descriptor_hash().as_bytes()),
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -549,8 +636,10 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) fn room_catalogue() -> ScenarioRoomCatalogueV1 {
     crate::FrozenGatewayActionConfiguration::resolve(std::iter::empty())
         .ok()
-        .map(|frozen| {
-            HostCatalogueEntryV1::<crate::GatewayActionPlugin>::scenario_room_catalogue_v1(&frozen)
+        .and_then(|frozen| {
+            HostCatalogueEntryV1::<crate::GatewayActionPlugin>::gateway()
+                .scenario_room_catalogue_v1(&frozen)
+                .ok()
         })
         .unwrap_or_default()
 }

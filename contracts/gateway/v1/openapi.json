@@ -904,7 +904,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`.",
+            "description": "`idempotency-conflict`, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -924,7 +924,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1046,7 +1046,7 @@
             }
           },
           "409": {
-            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it.",
+            "description": "`idempotency-conflict`, or `append-conflict`: `parent_revision` is not the room's head revision and the proposal differs from the revision derived from it, or `resource-limit-exceeded`: the room or the host's request Timeline reached its Event ceiling (permanent; not retryable).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1066,7 +1066,7 @@
             }
           },
           "429": {
-            "description": "`resource-limit-exceeded`: a per-Principal admission or concurrency quota; retryable.",
+            "description": "`resource-limit-exceeded`: the host reached its root-Timeline ceiling (permanent; not retryable), or the denial-record bound or a per-Principal admission or concurrency quota (retryable, with `Retry-After`).",
             "content": {
               "application/problem+json": {
                 "schema": {
