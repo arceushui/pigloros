@@ -18,7 +18,7 @@ use pos_core::{
     store::{AppendDedupScope, EventReadBounds, EventStore, PurgeOutcome, SeqRange},
     timeline::Timeline,
     AuthorityErrorV1, AuthorityPersistenceErrorV1, AuthorizationOutcomeV1, ConsentAppendPermit,
-    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
+    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError, CorrelationId,
     ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
     ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
@@ -464,7 +464,7 @@ enum Command {
     },
     AppendConsentRevocation {
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -1596,6 +1596,21 @@ impl StoreExecutor {
             }
         )))
     }
+    /// The binding the commit of consent Timeline sequence `seq` of
+    /// `timeline` was produced under (ADR-134 §5).
+    pub(crate) async fn produced_under(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError> {
+        submit!(self, |reply| Command::Action(Box::new(
+            ProducedUnderCommand {
+                timeline,
+                seq,
+                reply
+            }
+        )))
+    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -1725,7 +1740,7 @@ impl StoreExecutor {
     pub(crate) async fn append_consent_revocation(
         &self,
         timeline: TimelineId,
-        revocation: ConsentRevokedV1,
+        revocation: (ConsentRevokedV1, Option<CorrelationId>),
         cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
@@ -2391,6 +2406,36 @@ impl WorkerCommandV1 for LoadAuthorityCommand {
             }
         };
         drop(reply.send(Ok(loaded)));
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        drop(self.reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+    }
+}
+
+struct ProducedUnderCommand {
+    timeline: TimelineId,
+    seq: Seq,
+    reply: oneshot::Sender<
+        Result<Option<crate::mode_profile::GatewayProducedUnderV1>, StoreExecutorError>,
+    >,
+}
+
+impl WorkerCommandV1 for ProducedUnderCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Self {
+            timeline,
+            seq,
+            reply,
+        } = *self;
+        let produced = match &mut state.store {
+            ExecutorStore::Host(host, _) => {
+                crate::mode_profile::produced_under_v1(host.gateway_mode_binding(), timeline, seq)
+            }
+            #[cfg(test)]
+            ExecutorStore::Generic(_) | ExecutorStore::Gateway(_) => None,
+        };
+        drop(reply.send(Ok(produced)));
     }
 
     fn expire_unrun(self: Box<Self>) {
@@ -3297,7 +3342,7 @@ fn execute_host_action_admission(
     >,
 ) {
     let result = open_action_fence(host, context.timeline)
-        .and_then(|()| persisted_action_authority(host, context.authorization))
+        .and_then(|()| persisted_action_authority(host, context.authorization, context.decision))
         .and_then(|authority| {
             with_host_action_fence(host, context.timeline, |sender| {
                 reauthorize_action(context.authorization, context.decision).and_then(|decision| {
@@ -3376,11 +3421,12 @@ fn refused_action_fence(
 fn persisted_action_authority(
     host: &mut ErasureExecutionHostV1,
     authorization: &GatewayAuthorization,
+    decision: &GatewayAuthorizationDecision,
 ) -> Result<(Hash, PersistedAuthorityV1), ActionCommandError> {
     host.command_sender()
         .and_then(|mut sender| {
             sender.with_scheduled_admission(|ports| {
-                action_admission::persist_authority(authorization, ports)
+                action_admission::persist_authority(authorization, decision, ports)
             })
         })
         .map_err(host_action_error)
@@ -3613,7 +3659,7 @@ fn execute_append_consent_revocation_command_from_command(
 fn execute_append_consent_revocation_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
-    revocation: &ConsentRevokedV1,
+    (revocation, correlation): &(ConsentRevokedV1, Option<CorrelationId>),
     cleanup_scope: AppendDedupScope,
     permit: ConsentAppendPermit,
     maximum: u64,
@@ -3633,11 +3679,13 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            let drafts = [EventDraft::new(
+            let mut draft = EventDraft::new(
                 revocation.subject_id,
                 Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                 payload,
-            )];
+            );
+            draft.correlation_id = *correlation;
+            let drafts = [draft];
             state.store.execute(
                 |host| {
                     host.command_sender().and_then(|mut sender| {
@@ -5001,7 +5049,7 @@ mod tests {
                 executor
                     .append_consent_revocation(
                         timeline,
-                        revocation,
+                        (revocation, None),
                         cleanup_scope,
                         permit,
                         10,

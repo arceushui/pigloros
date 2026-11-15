@@ -109,9 +109,10 @@ host answers every protected route `401` before reading the request body.
 
 ### Consents
 
-The document may also bind consents (#309, ADR-039) to some of its operations with a `[consent]`
-table: the subject who consents and the actor the consents grant (both listed actors), the
-consented operations, and one `[[consent.grants]]` entry per consent:
+The document may also bind consents (#309, ADR-039) with a `[consent]` table: the subject who
+consents and the actor the consents grant (both listed actors, shared by every consent), and one
+`[[consent.grants]]` entry per consent, naming the ADR-059 purpose it covers and its data
+categories (operation resources):
 
 ```toml
 operations = ["consent.revoke", "session.read", "timeline.create", "timeline.events.read"]
@@ -119,30 +120,34 @@ operations = ["consent.revoke", "session.read", "timeline.create", "timeline.eve
 [consent]
 subject_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
 grantee_entity_id = "01JC0GATEWAYQ0CA1ACT0R0000"
-operations = ["timeline.create"]
 
 [[consent.grants]]
-purpose = "local decision preview"
+purpose = "operation"
+data_categories = ["timeline"]
 export_permitted = false
 ```
 
-Provisioning records each consent as one `consent.granted.v1` Event on the Principal's consent
-Timeline, a root Timeline under a fixed identity no client can create, and splits the
-Principal's grant in two: a root grant of the unconsented operations and a consent-bound grant of
-the consented ones, which names the subject and references every consent. The ADR-059 evaluator
-decides a consented operation on the consent-bound grant and requires every consent to be active
-and to be the acting entity's, so all consents of one document govern the same operations. No
-consent may govern `session.read`, `consent.revoke`, `gateway.network.v1` or
-`world.action.v1.submit`, and at least one operation stays unconsented. An exact retry records
-nothing; a document with other consents is refused.
+A consent governs the granted operations whose purpose is its `purpose` (`operation`, `read` or
+`action`) and whose resource is one of its `data_categories`; every operation is governed by at
+most one consent, and at least one operation by none. No consent governs `session.read`,
+`consent.revoke` or `gateway.network.v1`: the owner's exempt set keeps reading the Session
+available, revoking must stay possible after any revocation, and the network capability
+authorizes no data operation. Provisioning records each consent as one `consent.granted.v1`
+Event on the Principal's consent Timeline, a root Timeline under a fixed identity that no client
+can create, read or append, and gives each consent its own consent-bound grant of exactly the
+operations it governs. All consents of one Principal share one subject and one grantee, the
+subject of its one consent Timeline. Provisioning checks before it writes anything: a store that
+holds another Principal, or other consents, refuses the document. An exact retry records nothing.
 
 `POST /v1/me/consent-revocations` revokes one consent the Session lists, named by its
 `consent_ref`, under the `consent.revoke` grant. The host appends its `consent.revoked.v1` Event
 while it holds the authority commit fence exclusively, after every operation admitted before has
-completed, and recomposes its consents before the next decision; from then on every consented
-operation is `403 revoked`, while the unconsented ones stay available. Revoking a revoked consent
-returns the original revocation (`200`). The host reads the consent Timeline head before every
-decision, so a restarted host recomposes the revocation from the Timeline.
+completed, and recomposes its consents before the next decision; from then on every operation the
+consent governs, a World action included, is `403 revoked`, while every other operation stays
+available. Revoking a revoked consent returns the original revocation (`200`), byte for byte: its
+`generation` is its fence and its `mode_profile` the binding its commit was produced under. The
+host reads the consent Timeline head before every decision, so a restarted host, or a revocation
+another process recorded, is seen.
 
 ### Session
 

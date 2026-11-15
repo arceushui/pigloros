@@ -75,8 +75,8 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   mode `gateway-mode-air-gapped-v1`.
 - `authorized-consented`: the `authorized` composition (#309) whose fixture Local Principal is
   also granted `consent.revoke` (resource `consent`, action `revoke`) and binds one consent of
-  the fixture actor to itself, purpose `gateway conformance fixture`, export not permitted,
-  governing `timeline.create`. The consent is recorded at sequence 1 of the Principal's consent
+  the fixture actor to itself, purpose `operation`, data category `timeline`, export not
+  permitted, so it governs `timeline.create`. The consent is recorded at sequence 1 of the Principal's consent
   Timeline; the consent-bound grant is issued at position 1 of its own authority Timeline, so
   the Principal's Session generation is 3 until the consent is revoked.
 

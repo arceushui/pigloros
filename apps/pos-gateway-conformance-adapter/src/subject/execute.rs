@@ -244,9 +244,9 @@ fn provision_store(store: &ScratchStore, consented: bool) -> Option<()> {
             let consent = consented.then(|| LocalConsentDraftV1 {
                 subject: actor,
                 grantee: actor,
-                operations: vec![GatewayOperationV1::CREATE_TIMELINE],
                 grants: vec![LocalConsentGrantDraftV1 {
-                    purpose: "gateway conformance fixture".to_owned(),
+                    purpose: "operation".to_owned(),
+                    data_categories: vec!["timeline".to_owned()],
                     export_permitted: false,
                 }],
             });

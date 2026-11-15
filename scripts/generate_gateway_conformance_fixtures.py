@@ -316,8 +316,9 @@ def session(expect: dict, actor: bool = True, capture: str | None = None) -> Exc
 
 def consent_revocation_body(generation: int) -> dict:
     """The `ConsentRevocation` the contract prescribes for the `authorized-consented` fixture
-    Principal's one consent, revoked at consent Timeline sequence 2, under the Local binding at
-    epoch 1, with the provenance digest of the `ConsentRevocation` schema description."""
+    Principal's one consent, revoked at consent Timeline sequence 2 (its `generation`), under the
+    Local binding at epoch 1, with the provenance digest of the `ConsentRevocation` schema
+    description."""
     digest = MODE_PROFILE_DIGESTS["gateway-mode-local-v1"]
     record = (
         b"PiglorOS.GatewayConsentRevocation.v1\x00"
@@ -538,8 +539,8 @@ def consent_revocation_exchanges() -> list[Exchange]:
             capture="consent",
         ),
         create("pos-7", capture=False, actor=True),
-        revoke(observed(201, json_body(consent_revocation_body(4)))),
-        revoke(observed(200, json_body(consent_revocation_body(4)))),
+        revoke(observed(201, json_body(consent_revocation_body(2)))),
+        revoke(observed(200, json_body(consent_revocation_body(2)))),
         create("pos-7", capture=False, actor=True, expect=routed_problem(403, "revoked", "/v1/timelines")),
         session(observed(200, json_body(session_body(*local, without_create, 4, revoked)))),
     ]

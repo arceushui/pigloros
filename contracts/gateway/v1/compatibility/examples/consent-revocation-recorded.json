@@ -17,9 +17,9 @@
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:consent-revocation",
       "id": "01JC0GATEWAYW90REV0KE00001",
-      "generation": 4,
+      "generation": 2,
       "provenance": {
-        "digest": "e7a2d96f33c540987b4df7546e56ccef6e93cf3c2c9b49f3bb40251b8e164fee",
+        "digest": "582d720a564be9e2a09580fcf00153b59e45a0d53884c4c731cfb31d9184d465",
         "origin": "host-derived"
       },
       "mode_profile": {

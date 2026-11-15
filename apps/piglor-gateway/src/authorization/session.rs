@@ -152,9 +152,7 @@ impl GatewayAuthorization {
         let pinned = self.pinned();
         let authority = pinned.view.authority();
         let consented = pinned.consented.as_ref();
-        let consent_chain_head = consented.map_or(Seq::ZERO, |consented| {
-            consented.view().authority().head_position()
-        });
+        let consent_chain_head = consented.map_or(0, GatewayConsentedAuthorityV1::head_position);
         let consents = consented.and_then(GatewayConsentedAuthorityV1::consents);
         let entity_ids = authority
             .chain()
@@ -188,13 +186,12 @@ impl GatewayAuthorization {
                         authority
                             .head_position()
                             .as_u64()
-                            .saturating_add(consent_chain_head.as_u64()),
+                            .saturating_add(consent_chain_head),
                     ),
                     consent_head: consents.map_or(Seq::ZERO, GatewayConsentsV1::head),
                     consents: consents.map_or_else(Vec::new, |consents| {
                         consents
-                            .disclosed()
-                            .iter()
+                            .of_party(actor)
                             .map(|consent| {
                                 (
                                     consent.consent_ref(),

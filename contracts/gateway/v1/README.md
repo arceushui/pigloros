@@ -47,10 +47,11 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   consents its `Session` lists, named by `consent_ref`, under the `consent.revoke` grant. The
   revocation is a `consent.revoked.v1` Event on the Principal's consent Timeline whose sequence
   is the ADR-039 fence; it takes effect before the next decision. From then on every operation
-  the consent governs is `403 revoked`; the operations no consent governs (reading the Session,
-  revoking a consent, the network capability and World actions) stay available. A consent the
-  Principal does not hold, or whose subject or grantee is not the acting entity, is
-  `404 not-found-or-unavailable`. Revocation stops future protected work and deletes nothing;
+  the consent governs (the granted operations of its purpose and data categories) is
+  `403 revoked`; every other operation stays available, and no consent ever governs reading the
+  Session, revoking a consent or the network capability. A consent the acting entity is not a
+  party to (its subject or grantee) is `404 not-found-or-unavailable`, and the Session lists only
+  the consents the acting entity is a party to. Revocation stops future protected work and deletes nothing;
   erasure is a separate operation.
 - Open identifiers and server invariants. Frozen with Session, `ExecutionProfileId`,
   `GatewayModeProfileId`, `mode`, `execution_profile.reason` and `network_grants` are bounded,
@@ -134,8 +135,9 @@ A mutation that is retry-safe carries an `Idempotency-Key` header of 1 to 128 vi
 characters (schema `idempotency-key`); every Draft mutation requires one, and of the served
 routes `POST /v1/timelines/{timeline_id}/actions` and `POST /v1/me/consent-revocations` do. A
 consent revocation is monotonic: revoking a revoked consent returns its original revocation
-(`200`) whatever its key, and the serving process keeps each recent revocation key bound to the
-consent it named, so reusing it for another consent is `409 idempotency-conflict`. Without it the request is
+(`200`) whatever its key, and the revocation Event records the key (with the Principal and the
+acting entity), so reusing it for another consent is `409 idempotency-conflict`, also after a
+restart. Without it the request is
 `400 invalid-request`. Repeating the key with the same request returns the original result
 (`200` with the original committed Event for an action) without re-running approval; reusing
 it with a different request is `409 idempotency-conflict`. A rejected action is never retried by

@@ -302,7 +302,7 @@ impl Gateway {
     /// Reload the chains the store records for the authorizer's source, and
     /// the consent Timeline head when its Principal binds consents, and
     /// recompose the pinned authority when the store is ahead of it.
-    async fn bring_current(
+    pub(crate) async fn bring_current(
         &self,
         authorization: &GatewayAuthorization,
     ) -> Result<(), GatewayAuthorizationError> {
@@ -341,7 +341,7 @@ impl Gateway {
     ) -> Result<GatewayAuthorityRecordV1, GatewayAuthorizationError> {
         let chain = self.store.load_authority(leaf).await;
         let consented = match authorization.consented_binding() {
-            Some((leaf, timeline)) => Some(self.consent_record(leaf, timeline).await),
+            Some((leaves, timeline)) => Some(self.consent_record(&leaves, timeline).await),
             None => None,
         };
         match (chain, consented.transpose()) {
@@ -350,18 +350,24 @@ impl Gateway {
         }
     }
 
-    /// The consent-bound chain under `leaf` and the head of the consent
+    /// The consent-bound chains under `leaves` and the head of the consent
     /// Timeline `timeline`.
     async fn consent_record(
         &self,
-        leaf: Hash,
+        leaves: &[Hash],
         timeline: TimelineId,
     ) -> Result<GatewayConsentRecordV1, GatewayAuthorizationError> {
-        let chain = self.store.load_authority(leaf).await;
+        let mut chains = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            chains.push(self.store.load_authority(*leaf).await);
+        }
         let head = self.store.protected_logical_head(timeline).await;
-        match (chain, head) {
-            (Ok(Ok(chain)), Ok(head)) => Ok(GatewayConsentRecordV1 {
-                chain,
+        match (
+            chains.into_iter().collect::<Result<Result<Vec<_>, _>, _>>(),
+            head,
+        ) {
+            (Ok(Ok(chains)), Ok(head)) => Ok(GatewayConsentRecordV1 {
+                chains,
                 head,
                 events: None,
             }),

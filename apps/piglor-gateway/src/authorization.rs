@@ -30,7 +30,9 @@ mod consent;
 mod revocation;
 mod session;
 
-pub use consent::{GatewayConsentV1, GatewayConsentedAuthorityV1, GatewayConsentsV1};
+pub use consent::{
+    GatewayConsentRevocationV1, GatewayConsentV1, GatewayConsentedAuthorityV1, GatewayConsentsV1,
+};
 pub(crate) use revocation::ConsentRevocationOutcomeV1;
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
@@ -692,16 +694,16 @@ pub trait GatewayAuthoritySourceV1: Send + Sync {
 pub struct GatewayAuthorityRecordV1 {
     /// The chain the store records under the source's leaf grant.
     pub chain: PersistedAuthorityV1,
-    /// The consent-bound chain of a Principal whose provisioning binds
+    /// The consent-bound chains of a Principal whose provisioning binds
     /// consents, with its consent Timeline.
     pub consented: Option<GatewayConsentRecordV1>,
 }
 
-/// The recorded consent-bound chain and consent Timeline of one Principal.
+/// The recorded consent-bound chains and consent Timeline of one Principal.
 #[derive(Clone, Debug)]
 pub struct GatewayConsentRecordV1 {
-    /// The consent-bound chain.
-    pub chain: PersistedAuthorityV1,
+    /// The consent-bound chains, one per consent, in provisioning order.
+    pub chains: Vec<PersistedAuthorityV1>,
     /// The consent Timeline head.
     pub head: Seq,
     /// The consent Timeline's Events through `head`, once read.
@@ -738,16 +740,18 @@ impl GatewayPinnedAuthorityV1 {
     }
 
     /// The chain `request` is decided on, and `request` bound to the
-    /// consents when the consent-bound grant covers it.
+    /// governing consent when a consent-bound grant covers it.
     fn decide(
         &self,
         request: GatewayAuthorizationRequest,
-    ) -> (&PersistedAuthorityV1, GatewayAuthorizationRequest) {
-        match &self.consented {
-            Some(consented) if consented.covers(&request) => {
-                (consented.view().authority(), consented.bind(request))
-            }
-            _ => (self.view.authority(), request),
+    ) -> (&AuthorityViewV1, GatewayAuthorizationRequest) {
+        let covering = self
+            .consented
+            .as_ref()
+            .and_then(|consented| consented.covering(&request).map(|view| (consented, view)));
+        match covering {
+            Some((consented, view)) => (view, consented.bind(view, request)),
+            None => (&self.view, request),
         }
     }
 
@@ -760,7 +764,12 @@ impl GatewayPinnedAuthorityV1 {
             .as_ref()
             .zip(record.consented.as_ref())
             .is_some_and(|(pinned, recorded)| {
-                chain_ahead(&recorded.chain, pinned.view().authority())
+                pinned.views().len() != recorded.chains.len()
+                    || recorded
+                        .chains
+                        .iter()
+                        .zip(pinned.views())
+                        .any(|(chain, view)| chain_ahead(chain, view.authority()))
                     || pinned
                         .consents()
                         .is_none_or(|consents| recorded.head > consents.head())
@@ -793,8 +802,6 @@ pub struct GatewayAuthorization {
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
     denial_budget: Arc<Mutex<DenialRecordBudget>>,
-    /// The consent each recent revocation's idempotency key named (#309).
-    revocation_keys: Arc<Mutex<VecDeque<(Hash, EventId)>>>,
 }
 
 impl GatewayAuthorization {
@@ -859,7 +866,6 @@ impl GatewayAuthorization {
             session_mode: None,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
-            revocation_keys: Arc::new(Mutex::new(VecDeque::new())),
             denial_budget: Arc::new(Mutex::new(DenialRecordBudget::default())),
         }
     }
@@ -877,7 +883,8 @@ impl GatewayAuthorization {
             .map(|pinned| Arc::clone(&pinned))
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
             .and_then(|pinned| {
-                let (authority, request) = pinned.decide(request);
+                let (view, request) = pinned.decide(request);
+                let authority = view.authority();
                 let operation_binding = operation_binding(&request);
                 self.adapter
                     .authenticate(&GatewayAuthenticationRequest { operation_binding })
@@ -1157,12 +1164,17 @@ impl GatewayAuthorization {
         Arc::clone(&self.commit_lock).write_owned().await
     }
 
-    /// The leaf grant and consent Timeline of the pinned consent-bound
-    /// chain, when the Principal's provisioning binds consents.
-    pub(crate) fn consented_binding(&self) -> Option<(Hash, TimelineId)> {
-        self.pinned().consented.as_ref().map(|consented| {
+    /// The leaf grants of the pinned consent-bound chains and the consent
+    /// Timeline, when the Principal's provisioning binds consents.
+    pub(crate) fn consented_binding(&self) -> Option<(Vec<Hash>, TimelineId)> {
+        let pinned = self.pinned();
+        pinned.consented.as_ref().map(|consented| {
             (
-                consented.view().authority().leaf_grant_id(),
+                consented
+                    .views()
+                    .iter()
+                    .map(|view| view.authority().leaf_grant_id())
+                    .collect(),
                 consented.timeline(),
             )
         })
@@ -1325,10 +1337,12 @@ impl GatewayAuthorization {
     pub(crate) fn persist_authority(
         &self,
         store: &mut dyn AuthorityPersistencePortV1,
+        decision: &GatewayAuthorizationDecision,
     ) -> Result<(Hash, PersistedAuthorityV1), AuthorityPersistenceErrorV1> {
         let pinned = self.pinned();
+        let (view, _) = pinned.decide(decision.request().clone());
         self.persistence
-            .persist_authority(store, &pinned.view)
+            .persist_authority(store, view)
             .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
