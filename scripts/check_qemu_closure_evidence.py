@@ -74,12 +74,6 @@ VERITY_FALLBACKS = (
 CONTEXT_OPTIONS = ("SECONDARY_TRUSTED_KEYRING", "INTEGRITY_PLATFORM_KEYRING", "MODULE_SIG")
 USERSPACE_VERITY_KEYS = {"systemd.allow_userspace_verity", "rd.systemd.allow_userspace_verity"}
 REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
-# The guest has no disk image (tmpfs root) and no network: any disk or
-# network option is foreign to the reviewed runner.
-FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "hda", "hdb",
-                          "hdc", "hdd", "fda", "fdb", "cdrom", "pflash", "sd", "mtdblock",
-                          "snapshot", "fsdev", "usbdevice", "global"}
-# -usb is checked per architecture below.
 # The exact -device models and -usb use of qemu-vm's runner for this guest,
 # as recorded on the hosted runners. Any other device is foreign: no disk,
 # network or host-passthrough model can be added unnoticed.
@@ -88,13 +82,17 @@ DEVICES = {
     "aarch64": ["usb-ehci,id=usb0", "usb-kbd", "usb-tablet", "virtio-gpu-pci", "virtio-keyboard",
                 "virtio-rng-pci"],
 }
-USB_OPTION = {"x86_64": 1, "aarch64": 0}
-# Every option flag of that runner. Anything else, however harmless it looks,
-# is not the reviewed runner.
-QEMU_FLAGS = {"-accel", "-append", "-cpu", "-device", "-initrd", "-kernel", "-m", "-name", "-nic",
-              "-no-reboot", "-nographic", "-qmp", "-smp", "-virtfs"}
-ARCHITECTURE_FLAGS = {"x86_64": {"-usb"}, "aarch64": {"-machine"}}
+# The whole argv shape of that runner: each flag with its exact count, and
+# the fixed values. Anything else, a positional disk image included, is not
+# the reviewed runner (the guest has no disk image and no network).
+VALUELESS_FLAGS = {"-usb", "-nographic", "-no-reboot"}
+SINGLE_FLAGS = {flag: 1 for flag in ("-accel", "-append", "-cpu", "-initrd", "-kernel", "-m", "-name",
+                                     "-nic", "-no-reboot", "-nographic", "-qmp", "-smp")}
+ARCHITECTURE_FLAGS = {"x86_64": {"-usb": 1}, "aarch64": {"-machine": 1}}
 MACHINES = {"x86_64": [], "aarch64": ["virt,gic-version=max"]}
+# guest.nix: memorySize, cores and the QMP socket in the run's working directory.
+PINNED_VALUES = {"-accel": "tcg", "-cpu": "max", "-name": "piglor-qemu-evidence", "-m": "2048",
+                 "-smp": "2", "-nic": "none", "-qmp": "unix:qmp.sock,server=on,wait=off"}
 # Block-device file systems; the guest mounts none of them.
 BLOCK_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "msdos", "exfat", "ntfs", "ntfs3",
                  "f2fs", "erofs", "squashfs", "iso9660", "udf", "jfs", "reiserfs", "bcachefs"}
@@ -397,38 +395,28 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     images = (executable, f"{paths['qemu']}/bin/.qemu-system-{architecture}-wrapped")
     if evidence.line("host/qemu-exe") not in images or argv[0] != executable:
         raise EvidenceError("the running QEMU is not the recorded package's system emulator")
-    accelerators, nics, kernels, appends, shares, devices, machines = [], [], [], [], [], [], []
-    for index, flag in enumerate(argv[1:], start=1):
-        value = argv[index + 1] if index + 1 < len(argv) else ""
-        if flag.lstrip("-") in FORBIDDEN_QEMU_OPTIONS and flag.startswith("-"):
-            raise EvidenceError(f"QEMU option {flag} is not allowed in the evidence boot")
-        if flag in ("-nic", "--nic"):
-            nics.append(value)
-        if flag in ("-accel", "--accel"):
-            accelerators.append(value)
-        if flag in ("-virtfs", "--virtfs"):
-            shares.append(value)
-        if flag in ("-kernel", "--kernel"):
-            kernels.append(value)
-        if flag in ("-append", "--append"):
-            appends.append(value)
-        if flag in ("-device", "--device"):
-            devices.append(value)
-        if flag in ("-machine", "--machine", "-M"):
-            if "accel" in value:
-                raise EvidenceError("the accelerator must come from -accel, not -machine")
-            machines.append(value)
-    if sorted(devices) != sorted(DEVICES[architecture]) or argv.count("-usb") != USB_OPTION[architecture]:
-        raise EvidenceError(f"QEMU devices {sorted(devices)} are not the reviewed runner's")
-    if machines != MACHINES[architecture]:
-        raise EvidenceError(f"QEMU machine {machines} is not the reviewed runner's")
-    # No value of the reviewed runner starts with "-", so every such word is a flag.
-    flags = {argument for argument in argv[1:] if argument.startswith("-")}
-    unexpected = sorted(flags - QEMU_FLAGS - ARCHITECTURE_FLAGS[architecture])
-    if unexpected:
-        raise EvidenceError(f"QEMU options {unexpected} are not the reviewed runner's")
+    options = qemu_options(argv)
+    expected = {**SINGLE_FLAGS, "-virtfs": 3, "-device": len(DEVICES[architecture]),
+                **ARCHITECTURE_FLAGS[architecture]}
+    counts = {flag: len(values) for flag, values in options.items()}
+    if counts != expected:
+        raise EvidenceError(f"QEMU options {counts} are not the reviewed runner's {expected}")
+    for flag, value in PINNED_VALUES.items():
+        if options[flag] != [value]:
+            raise EvidenceError(f"QEMU {flag} {options[flag]} is not the reviewed runner's {value}")
+    if sorted(options["-device"]) != sorted(DEVICES[architecture]):
+        raise EvidenceError(f"QEMU devices {sorted(options['-device'])} are not the reviewed runner's")
+    if options.get("-machine", []) != MACHINES[architecture]:
+        raise EvidenceError(f"QEMU machine {options.get('-machine')} is not the reviewed runner's")
+    initrd = options["-initrd"][0]
+    closure = store_info(evidence, "host/toplevel-closure.json")
+    if not re.fullmatch(rf"{STORE_PATH.pattern}/initrd", initrd) \
+            or initrd.split("/")[3] not in closure or "-initrd-linux-" not in initrd:
+        raise EvidenceError(f"QEMU -initrd {initrd} is not the recorded toplevel's initrd")
+    accelerators, nics = options["-accel"], options["-nic"]
+    kernels, appends, shares = options["-kernel"], options["-append"], options["-virtfs"]
     # ADR-069 R13 §2.3: started with `-accel tcg` only, and QEMU reports no KVM.
-    if accelerators != ["tcg"]:
+    if accelerators != ["tcg"]:  # pinned above; restated for the R13 claim
         raise EvidenceError(f"QEMU must be started with exactly -accel tcg, not {accelerators}")
     reported = evidence.json("host/qemu-query-kvm.json")
     if not isinstance(reported, dict) or not isinstance(reported.get("return"), dict) \
@@ -451,6 +439,25 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
         raise EvidenceError(f"the run did not stop QEMU and remove its disposable state: {cleanup}")
     return {"accelerator": "tcg", "qemu_reports": reported["return"], "virtualization": "qemu",
             "runner": runner, "virtfs": virtfs, "cleanup": cleanup}
+
+
+def qemu_options(argv: list[str]) -> dict[str, list[str | None]]:
+    """Split argv[1:] into flags and their values; a stray word is refused."""
+    options: dict[str, list[str | None]] = {}
+    index = 1
+    while index < len(argv):
+        flag = argv[index]
+        if not flag.startswith("-"):
+            raise EvidenceError(f"QEMU argument {flag!r} is not a flag (a positional disk image?)")
+        if flag in VALUELESS_FLAGS:
+            options.setdefault(flag, []).append(None)
+            index += 1
+            continue
+        if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+            raise EvidenceError(f"QEMU option {flag} has no value")
+        options.setdefault(flag, []).append(argv[index + 1])
+        index += 2
+    return options
 
 
 def check_virtfs(shares: list[str]) -> dict[str, str]:

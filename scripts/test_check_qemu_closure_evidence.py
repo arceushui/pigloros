@@ -76,10 +76,14 @@ NS = "pid\tpid:[4026531836]\nuser\tuser:[4026531837]\nmnt\tmnt:[4026531841]\n"
 CLOSURE = ("toplevel", "kernel", "systemd", "collector", "collectorUnit")
 
 
+INITRD = store("initrd-linux-6.12.117", "c")
+
+
 def info(*names: str, paths: dict[str, str] = PATHS) -> str:
-    return json.dumps({"version": 2, "storeDir": "/nix/store", "info": {
-        paths[name].removeprefix("/nix/store/"): {"narHash": f"sha256-{name}"} for name in names
-    }})
+    entries = {paths[name].removeprefix("/nix/store/"): {"narHash": f"sha256-{name}"} for name in names}
+    if "toplevel" in names and len(names) > 1:  # a toplevel closure also holds its initrd
+        entries[INITRD.removeprefix("/nix/store/")] = {"narHash": "sha256-initrd"}
+    return json.dumps({"version": 2, "storeDir": "/nix/store", "info": entries})
 
 
 def with_paths(files: dict, **changes: str) -> dict[str, str]:
@@ -100,14 +104,14 @@ def qemu_argv(architecture: str, *extra: str) -> bytes:
                                          "-device", "usb-ehci,id=usb0", "-device", "usb-kbd",
                                          "-device", "usb-tablet"]}
     argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", *machine[architecture],
-            "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
+            "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048", "-smp", "2",
             "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,security_model=none,mount_tag=nix-store",
             "-virtfs", "local,path=/tmp/qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=xchg",
             "-virtfs", "local,path=/tmp/qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=shared",
             *devices[architecture],
-            "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
+            "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{INITRD}/initrd",
             "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
-            "-nic", "none", "-no-reboot", "-qmp", "unix:qmp.sock,server=on,wait=off", *extra]
+            "-nographic", "-nic", "none", "-no-reboot", "-qmp", "unix:qmp.sock,server=on,wait=off", *extra]
     return b"".join(argument.encode() + b"\0" for argument in argv)
 
 
@@ -562,6 +566,18 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "vmxnet3")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-monitor", "stdio")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "disk.img")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-qmp", "tcp:0.0.0.0:4444,server=on")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"unix:qmp.sock,server=on,wait=off", b"tcp:0.0.0.0:4444,server=on,wait=off")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-m\x002048", b"-m\x004096")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-smp\x002", b"-smp\x008")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-nographic\x00", b"")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                f"{INITRD}/initrd".encode(), f"{store('initrd-linux-6.12.117', 'd')}/initrd".encode())}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                f"{INITRD}/initrd".encode(), b"/tmp/initrd")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-cpu")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-S")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-machine", "q35")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
