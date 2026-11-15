@@ -104,7 +104,12 @@ fn provider_binary(admitted: &AdmittedSelectorProvider) -> TestResult<PathBuf> {
         )?
         .object()
         .content_digest();
-    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let name: String = digest
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
+        .collect();
     Ok(Path::new(SANDBOX_ARTIFACT_ROOT)
         .join("providers")
         .join(name))
@@ -119,6 +124,30 @@ fn bind_as_provider() -> TestResult<Result<ProviderRuntimeAuthority, ProviderSta
         &binary,
         ProviderInstallation::open,
     ))
+}
+
+/// Step 3: an executable other than the held provider binary is refused
+/// before SPI1 is read.
+fn refuses_another_executable_before_spi1() -> TestResult {
+    // Step 3: this test binary is not the admitted provider binary, so
+    // startup stops before it reads SPI1.
+    assert_eq!(
+        ProviderRuntimeAuthority::start().err(),
+        Some(ProviderStartupError::SelfBinding)
+    );
+    let mut read = false;
+    let refused = ProviderRuntimeAuthority::bind(admitted()?, Path::new("/proc/self/exe"), || {
+        read = true;
+        ProviderInstallation::open()
+    });
+    assert_eq!(refused.err(), Some(ProviderStartupError::SelfBinding));
+    assert!(!read);
+    // Another file on the very device of the held binary.
+    let manifest = Path::new(SANDBOX_ARTIFACT_ROOT).join("installation.cbor");
+    let refused =
+        ProviderRuntimeAuthority::bind(admitted()?, &manifest, ProviderInstallation::open);
+    assert_eq!(refused.err(), Some(ProviderStartupError::SelfBinding));
+    Ok(())
 }
 
 #[test]
@@ -145,24 +174,7 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
         Err(ProviderStartupError::Installation(_))
     ));
     let staged = StagedInstallation::stage()?;
-    // Step 3: this test binary is not the admitted provider binary, so
-    // startup stops before it reads SPI1.
-    assert_eq!(
-        ProviderRuntimeAuthority::start().err(),
-        Some(ProviderStartupError::SelfBinding)
-    );
-    let mut read = false;
-    let refused = ProviderRuntimeAuthority::bind(admitted()?, Path::new("/proc/self/exe"), || {
-        read = true;
-        ProviderInstallation::open()
-    });
-    assert_eq!(refused.err(), Some(ProviderStartupError::SelfBinding));
-    assert!(!read);
-    // Another file on the very device of the held binary.
-    let manifest = Path::new(SANDBOX_ARTIFACT_ROOT).join("installation.cbor");
-    let refused =
-        ProviderRuntimeAuthority::bind(admitted()?, &manifest, ProviderInstallation::open);
-    assert_eq!(refused.err(), Some(ProviderStartupError::SelfBinding));
+    refuses_another_executable_before_spi1()?;
     // Step 4: no SPI1.
     assert_eq!(
         bind_as_provider()?.err(),
@@ -222,18 +234,6 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
         ))
     );
     drop(staged);
-    for (error, text) in [
-        (
-            ProviderStartupError::SelfBinding,
-            "the running executable is not the admitted provider binary",
-        ),
-        (
-            ProviderStartupError::SlotCount,
-            "the attempt range holds fewer slots than admission can use",
-        ),
-    ] {
-        assert_eq!(error.to_string(), text);
-    }
     Ok(())
 }
 
@@ -248,5 +248,21 @@ fn the_slot_requirement_is_bhc1_limit_13_capped_at_256() {
         (Vec::new(), 256),
     ] {
         assert_eq!(required_slots(&caps), expected);
+    }
+}
+
+#[test]
+fn startup_refusals_name_no_secret() {
+    for (error, text) in [
+        (
+            ProviderStartupError::SelfBinding,
+            "the running executable is not the admitted provider binary",
+        ),
+        (
+            ProviderStartupError::SlotCount,
+            "the attempt range holds fewer slots than admission can use",
+        ),
+    ] {
+        assert_eq!(error.to_string(), text);
     }
 }
