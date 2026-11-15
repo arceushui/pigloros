@@ -314,6 +314,16 @@ fn wrong_policy_wire_fields_and_rules_fail_closed() -> TestResult {
             WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?).is_err()
         );
     }
+    // Either reserved trailing field alone is an unsupported value, not
+    // merely a noncanonical encoding of an otherwise valid policy.
+    for index in [8, 9] {
+        let mut changed = fields.clone();
+        changed[index] = Value::Integer(1.into());
+        assert_eq!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?),
+            Err(WorldRetentionErrorV1::UnsupportedValue)
+        );
+    }
     for index in 0..fields.len() {
         let mut changed = fields.clone();
         changed[index] = Value::Null;
