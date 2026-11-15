@@ -421,7 +421,6 @@ impl LocalRecordV1 for LocalErasureBundleV1 {
                 && (1..=MAX_EXECUTOR_ID_BYTES).contains(&self.execution_binding.executor_id.len())
                 && self.signer_identity.is_valid()
                 && self.signer_key_id == local_erasure_signer_key_id_v1(&self.signer_public_key)
-                && is_tps1_key_id(&self.signer_key_id)
                 && is_tps1_key_id(&self.issued_by)
                 && self.issued_by.len() > ERASURE_BUNDLE_ROOT_PREFIX_V1.len()
                 && self.issued_by.starts_with(ERASURE_BUNDLE_ROOT_PREFIX_V1),

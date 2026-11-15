@@ -120,24 +120,31 @@ fn signer() -> LocalErasureSignerIdentityV1 {
     }
 }
 
-fn owner(category: u64, ack_class: &str) -> LocalErasureOwnerRowV1 {
-    LocalErasureOwnerRowV1 {
-        category,
-        ack_class: ack_class.to_owned(),
-        owner_ref: local_erasure_owner_ref_v1(reference(2), category, ack_class)
-            .unwrap_or(reference(0)),
-    }
+fn owner(category: u64, ack_class: &str) -> Result<LocalErasureOwnerRowV1, ErasureErrorV1> {
+    local_erasure_owner_ref_v1(reference(2), category, ack_class).map(|owner_ref| {
+        LocalErasureOwnerRowV1 {
+            category,
+            ack_class: ack_class.to_owned(),
+            owner_ref,
+        }
+    })
 }
 
-fn bundle() -> LocalErasureBundleV1 {
+fn owners<I: IntoIterator<Item = String>>(
+    classes: I,
+) -> Result<Vec<LocalErasureOwnerRowV1>, ErasureErrorV1> {
+    classes.into_iter().map(|class| owner(0, &class)).collect()
+}
+
+fn bundle() -> Result<LocalErasureBundleV1, ErasureErrorV1> {
     let signer_public_key = [9; 32];
-    LocalErasureBundleV1 {
+    Ok(LocalErasureBundleV1 {
         tps1: reference(1),
         store_identity: reference(2),
         authority_registry_digest: reference(3),
         host_timelines: vec![timeline(1), timeline(2)],
         policy: reference(4),
-        owners: vec![owner(0, "artifact-store"), owner(1, "key-registry")],
+        owners: vec![owner(0, "artifact-store")?, owner(1, "key-registry")?],
         execution_binding: LocalErasureExecutionBindingV1 {
             executor_id: "local-erasure-executor".to_owned(),
             executor_version_digest: reference(7),
@@ -147,7 +154,7 @@ fn bundle() -> LocalErasureBundleV1 {
         signer_key_id: local_erasure_signer_key_id_v1(&signer_public_key),
         issued_by: "erasure-bundle/root-1".to_owned(),
         expiry: 0x1234_5678,
-    }
+    })
 }
 
 fn policy() -> LocalErasurePolicyV1 {
@@ -181,14 +188,14 @@ fn policy() -> LocalErasurePolicyV1 {
 #[test]
 fn bundle_and_signature_round_trip_and_refuse_corruption() -> TestResult {
     assert_codec(
-        &bundle(),
+        &bundle()?,
         LocalErasureBundleV1::to_canonical_cbor,
         LocalErasureBundleV1::from_canonical_cbor,
         LocalErasureBundleV1::reference,
     )?;
     assert_codec(
         &LocalErasureBundleSignatureV1 {
-            bundle: bundle().reference()?,
+            bundle: bundle()?.reference()?,
             admin_signature: [3; 64],
         },
         LocalErasureBundleSignatureV1::to_canonical_cbor,
@@ -205,64 +212,62 @@ fn bundle_and_signature_round_trip_and_refuse_corruption() -> TestResult {
 }
 
 #[test]
-fn bundle_rules_are_enforced() {
+fn bundle_rules_are_enforced() -> TestResult {
     let unsorted = |mut bundle: LocalErasureBundleV1| {
         bundle.host_timelines.reverse();
         bundle
     };
-    let mut cases = vec![unsorted(bundle())];
-    let mut owners_unsorted = bundle();
+    let mut cases = vec![unsorted(bundle()?)];
+    let mut owners_unsorted = bundle()?;
     owners_unsorted.owners.reverse();
     cases.push(owners_unsorted);
-    let mut too_many_timelines = bundle();
+    let mut too_many_timelines = bundle()?;
     too_many_timelines.host_timelines = (0..65).map(timeline).collect();
     too_many_timelines.host_timelines.sort_unstable();
     cases.push(too_many_timelines);
-    let mut too_many_owners = bundle();
-    too_many_owners.owners = (0..65)
-        .map(|index| owner(0, &format!("c{index:03}")))
-        .collect();
+    let mut too_many_owners = bundle()?;
+    too_many_owners.owners = owners((0..65).map(|index| format!("c{index:03}")))?;
     cases.push(too_many_owners);
-    let mut foreign_owner = bundle();
+    let mut foreign_owner = bundle()?;
     foreign_owner.owners[0].owner_ref = reference(5);
     cases.push(foreign_owner);
-    let mut uppercase_issuer = bundle();
+    let mut uppercase_issuer = bundle()?;
     uppercase_issuer.issued_by = "erasure-bundle/Root".to_owned();
     cases.push(uppercase_issuer);
-    let mut colon_issuer = bundle();
+    let mut colon_issuer = bundle()?;
     colon_issuer.issued_by = "erasure-bundle:root".to_owned();
     cases.push(colon_issuer);
-    let mut bad_category = bundle();
+    let mut bad_category = bundle()?;
     bad_category.owners[0].category = 9;
     cases.push(bad_category);
-    let mut bad_class = bundle();
+    let mut bad_class = bundle()?;
     bad_class.owners[0].ack_class = "Artifact".to_owned();
     cases.push(bad_class);
-    let mut empty_executor = bundle();
+    let mut empty_executor = bundle()?;
     empty_executor.execution_binding.executor_id.clear();
     cases.push(empty_executor);
-    let mut long_executor = bundle();
+    let mut long_executor = bundle()?;
     long_executor.execution_binding.executor_id = "e".repeat(65);
     cases.push(long_executor);
-    let mut empty_owner = bundle();
+    let mut empty_owner = bundle()?;
     empty_owner.signer_identity.owner_id.clear();
     cases.push(empty_owner);
-    let mut long_owner = bundle();
+    let mut long_owner = bundle()?;
     long_owner.signer_identity.owner_id = vec![1; 129];
     cases.push(long_owner);
-    let mut epoch_zero = bundle();
+    let mut epoch_zero = bundle()?;
     epoch_zero.signer_identity.epoch = 0;
     cases.push(epoch_zero);
-    let mut wrong_key_id = bundle();
+    let mut wrong_key_id = bundle()?;
     wrong_key_id.signer_key_id = local_erasure_signer_key_id_v1(&[8; 32]);
     cases.push(wrong_key_id);
-    let mut long_issuer = bundle();
+    let mut long_issuer = bundle()?;
     long_issuer.issued_by = format!("erasure-bundle/{}", "r".repeat(114));
     cases.push(long_issuer);
-    let mut bare_prefix = bundle();
+    let mut bare_prefix = bundle()?;
     bare_prefix.issued_by = "erasure-bundle/".to_owned();
     cases.push(bare_prefix);
-    let mut other_root = bundle();
+    let mut other_root = bundle()?;
     other_root.issued_by = "plugin-release/root-1".to_owned();
     cases.push(other_root);
     for case in cases {
@@ -272,21 +277,20 @@ fn bundle_rules_are_enforced() {
             "{case:?}"
         );
     }
-    let mut longest = bundle();
+    let mut longest = bundle()?;
     longest.issued_by = format!("erasure-bundle/{}", "r".repeat(113));
     longest.host_timelines = (0..64).map(timeline).collect();
-    longest.owners = (0..64)
-        .map(|index| owner(0, &format!("s3-cache{index:02}")))
-        .collect();
+    longest.owners = owners((0..64).map(|index| format!("s3-cache{index:02}")))?;
     longest.execution_binding.executor_id = "e".repeat(64);
     longest.signer_identity.owner_id = vec![1; 128];
     assert!(longest.to_canonical_cbor().is_ok());
-    let mut duplicate_pair = bundle();
-    duplicate_pair.owners = vec![owner(0, "artifact-store"), owner(0, "artifact-store")];
+    let mut duplicate_pair = bundle()?;
+    duplicate_pair.owners = vec![owner(0, "artifact-store")?, owner(0, "artifact-store")?];
     assert_eq!(
         duplicate_pair.to_canonical_cbor(),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
 }
 
 #[test]
@@ -808,7 +812,7 @@ fn assert_golden<R: PartialEq + std::fmt::Debug>(
 
 #[test]
 fn records_match_hand_written_golden_vectors() -> TestResult {
-    let bundle = bundle();
+    let bundle = bundle()?;
     let golden = Cbor::default()
         .record("ELB1", 12)
         .bytes(&[1; 32])
