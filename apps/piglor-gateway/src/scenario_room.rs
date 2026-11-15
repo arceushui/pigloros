@@ -463,13 +463,23 @@ impl Gateway {
     /// decision of `permit` pinned it (#303 decision 2a), with the authorizer
     /// to record it: a consent the acting Principal does not hold is
     /// `consent-invalid` (ADN1 outcome `ConsentMissing`), a revoked one
-    /// `revoked` (`RevokedAtFence`). A composition that protects nothing has
-    /// no decision and so no consent to check.
+    /// `revoked` (`RevokedAtFence`). Only the in-process harness composition
+    /// protects nothing; it has no authorizer and checks no consent.
+    ///
+    /// # Errors
+    /// A refusal that yields no recordable denial fails closed with
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] (`503`). It is not
+    /// reachable: a protected composition always has the decision, and
+    /// `deny_at_commit_fence` records every outcome but `Active`. It stops a
+    /// future outcome change from skipping the consent check.
     fn room_consent_denial(
         &self,
         permit: &GatewayOperationPermitV1,
         input: &ScenarioRoomInputV1,
-    ) -> Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)> {
+    ) -> Result<Option<(Arc<GatewayAuthorization>, PendingAuthorityDenial)>, RoomFailureV1> {
+        let Some(authorization) = self.authorization.clone() else {
+            return Ok(None);
+        };
         let consent =
             self.consent_pinned(permit, EventId::from_ulid(input.privacy_export_ref.inner()));
         let refusal = match consent {
@@ -483,14 +493,19 @@ impl Gateway {
             )),
             Some(_) => None,
         };
-        self.authorization
-            .clone()
-            .zip(permit.decision())
-            .zip(refusal)
-            .and_then(|((authorization, decision), (outcome, error))| {
-                GatewayAuthorization::deny_at_commit_fence(decision, outcome, Some(error))
-                    .map(|pending| (authorization, pending))
+        refusal
+            .map(|(outcome, error)| {
+                permit
+                    .decision()
+                    .and_then(|decision| {
+                        GatewayAuthorization::deny_at_commit_fence(decision, outcome, Some(error))
+                    })
+                    .map(|pending| (Arc::clone(&authorization), pending))
+                    .ok_or(RoomFailureV1::Gateway(
+                        GatewayError::AuthorizationEvidenceUnavailable,
+                    ))
             })
+            .transpose()
     }
 
     /// Run a room write under `permit`, after its consent check. A consent
@@ -502,7 +517,7 @@ impl Gateway {
         input: &ScenarioRoomInputV1,
         operation: RoomOperationV1,
     ) -> Result<RoomOutcomeV1, RoomFailureV1> {
-        if let Some((authorization, pending)) = self.room_consent_denial(&permit, input) {
+        if let Some((authorization, pending)) = self.room_consent_denial(&permit, input)? {
             drop(permit);
             return Err(RoomFailureV1::Gateway(
                 self.recorded_denial(&authorization, pending).await,

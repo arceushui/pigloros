@@ -95,6 +95,7 @@ mod served {
                 GatewayOperationV1::READ_SESSION,
                 GatewayOperationV1::REVOKE_CONSENT,
                 GatewayOperationV1::CREATE_TIMELINE,
+                GatewayOperationV1::READ_EVENTS,
             ]),
             Some(LocalConsentDraftV1 {
                 subject: id(ACTOR)?,
@@ -362,6 +363,26 @@ mod served {
         assert_eq!(
             (status, &body["code"]),
             (StatusCode::CONFLICT, &json!("append-conflict"))
+        );
+        // The room Timeline is an ordinary Timeline: its revisions and the
+        // derive's claim read through the events route.
+        let events = format!(
+            "/v1/timelines/{}/events",
+            created["commit"]["timeline_id"]
+                .as_str()
+                .ok_or("timeline")?
+        );
+        let (status, page) = send(app, "GET", &events, None, None).await?;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let types = page["events"]
+            .as_array()
+            .ok_or("events")?
+            .iter()
+            .map(|event| event["event_type"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            ["room.revision.v1", "room.request.v1", "room.revision.v1"]
         );
         let unknown = format!("/v1/scenario-rooms/{}/revisions", EntityId::new());
         let (status, body) = post(app, &unknown, Some("k-5"), &derive).await?;
@@ -633,13 +654,17 @@ mod served {
             .map(|(status, _)| status)
             .map_err(|error| error.to_string())
         });
-        while !authorization.fence_writer_waits() {
-            assert!(
-                !revocation.is_finished(),
-                "the revocation waits for the permit"
-            );
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !authorization.fence_writer_waits() {
+                assert!(
+                    !revocation.is_finished(),
+                    "the revocation finished without waiting for the create's permit"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "the revocation never reached the commit fence")?;
         let body = json!({"descriptor": served.descriptor(2)});
         let admitted = served
             .gateway
@@ -717,6 +742,18 @@ mod served {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
+        // The harness composition protects nothing and checks no consent;
+        // its write and its read both reach the store, which cannot hold a
+        // room.
+        let create = json!({"descriptor": descriptor(1, &EntityId::new().to_string())});
+        let (status, problem) = post(&app, "/v1/scenario-rooms", Some("k"), &create).await?;
+        assert_eq!(
+            (status, &problem["code"]),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!("temporarily-unavailable")
+            )
+        );
         let read = format!("/v1/scenario-rooms/{}/revisions/1", EntityId::new());
         let (status, problem) = send(&app, "GET", &read, None, None).await?;
         assert_eq!(
