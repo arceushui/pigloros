@@ -28,7 +28,6 @@ mod tests;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use ed25519_dalek::VerifyingKey;
 use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use pos_reference::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
@@ -69,7 +68,6 @@ pub enum ProviderStartupError {
 pub struct ProviderRuntimeAuthority {
     admitted: AdmittedSelectorProvider,
     installation: ProviderInstallation,
-    runtime_key: VerifyingKey,
     signer: KeyFileReleaseSigner,
 }
 
@@ -116,14 +114,12 @@ impl ProviderRuntimeAuthority {
             .clone();
         // Admission already resolved the TRS1 role-3 key that the SPM1 key
         // ID names and RVS1 leaves active.
-        let runtime_key = *admitted.provider().runtime_attestation_key();
         let signer = RuntimeKey::open(&installation)
-            .and_then(|key| key.require_admitted(&runtime_key))?
+            .and_then(|key| key.require_admitted(admitted.provider().runtime_attestation_key()))?
             .into_signer(key_id);
         Ok(Self {
             admitted,
             installation,
-            runtime_key,
             signer,
         })
     }
@@ -138,12 +134,6 @@ impl ProviderRuntimeAuthority {
     #[must_use]
     pub const fn installation(&self) -> &ProviderInstallation {
         &self.installation
-    }
-
-    /// The admitted runtime-attestation public key.
-    #[must_use]
-    pub const fn runtime_key(&self) -> &VerifyingKey {
-        &self.runtime_key
     }
 
     /// The one R9 runtime-attestation signer.

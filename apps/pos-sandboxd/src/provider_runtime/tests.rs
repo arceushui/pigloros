@@ -192,6 +192,13 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
         Some(ProviderStartupError::SlotCount)
     );
     remove_spi1()?;
+    // Step 5 comes before step 6: too few slots and a foreign key.
+    install_spi1(&spi1(23)?, &[5; 32])?;
+    assert_eq!(
+        bind_as_provider()?.err(),
+        Some(ProviderStartupError::SlotCount)
+    );
+    remove_spi1()?;
     // Step 6: a key file that is not the admitted key.
     install_spi1(&spi1(22)?, &[5; 32])?;
     assert_eq!(
@@ -205,7 +212,10 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
     install_spi1(&spi1(22)?, &RUNTIME_SEED)?;
     let authority = bind_as_provider()??;
     let expected = SigningKey::from_bytes(&RUNTIME_SEED).verifying_key();
-    assert_eq!(*authority.runtime_key(), expected);
+    assert_eq!(
+        *authority.admitted().provider().runtime_attestation_key(),
+        expected
+    );
     assert_eq!(
         authority.signer().runtime_attestation_key_id(),
         RUNTIME_KEY_ID
