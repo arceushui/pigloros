@@ -1012,7 +1012,8 @@ fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
 /// (epoch + 1 and a history entry of kind migrate). Returns the operator
 /// audit line. A target mode without network refuses a store whose Local
 /// Principal holds the network capability, so the next `serve` never fails
-/// on it (ADR-134 §4).
+/// on it (ADR-134 §4); a store whose authority records cannot be read is
+/// refused as unavailable, and nothing is written.
 ///
 /// # Errors
 /// Returns a lock, profile or store refusal; nothing changes on failure.
@@ -1042,15 +1043,13 @@ pub fn migrate_gateway_mode_v1(
                         GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unavailable)
                     })
                     .and_then(|mut store| {
-                        refuse_principal_network(
-                            &to,
-                            crate::local_principal::names_network_capability(&store),
-                        )
-                        .and_then(|()| {
-                            store
-                                .migrate_mode(permit)
-                                .map_err(GatewayModeErrorV1::Store)
-                        })
+                        crate::local_principal::names_network_capability(&store)
+                            .and_then(|names| refuse_principal_network(&to, names))
+                            .and_then(|()| {
+                                store
+                                    .migrate_mode(permit)
+                                    .map_err(GatewayModeErrorV1::Store)
+                            })
                     })
             })
             .map(|record| {

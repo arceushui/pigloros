@@ -290,18 +290,28 @@ fn admit_in_mode(
 }
 
 /// Whether the Local Principal recorded in `store` holds the network
-/// capability; an unprovisioned or unreadable store holds none.
-pub(crate) fn names_network_capability<S>(store: &S) -> bool
+/// capability. A store that records no Local Principal holds none.
+///
+/// # Errors
+/// Returns the unavailable store error when the authority records cannot be
+/// read or decoded, so a caller fails closed instead of treating an
+/// unreadable store as one without the capability.
+pub(crate) fn names_network_capability<S>(
+    store: &S,
+) -> Result<bool, crate::mode_profile::GatewayModeErrorV1>
 where
     S: AuthorityPersistencePortV1 + ?Sized,
 {
-    store
-        .load_authority(local_principal_grant_id())
-        .is_ok_and(|persisted| {
-            persisted.chain().grants().iter().any(|grant| {
-                crate::authorization::scope_names(grant.scope(), GatewayOperationV1::NETWORK)
-            })
-        })
+    match store.load_authority(local_principal_grant_id()) {
+        // The store resolves no chain for an absent leaf grant.
+        Err(AuthorityPersistenceErrorV1::Conflict) => Ok(false),
+        Err(_) => Err(crate::mode_profile::GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        )),
+        Ok(persisted) => Ok(persisted.chain().grants().iter().any(|grant| {
+            crate::authorization::scope_names(grant.scope(), GatewayOperationV1::NETWORK)
+        })),
+    }
 }
 
 /// Compose the Local Principal recorded in `store` as the Gateway
@@ -1076,6 +1086,43 @@ mod tests {
             .to_string()
             .contains("create a new store"));
         assert!(load_local_principal(&SqliteStore::open(&path)?)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn the_network_capability_check_fails_closed_on_an_unreadable_store() -> TestResult {
+        use crate::mode_profile::GatewayModeErrorV1;
+        let unavailable = Err(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        ));
+        // No Principal recorded: no capability, and a migration may proceed.
+        assert_eq!(names_network_capability(&MemoryStore::new()), Ok(false));
+        assert_eq!(
+            names_network_capability(&FailingStore(AuthorityPersistenceErrorV1::Conflict)),
+            Ok(false)
+        );
+        for error in [
+            AuthorityPersistenceErrorV1::Unavailable,
+            AuthorityPersistenceErrorV1::InvalidRecord,
+            AuthorityPersistenceErrorV1::StaleEpoch,
+            AuthorityPersistenceErrorV1::TimelineOrder,
+        ] {
+            assert_eq!(names_network_capability(&FailingStore(error)), unavailable);
+        }
+        for (operations, names) in [
+            (
+                vec![
+                    GatewayOperationV1::READ_SESSION,
+                    GatewayOperationV1::NETWORK,
+                ],
+                true,
+            ),
+            (vec![GatewayOperationV1::READ_SESSION], false),
+        ] {
+            let mut store = MemoryStore::new();
+            provision_local_principal(&mut store, &provision(operations)?)?;
+            assert_eq!(names_network_capability(&store), Ok(names));
+        }
         Ok(())
     }
 
