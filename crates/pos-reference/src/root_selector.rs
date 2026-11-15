@@ -3681,30 +3681,6 @@ mod tests {
         let update_fixture = crate::selector::installation::tests::updates::UpdateFixture::at(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
-        let control_fixture =
-            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let execute_fixture =
-            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let requirement = request
-            .sandbox_requirement
-            .as_ref()
-            .ok_or("sandbox requirement missing")?;
-        let (image, launch) =
-            selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
-        let commitment = admitted.provider().derive_selector_grant_commitment(
-            &image.image,
-            &launch,
-            &request,
-            resolved.attempt(),
-            &[],
-        )?;
-        let current_epochs = [
-            admitted.bootstrap().trust().trust_epoch(),
-            admitted.bootstrap().revocation().revocation_epoch(),
-            admitted.bootstrap().policy().policy_epoch(),
-        ];
-        let execute_provider_identity = admitted.provider().clone();
-
         // A crash-stale, refusing execute leaf: the selector removes it (R11
         // §5.0 step 3) before the started runtime binds the same path.
         drop(UnixListener::bind("/run/pigloros/provider-execute.sock")?);
@@ -3713,40 +3689,9 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let (started, started_runtime) = std::sync::mpsc::channel();
-        let port = InProcessProviderPort::starting(move || {
-            let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
-            fs::set_permissions(
-                "/run/pigloros/provider-execute.sock",
-                fs::Permissions::from_mode(SOCKET_MODE),
-            )?;
-            let control_listener = UnixListener::bind("/run/pigloros/provider-control.sock")?;
-            fs::set_permissions(
-                "/run/pigloros/provider-control.sock",
-                fs::Permissions::from_mode(SOCKET_MODE),
-            )?;
-            let execute_provider = std::thread::spawn(move || {
-                serve_describe_response(
-                    &execute_listener,
-                    &control_fixture,
-                    &execute_provider_identity,
-                )
-                .map_err(|error| error.to_string())?;
-                serve_execution_responses(
-                    &execute_listener,
-                    &execute_fixture,
-                    &execute_provider_identity,
-                    &commitment,
-                    &[(current_epochs, false), (current_epochs, true)],
-                )
-                .map_err(|error| error.to_string())?;
-                serve_installed_describe_response(&execute_listener, &control_fixture)
-                    .map_err(|error| error.to_string())
-            });
-            started
-                .send((execute_provider, control_listener))
-                .map_err(|_| "runtime start channel closed")?;
-            Ok(())
-        });
+        let port = InProcessProviderPort::starting(initial_runtime(
+            &admitted, &request, &resolved, started,
+        )?);
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let mut runtime = activate_in_process(&port)?;
@@ -3782,6 +3727,77 @@ mod tests {
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         Ok(())
+    }
+
+    /// The first runtime's provider threads: they answer activation's
+    /// `describe` and two executions, and hand the control listener to the
+    /// test, which serves the live update on it.
+    fn initial_runtime(
+        admitted: &AdmittedSelectorProvider,
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        resolved: &crate::selector::installation::ResolvedInstalledCase,
+        started: std::sync::mpsc::Sender<(
+            std::thread::JoinHandle<Result<(), String>>,
+            UnixListener,
+        )>,
+    ) -> TestResult<impl FnOnce() -> TestResult + Send + use<>> {
+        let control_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execute_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("sandbox requirement missing")?;
+        let (image, launch) =
+            selected_image_and_launch(admitted, requirement, FIXTURE_ADMISSION_TIME)?;
+        let commitment = admitted.provider().derive_selector_grant_commitment(
+            &image.image,
+            &launch,
+            request,
+            resolved.attempt(),
+            &[],
+        )?;
+        let current_epochs = [
+            admitted.bootstrap().trust().trust_epoch(),
+            admitted.bootstrap().revocation().revocation_epoch(),
+            admitted.bootstrap().policy().policy_epoch(),
+        ];
+        let execute_provider_identity = admitted.provider().clone();
+        Ok(move || {
+            let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
+            fs::set_permissions(
+                "/run/pigloros/provider-execute.sock",
+                fs::Permissions::from_mode(SOCKET_MODE),
+            )?;
+            let control_listener = UnixListener::bind("/run/pigloros/provider-control.sock")?;
+            fs::set_permissions(
+                "/run/pigloros/provider-control.sock",
+                fs::Permissions::from_mode(SOCKET_MODE),
+            )?;
+            let execute_provider = std::thread::spawn(move || {
+                serve_describe_response(
+                    &execute_listener,
+                    &control_fixture,
+                    &execute_provider_identity,
+                )
+                .map_err(|error| error.to_string())?;
+                serve_execution_responses(
+                    &execute_listener,
+                    &execute_fixture,
+                    &execute_provider_identity,
+                    &commitment,
+                    &[(current_epochs, false), (current_epochs, true)],
+                )
+                .map_err(|error| error.to_string())?;
+                serve_installed_describe_response(&execute_listener, &control_fixture)
+                    .map_err(|error| error.to_string())
+            });
+            started
+                .send((execute_provider, control_listener))
+                .map_err(|_| "runtime start channel closed")?;
+            Ok(())
+        })
     }
 
     /// Installs the fixed composition with sanitizer-proof provider headroom.

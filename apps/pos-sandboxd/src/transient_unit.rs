@@ -1037,7 +1037,7 @@ const PROVIDER_UNIT_UMASK: u32 = 0o077;
 /// `RuntimeMaxUSec`. #444 owns the additional shared confinement set.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct ProviderRuntimeUnitRequest {
+pub struct ProviderRuntimeUnitRequest {
     binary_path: String,
 }
 

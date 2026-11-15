@@ -406,13 +406,12 @@ mod tests {
         Ok(())
     }
 
-    fn binary_digest(_: NonZeroU64, _: u64) -> Result<[u8; 32], SelectorBoundaryError> {
-        Ok(*blake3::hash(b"exact provider binary").as_bytes())
+    fn fixture_digest() -> [u8; 32] {
+        *blake3::hash(b"exact provider binary").as_bytes()
     }
 
-    fn other_digest(_: NonZeroU64, _: u64) -> Result<[u8; 32], SelectorBoundaryError> {
-        Ok([0; 32])
-    }
+    const BINARY_DIGEST: ExecutableDigest = |_, _| Ok(fixture_digest());
+    const OTHER_DIGEST: ExecutableDigest = |_, _| Ok([0; 32]);
 
     fn failing_digest(_: NonZeroU64, _: u64) -> Result<[u8; 32], SelectorBoundaryError> {
         Err(SelectorBoundaryError::Io)
@@ -421,11 +420,11 @@ mod tests {
     #[test]
     fn the_main_process_must_match_the_kernel_and_the_admitted_binary() -> TestResult {
         let (_, slot, binary) = fixture()?;
-        assert_eq!(binary.digest(), binary_digest(NonZeroU64::MIN, 0)?);
+        assert_eq!(binary.digest(), BINARY_DIGEST(NonZeroU64::MIN, 0)?);
         let observed = start_slot(&ScriptedPort::new(Reply::Echo, Reply::Echo), &slot, &binary)?;
-        verify_started_process(&observed, &binary, binary_digest)?;
+        verify_started_process(&observed, &binary, BINARY_DIGEST)?;
         assert_eq!(
-            verify_started_process(&observed, &binary, other_digest),
+            verify_started_process(&observed, &binary, OTHER_DIGEST),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         assert_eq!(
@@ -452,7 +451,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                verify_started_process(&changed, &binary, binary_digest),
+                verify_started_process(&changed, &binary, BINARY_DIGEST),
                 Err(SelectorBoundaryError::ArtifactInvalid)
             );
         }
@@ -464,7 +463,7 @@ mod tests {
             cgroup,
         );
         assert_eq!(
-            verify_started_process(&absent, &binary, binary_digest),
+            verify_started_process(&absent, &binary, BINARY_DIGEST),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         Ok(())

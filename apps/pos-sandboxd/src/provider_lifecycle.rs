@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 use tokio::time::{timeout_at, Instant};
 use zbus::OwnedObjectPath;
 
-use crate::transient_unit::ProviderRuntimeUnitRequest;
+pub use crate::transient_unit::ProviderRuntimeUnitRequest;
 use crate::{
     AttemptCgroupError, AttemptShutdownDeadlines, CgroupRoot, SystemdTransientUnitTransport,
     SystemdTransientUnitTransportError, TransientServiceUnitName,
@@ -29,17 +29,16 @@ use crate::{
 /// open reads no SPI1 (owner reading, 2026-11-15). The selector bounds the
 /// whole operation by §9's 10 s restart bound.
 const STALE_STOP_GRACE: Duration = Duration::from_millis(500);
-const STALE_UNIT_KILL: Duration = Duration::from_millis(1_000);
+const STALE_UNIT_KILL: Duration = Duration::from_secs(1);
 const STALE_SHUTDOWN: Duration = Duration::from_millis(1_500);
-const STALE_UNIT_ABSENT: Duration = Duration::from_millis(3_000);
+const STALE_UNIT_ABSENT: Duration = Duration::from_secs(3);
 
 /// Opens the cgroup2 mount for one cgroup observation.
-pub(super) type CgroupRootSource =
-    Box<dyn Fn() -> Result<CgroupRoot, AttemptCgroupError> + Send + Sync>;
+pub type CgroupRootSource = Box<dyn Fn() -> Result<CgroupRoot, AttemptCgroupError> + Send + Sync>;
 
 /// The two selector-owned unit families (ADR-069 R12 §7.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ProviderUnitFamily {
+pub enum ProviderUnitFamily {
     /// `pigloros-provider-runtime-<hex(lifecycle-scope-id)>.service` (R11 D7).
     Runtime,
     /// `pigloros-provider-recovery-<hex(recovery-lifecycle-scope-id)>.service`.
@@ -59,7 +58,7 @@ impl ProviderUnitFamily {
 
 /// One loaded provider unit, resolved back to its listed object.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ProviderUnit {
+pub struct ProviderUnit {
     name: TransientServiceUnitName,
     path: OwnedObjectPath,
 }
@@ -80,7 +79,7 @@ impl ProviderUnit {
 
 /// The started runtime unit's `MainPID` and `ControlGroup`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct StartedProviderUnit {
+pub struct StartedProviderUnit {
     main_pid: u32,
     control_group: String,
 }
