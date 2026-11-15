@@ -159,7 +159,9 @@ fn read_exactly(file: &File, length: u64) -> Option<Vec<u8>> {
     // One byte more than the limit shows a file that grew after `fstat`.
     let mut bytes = vec![0; INSTALLATION_LIMIT + 1];
     let mut filled = 0;
-    loop {
+    // Every read that continues returns at least one byte, so the buffer is
+    // full after at most as many reads as it has bytes.
+    for _ in 0..bytes.len() {
         let read = file
             .read_at(&mut bytes[filled..], filled as u64)
             .unwrap_or(0);
