@@ -132,6 +132,14 @@ pub enum GatewayModeErrorV1 {
     /// A write found this process's binding epoch stale (ADR-134 §8).
     #[error("gateway mode binding is stale")]
     Stale,
+    /// The store's Local Principal holds the network capability, which the
+    /// execution mode refuses (ADR-134 §4, D6).
+    #[error(
+        "the Local Principal holds the network capability gateway.network.v1, which this \
+         execution mode refuses: keep the Local mode, or provision a new store whose Principal \
+         omits it"
+    )]
+    PrincipalNetworkRefused,
 }
 
 /// The closed set of compiled Gateway execution-mode profile identifiers.
@@ -875,6 +883,29 @@ fn compiled_profile_of(
         .ok_or(GatewayModeErrorV1::ModeMismatch)
 }
 
+/// ADR-134 §4 and D6: a profile without network refuses a Local Principal
+/// whose grant `names_network`.
+fn refuse_principal_network(
+    profile: &GatewayModeProfileV1,
+    names_network: bool,
+) -> Result<(), GatewayModeErrorV1> {
+    refuse(
+        names_network && !profile.record.network_allowed,
+        GatewayModeErrorV1::PrincipalNetworkRefused,
+    )
+}
+
+/// The refusal of [`refuse_principal_network`] for the compiled profile
+/// `id`, for an offline writer that provisions a Principal.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_principal_network_v1(
+    id: GatewayModeProfileIdV1,
+    names_network: bool,
+) -> Result<(), GatewayModeErrorV1> {
+    installed_gateway_mode_profile_v1(id)
+        .and_then(|profile| refuse_principal_network(&profile, names_network))
+}
+
 /// Refuse an operation the Air-Gapped mode never composes.
 pub(crate) const fn refuse_air_gapped(
     mode: GatewayModeProfileIdV1,
@@ -979,7 +1010,9 @@ fn lock_path(sqlite_path: &str) -> Option<PathBuf> {
 ///
 /// Under the exclusive lock, advance the store's binding from `from` to `to`
 /// (epoch + 1 and a history entry of kind migrate). Returns the operator
-/// audit line.
+/// audit line. A target mode without network refuses a store whose Local
+/// Principal holds the network capability, so the next `serve` never fails
+/// on it (ADR-134 §4).
 ///
 /// # Errors
 /// Returns a lock, profile or store refusal; nothing changes on failure.
@@ -1009,9 +1042,15 @@ pub fn migrate_gateway_mode_v1(
                         GatewayModeErrorV1::Store(pos_core::GatewayModeBindingErrorV1::Unavailable)
                     })
                     .and_then(|mut store| {
-                        store
-                            .migrate_mode(permit)
-                            .map_err(GatewayModeErrorV1::Store)
+                        refuse_principal_network(
+                            &to,
+                            crate::local_principal::names_network_capability(&store),
+                        )
+                        .and_then(|()| {
+                            store
+                                .migrate_mode(permit)
+                                .map_err(GatewayModeErrorV1::Store)
+                        })
                     })
             })
             .map(|record| {
