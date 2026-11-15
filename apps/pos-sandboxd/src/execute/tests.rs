@@ -319,7 +319,7 @@ impl RequestedConfiguration for String {
         };
         let policy = DbusProperty {
             name: "RootImagePolicy".to_owned(),
-            value: DbusValue::String(String::new()),
+            value: DbusValue::String(Self::new()),
         };
         RequestedConfigurationEvidence::new(&RequestedConfigurationEvidenceFields {
             attempt_id,
