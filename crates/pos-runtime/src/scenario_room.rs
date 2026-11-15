@@ -262,9 +262,13 @@ impl ScenarioRoomCatalogueV1 {
 
     /// The `capability_set_hash` of the one bundled Plugin `plugin` names.
     pub(crate) fn resolve(&self, plugin: &RoomPluginRefV1) -> Result<Hash, ScenarioRoomErrorV1> {
-        let mut matches = self.plugins.iter().filter(|bundled| {
-            bundled.name == plugin.plugin_id && bundled.version == plugin.version
-        });
+        // A room's `plugin_id` is the bundled Plugin's name; the pair must
+        // match exactly.
+        let wanted = (plugin.plugin_id.as_str(), plugin.version.as_str());
+        let mut matches = self
+            .plugins
+            .iter()
+            .filter(|bundled| (bundled.name.as_str(), bundled.version.as_str()) == wanted);
         match (matches.next(), matches.next()) {
             (Some(bundled), None) => Ok(bundled.capability_set_hash),
             _ => Err(ScenarioRoomErrorV1::PluginNotBundled),

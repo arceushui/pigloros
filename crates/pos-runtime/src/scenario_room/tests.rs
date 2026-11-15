@@ -2,7 +2,7 @@
 //! independent Python encoding of the Proposed ADR-041 amendment of #303
 //! (`json.dumps(sort_keys=True, separators=(",", ":"))` and `blake3`).
 
-use pos_core::{Kind, Plugin, PluginId, TimelineId};
+use pos_core::{Capability, Kind, Plugin, PluginId, TimelineId};
 
 use super::*;
 use crate::composition::{
@@ -124,12 +124,12 @@ fn refusal(
     Ok(admit(changed).err())
 }
 
-fn invalid(field: ScenarioRoomFieldV1) -> Option<ScenarioRoomErrorV1> {
-    Some(ScenarioRoomErrorV1::InvalidField(field))
+const fn invalid(field: ScenarioRoomFieldV1) -> ScenarioRoomErrorV1 {
+    ScenarioRoomErrorV1::InvalidField(field)
 }
 
-fn limit(limit: ScenarioRoomLimitV1) -> Option<ScenarioRoomErrorV1> {
-    Some(ScenarioRoomErrorV1::LimitExceeded(limit))
+const fn limit(limit: ScenarioRoomLimitV1) -> ScenarioRoomErrorV1 {
+    ScenarioRoomErrorV1::LimitExceeded(limit)
 }
 
 #[test]
@@ -323,11 +323,11 @@ fn the_revision_stops_at_the_safe_integer_bound() -> TestResult {
     assert_eq!(below.revision().get(), MAX_ROOM_SAFE_INTEGER_V1);
     assert_eq!(
         below.admit_next(input()?, &catalogue()).err(),
-        limit(ScenarioRoomLimitV1::Revision)
+        Some(limit(ScenarioRoomLimitV1::Revision))
     );
     assert_eq!(
         at(u64::MAX)?.admit_next(input()?, &catalogue()).err(),
-        limit(ScenarioRoomLimitV1::Revision)
+        Some(limit(ScenarioRoomLimitV1::Revision))
     );
     Ok(())
 }
@@ -369,7 +369,7 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
     };
     let mut over = input()?;
     over.plugins = plugins(MAX_ROOM_PLUGINS_V1 + 1);
-    assert_eq!(admit(over).err(), limit(ScenarioRoomLimitV1::Plugins));
+    assert_eq!(admit(over).err(), Some(limit(ScenarioRoomLimitV1::Plugins)));
     let mut at = input()?;
     at.plugins = plugins(MAX_ROOM_PLUGINS_V1);
     at.rules.clear();
@@ -377,15 +377,18 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
 
     let mut over = input()?;
     over.rules = rules(MAX_ROOM_RULES_V1 + 1);
-    assert_eq!(admit(over).err(), limit(ScenarioRoomLimitV1::Rules));
+    assert_eq!(admit(over).err(), Some(limit(ScenarioRoomLimitV1::Rules)));
     let mut over = input()?;
     over.participants = participants(MAX_ROOM_PARTICIPANTS_V1 + 1);
-    assert_eq!(admit(over).err(), limit(ScenarioRoomLimitV1::Participants));
+    assert_eq!(
+        admit(over).err(),
+        Some(limit(ScenarioRoomLimitV1::Participants))
+    );
     let mut over = input()?;
     over.initial_conditions = conditions(MAX_ROOM_INITIAL_CONDITIONS_V1 + 1);
     assert_eq!(
         admit(over).err(),
-        limit(ScenarioRoomLimitV1::InitialConditions)
+        Some(limit(ScenarioRoomLimitV1::InitialConditions))
     );
 
     // At its limit a list passes its own bound. Rules fit the payload; 64
@@ -397,11 +400,17 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
     let mut at = input()?;
     at.participants = participants(MAX_ROOM_PARTICIPANTS_V1);
     at.initial_conditions = Vec::new();
-    assert_eq!(admit(at).err(), limit(ScenarioRoomLimitV1::DescriptorBytes));
+    assert_eq!(
+        admit(at).err(),
+        Some(limit(ScenarioRoomLimitV1::DescriptorBytes))
+    );
     let mut at = input()?;
     at.participants = participants(1);
     at.initial_conditions = conditions(MAX_ROOM_INITIAL_CONDITIONS_V1);
-    assert_eq!(admit(at).err(), limit(ScenarioRoomLimitV1::DescriptorBytes));
+    assert_eq!(
+        admit(at).err(),
+        Some(limit(ScenarioRoomLimitV1::DescriptorBytes))
+    );
     Ok(())
 }
 
@@ -425,7 +434,7 @@ fn the_payload_bound_admits_exactly_4096_bytes() -> TestResult {
     );
     assert_eq!(
         admit(sized(padding + 1)?).err(),
-        limit(ScenarioRoomLimitV1::DescriptorBytes)
+        Some(limit(ScenarioRoomLimitV1::DescriptorBytes))
     );
     Ok(())
 }
@@ -435,15 +444,15 @@ fn malformed_scalars_are_refused() -> TestResult {
     use ScenarioRoomFieldV1 as Field;
     assert_eq!(
         refusal(|input| input.tick_duration_ms = 0)?,
-        invalid(Field::TickDurationMs)
+        Some(invalid(Field::TickDurationMs))
     );
     assert_eq!(
         refusal(|input| input.max_ticks = 0)?,
-        invalid(Field::MaxTicks)
+        Some(invalid(Field::MaxTicks))
     );
     assert_eq!(
         refusal(|input| input.max_ticks = MAX_ROOM_TICKS_V1 + 1)?,
-        invalid(Field::MaxTicks)
+        Some(invalid(Field::MaxTicks))
     );
     assert_eq!(refusal(|input| input.max_ticks = MAX_ROOM_TICKS_V1)?, None);
     assert_eq!(refusal(|input| input.tick_duration_ms = 1)?, None);
@@ -455,7 +464,7 @@ fn malformed_plugins_are_refused() -> TestResult {
     use ScenarioRoomFieldV1 as Field;
     assert_eq!(
         refusal(|input| input.plugins.clear())?,
-        invalid(Field::Plugins)
+        Some(invalid(Field::Plugins))
     );
     for plugin_id in [
         "",
@@ -468,7 +477,7 @@ fn malformed_plugins_are_refused() -> TestResult {
     ] {
         assert_eq!(
             refusal(|input| input.plugins[0].plugin_id = plugin_id.to_owned())?,
-            invalid(Field::PluginId),
+            Some(invalid(Field::PluginId)),
             "{plugin_id}"
         );
     }
@@ -481,13 +490,13 @@ fn malformed_plugins_are_refused() -> TestResult {
     ] {
         assert_eq!(
             refusal(|input| input.plugins[0].version = version.to_owned())?,
-            invalid(Field::PluginVersion),
+            Some(invalid(Field::PluginVersion)),
             "{version}"
         );
     }
     assert_eq!(
         refusal(|input| input.plugins.push(plugin("world")))?,
-        invalid(Field::Plugins)
+        Some(invalid(Field::Plugins))
     );
     // A well-formed but unbundled name or version, and the longest name.
     assert_eq!(
@@ -513,12 +522,12 @@ fn malformed_rules_are_refused() -> TestResult {
     use ScenarioRoomFieldV1 as Field;
     assert_eq!(
         refusal(|input| input.rules[0].rule_id = "World.gravity".to_owned())?,
-        invalid(Field::RuleId)
+        Some(invalid(Field::RuleId))
     );
     for value in [MAX_ROOM_SAFE_INTEGER_V1.cast_signed() + 1, i64::MIN] {
         assert_eq!(
             refusal(|input| input.rules[0].value_micro = value)?,
-            invalid(Field::RuleValue)
+            Some(invalid(Field::RuleValue))
         );
     }
     for value in [
@@ -529,7 +538,7 @@ fn malformed_rules_are_refused() -> TestResult {
     }
     assert_eq!(
         refusal(|input| input.rules.push(rule("world.gravity", 1)))?,
-        invalid(Field::Rules)
+        Some(invalid(Field::Rules))
     );
     assert_eq!(
         refusal(|input| input.rules[0].rule_id = "world".to_owned())?,
@@ -552,36 +561,36 @@ fn malformed_participants_and_conditions_are_refused() -> TestResult {
     let stranger = EntityId::from_ulid(ulid::Ulid::from_parts(7, 7));
     assert_eq!(
         refusal(|input| input.participants.clear())?,
-        invalid(Field::Participants)
+        Some(invalid(Field::Participants))
     );
     assert_eq!(
         refusal(|input| {
             let duplicate = input.participants[0].clone();
             input.participants.push(duplicate);
         })?,
-        invalid(Field::Participants)
+        Some(invalid(Field::Participants))
     );
     for dimension in ["Trust", "tr\u{fc}st"] {
         assert_eq!(
             refusal(|input| input.initial_conditions[0].dimension = dimension.to_owned())?,
-            invalid(Field::Dimension),
+            Some(invalid(Field::Dimension)),
             "{dimension}"
         );
     }
     assert_eq!(
         refusal(|input| input.initial_conditions[0].value_micro = i64::MAX)?,
-        invalid(Field::ConditionValue)
+        Some(invalid(Field::ConditionValue))
     );
     assert_eq!(
         refusal(|input| {
             let duplicate = input.initial_conditions[0].clone();
             input.initial_conditions.push(duplicate);
         })?,
-        invalid(Field::InitialConditions)
+        Some(invalid(Field::InitialConditions))
     );
     assert_eq!(
         refusal(|input| input.initial_conditions[0].entity_id = stranger)?,
-        invalid(Field::ConditionEntity)
+        Some(invalid(Field::ConditionEntity))
     );
     assert_eq!(refusal(|input| input.initial_conditions.clear())?, None);
     Ok(())
@@ -820,19 +829,19 @@ fn the_errors_name_their_cause() {
 struct RoomTestFactory;
 
 impl crate::InstalledPluginFactoryV1 for RoomTestFactory {
-    type Configuration = &'static str;
+    type Configuration = ();
     type Plugin = TestPlugin;
     type Approver = crate::NoActionApproverV1;
 
-    fn configuration_details(_configuration: &&'static str) -> Vec<u8> {
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
         Vec::new()
     }
 
     fn build(
-        configuration: &&'static str,
+        _configuration: &(),
     ) -> crate::InstalledPluginProductV1<TestPlugin, crate::NoActionApproverV1> {
         crate::InstalledPluginProductV1 {
-            plugin: test_plugin("gateway-test-actions", *configuration),
+            plugin: test_plugin("gateway-test-actions", "gateway-test-actions.v1"),
             reducer: None,
             approver: crate::NoActionApproverV1,
         }
@@ -841,8 +850,8 @@ impl crate::InstalledPluginFactoryV1 for RoomTestFactory {
 
 #[test]
 fn a_foreign_factory_is_not_the_reviewed_host_catalogue_entry() {
-    let refused = crate::HostCatalogueEntryV1::<RoomTestFactory>::gateway()
-        .scenario_room_catalogue_v1(&"gateway-test-actions.v1");
+    let refused =
+        crate::HostCatalogueEntryV1::<RoomTestFactory>::gateway().scenario_room_catalogue_v1(&());
     assert_eq!(
         refused.err().map(|error| error.to_string()),
         Some(RuntimeError::from(crate::OutputAdmissionErrorV1::PluginMismatch).to_string())
