@@ -205,11 +205,18 @@ fn wanted_steps_and_events(attempt: &CaseAttempt) -> TestResult<(u64, u64)> {
             }
             steps += 1;
             let path = exchange["path"].as_str().ok_or("no path")?;
-            let commits = path.ends_with("/signals")
-                || path.ends_with("/actions")
-                || path == "/v1/me/consent-revocations";
-            if commits && exchange["expect"]["status"] == json!(201) {
-                events += 1;
+            // A room create or derive appends its request claim and the revision.
+            let committed = if path == "/v1/scenario-rooms" || path.ends_with("/revisions") {
+                2
+            } else {
+                u64::from(
+                    path.ends_with("/signals")
+                        || path.ends_with("/actions")
+                        || path == "/v1/me/consent-revocations",
+                )
+            };
+            if exchange["expect"]["status"] == json!(201) {
+                events += committed;
             }
         }
     }
