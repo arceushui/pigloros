@@ -343,11 +343,8 @@ fn an_unknown_schema_version_is_refused() -> TestResult {
 
 #[test]
 fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
-    let persona = |index: usize| RoomParticipantV1 {
-        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(
-            1,
-            u128::try_from(index).unwrap_or_default(),
-        )),
+    let persona = |index: u64| RoomParticipantV1 {
+        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(1, u128::from(index))),
         kind: RoomParticipantKindV1::Agent,
     };
     let plugins = |count: usize| {
@@ -360,7 +357,7 @@ fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
             .map(|index| rule(&format!("world.r{index}"), 0))
             .collect::<Vec<_>>()
     };
-    let participants = |count: usize| (1..=count).map(persona).collect::<Vec<_>>();
+    let participants = |count: usize| (1_u64..).take(count).map(persona).collect::<Vec<_>>();
     let conditions = |count: usize| {
         (0..count)
             .map(|index| RoomInitialConditionV1 {
