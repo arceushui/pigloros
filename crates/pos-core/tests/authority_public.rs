@@ -822,6 +822,11 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         vec![hash(8)],
     ));
     let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
+    let chain_bindings: Vec<_> = chain
+        .grants()
+        .iter()
+        .map(|grant| ok(grant.binding_digest()))
+        .collect();
     assert_eq!(untrusted.registry_digest(), hash(7));
     let decision = AuthorityEvaluatorV1::authorize(&current_request, &chain, &untrusted);
     assert_eq!(
@@ -853,11 +858,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         hash(7),
         vec![original_binding],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings.clone(),
         vec![consent_grant().binding_digest()],
     ));
     let decision =
@@ -883,11 +884,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         vec![untrusted_consent_request
             .authenticated()
             .registry_binding_digest()],
-        chain
-            .grants()
-            .iter()
-            .map(|grant| ok(grant.binding_digest()))
-            .collect(),
+        chain_bindings,
         Vec::new(),
     ));
     let decision = AuthorityEvaluatorV1::authorize(
