@@ -109,8 +109,13 @@ systemctl start piglor-gateway-local-principal-provision.service
 Provisioning records one root capability grant in the database's authority records; the authority
 registry snapshot and the Principal's evidence are derived from that record. An exact retry is
 unchanged. `serve` only reads the record: before each protected decision it compares the record
-with the authority it holds and, when another writer recorded a revocation, rebuilds the
-authority from the record, so the next request is answered `403 revoked`. A signal's `entity_id`
+with the authority it holds and, when another writer recorded a revocation of a Principal without
+consents, rebuilds the authority from the record, so the next request is answered `403 revoked`.
+A Principal with consents is read through the consent Timeline, which the serving host owns: once
+another process records anything to the store, the host's protected reads and writes fail closed,
+and once that includes a revocation, every decision its grants cover fails closed as
+`503 temporarily-unavailable` (retryable) until the host restarts, and the restarted host sees it
+(see [SQLite and host ownership](#sqlite-and-host-ownership)). A signal's `entity_id`
 must be the request's actor; any other entity is a recorded `403 unauthorized`. An unprovisioned
 host answers every protected route `401` before reading the request body.
 
@@ -153,8 +158,11 @@ completed, and recomposes its consents before the next decision; from then on ev
 consent governs, a World action included, is `403 revoked`, while every other operation stays
 available. Revoking a revoked consent returns the original revocation (`200`), byte for byte: its
 `generation` is its fence and its `mode_profile` the binding its commit was produced under. The
-host reads the consent Timeline head before every decision, so a restarted host, or a revocation
-another process recorded, is seen.
+host reads the consent Timeline head before every decision, and a restarted host recomposes every
+revocation from it. Once another process records anything to the store, the host fails closed
+(`503 temporarily-unavailable`) on every read of the consent Timeline, so a revocation recorded
+there makes every decision the host's grants cover fail closed until the host restarts; the
+restarted host then sees it.
 
 ### Session
 
