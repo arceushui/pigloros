@@ -8,7 +8,11 @@
 //! looks anything up. Before each decision the host compares the authority
 //! its store records with the pinned one and, when the store is ahead (a
 //! revocation recorded by another writer), recomposes the view and its
-//! registry together (owner decisions D3 and D10 on #302). The returned
+//! registry together (owner decisions D3 and D10 on #302). A Principal with
+//! consents is read through the consent Timeline of the host that owns the
+//! store: after another process commits to it, that read fails and every
+//! covered decision is stale revocation state (`503`, retryable) until the
+//! host restarts and recomposes the revocation. The returned
 //! [`GatewayOperationPermitV1`] holds the authority commit fence, and
 //! [`OperationAuthority::run`] runs the admitted mutation as a detached task
 //! that owns the permit until the mutation completes, even when the request

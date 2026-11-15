@@ -3066,6 +3066,20 @@ mod tests {
         )?)
     }
 
+    /// The Gateway `serve` composes over the Local store at `path`.
+    fn serve_local(path: &str) -> TestResult<(Gateway, Router)> {
+        let mode = crate::mode_profile::test_binding(
+            crate::mode_profile::GatewayModeProfileIdV1::Local,
+            [],
+        );
+        let gateway = local_gateway(
+            crate::mode_profile::test_attach_host(sqlite_host(path)?, &mode),
+            None,
+            &mode,
+        )?;
+        Ok((gateway.clone(), app_of(gateway)))
+    }
+
     /// A Local store at `path` provisioned with `provision` through the
     /// production host path, and a Gateway over it that requires its
     /// recorded Principal, as `serve` composes it, with a World action
@@ -3437,6 +3451,82 @@ mod tests {
         );
         gateway.shutdown().await?;
         drop(gateway);
+        Ok(())
+    }
+
+    /// A host exclusively owns its store: once another host commits a
+    /// revocation to it, every decision the serving host's grants cover
+    /// fails closed as stale revocation state (`503`, retryable), while an
+    /// operation no grant covers is still `403 unauthorized`; a restarted
+    /// host recomposes the revocation.
+    #[tokio::test]
+    async fn a_revocation_another_host_records_fails_closed_until_a_restart() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = sqlite_path(&directory)?;
+        bind_local(&path)?;
+        let actor = actor()?;
+        let (gateway, app) = consented_gateway(&path, &consented_provision()?)?;
+        assert_eq!(create(&app, Some(actor)).await?.0, StatusCode::CREATED);
+        let consent = session_of(&app, actor).await?["consents"][0]["consent_ref"].clone();
+        let (other, other_app) = serve_local(&path)?;
+        assert_eq!(
+            revoke_with(&other_app, actor, &consent, "elsewhere")
+                .await?
+                .0,
+            StatusCode::CREATED
+        );
+        let (status, problem) = create(&app, Some(actor)).await?;
+        assert_eq!(
+            (
+                status,
+                problem["code"].clone(),
+                problem["retryable"].clone()
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable"),
+                json!(true)
+            )
+        );
+        let (status, problem) = revoke_with(&app, actor, &consent, "here").await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("temporarily-unavailable")
+            )
+        );
+        let (status, problem) = send(
+            &app,
+            "POST",
+            "/v1/ledger/predictions",
+            Some(actor),
+            Some(prediction()),
+        )
+        .await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (StatusCode::FORBIDDEN, json!("unauthorized"))
+        );
+        for gateway in [gateway, other] {
+            gateway.shutdown().await?;
+            drop(gateway);
+        }
+        drop((app, other_app));
+
+        let (gateway, app) = serve_local(&path)?;
+        let (status, problem) = create(&app, Some(actor)).await?;
+        assert_eq!(
+            (status, problem["code"].clone()),
+            (StatusCode::FORBIDDEN, json!("revoked"))
+        );
+        assert_eq!(
+            session_of(&app, actor).await?["consents"][0]["state"],
+            "revoked"
+        );
+        gateway.shutdown().await?;
+        drop(gateway);
+        drop(app);
         Ok(())
     }
 
