@@ -33,6 +33,8 @@ pub mod counterfactual;
 pub mod driver;
 pub mod erasure_authority_view;
 pub mod erasure_host;
+#[cfg(target_os = "linux")]
+pub mod erasure_local_authority;
 pub mod error;
 pub mod measured_process_image;
 pub mod output_admission;
@@ -74,6 +76,10 @@ pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
     ErasureReadSenderV1,
+};
+#[cfg(target_os = "linux")]
+pub use erasure_local_authority::{
+    LocalErasureCompositionErrorV1, LocalErasureCompositionInputsV1,
 };
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;
