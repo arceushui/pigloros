@@ -353,7 +353,7 @@ impl Slots {
         let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
         match capture {
             Some(CaptureV2::Timeline) => {
-                self.timeline = text(parsed.and_then(|value| value.get("id")))
+                self.timeline = text(parsed.and_then(|value| value.get("id")));
             }
             Some(CaptureV2::Consent) => {
                 self.consent =
