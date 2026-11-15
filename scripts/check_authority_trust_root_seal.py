@@ -13,18 +13,24 @@ only with `pos-core`'s `authority-trust-root` feature, so:
 - no feature named `local-admission-host`, nor any feature it reaches, forwards it, in any
   manifest: the local scheduled-admission host takes the seal from its caller and never mints it;
 - outside `crates/pos-core/`, non-test code calls `for_composition_root` only at the pinned mint
-  sites, exactly once each: `apps/piglor-gateway/src/local_principal.rs`,
-  `apps/pos-experiment/src/lib.rs`, `apps/pos-plugin-conformance-adapter/src/main.rs` and
+  sites `apps/piglor-gateway/src/local_principal.rs`, `apps/pos-experiment/src/lib.rs`,
+  `apps/pos-plugin-conformance-adapter/src/main.rs` and
   `crates/pos-store/src/community/attestation.rs` (the community owner's per-request snapshot and
-  verified authentication result, ADR-129 R6.2(5)). Crates
+  verified authentication result, ADR-129 R6.2(5)): exactly once each, only as the initializer
+  of a `static`, and never inside a `macro_rules!` (which could expand it more than once). Crates
   that depend on an allowed crate compile the minter too (Cargo features are global) but cannot
   call it. Test code is exempt: a crate's top-level `tests` directory, an inline
   `#[cfg(test)] mod name { .. }`, and the file of a module declared `#[cfg(test)] mod name;`
   with all of its descendant modules. Any other guard (`cfg(all(test, ..))`, `#[path]`) is not
-  recognised, so such a mint is rejected;
-- in non-test `crates/pos-core/src` code, the seal derives only `Debug`, has exactly one inherent
-  impl (in `authority.rs`) whose only fn is `for_composition_root`, has no trait impl, and is
-  never constructed by a literal, so no second constructor can bypass the doctests;
+  recognised, so such a mint is rejected. A file that non-test code pulls in with `include!` or
+  `#[path]` is non-test, whatever else declares it, even under a `tests` directory or with
+  another extension. String and char literals are blanked first, so braces or names inside
+  them change nothing;
+- in non-test `crates/pos-core/src` code, the seal derives only `Debug` (no `cfg_attr` on it), has
+  exactly one inherent impl (in `authority.rs`) whose only fn is `for_composition_root`, has no
+  trait impl and no type alias, is never constructed by a literal (nor by `Self(())` outside that
+  impl), and `for_composition_root` is never called, so no second constructor can bypass the
+  doctests;
 - no `default` feature closure reaches `authority-trust-root` or a feature that forwards it, and
   no `pos-core` feature forwards it;
 - outside `crates/pos-core/` and the crates' top-level `tests` directories, no source re-exports
@@ -99,11 +105,25 @@ INLINE_TEST_MODULE = re.compile(TEST_ATTRIBUTES + r"\{")
 OUTLINE_TEST_MODULE = re.compile(TEST_ATTRIBUTES + ";")
 OUTLINE_MODULE = re.compile(r"(?:^|[;}\]\s])(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
 SEAL_PATH = rf"(?:(?:\w+)?::)*{SEAL_NAME}\b"
-SEAL_IMPL = re.compile(rf"\bimpl\b(?:\s*<[^>]*>)?\s*[\w:<>, ]+?\s+for\s+{SEAL_PATH}")
+SEAL_IMPL = re.compile(rf"\bimpl\b[^{{;]*?\bfor\s+{SEAL_PATH}")
 SEAL_INHERENT = re.compile(rf"\bimpl\s+{SEAL_PATH}\s*\{{")
-SEAL_DERIVE = re.compile(rf"#\[derive\(([^)]*)\)\]\s*pub\s+struct\s+{SEAL_NAME}\b")
-SEAL_LITERAL = re.compile(rf"(?<!struct )\b{SEAL_NAME}\s*\(\s*\(\s*\)\s*\)")
+SEAL_ATTRIBUTES = re.compile(rf"((?:#\[[^\]]*\]\s*)*)pub\s+struct\s+{SEAL_NAME}\b")
+DERIVE = re.compile(r"\bderive\(([^)]*)\)")
+SEAL_LITERAL = re.compile(
+    rf"(?<!struct )\b{SEAL_NAME}\s*(?:\(\s*\(\s*\)\s*\)|\{{\s*0\s*:)"
+)
+SELF_LITERAL = re.compile(r"\bSelf\s*(?:\(\s*\(\s*\)\s*\)|\{\s*0\s*:)")
 FN_NAME = re.compile(r"\bfn\s+(\w+)")
+MINT_DEFINITION = re.compile(r"\bfn\s+for_composition_root\b")
+MACRO = re.compile(r"\bmacro_rules!\s*\w+\s*\{")
+STATIC_MINT = re.compile(
+    rf"\bstatic\s+[A-Z_][A-Z0-9_]*\s*:\s*{SEAL_PATH}\s*=\s*"
+    rf"{SEAL_PATH}::for_composition_root\(\s*\)\s*;"
+)
+FILE_REFERENCE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)|#\[path\s*=\s*"([^"]+)"\]')
+LITERAL = re.compile(
+    r'(?<!\w)b?r(#*)"(?:.|\n)*?"\1|(?<!\w)b?"(?:\\.|[^"\\])*"|(?<!\w)b?\'(?:\\.|[^\'\\\n])\''
+)
 
 
 def _forwards(members: list[str]) -> bool:
@@ -195,6 +215,11 @@ def _leaks(name: str, code: str) -> list[str]:
     return found
 
 
+def _blank_literals(code: str) -> str:
+    """Empty every string and char literal, so braces and names inside them are not code."""
+    return LITERAL.sub(lambda match: match.group(0)[:1] + match.group(0)[-1:], code)
+
+
 def _block_end(code: str, start: int) -> int:
     depth = 1
     index = start
@@ -242,6 +267,35 @@ def _test_files(codes: dict[Path, str]) -> set[Path]:
     return found
 
 
+def _non_test_references(
+    raw: dict[Path, str], non_test: list[Path], base: Path
+) -> tuple[set[Path], list[str]]:
+    """Return files that non-test code pulls in by `include!` or `#[path]`, transitively.
+
+    A referenced file that is not a scanned `.rs` file (another extension, or a file under a
+    skipped directory) is read and added to `raw`, so its code is checked as non-test code too.
+    A reference outside the repository is reported, since its code cannot be checked.
+    """
+    found: set[Path] = set()
+    outside: list[str] = []
+    pending = list(non_test)
+    while pending:
+        path = pending.pop()
+        for match in FILE_REFERENCE.finditer(_without_tests(raw[path])):
+            target = (path.parent / (match.group(1) or match.group(2))).resolve()
+            if target in found or not target.is_file():
+                continue
+            if not target.is_relative_to(base):
+                outside.append(f"{path.relative_to(base).as_posix()}: includes {target}")
+                continue
+            if target not in raw:
+                text = target.read_text(encoding="utf-8", errors="replace")
+                raw[target] = strip_comments(text)
+            found.add(target)
+            pending.append(target)
+    return found, outside
+
+
 def _without_tests(code: str) -> str:
     """Return `code` with every inline `#[cfg(test)]` module removed."""
     kept: list[str] = []
@@ -254,13 +308,35 @@ def _without_tests(code: str) -> str:
     return "".join(kept)
 
 
-def _mint_violations(name: str, mints: int) -> list[str]:
+def _mint_violations(name: str, code: str) -> list[str]:
+    code = _without_tests(code)
+    mints = len(MINT.findall(code))
     expected = MINT_SITES.get(name, 0)
-    if mints == expected:
-        return []
-    if not expected:
-        return [f"{name}: mints the authority trust-root seal outside its pinned mint sites"]
-    return [f"{name}: mints the authority trust-root seal {mints} times, expected {expected}"]
+    found: list[str] = []
+    macros = [code[match.end() : _block_end(code, match.end())] for match in MACRO.finditer(code)]
+    if any(MINT.search(body) for body in macros):
+        found.append(f"{name}: expands the authority trust-root seal mint from a macro")
+    seal = "the authority trust-root seal"
+    if mints != expected and not expected:
+        found.append(f"{name}: mints {seal} outside its pinned mint sites")
+    elif mints != expected:
+        found.append(f"{name}: mints {seal} {mints} times, expected {expected}")
+    elif len(STATIC_MINT.findall(code)) != expected:
+        found.append(f"{name}: mints {seal} other than as a static initializer")
+    return found
+
+
+def _seal_derives(code: str) -> list[str] | None:
+    """Return the seal's derives, or None when its attributes are conditional or absent."""
+    blocks = [match.group(1) for match in SEAL_ATTRIBUTES.finditer(code)]
+    if len(blocks) != 1 or "cfg_attr" in blocks[0]:
+        return None
+    return sorted(
+        item.strip()
+        for derive in DERIVE.findall(blocks[0])
+        for item in derive.split(",")
+        if item.strip()
+    )
 
 
 def _core_seal_violations(name: str, code: str) -> list[str]:
@@ -268,46 +344,68 @@ def _core_seal_violations(name: str, code: str) -> list[str]:
     found: list[str] = []
     if SEAL_IMPL.search(code):
         found.append(f"{name}: implements a trait for the authority trust-root seal")
-    inherent = [
-        FN_NAME.findall(code[match.end() : _block_end(code, match.end())])
-        for match in SEAL_INHERENT.finditer(code)
+    if ALIAS.search(code):
+        found.append(f"{name}: aliases the authority trust-root seal")
+    bodies = [
+        (match.end(), _block_end(code, match.end())) for match in SEAL_INHERENT.finditer(code)
     ]
+    inherent = [FN_NAME.findall(code[start:end]) for start, end in bodies]
     if name == CORE_SEAL_SOURCE and inherent != [["for_composition_root"]]:
         found.append(f"{name}: the seal's only constructor must be for_composition_root")
     elif name != CORE_SEAL_SOURCE and inherent:
         found.append(f"{name}: adds an inherent impl to the authority trust-root seal")
-    derives = [match.group(1).replace(" ", "") for match in SEAL_DERIVE.finditer(code)]
-    if name == CORE_SEAL_SOURCE and derives != ["Debug"]:
+    if name == CORE_SEAL_SOURCE and _seal_derives(code) != ["Debug"]:
         found.append(f"{name}: the seal may derive only Debug")
-    if SEAL_LITERAL.search(code):
+    outside = "".join(
+        code[end:start]
+        for end, start in zip([0, *[e for _, e in bodies]], [*[s for s, _ in bodies], len(code)])
+    )
+    if SEAL_LITERAL.search(code) or (name == CORE_SEAL_SOURCE and SELF_LITERAL.search(outside)):
         found.append(f"{name}: constructs the seal outside for_composition_root")
+    if len(MINT.findall(code)) != len(MINT_DEFINITION.findall(code)):
+        found.append(f"{name}: mints the authority trust-root seal inside pos-core")
     return found
 
 
 def source_violations(root: Path) -> list[str]:
-    codes = {
-        path: strip_comments(path.read_text(encoding="utf-8", errors="replace"))
+    raw = {
+        path.resolve(): strip_comments(path.read_text(encoding="utf-8", errors="replace"))
         for path in sorted(root.rglob("*.rs"))
         if _kept(path, root)
     }
-    tests = _test_files(codes)
-    found: list[str] = []
+    codes = {path: _blank_literals(code) for path, code in raw.items()}
+    base = root.resolve()
+    tests = {
+        path
+        for path in _test_files(codes)
+        if not _in_crate_tests(path.relative_to(base), base)
+    }
+    referenced, found = _non_test_references(
+        raw,
+        [
+            path
+            for path in codes
+            if path not in tests and not _in_crate_tests(path.relative_to(base), base)
+        ],
+        base,
+    )
+    codes = {path: _blank_literals(code) for path, code in raw.items()}
     for path, code in codes.items():
-        relative = path.relative_to(root)
+        relative = path.relative_to(base)
         name = relative.as_posix()
-        test_only = path in tests or _in_crate_tests(relative, root)
+        test_only = (path in tests or _in_crate_tests(relative, base)) and path not in referenced
         if name.startswith(CORE_SOURCES):
             if not test_only:
                 found.extend(_core_seal_violations(name, code))
             continue
         if not test_only:
-            found.extend(_mint_violations(name, len(MINT.findall(_without_tests(code)))))
-        if not _in_crate_tests(relative, root):
+            found.extend(_mint_violations(name, code))
+        if not _in_crate_tests(relative, base):
             found.extend(_leaks(name, code))
     found.extend(
         f"{name}: pinned mint site is missing"
         for name in MINT_SITES
-        if root / name not in codes
+        if (root / name).resolve() not in codes
     )
     return found
 

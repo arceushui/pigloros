@@ -135,7 +135,7 @@ REJECTED_MANIFESTS = {
 }
 
 CORE_SEAL = (
-    "#[derive(Debug)]\npub struct AuthorityTrustRootSealV1(());\n"
+    "#[derive(Debug)]\n#[must_use]\npub struct AuthorityTrustRootSealV1(());\n"
     + "impl AuthorityTrustRootSealV1 {\n"
     + "    pub const fn for_composition_root() -> Self {\n        Self(())\n    }\n}\n"
 )
@@ -189,6 +189,47 @@ ALLOWED_SOURCES = {
 
 
 CRATE_MANIFEST = {"crates/pos-state/Cargo.toml": DEV_ONLY}
+
+TEST_ONLY_E2E = {
+    "apps/piglor-gateway/src/lib.rs": "#[cfg(test)]\nmod e2e;\n",
+    "apps/piglor-gateway/src/e2e.rs": SEAL_USE,
+}
+REJECTED_LAYOUTS = {
+    "a test-only file pulled into non-test code by include!": {
+        **TEST_ONLY_E2E,
+        "apps/piglor-gateway/src/http.rs": 'include!("e2e.rs");\n',
+    },
+    "a test-only file pulled into non-test code by #[path]": {
+        **TEST_ONLY_E2E,
+        "apps/piglor-gateway/src/http.rs": '#[path = "e2e.rs"]\nmod real;\n',
+    },
+    "a test-only file pulled in transitively": {
+        **TEST_ONLY_E2E,
+        "apps/piglor-gateway/src/lib.rs": "#[cfg(test)]\nmod e2e;\n#[cfg(test)]\nmod mid;\n",
+        "apps/piglor-gateway/src/mid.rs": 'include!("e2e.rs");\n',
+        "apps/piglor-gateway/src/http.rs": 'include!("mid.rs");\n',
+    },
+}
+REJECTED_REFERENCES = {
+    "a tests-directory file included from src": (
+        {
+            "apps/piglor-gateway/tests/support/seal.rs": SEAL_USE,
+            "apps/piglor-gateway/src/http.rs": 'include!("../tests/support/seal.rs");\n',
+        },
+        "apps/piglor-gateway/tests/support/seal.rs: " + PINNED,
+    ),
+    "a file outside the repository included from src": (
+        {"apps/piglor-gateway/src/http.rs": 'include!("/etc/passwd");\n'},
+        "apps/piglor-gateway/src/http.rs: includes /etc/passwd",
+    ),
+    "a non-Rust file included from src": (
+        {
+            "apps/piglor-gateway/src/seal.in": SEAL_USE,
+            "apps/piglor-gateway/src/http.rs": 'include!("seal.in");\n',
+        },
+        "apps/piglor-gateway/src/seal.in: " + PINNED,
+    ),
+}
 
 REJECTED_SOURCES = {
     "re-export": (
@@ -387,6 +428,89 @@ REJECTED_SOURCES = {
         + "    crate::AuthorityTrustRootSealV1(())\n}\n",
         "constructs the seal outside for_composition_root",
     ),
+    "From<()> impl on the seal": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl From<()> for AuthorityTrustRootSealV1 {\n",
+        "implements a trait for the authority trust-root seal",
+    ),
+    "Deserialize impl on the seal": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl<'de> serde::Deserialize<'de> for AuthorityTrustRootSealV1 {\n",
+        "implements a trait for the authority trust-root seal",
+    ),
+    "split derive": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace("#[derive(Debug)]", "#[derive(Clone)]\n#[derive(Debug)]"),
+        "the seal may derive only Debug",
+    ),
+    "conditional derive": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace("#[must_use]", "#[cfg_attr(feature = \"x\", derive(Clone))]"),
+        "the seal may derive only Debug",
+    ),
+    "alias in core": (
+        "crates/pos-core/src/store.rs",
+        "type S = crate::AuthorityTrustRootSealV1;\n",
+        "aliases the authority trust-root seal",
+    ),
+    "Self literal outside the seal impl": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl Other {\n    fn forge() -> Self {\n        Self(())\n    }\n}\n",
+        "constructs the seal outside for_composition_root",
+    ),
+    "field-zero literal in core": (
+        "crates/pos-core/src/store.rs",
+        "fn forge() -> crate::AuthorityTrustRootSealV1 {\n"
+        + "    crate::AuthorityTrustRootSealV1 { 0: () }\n}\n",
+        "constructs the seal outside for_composition_root",
+    ),
+    "mint inside core": (
+        "crates/pos-core/src/store.rs",
+        "fn root() {\n"
+        + "    let _seal = crate::AuthorityTrustRootSealV1::for_composition_root();\n}\n",
+        "mints the authority trust-root seal inside pos-core",
+    ),
+    "mint after a test module with braces in literals": (
+        "crates/pos-state/src/lib.rs",
+        TEST_MODULE
+        + "    const B: char = '{';\n"
+        + "    const S: &str = \"{{\";\n"
+        + "    const R: &str = r#\"{\"#;\n}\n"
+        + SEAL_USE,
+        PINNED,
+    ),
+    "conditional Debug derive": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace("#[derive(Debug)]", "#[cfg_attr(feature = \"x\", derive(Debug))]"),
+        "the seal may derive only Debug",
+    ),
+    "missing seal struct": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace("pub struct AuthorityTrustRootSealV1(());\n", ""),
+        "the seal may derive only Debug",
+    ),
+    "core alias with an inherent impl": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "type S = AuthorityTrustRootSealV1;\nimpl S {\n    pub fn forge() -> S {\n",
+        "aliases the authority trust-root seal",
+    ),
+    "pinned mint in a fn": (
+        "apps/piglor-gateway/src/local_principal.rs",
+        "fn seal() -> AuthorityTrustRootSealV1 {\n    " + MINT + "}\n",
+        "mints the authority trust-root seal other than as a static initializer",
+    ),
+    "pinned mint as a const": (
+        "apps/pos-experiment/src/lib.rs",
+        "const ROOT: AuthorityTrustRootSealV1 = " + MINT,
+        "mints the authority trust-root seal other than as a static initializer",
+    ),
+    "pinned mint inside a macro": (
+        "apps/pos-plugin-conformance-adapter/src/main.rs",
+        "macro_rules! mint {\n    () => {\n        "
+        + MINT
+        + "    };\n}\n",
+        "expands the authority trust-root seal mint from a macro",
+    ),
     "workflow": (".github/workflows/ci.yml", "run: " + FEATURES_FLAG, CONFIG),
     "Dockerfile": ("docker/Dockerfile", "RUN " + FEATURES_FLAG, CONFIG),
     "cargo config": (
@@ -442,13 +566,20 @@ def main() -> None:
                 if path != missing
             }
         )
-        expect_rejected(f"an allowed layout without {missing}", result, "pinned mint site is missing")
+        expect_rejected(
+            f"an allowed layout without {missing}", result, "pinned mint site is missing"
+        )
     for case, (relative, text, reason) in REJECTED_MANIFESTS.items():
         result = with_files({relative: text})
         expect_rejected(f"a {case} enabling the trust-root feature", result, reason)
     for case, (relative, text, reason) in REJECTED_SOURCES.items():
         result = with_files({**CRATE_MANIFEST, relative: text})
         expect_rejected(f"the seal in a {case}", result, reason)
+    for case, files in REJECTED_LAYOUTS.items():
+        result = with_files({**CRATE_MANIFEST, **files})
+        expect_rejected(case, result, "apps/piglor-gateway/src/e2e.rs: " + PINNED)
+    for case, (files, reason) in REJECTED_REFERENCES.items():
+        expect_rejected(case, with_files({**CRATE_MANIFEST, **files}), reason)
 
 
 if __name__ == "__main__":
