@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_naming_another_key_or_invalid_fields_is_not_signed() -> TestResult {
+    fn a_release_naming_another_key_or_invalid_fields_is_not_signed() {
         let signer = signer([42; 32]);
         let public = SigningKey::from_bytes(&[42; 32]).verifying_key();
         let admitted = AdmittedRuntimeKey::new("runtime", &public);
@@ -212,7 +212,6 @@ mod tests {
             issue_release(&signer, admitted, invalid),
             Err(RuntimeSignerError::Protocol(_))
         ));
-        Ok(())
     }
 
     #[test]
