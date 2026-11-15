@@ -307,7 +307,7 @@ impl CatalogueLinksV1<'_> {
 ///
 /// Callers evaluate every link eagerly when building the array; this only
 /// selects which failure is reported.
-fn first_broken_link<const N: usize>(
+pub(super) fn first_broken_link<const N: usize>(
     links: [(bool, crate::OutputAdmissionErrorV1); N],
 ) -> Result<(), crate::OutputAdmissionErrorV1> {
     links

@@ -24,10 +24,12 @@ local-admission-host = []
 
 [dependencies]
 blake3 = { workspace = true }
+getrandom = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
