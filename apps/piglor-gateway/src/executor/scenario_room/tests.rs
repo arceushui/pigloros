@@ -370,7 +370,7 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
         max_timelines: 2,
         ..admission()?
     };
-    let causation = ok(claim_request(
+    ok(claim_request(
         &mut host,
         &claim(4, 4),
         &two,
@@ -380,7 +380,6 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
     drop(ok(create_root(&mut host, "other", &two))?);
     // The claim already exists, so its retry runs no headroom check and
     // meets the ceiling when it creates the room's Timeline.
-    drop(causation);
     assert_eq!(
         refusal(create(&mut host, 4, 4, 4, &two)?),
         "TimelineCeiling"
