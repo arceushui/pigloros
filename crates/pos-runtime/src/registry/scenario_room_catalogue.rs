@@ -1,5 +1,7 @@
 //! The ADR-041 bundled-plugin catalogue of one registry (Redmine #1397).
 
+use pos_core::Plugin;
+
 use super::catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1};
 use super::PluginRegistry;
 use crate::composition::PluginAvailabilityV1;
