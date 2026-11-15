@@ -33,8 +33,8 @@ use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
     CommunityAdministrativeActionV1 as Action, CommunityAdministrativeOperationV1 as Operation,
     CommunityAdministrativeRequestV1 as Request, CommunityAuthorityAdmissionV1,
-    CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1, CommunityMemberActionV1,
-    CommunityMemberUseV1,
+    CommunityAuthorityCallV1, CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1,
+    CommunityMemberActionV1, MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -341,16 +341,20 @@ fn install(
             authentication_policy: fap1(SEED)?,
             attestation,
             fork_admission_policies: vec![],
+            member_recipient: RECIPIENT.to_owned(),
         },
         ScriptedTrustedWallSourceV1::from_micros(samples.iter().copied()),
     )?)
 }
 
-/// A store holding `issued` through a persistence host built from
-/// `host_snapshot`, and the authority installed with `attestation`.
+/// A revocation applied before the store becomes the domain's.
+type Revocation<'a> = (&'a CapabilityGrantV1, u64, u64);
+
+/// A domain whose store holds `grants` issued through a persistence host
+/// built from `host_snapshot`, with `revocations` applied before the store is
+/// handed over, and the authority installed with `attestation`.
 struct World {
-    store: MemoryStore,
-    host: AuthorityPersistenceHostV1,
+    domain: MemoryCommunityDomainV1,
     authority: CommunityLifecycleAuthorityV1,
     catalogue: Hash,
 }
@@ -359,13 +363,14 @@ impl World {
     fn new(grants: &[CapabilityGrantV1]) -> Fallible<Self> {
         let all = grants.iter().collect::<Vec<_>>();
         let attestation = snapshot(&all)?;
-        Self::with(grants, &attestation, attestation.clone())
+        Self::with(grants, &attestation, attestation.clone(), &[])
     }
 
     fn with(
         grants: &[CapabilityGrantV1],
         host_snapshot: &AuthorityRegistrySnapshotV1,
         attestation: AuthorityRegistrySnapshotV1,
+        revocations: &[Revocation<'_>],
     ) -> Fallible<Self> {
         let host = AuthorityPersistenceHostV1::new(host_snapshot);
         let mut store = MemoryStore::new();
@@ -374,11 +379,32 @@ impl World {
             let permit = host.authorize_grant(grant)?;
             store.issue_capability_grant(permit, grant)?;
         }
+        for (grant, fence, epoch) in revocations {
+            let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+                grant_id: grant.grant_id(),
+                authority_timeline: authority_timeline(),
+                fence_position: Seq::from_u64(*fence),
+                revocation_epoch: *epoch,
+                policy_revision: POLICY_REVISION,
+                authority_registry_digest: REGISTRY,
+            })?;
+            let permit = host.authorize_revocation(grant, &revocation)?;
+            store.revoke_capability_grant(permit, &revocation)?;
+        }
+        if let Some((grant, _, _)) = revocations.first() {
+            // The store re-stamps every loaded grant after a revocation.
+            let loaded = store.load_authority(grants[0].grant_id())?;
+            assert_ne!(
+                loaded.chain().grants()[0].binding_digest()?,
+                grants[0].binding_digest()?,
+                "revoking {:?} must re-stamp the chain",
+                grant.grant_id()
+            );
+        }
         let catalogue = CommunityAuthorityCatalogueV1::new(&SEAL, catalogue_input(&attestation)?)?;
         let digest = catalogue.digest();
         Ok(Self {
-            store,
-            host,
+            domain: MemoryCommunityDomainV1::new(store, [0x5a; 16])?,
             authority: install(catalogue, attestation, &[NOW; 64])?,
             catalogue: digest,
         })
@@ -406,35 +432,21 @@ impl World {
         sign(self.record(operation)?, SEED)
     }
 
+    fn call(&mut self, operation: &Operation) -> Fallible<CommunityAuthorityCallV1> {
+        let credential = self.credential(operation)?;
+        Ok(self
+            .authority
+            .authenticate(&credential, Request::derive(operation)?)?)
+    }
+
     fn admit(
         &mut self,
         operation: &Operation,
         leaf: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
-        let credential = self
-            .credential(operation)
-            .map_err(|_| Error::InvalidEncoding)?;
-        let persisted = self
-            .store
-            .load_authority(leaf)
-            .map_err(|_| Error::StorageUnavailable)?;
-        Request::derive(operation)
-            .and_then(|request| self.authority.authenticate(&credential, request))
-            .and_then(|call| self.authority.authorize_administrative(&call, &persisted))
-    }
-
-    fn revoke(&mut self, grant: &CapabilityGrantV1, fence: u64, epoch: u64) -> TestResult {
-        let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
-            grant_id: grant.grant_id(),
-            authority_timeline: authority_timeline(),
-            fence_position: Seq::from_u64(fence),
-            revocation_epoch: epoch,
-            policy_revision: POLICY_REVISION,
-            authority_registry_digest: REGISTRY,
-        })?;
-        let permit = self.host.authorize_revocation(grant, &revocation)?;
-        self.store.revoke_capability_grant(permit, &revocation)?;
-        Ok(())
+        let call = self.call(operation).map_err(|_| Error::InvalidEncoding)?;
+        self.authority
+            .authorize_administrative(&call, &self.domain, leaf)
     }
 }
 
@@ -603,7 +615,8 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
     let good = catalogue_input(&attestation)?;
     let attempt = |input: CommunityAuthorityCatalogueInputV1,
                    attestation: AuthorityRegistrySnapshotV1,
-                   forks: Vec<ForkAuthenticationPolicyV1>|
+                   forks: Vec<ForkAuthenticationPolicyV1>,
+                   recipient: String|
      -> Fallible<Result<CommunityLifecycleAuthorityV1, Error>> {
         Ok(CommunityLifecycleAuthorityV1::new(
             &SEAL,
@@ -612,6 +625,7 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
                 authentication_policy: fap1(SEED)?,
                 attestation,
                 fork_admission_policies: forks,
+                member_recipient: recipient,
             },
             ScriptedTrustedWallSourceV1::from_micros([NOW]),
         ))
@@ -652,11 +666,24 @@ fn installation_refuses_every_mismatched_pin() -> TestResult {
     ];
     for (input, attestation, forks) in refusals {
         assert_eq!(
-            attempt(input, attestation, forks)?.err(),
+            attempt(input, attestation, forks, RECIPIENT.to_owned())?.err(),
             Some(Error::InvalidBinding)
         );
     }
-    assert!(attempt(good, attestation, vec![fap1([9; 32])?])?.is_ok());
+    for recipient in [String::new(), "r".repeat(129)] {
+        assert_eq!(
+            attempt(good.clone(), attestation.clone(), vec![], recipient)?.err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    assert!(attempt(good.clone(), attestation.clone(), vec![], "r".repeat(128))?.is_ok());
+    assert!(attempt(
+        good,
+        attestation,
+        vec![fap1([9; 32])?],
+        RECIPIENT.to_owned()
+    )?
+    .is_ok());
     Ok(())
 }
 
@@ -678,10 +705,10 @@ fn an_authorized_initialize_binds_the_exact_request_and_refs() -> TestResult {
     assert_eq!(call.request(), &request);
     assert_eq!(call.at_time(), WallTime::from_micros(NOW));
     assert_eq!(call.expires_at(), WallTime::from_micros(EXPIRES));
-    let persisted = world.store.load_authority(leaf.grant_id())?;
-    let admission = world
-        .authority
-        .authorize_administrative(&call, &persisted)?;
+    let admission =
+        world
+            .authority
+            .authorize_administrative(&call, &world.domain, leaf.grant_id())?;
 
     let mut evidence_input = b"pigloros/authenticated-principal-evidence/v1".to_vec();
     evidence_input.extend_from_slice(&credential);
@@ -972,35 +999,79 @@ fn attestation_admits_issued_grants_across_a_sibling_revocation() -> TestResult 
     let attested = grant(1, 1, 0, &scope)?;
     let sibling = grant(2, 2, 0, &scope)?;
     let rogue = grant(3, 3, 0, &scope)?;
+    let grants = [attested.clone(), sibling.clone(), rogue.clone()];
     let attestation = snapshot(&[&attested, &sibling])?;
     let host_snapshot = snapshot(&[&attested, &sibling, &rogue])?;
-    let mut world = World::with(
-        &[attested.clone(), sibling.clone(), rogue.clone()],
-        &host_snapshot,
-        attestation,
-    )?;
+    let mut world = World::with(&grants, &host_snapshot, attestation.clone(), &[])?;
     assert!(world.admit(&initialize(), attested.grant_id()).is_ok());
     assert_eq!(
         world.admit(&initialize(), rogue.grant_id()).err(),
         Some(Error::EvidenceUnavailable)
     );
 
-    world.revoke(&sibling, 4, 1)?;
-    let restamped = world.store.load_authority(attested.grant_id())?;
-    assert_ne!(
-        restamped.chain().grants()[0].binding_digest()?,
-        attested.binding_digest()?
-    );
-    let admission = world.admit(&initialize(), attested.grant_id())?;
+    let mut revoked_sibling = World::with(
+        &grants,
+        &host_snapshot,
+        attestation.clone(),
+        &[(&sibling, 4, 1)],
+    )?;
+    let admission = revoked_sibling.admit(&initialize(), attested.grant_id())?;
     assert_eq!(admission.request().revocation_epoch(), 1);
     assert_eq!(admission.request().at_position(), Seq::from_u64(4));
     assert_eq!(
-        world.admit(&initialize(), sibling.grant_id()).err(),
+        revoked_sibling
+            .admit(&initialize(), sibling.grant_id())
+            .err(),
         Some(Error::EvidenceUnavailable)
     );
-    world.revoke(&attested, 5, 2)?;
+
+    let mut revoked_both = World::with(
+        &grants,
+        &host_snapshot,
+        attestation,
+        &[(&sibling, 4, 1), (&attested, 5, 2)],
+    )?;
     assert_eq!(
-        world.admit(&initialize(), attested.grant_id()).err(),
+        revoked_both.admit(&initialize(), attested.grant_id()).err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    Ok(())
+}
+
+/// A5.9 and the call binding: a call is honoured only by the authority that
+/// authenticated it, and a missing leaf locator gives 12.
+#[test]
+fn a_call_is_refused_by_another_authority_and_for_an_unknown_leaf() -> TestResult {
+    let leaf = grant(1, 1, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let mut world = World::new(std::slice::from_ref(&leaf))?;
+    let call = world.call(&initialize())?;
+    let attestation = snapshot(&[&leaf])?;
+    let other = install(
+        CommunityAuthorityCatalogueV1::new(
+            &SEAL,
+            CommunityAuthorityCatalogueInputV1 {
+                trust_scope: "community.other".to_owned(),
+                ..catalogue_input(&attestation)?
+            },
+        )?,
+        attestation,
+        &[NOW],
+    )?;
+    assert!(world
+        .authority
+        .authorize_administrative(&call, &world.domain, leaf.grant_id())
+        .is_ok());
+    assert_eq!(
+        other
+            .authorize_administrative(&call, &world.domain, leaf.grant_id())
+            .err(),
+        Some(Error::EvidenceUnavailable)
+    );
+    assert_eq!(
+        world
+            .authority
+            .authorize_administrative(&call, &world.domain, hash(99))
+            .err(),
         Some(Error::EvidenceUnavailable)
     );
     Ok(())
@@ -1055,17 +1126,6 @@ fn member_scope(timeline: TimelineId, implementation: &ImplementationKeyV1) -> F
     })
 }
 
-const fn member_use<'a>(
-    member: &'a CommunityMemberBindingV1<'a>,
-    action: CommunityMemberActionV1,
-) -> CommunityMemberUseV1<'a> {
-    CommunityMemberUseV1 {
-        member,
-        action,
-        audience: RECIPIENT,
-    }
-}
-
 /// A5.2(3a), A5.8, I2 and I14: a member request names
 /// `community:<T32>:member:<M64>` for the call's own Timeline (the parent T
 /// for Fork), the in-operation purpose and the installed recipient, with the
@@ -1079,27 +1139,37 @@ fn member_requests_use_the_call_timeline_member_and_constraint() -> TestResult {
     let member_grant = grant(1, 1, 0, &member_scope(target(), &release)?)?;
     let child_grant = grant(2, 2, 0, &member_scope(other_timeline(), &release)?)?;
     let admin_grant = grant(3, 3, 0, &administrative(target(), &ALL_ACTIONS))?;
+    let caller_audience = grant(
+        4,
+        4,
+        0,
+        &Scope {
+            audience: AUDIENCE.to_owned(),
+            ..member_scope(target(), &release)?
+        },
+    )?;
     let mut world = World::new(&[
         member_grant.clone(),
         child_grant.clone(),
         admin_grant.clone(),
+        caller_audience.clone(),
     ])?;
-    let member_chain = world.store.load_authority(member_grant.grant_id())?;
-    let child_chain = world.store.load_authority(child_grant.grant_id())?;
-    let admin_chain = world.store.load_authority(admin_grant.grant_id())?;
 
     for operation in [initialize(), transition(), fork()] {
         let request = Request::derive(&operation)?;
-        let credential = world.credential(&operation)?;
-        let call = world.authority.authenticate(&credential, request)?;
+        let call = world.call(&operation)?;
+        let authority = &world.authority;
+        let domain = &world.domain;
         for action in [
             CommunityMemberActionV1::Read,
             CommunityMemberActionV1::Execute,
         ] {
-            let admission = world.authority.authorize_member(
+            let admission = authority.authorize_member(
                 &call,
-                member_use(&member, action),
-                &member_chain,
+                &member,
+                action,
+                domain,
+                member_grant.grant_id(),
             )?;
             let built = admission.request();
             assert_eq!(built.resource(), member_resource(target(), &release)?);
@@ -1120,34 +1190,32 @@ fn member_requests_use_the_call_timeline_member_and_constraint() -> TestResult {
                 vec![request.operation_constraint()]
             );
             assert_eq!(built.authenticated().principal(), &caller()?);
+            // Another release, a child-T grant, an administrative grant and a
+            // grant scoped to a caller-chosen audience never match.
             for refused in [
-                world.authority.authorize_member(
+                authority.authorize_member(
                     &call,
-                    member_use(&released, action),
-                    &member_chain,
+                    &released,
+                    action,
+                    domain,
+                    member_grant.grant_id(),
                 ),
-                world
-                    .authority
-                    .authorize_member(&call, member_use(&member, action), &child_chain),
-                world
-                    .authority
-                    .authorize_member(&call, member_use(&member, action), &admin_chain),
-                world.authority.authorize_member(
+                authority.authorize_member(&call, &member, action, domain, child_grant.grant_id()),
+                authority.authorize_member(&call, &member, action, domain, admin_grant.grant_id()),
+                authority.authorize_member(
                     &call,
-                    CommunityMemberUseV1 {
-                        audience: AUDIENCE,
-                        ..member_use(&member, action)
-                    },
-                    &member_chain,
+                    &member,
+                    action,
+                    domain,
+                    caller_audience.grant_id(),
                 ),
             ] {
                 assert_eq!(refused.err(), Some(Error::EvidenceUnavailable));
             }
         }
         assert_eq!(
-            world
-                .authority
-                .authorize_administrative(&call, &member_chain)
+            authority
+                .authorize_administrative(&call, domain, member_grant.grant_id())
                 .err(),
             Some(Error::EvidenceUnavailable)
         );
@@ -1164,27 +1232,21 @@ fn retire_and_reset_calls_admit_no_member_request() -> TestResult {
     let member_grant = grant(1, 1, 0, &member_scope(target(), &release)?)?;
     let admin_grant = grant(3, 3, 0, &administrative(target(), &ALL_ACTIONS))?;
     let mut world = World::new(&[member_grant.clone(), admin_grant.clone()])?;
-    let member_chain = world.store.load_authority(member_grant.grant_id())?;
-    let admin_chain = world.store.load_authority(admin_grant.grant_id())?;
     for operation in [retire(), reset()] {
-        let request = Request::derive(&operation)?;
-        let credential = world.credential(&operation)?;
-        let call = world.authority.authenticate(&credential, request)?;
+        let call = world.call(&operation)?;
         assert!(world
             .authority
-            .authorize_administrative(&call, &admin_chain)
+            .authorize_administrative(&call, &world.domain, admin_grant.grant_id())
             .is_ok());
         assert_eq!(
             world
                 .authority
                 .authorize_member(
                     &call,
-                    CommunityMemberUseV1 {
-                        member: &member,
-                        action: CommunityMemberActionV1::Read,
-                        audience: RECIPIENT,
-                    },
-                    &member_chain,
+                    &member,
+                    CommunityMemberActionV1::Read,
+                    &world.domain,
+                    member_grant.grant_id(),
                 )
                 .err(),
             Some(Error::EvidenceUnavailable)

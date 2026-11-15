@@ -20,7 +20,6 @@ pub use lifecycle_authority::{
     CommunityAdministrativeActionV1, CommunityAdministrativeOperationV1,
     CommunityAdministrativeRequestV1, CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1,
     CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1, CommunityMemberActionV1,
-    CommunityMemberUseV1,
 };
 pub use memory_domain::{
     CommunityBootstrapRequestV1, CommunityDomainBindingV1, CommunityDomainOpenedV1,

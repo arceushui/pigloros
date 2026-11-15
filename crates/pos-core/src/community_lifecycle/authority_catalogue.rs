@@ -71,6 +71,10 @@ pub struct CommunityAuthorityCatalogueInputV1 {
 }
 
 /// Exact thirteen-field CAP1 policy data; it grants no authority.
+///
+/// CAP1 is built only at composition, from validated fields, and is used as
+/// installed data and through its digest. It has no decoder by design; a
+/// strict one belongs with the first loader that reads CAP1 bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityAuthorityCatalogueV1(CommunityAuthorityCatalogueInputV1);
 

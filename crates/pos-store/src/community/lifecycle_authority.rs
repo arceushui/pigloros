@@ -35,15 +35,17 @@ use pos_core::fork_authentication::{
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityTrustRootSealV1,
-    AuthorizationDecisionV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    ConsentEvidenceV1, EntityId, Hash, PersistedAuthorityV1, TimelineId, WallTime,
+    AuthorityEvaluatorV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorityTrustRootSealV1, AuthorizationDecisionV1, AuthorizationRequestDraftV1,
+    AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1, EntityId, Hash,
+    PersistedAuthorityV1, TimelineId, WallTime, MAX_AUTHORITY_TEXT_BYTES,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, VerifiedAuthenticatedPrincipalEvidenceV1,
 };
 
 use super::attestation::{evaluation_snapshot, OWNER_SEAL};
+use super::memory_domain::MemoryCommunityDomainV1;
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
 const EXECUTION_CATEGORY: &str = "community.execution-state";
@@ -265,20 +267,6 @@ impl CommunityMemberActionV1 {
     }
 }
 
-/// One in-operation member data-use request inside an administrative call.
-#[derive(Clone, Copy)]
-pub struct CommunityMemberUseV1<'a> {
-    /// The member binding naming stable member M.
-    pub member: &'a CommunityMemberBindingV1<'a>,
-    /// The closed data-use action.
-    pub action: CommunityMemberActionV1,
-    /// The installed recipient of the new generation's selected cells
-    /// (A5.2(2)–(3)). The owner supplies its installed recipient identity
-    /// here, never caller text; a grant scoped to another recipient does not
-    /// match.
-    pub audience: &'a str,
-}
-
 /// Installed authority inputs, fixed at the trusted composition root.
 pub struct CommunityLifecycleAuthorityInputV1 {
     /// The pinned CAP1.
@@ -289,6 +277,9 @@ pub struct CommunityLifecycleAuthorityInputV1 {
     pub attestation: AuthorityRegistrySnapshotV1,
     /// Every Fork-admission FAP1 installed by the same composition root.
     pub fork_admission_policies: Vec<ForkAuthenticationPolicyV1>,
+    /// The installed recipient of the selected cells (A5.2(2)–(3)), the
+    /// audience of every in-operation member request; 1..128 bytes.
+    pub member_recipient: String,
 }
 
 /// Installed community lifecycle authority with its trusted wall source.
@@ -297,6 +288,7 @@ pub struct CommunityLifecycleAuthorityV1 {
     catalogue_digest: Hash,
     policy: ForkAuthenticationPolicyV1,
     attestation: AuthorityRegistrySnapshotV1,
+    member_recipient: String,
     wall: Box<dyn TrustedWallSourceV1>,
 }
 
@@ -322,7 +314,8 @@ impl CommunityLifecycleAuthorityV1 {
     /// Returns `InvalidBinding` (a composition refusal, R6.2(2)) when the
     /// FAP1 digest differs from CAP1's, the attestation snapshot's registry
     /// digest or attestation digest differs from CAP1's, or any community
-    /// adapter key also appears in an installed Fork-admission FAP1.
+    /// adapter key also appears in an installed Fork-admission FAP1, and for
+    /// an empty or over-128-byte member recipient.
     pub fn new(
         _seal: &AuthorityTrustRootSealV1,
         input: CommunityLifecycleAuthorityInputV1,
@@ -345,6 +338,7 @@ impl CommunityLifecycleAuthorityV1 {
             || community_capability_attestation_digest_v1(&input.attestation)
                 != pins.capability_attestation_digest
             || overlap
+            || !(1..=MAX_AUTHORITY_TEXT_BYTES).contains(&input.member_recipient.len())
         {
             return Err(Error::InvalidBinding);
         }
@@ -353,6 +347,7 @@ impl CommunityLifecycleAuthorityV1 {
             catalogue: input.catalogue,
             policy: input.authentication_policy,
             attestation: input.attestation,
+            member_recipient: input.member_recipient,
             wall: Box::new(wall),
         })
     }
@@ -378,20 +373,27 @@ impl CommunityLifecycleAuthorityV1 {
             request.action.as_str(),
             &request.operation_constraint(),
         );
-        let now = self.wall.sample().ok();
         AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(credential)
             .ok()
             .and_then(|evidence| {
                 verify_authenticated_principal_evidence_v1(&self.policy, evidence).ok()
             })
             .filter(|verified| verified.evidence().record().operation_nonce == nonce)
-            .zip(now)
+            .and_then(|verified| self.sampled(verified))
             .filter(|(verified, now)| {
                 let record = verified.evidence().record();
                 record.issued_at <= now.as_micros() && now.as_micros() < record.expires_at
             })
             .and_then(|(verified, now)| self.call(request, &verified, now))
             .ok_or(Error::EvidenceUnavailable)
+    }
+
+    /// Sample the trusted wall only once the credential has verified.
+    fn sampled(
+        &mut self,
+        verified: VerifiedAuthenticatedPrincipalEvidenceV1,
+    ) -> Option<(VerifiedAuthenticatedPrincipalEvidenceV1, WallTime)> {
+        self.wall.sample().ok().map(|now| (verified, now))
     }
 
     /// Derive `authenticated` and the actor from verified evidence (R6.2(3)(iv), (4)).
@@ -426,6 +428,7 @@ impl CommunityLifecycleAuthorityV1 {
                         .ok()
                     })
                     .map(|authenticated| CommunityAuthorityCallV1 {
+                        catalogue_digest: self.catalogue_digest,
                         request,
                         authenticated,
                         actor_entity_id,
@@ -435,20 +438,27 @@ impl CommunityLifecycleAuthorityV1 {
     }
 
     /// Evaluate the call's administrative request (A5.1) against the chain
-    /// the owner loaded from its own store under the guard.
+    /// `leaf_grant_id` names, loaded now from the domain's own store.
+    ///
+    /// `leaf_grant_id` is an untrusted locator (A5.1). No loaded chain is
+    /// accepted from the caller, so a chain read before a revocation can
+    /// never be evaluated as current.
     ///
     /// # Errors
-    /// Returns `EvidenceUnavailable` when the leaf binds consent references,
-    /// a chain grant is not attested as issued, or the decision is not
+    /// Returns `EvidenceUnavailable` for a call another authority issued, a
+    /// missing or foreign leaf, a leaf that binds consent references, a
+    /// chain grant not attested as issued, or a decision that is not
     /// `Active`.
     pub fn authorize_administrative(
         &self,
         call: &CommunityAuthorityCallV1,
-        persisted: &PersistedAuthorityV1,
+        domain: &MemoryCommunityDomainV1,
+        leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         self.evaluate(
             call,
-            persisted,
+            domain,
+            leaf_grant_id,
             RequestShapeV1 {
                 resource: call.request.resource(),
                 data_category: LIFECYCLE_CATEGORY,
@@ -460,7 +470,8 @@ impl CommunityLifecycleAuthorityV1 {
 
     /// Evaluate one in-operation member request (A5.2(3a), A5.8) on
     /// `community:<T32>:member:<M64>`, where T is the call's resource
-    /// Timeline: the target T, or the parent T for Fork.
+    /// Timeline: the target T, or the parent T for Fork. The audience is the
+    /// installed member recipient.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a retire or reset call, which uses
@@ -468,8 +479,10 @@ impl CommunityLifecycleAuthorityV1 {
     pub fn authorize_member(
         &self,
         call: &CommunityAuthorityCallV1,
-        member_use: CommunityMemberUseV1<'_>,
-        persisted: &PersistedAuthorityV1,
+        member: &CommunityMemberBindingV1<'_>,
+        action: CommunityMemberActionV1,
+        domain: &MemoryCommunityDomainV1,
+        leaf_grant_id: Hash,
     ) -> Result<CommunityAuthorityAdmissionV1, Error> {
         if !call.request.action.uses_state() {
             return Err(Error::EvidenceUnavailable);
@@ -478,32 +491,50 @@ impl CommunityLifecycleAuthorityV1 {
         resource.push_str("community:");
         push_hex(&mut resource, &call.request.timeline.inner().to_bytes());
         resource.push_str(":member:");
-        push_hex(
-            &mut resource,
-            member_use.member.stable_member_digest().as_bytes(),
-        );
+        push_hex(&mut resource, member.stable_member_digest().as_bytes());
         self.evaluate(
             call,
-            persisted,
+            domain,
+            leaf_grant_id,
             RequestShapeV1 {
                 resource,
                 data_category: EXECUTION_CATEGORY,
-                action: member_use.action.as_str(),
-                audience: member_use.audience,
+                action: action.as_str(),
+                audience: &self.member_recipient,
             },
         )
+    }
+
+    /// Check the call is this authority's, load the chain from the domain's
+    /// own store, and evaluate it.
+    fn evaluate(
+        &self,
+        call: &CommunityAuthorityCallV1,
+        domain: &MemoryCommunityDomainV1,
+        leaf_grant_id: Hash,
+        shape: RequestShapeV1<'_>,
+    ) -> Result<CommunityAuthorityAdmissionV1, Error> {
+        if call.catalogue_digest != self.catalogue_digest {
+            return Err(Error::EvidenceUnavailable);
+        }
+        domain
+            .store
+            .load_authority(leaf_grant_id)
+            .ok()
+            .and_then(|persisted| self.admit(call, &persisted, shape))
+            .ok_or(Error::EvidenceUnavailable)
     }
 
     /// Build the exact request, admit the chain through the attestation set
     /// and require an `Active` decision.
     ///
     /// The leaf lookup cannot miss: a loaded chain is never empty.
-    fn evaluate(
+    fn admit(
         &self,
         call: &CommunityAuthorityCallV1,
         persisted: &PersistedAuthorityV1,
         shape: RequestShapeV1<'_>,
-    ) -> Result<CommunityAuthorityAdmissionV1, Error> {
+    ) -> Option<CommunityAuthorityAdmissionV1> {
         let pins = self.catalogue.as_input();
         persisted
             .chain()
@@ -556,7 +587,6 @@ impl CommunityLifecycleAuthorityV1 {
             })
             .filter(|(_, decision)| decision.is_allowed())
             .and_then(|(request, decision)| admission(request, decision))
-            .ok_or(Error::EvidenceUnavailable)
     }
 }
 
@@ -574,9 +604,15 @@ struct RequestShapeV1<'a> {
 /// derived from the call's FAE1, and the trusted wall sample every request
 /// of the call uses as `at_time`.
 ///
+/// It is bound to the H(CAP1) of the authority that issued it, and another
+/// authority refuses it. It serves one operation: its `at_time` is the
+/// operation's single trusted sample, and the operation's final writer
+/// enforces its decision bound against [`Self::expires_at`] (A5.4).
+///
 /// It has no public constructor; only [`CommunityLifecycleAuthorityV1::authenticate`]
 /// produces it.
 pub struct CommunityAuthorityCallV1 {
+    catalogue_digest: Hash,
     request: CommunityAdministrativeRequestV1,
     authenticated: AuthenticatedPrincipalResultV1,
     actor_entity_id: EntityId,
@@ -672,3 +708,7 @@ fn push_hex(out: &mut String, bytes: &[u8]) {
         out.push(char::from(HEX[usize::from(byte & 15)]));
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
