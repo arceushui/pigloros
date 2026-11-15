@@ -4192,7 +4192,7 @@ mod tests {
         execute_append_consent_revocation_command(
             &mut state,
             timeline,
-            &revocation,
+            &(revocation, None),
             AppendDedupScope::from_keyed_hash([0; 32]),
             authority.append_permit(),
             10,
@@ -4977,7 +4977,7 @@ mod tests {
         assert_expired(
             Command::AppendConsentRevocation {
                 timeline,
-                revocation,
+                revocation: (revocation, None),
                 cleanup_scope: AppendDedupScope::from_keyed_hash([0; 32]),
                 permit: authority.append_permit(),
                 maximum: 1,

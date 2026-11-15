@@ -3431,22 +3431,28 @@ impl ErasureCommandSenderV1<'_> {
             |permit, store, candidate| {
                 store
                     .get_timeline_for_host_transition(permit, id)
-                    .and_then(|recorded| match recorded {
-                        Some(timeline) => Ok(TopologyTransitionResultV1 {
-                            timeline,
-                            #[cfg(test)]
-                            created: false,
-                        }),
-                        None => store
-                            .create_timeline_for_host_transition_with_meta(
-                                permit,
-                                candidate.meta.clone(),
-                            )
-                            .map(|timeline| TopologyTransitionResultV1 {
-                                timeline,
-                                #[cfg(test)]
-                                created: true,
-                            }),
+                    .and_then(|recorded| {
+                        recorded.map_or_else(
+                            || {
+                                store
+                                    .create_timeline_for_host_transition_with_meta(
+                                        permit,
+                                        candidate.meta.clone(),
+                                    )
+                                    .map(|timeline| TopologyTransitionResultV1 {
+                                        timeline,
+                                        #[cfg(test)]
+                                        created: true,
+                                    })
+                            },
+                            |timeline| {
+                                Ok(TopologyTransitionResultV1 {
+                                    timeline,
+                                    #[cfg(test)]
+                                    created: false,
+                                })
+                            },
+                        )
                     })
             },
         )?;
