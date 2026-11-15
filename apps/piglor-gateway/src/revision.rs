@@ -52,7 +52,7 @@ use crate::{
     mode_profile::GatewayModeProfileIdV1,
     operation::{OperationAuthority, OperationSpecV1},
     problem::{ProblemCodeV1, ProblemV1},
-    Gateway, GatewayError,
+    Gateway, GatewayError, GatewayOperationPermitV1,
 };
 
 /// The only request and content schema version of both families.
@@ -586,18 +586,53 @@ pub(crate) fn store_failure(error: GatewayRevisionErrorV1) -> Response {
     }
 }
 
-/// The public answer to a store command that never ran.
-pub(crate) fn executor_failure(error: StoreExecutorError) -> Response {
-    GatewayError::from(error).into_response()
+/// Why one revision request was not answered with a revision: a request
+/// problem, a store answer, or a store command that never ran.
+#[derive(Debug)]
+pub(crate) enum RevisionFailureV1 {
+    /// The request violates the contract.
+    Problem(ProblemV1),
+    /// The revision store refused or could not answer.
+    Store(GatewayRevisionErrorV1),
+    /// The store command never ran.
+    Executor(StoreExecutorError),
 }
 
-/// The value of a store command, or the public answer to its failure.
+impl From<ProblemV1> for RevisionFailureV1 {
+    fn from(problem: ProblemV1) -> Self {
+        Self::Problem(problem)
+    }
+}
+
+impl From<GatewayRevisionErrorV1> for RevisionFailureV1 {
+    fn from(error: GatewayRevisionErrorV1) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<StoreExecutorError> for RevisionFailureV1 {
+    fn from(error: StoreExecutorError) -> Self {
+        Self::Executor(error)
+    }
+}
+
+impl IntoResponse for RevisionFailureV1 {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Problem(problem) => problem.into_response(),
+            Self::Store(error) => store_failure(error),
+            Self::Executor(error) => GatewayError::from(error).into_response(),
+        }
+    }
+}
+
+/// The value of a store command, or why it has none.
 fn settled<T>(
     outcome: Result<Result<T, GatewayRevisionErrorV1>, StoreExecutorError>,
-) -> Result<T, Response> {
+) -> Result<T, RevisionFailureV1> {
     outcome
-        .map_err(executor_failure)
-        .and_then(|result| result.map_err(store_failure))
+        .map_err(RevisionFailureV1::from)
+        .and_then(|result| result.map_err(RevisionFailureV1::from))
 }
 
 /// A rendered revision with `status`.
@@ -643,7 +678,7 @@ fn draft<F: GatewayRevisionFamilyV1>(
     key: &str,
     entries: Vec<F::Entry>,
     parent: Option<ParentV1>,
-) -> Result<GatewayRevisionDraftV1, Response> {
+) -> Result<GatewayRevisionDraftV1, RevisionFailureV1> {
     let parent_ref = parent
         .as_ref()
         .map(|parent| (parent.id.to_string(), parent.revision.get()));
@@ -676,7 +711,27 @@ fn draft<F: GatewayRevisionFamilyV1>(
         domain_digest(F::DIGEST_DOMAIN, &content),
         content,
     )
-    .map_err(store_failure)
+    .map_err(RevisionFailureV1::from)
+}
+
+/// Commit `draft` on its own task, which owns `permit` until the commit
+/// completes, so a cancelled request never releases the authority fence
+/// early.
+async fn commit_holding(
+    gateway: Gateway,
+    permit: GatewayOperationPermitV1,
+    draft: GatewayRevisionDraftV1,
+) -> Result<Result<GatewayRevisionCommitV1, GatewayRevisionErrorV1>, StoreExecutorError> {
+    tokio::spawn(async move {
+        let outcome = gateway
+            .store
+            .gateway_revision(move |port| port.commit_gateway_revision(draft))
+            .await;
+        drop(permit);
+        outcome
+    })
+    .await
+    .unwrap_or(Err(StoreExecutorError::Unhealthy))
 }
 
 /// The answer to one committed or replayed request.
@@ -712,26 +767,14 @@ pub(crate) async fn create<F: GatewayRevisionFamilyV1, O: OperationSpecV1>(
     };
     let admitted = request::<F>(body)
         .and_then(F::admit)
-        .map_err(ProblemV1::into_response)
+        .map_err(RevisionFailureV1::from)
         .and_then(|(entries, parent)| draft::<F>(principal_id, actor, key, entries, parent));
     let draft = match admitted {
         Ok(draft) => draft,
-        Err(response) => return response,
+        Err(failure) => return failure.into_response(),
     };
-    // The detached task owns the permit until the commit completes, so a
-    // cancelled request never releases the authority fence early.
-    let gateway = gateway.clone();
-    let outcome = tokio::spawn(async move {
-        let outcome = gateway
-            .store
-            .gateway_revision(move |port| port.commit_gateway_revision(draft))
-            .await;
-        drop(permit);
-        outcome
-    })
-    .await
-    .unwrap_or(Err(StoreExecutorError::Unhealthy));
-    settled(outcome).map_or_else(std::convert::identity, committed::<F>)
+    let outcome = commit_holding(gateway.clone(), permit, draft).await;
+    settled(outcome).map_or_else(RevisionFailureV1::into_response, committed::<F>)
 }
 
 /// The answer to `actor`'s read of one revision state.
@@ -779,7 +822,7 @@ pub(crate) async fn read<F: GatewayRevisionFamilyV1, O: OperationSpecV1>(
         .gateway_revision(move |port| port.load_gateway_revision(key))
         .await;
     drop(permit);
-    settled(loaded).map_or_else(std::convert::identity, |state| {
+    settled(loaded).map_or_else(RevisionFailureV1::into_response, |state| {
         read_answer::<F>(state, actor)
     })
 }

@@ -228,7 +228,7 @@ async fn assert_golden_create<F: GatewayRevisionFamilyV1>(
     .await?;
     assert_eq!(status, StatusCode::CREATED);
     let expected_body = &golden["response"]["body"];
-    let mut normalized = body.clone();
+    let mut normalized = body;
     normalized["id"] = expected_body["id"].clone();
     normalized["digest"] = expected_body["digest"].clone();
     normalized["provenance"]["digest"] = expected_body["provenance"]["digest"].clone();
@@ -411,7 +411,7 @@ async fn a_revision_names_the_head_of_its_own_subject_as_parent() -> TestResult 
             collection,
             SUBJECT,
             "head-5",
-            &with_parent(body.clone(), &unknown),
+            &with_parent(body, &unknown),
         )
         .await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -981,11 +981,14 @@ fn a_store_command_that_never_ran_answers_as_every_gateway_operation() {
             StatusCode::SERVICE_UNAVAILABLE,
         ),
     ] {
-        assert_eq!(executor_failure(error).status(), status);
+        assert_eq!(
+            RevisionFailureV1::from(error).into_response().status(),
+            status
+        );
     }
     assert_eq!(
         settled::<()>(Err(StoreExecutorError::DeadlineExceeded))
-            .map_err(|response| response.status()),
+            .map_err(|failure| failure.into_response().status()),
         Err(StatusCode::SERVICE_UNAVAILABLE)
     );
 }
