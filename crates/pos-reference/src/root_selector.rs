@@ -14,7 +14,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -94,10 +94,14 @@ fn map_to_unit_error<T>(_: T) {}
 /// rejects it before any capability can be returned. [`RootSelectorRuntime`]
 /// owns the only production activation path.
 struct RootSelectorComposition {
-    service: RootSelectorService<ProviderTransport>,
+    service: RootSelectorService<SelectedProviderTransport>,
     updates: Mutex<()>,
     /// Bound for one committed live update's provider control exchange.
     live_update_timeout: Duration,
+    /// The one lifecycle port. It started the current runtime and replaces it
+    /// after every timely live update (ADR-069 R11 §8.6).
+    lifecycle: Box<dyn ProviderLifecyclePort + Send + Sync>,
+    executable_digest: runtime_start::ExecutableDigest,
 }
 
 struct ReceivedInstallationUpdate {
@@ -433,12 +437,15 @@ impl RootSelectorRuntime {
     /// every selector check, provider synchronization succeeds, the
     /// administrative listener is valid first, and the evaluator listener can
     /// then be bound without replacing any existing node.
-    pub fn activate<P: ProviderLifecyclePort>(port: &P) -> Result<Self, SelectorBoundaryError> {
-        Self::activate_with(port, runtime_start::proc_executable_digest)
+    pub fn activate<P>(port: P) -> Result<Self, SelectorBoundaryError>
+    where
+        P: ProviderLifecyclePort + Send + Sync + 'static,
+    {
+        Self::activate_with(Box::new(port), runtime_start::proc_executable_digest)
     }
 
     fn activate_with(
-        port: &dyn ProviderLifecyclePort,
+        port: Box<dyn ProviderLifecyclePort + Send + Sync>,
         executable_digest: runtime_start::ExecutableDigest,
     ) -> Result<Self, SelectorBoundaryError> {
         let administrator = OwnedAdministratorListener::bind()?;
@@ -674,30 +681,29 @@ impl RootSelectorComposition {
     /// Returns a closed boundary error for missing, invalid, pending-recovery,
     /// or unavailable installation/provider state.
     fn open(
-        port: &dyn ProviderLifecyclePort,
+        port: Box<dyn ProviderLifecyclePort + Send + Sync>,
         executable_digest: runtime_start::ExecutableDigest,
     ) -> Result<Self, SelectorBoundaryError> {
-        open_recovery_directory().and_then(|recovery_directory| {
-            InstalledSelectorState::open()
-                .and_then(InstalledSelectorState::authenticate_bootstrap)
-                .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-                .and_then(|admitted| {
-                    runtime_start::start_provider_runtime(port, &admitted, executable_digest).map(
-                        |(transport, runtime)| Self {
-                            service: RootSelectorService {
-                                admission_time: SystemTime::now,
-                                admission: SelectorAdmission::new(admitted, runtime),
-                                transport,
-                                peer_uid: ROOT_UID,
-                                evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                                recovery_directory: Arc::new(recovery_directory),
-                                recovery_owner: ROOT_UID,
-                            },
-                            updates: Mutex::new(()),
-                            live_update_timeout: LIVE_UPDATE_TIMEOUT,
-                        },
-                    )
-                })
+        let recovery_directory = open_recovery_directory()?;
+        let admitted = InstalledSelectorState::open()
+            .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .and_then(AuthenticatedSelectorBootstrap::admit_provider)?;
+        let (transport, runtime) =
+            runtime_start::start_provider_runtime(&*port, &admitted, executable_digest)?;
+        Ok(Self {
+            service: RootSelectorService {
+                admission_time: SystemTime::now,
+                admission: SelectorAdmission::new(admitted, runtime),
+                transport: SelectedProviderTransport::new(transport),
+                peer_uid: ROOT_UID,
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: Arc::new(recovery_directory),
+                recovery_owner: ROOT_UID,
+            },
+            updates: Mutex::new(()),
+            live_update_timeout: LIVE_UPDATE_TIMEOUT,
+            lifecycle: port,
+            executable_digest,
         })
     }
 
@@ -748,6 +754,7 @@ impl RootSelectorComposition {
             .and_then(|closed| {
                 self.service
                     .transport
+                    .current()?
                     .complete_committed_update(closed.committed, self.live_update_timeout)
                     .map(
                         |(successor, acknowledgement)| SynchronizedInstallationUpdate {
@@ -763,25 +770,49 @@ impl RootSelectorComposition {
                     .retire_previous_generation()
                     .map(|()| synchronized)
             })
-            .and_then(|synchronized| {
-                let previous = &synchronized.admission.admitted;
-                match synchronized
-                    .successor
-                    .admit_provider()
-                    .and_then(|successor| {
-                        synchronize_successor_provider(&self.service.transport, &successor)
-                            .map(|()| successor)
-                    }) {
-                    Ok(successor) => self
-                        .service
-                        .admission
-                        .admit_successor(previous, successor)?,
-                    Err(_) => self.service.admission.retire_previous(previous)?,
-                }
-                Ok(synchronized.acknowledgement)
-            })
+            .and_then(|synchronized| self.replace_runtime(synchronized))
             .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
             .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
+    }
+
+    /// ADR-069 R11 §8.6: after a timely live update, the fenced runtime is
+    /// never described again. The selector runs R11 §5.0 steps 2 to 8 for the
+    /// successor: the port stops the fenced runtime and proves it unloaded,
+    /// and a fresh runtime starts under a new slot. Only then does admission
+    /// reopen. If any step fails, admission stays closed for the successor
+    /// too; the acknowledgement is still returned, because the update itself
+    /// is durable.
+    fn replace_runtime(
+        &self,
+        synchronized: SynchronizedInstallationUpdate,
+    ) -> Result<Vec<u8>, SelectorBoundaryError> {
+        let SynchronizedInstallationUpdate {
+            admission,
+            successor,
+            acknowledgement,
+        } = synchronized;
+        let previous = &admission.admitted;
+        let started = successor.admit_provider().and_then(|successor| {
+            runtime_start::start_provider_runtime(
+                &*self.lifecycle,
+                &successor,
+                self.executable_digest,
+            )
+            .map(|(transport, runtime)| (successor, transport, runtime))
+        });
+        match started {
+            Ok((successor, transport, runtime)) => {
+                self.service.transport.replace(transport)?;
+                self.service.admission.admit_successor(
+                    previous,
+                    successor,
+                    runtime,
+                    &admission.live_attempt_ids,
+                )?;
+            }
+            Err(_) => self.service.admission.retire_previous(previous)?,
+        }
+        Ok(acknowledgement)
     }
 
     fn receive_installation_update(
@@ -942,13 +973,6 @@ fn synchronize_fixed_provider(
     )
 }
 
-fn synchronize_successor_provider(
-    transport: &ProviderTransport,
-    admitted: &AdmittedSelectorProvider,
-) -> Result<(), SelectorBoundaryError> {
-    fresh_synchronization_ids().and_then(|ids| synchronize_fixed_provider(transport, admitted, ids))
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SynchronizationRequestId([u8; 16]);
 
@@ -981,6 +1005,51 @@ trait ProviderExecutor {
         watchdog: Duration,
         admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError>;
+}
+
+/// The transport of the runtime the selector admitted last. A timely live
+/// update replaces it together with the runtime (ADR-069 R11 §8.6).
+struct SelectedProviderTransport(RwLock<Arc<ProviderTransport>>);
+
+impl SelectedProviderTransport {
+    fn new(transport: ProviderTransport) -> Self {
+        Self(RwLock::new(Arc::new(transport)))
+    }
+
+    fn current(&self) -> Result<Arc<ProviderTransport>, SelectorBoundaryError> {
+        self.0
+            .read()
+            .map(|current| Arc::clone(&current))
+            .map_err(selector_unavailable)
+    }
+
+    fn replace(&self, transport: ProviderTransport) -> Result<(), SelectorBoundaryError> {
+        let mut current = self.0.write().map_err(selector_unavailable)?;
+        *current = Arc::new(transport);
+        drop(current);
+        Ok(())
+    }
+}
+
+impl ProviderExecutor for SelectedProviderTransport {
+    fn execute(
+        &self,
+        admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        evaluation: &crate::evaluator_protocol::EvaluationRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
+    ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+        self.current()
+            .map_err(|_| ProviderTransportError::BeforeAdmission)
+            .and_then(|current| {
+                current.execute_staged(
+                    admitted, commitment, evaluation, spx1, input, watchdog, admission,
+                )
+            })
+    }
 }
 
 impl ProviderExecutor for ProviderTransport {
@@ -1167,16 +1236,33 @@ impl SelectorAdmission {
         Ok(())
     }
 
+    /// Reopen admission for the successor and its fresh runtime.
+    ///
+    /// ADR-069 R11 §8.6 m10: the fenced runtime may have ended provider-owned
+    /// attempts that it never reconciled. Each must be in `cancelled`, the RCC1
+    /// required set that the authenticated RCA1 echoes. The selector drops them,
+    /// with every other entry of the previous generation, so the fresh runtime
+    /// never answers one with SPE1 15; its restart reconciliation cleans their
+    /// resources.
     fn admit_successor(
         &self,
         previous: &Arc<AdmittedSelectorProvider>,
         successor: AdmittedSelectorProvider,
+        runtime: AdmittedProviderRuntime,
+        cancelled: &[[u8; 16]],
     ) -> Result<(), SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
-        if state.open || !Arc::ptr_eq(&state.admitted, previous) {
+        if state.open
+            || !Arc::ptr_eq(&state.admitted, previous)
+            || state
+                .attempts
+                .iter()
+                .any(|(id, attempt)| attempt.provider_owned && !cancelled.contains(id))
+        {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         state.admitted = Arc::new(successor);
+        state.runtime = runtime;
         state.attempts.clear();
         state.open = true;
         drop(state);
@@ -2643,24 +2729,79 @@ mod tests {
         ))
     }
 
-    type RuntimeStart = Box<dyn FnOnce() -> TestResult + Send>;
+    type ProviderThread = std::thread::JoinHandle<Result<(), String>>;
+    type RuntimeStart = Box<dyn FnOnce() -> TestResult<Vec<ProviderThread>> + Send>;
 
-    /// A port whose one runtime start runs `start` in this process, which
-    /// then serves the provider endpoints as the started runtime.
+    /// A port whose runtimes are provider threads of this process. Each start
+    /// runs the next queued closure, which binds the endpoints and spawns the
+    /// threads serving them; stale termination joins every running thread,
+    /// as stopping the unit ends the runtime's process.
     struct InProcessProviderPort {
-        start: Mutex<Option<RuntimeStart>>,
+        starts: Mutex<VecDeque<RuntimeStart>>,
+        running: Mutex<Vec<ProviderThread>>,
+        outcomes: Mutex<Vec<Result<(), String>>>,
     }
 
     impl InProcessProviderPort {
         const fn refusing() -> Self {
             Self {
-                start: Mutex::new(None),
+                starts: Mutex::new(VecDeque::new()),
+                running: Mutex::new(Vec::new()),
+                outcomes: Mutex::new(Vec::new()),
             }
         }
 
-        fn starting(start: impl FnOnce() -> TestResult + Send + 'static) -> Self {
+        fn starting(starts: Vec<RuntimeStart>) -> Self {
             Self {
-                start: Mutex::new(Some(Box::new(start))),
+                starts: Mutex::new(starts.into()),
+                ..Self::refusing()
+            }
+        }
+
+        /// Run `thread` as part of the current runtime.
+        fn adopt(&self, thread: ProviderThread) -> TestResult {
+            self.running
+                .lock()
+                .map_err(|_| "provider threads poisoned")?
+                .push(thread);
+            Ok(())
+        }
+
+        fn stop_running(&self) -> Result<(), ProviderLifecycleError> {
+            let running: Vec<_> = self
+                .running
+                .lock()
+                .map_err(|_| ProviderLifecycleError::Unavailable)?
+                .drain(..)
+                .collect();
+            let mut outcomes = self
+                .outcomes
+                .lock()
+                .map_err(|_| ProviderLifecycleError::Unavailable)?;
+            for thread in running {
+                outcomes.push(
+                    thread
+                        .join()
+                        .unwrap_or_else(|_| Err("provider thread panicked".to_owned())),
+                );
+            }
+            drop(outcomes);
+            Ok(())
+        }
+
+        /// Stop the last runtime and report every provider thread's outcome.
+        fn finish(&self) -> TestResult {
+            self.stop_running()
+                .map_err(|error| format!("provider threads: {error}"))?;
+            let outcomes = self.outcomes.lock().map_err(|_| "outcomes poisoned")?;
+            let errors: Vec<_> = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.clone().err())
+                .collect();
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; ").into())
             }
         }
     }
@@ -2671,7 +2812,15 @@ mod tests {
             challenge: ObservationChallenge,
             _deadline: std::time::Instant,
         ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
-            Ok(StaleUnitsObservation::new(challenge, 0))
+            let stopped = usize::from(
+                !self
+                    .running
+                    .lock()
+                    .map_err(|_| ProviderLifecycleError::Unavailable)?
+                    .is_empty(),
+            );
+            self.stop_running()?;
+            Ok(StaleUnitsObservation::new(challenge, stopped))
         }
 
         fn start_provider_runtime(
@@ -2680,12 +2829,16 @@ mod tests {
             _deadline: std::time::Instant,
         ) -> Result<StartedRuntimeObservation, ProviderLifecycleError> {
             let start = self
-                .start
+                .starts
                 .lock()
                 .map_err(|_| ProviderLifecycleError::Unavailable)?
-                .take()
+                .pop_front()
                 .ok_or(ProviderLifecycleError::Unavailable)?;
-            start().map_err(|_| ProviderLifecycleError::Unavailable)?;
+            let threads = start().map_err(|_| ProviderLifecycleError::Unavailable)?;
+            self.running
+                .lock()
+                .map_err(|_| ProviderLifecycleError::Unavailable)?
+                .extend(threads);
             own_runtime_observation(slot)
         }
     }
@@ -2715,9 +2868,30 @@ mod tests {
     }
 
     fn activate_in_process(
-        port: &InProcessProviderPort,
+        port: Arc<InProcessProviderPort>,
     ) -> Result<RootSelectorRuntime, SelectorBoundaryError> {
-        RootSelectorRuntime::activate_with(port, test_executable_digest)
+        RootSelectorRuntime::activate_with(Box::new(SharedPort(port)), test_executable_digest)
+    }
+
+    /// Lets a test keep its port after the composition took ownership.
+    struct SharedPort(Arc<InProcessProviderPort>);
+
+    impl ProviderLifecyclePort for SharedPort {
+        fn terminate_stale_runtimes(
+            &self,
+            challenge: ObservationChallenge,
+            deadline: std::time::Instant,
+        ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
+            self.0.terminate_stale_runtimes(challenge, deadline)
+        }
+
+        fn start_provider_runtime(
+            &self,
+            slot: &RuntimeSlotTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<StartedRuntimeObservation, ProviderLifecycleError> {
+            self.0.start_provider_runtime(slot, deadline)
+        }
     }
 
     #[test]
@@ -3646,18 +3820,18 @@ mod tests {
     fn assert_recovery_directory_activation_failures() -> TestResult {
         let recovery_directory = Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o755))?;
-        assert!(activate_in_process(&InProcessProviderPort::refusing()).is_err());
+        assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
         if recovery_directory.try_exists()? {
             fs::remove_dir(&recovery_directory)?;
         }
 
         fs::write(&recovery_directory, b"occupied")?;
-        assert!(activate_in_process(&InProcessProviderPort::refusing()).is_err());
+        assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
         fs::remove_file(&recovery_directory)?;
         fs::create_dir(&recovery_directory)?;
         fs::set_permissions(&recovery_directory, fs::Permissions::from_mode(0o755))?;
-        assert!(activate_in_process(&InProcessProviderPort::refusing()).is_err());
+        assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
         fs::remove_dir(recovery_directory)?;
         Ok(())
     }
@@ -3674,7 +3848,7 @@ mod tests {
 
         let _paths = FixedCompositionFixture::create()?;
         assert_recovery_directory_activation_failures()?;
-        assert!(activate_in_process(&InProcessProviderPort::refusing()).is_err());
+        assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let (request, admitted, resolved) = installed_composition_fixture()?;
@@ -3713,17 +3887,9 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let (started, started_runtime) = std::sync::mpsc::channel();
-        let port = InProcessProviderPort::starting(move || {
-            let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
-            fs::set_permissions(
-                "/run/pigloros/provider-execute.sock",
-                fs::Permissions::from_mode(SOCKET_MODE),
-            )?;
-            let control_listener = UnixListener::bind("/run/pigloros/provider-control.sock")?;
-            fs::set_permissions(
-                "/run/pigloros/provider-control.sock",
-                fs::Permissions::from_mode(SOCKET_MODE),
-            )?;
+        let first: RuntimeStart = Box::new(move || {
+            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
             let execute_provider = std::thread::spawn(move || {
                 serve_describe_response(
                     &execute_listener,
@@ -3738,19 +3904,33 @@ mod tests {
                     &commitment,
                     &[(current_epochs, false), (current_epochs, true)],
                 )
-                .map_err(|error| error.to_string())?;
-                serve_installed_describe_response(&execute_listener, &control_fixture)
-                    .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())
             });
             started
-                .send((execute_provider, control_listener))
+                .send(control_listener)
                 .map_err(|_| "runtime start channel closed")?;
-            Ok(())
+            Ok(vec![execute_provider])
         });
+        // R11 §8.6: after the live update the fenced runtime is never
+        // described again. The port stops it (joining its threads, which
+        // leaves both leaves refusing), the selector removes the leaves, and a
+        // fresh runtime under a new slot answers the successor's describe.
+        let successor_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let replacement: RuntimeStart = Box::new(move || {
+            let execute_listener = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control_listener = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
+            Ok(vec![std::thread::spawn(move || {
+                let _control = control_listener;
+                serve_installed_describe_response(&execute_listener, &successor_fixture)
+                    .map_err(|error| error.to_string())
+            })])
+        });
+        let port = Arc::new(InProcessProviderPort::starting(vec![first, replacement]));
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let mut runtime = activate_in_process(&port)?;
-        let (execute_provider, control_listener) = started_runtime.recv()?;
+        let mut runtime = activate_in_process(Arc::clone(&port))?;
+        let control_listener = started_runtime.recv()?;
         runtime.composition.live_update_timeout = INITIAL_IO_TIMEOUT;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
@@ -3766,13 +3946,16 @@ mod tests {
 
         // Only the live update connects to the control provider, so its accept
         // clock starts here rather than at activation.
-        let control_provider = std::thread::spawn(move || {
+        port.adopt(std::thread::spawn(move || {
             serve_control_response(&control_listener).map_err(|error| error.to_string())
-        });
+        }))?;
         let updated = apply_update_and_reject_replay(&update_fixture);
-        let control = join_provider("control", control_provider);
-        let execute = join_provider("execute", execute_provider);
-        all_succeeded([updated, control, execute])?;
+        all_succeeded([updated, port.finish()])?;
+        assert!(port
+            .starts
+            .lock()
+            .map_err(|_| "runtime starts poisoned")?
+            .is_empty());
         assert_successor_rejects_stale_request(&request, resolved.attempt())?;
         fs::remove_file(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
         assert!(runtime
@@ -3782,6 +3965,12 @@ mod tests {
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         Ok(())
+    }
+
+    fn bind_provider_endpoint(path: &str) -> TestResult<UnixListener> {
+        let listener = UnixListener::bind(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        Ok(listener)
     }
 
     /// Installs the fixed composition with sanitizer-proof provider headroom.
@@ -3811,19 +4000,9 @@ mod tests {
         Ok((request, admitted, resolved))
     }
 
-    fn join_provider(
-        name: &str,
-        provider: std::thread::JoinHandle<Result<(), String>>,
-    ) -> TestResult {
-        provider
-            .join()
-            .map_err(|_| format!("provider {name} thread panicked"))?
-            .map_err(|error| format!("provider {name}: {error}").into())
-    }
-
     /// Reports every failure, so an early update error is not hidden behind
     /// the provider stub timeouts it causes.
-    fn all_succeeded(results: [TestResult; 3]) -> TestResult {
+    fn all_succeeded(results: [TestResult; 2]) -> TestResult {
         let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
         if errors.is_empty() {
             Ok(())
@@ -4266,7 +4445,13 @@ mod tests {
             let successor_lease = if reopen_with_successor {
                 let (_, successor, _) =
                     crate::selector::installation::tests::root_selector_fixture()?;
-                admission.admit_successor(&closed.admitted, successor)?;
+                let runtime = successor_runtime(&successor)?;
+                admission.admit_successor(
+                    &closed.admitted,
+                    successor,
+                    runtime,
+                    &closed.live_attempt_ids,
+                )?;
                 Some(admission.acquire([1; 16])?)
             } else {
                 None
@@ -4372,17 +4557,113 @@ mod tests {
         let admission = SelectorAdmission::for_test(admitted)?;
         let current = admission.current()?;
         let (_, premature, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        assert!(admission.admit_successor(&current, premature).is_err());
+        let runtime = successor_runtime(&premature)?;
+        assert!(admission
+            .admit_successor(&current, premature, runtime, &[])
+            .is_err());
         let closed = admission.close_and_snapshot()?;
         let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let foreign = Arc::new(foreign);
         assert!(admission.reopen_previous(&foreign).is_err());
         let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        assert!(admission.admit_successor(&foreign, successor).is_err());
+        let runtime = successor_runtime(&successor)?;
+        assert!(admission
+            .admit_successor(&foreign, successor, runtime, &[])
+            .is_err());
         let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        admission.admit_successor(&closed.admitted, successor)?;
+        let runtime = successor_runtime(&successor)?;
+        admission.admit_successor(&closed.admitted, successor, runtime.clone(), &[])?;
+        assert_eq!(
+            admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?
+                .runtime,
+            runtime
+        );
         assert!(!Arc::ptr_eq(&admission.current()?, &closed.admitted));
         assert!(admission.reopen_previous(&closed.admitted).is_err());
+        Ok(())
+    }
+
+    fn successor_runtime(
+        successor: &AdmittedSelectorProvider,
+    ) -> TestResult<AdmittedProviderRuntime> {
+        Ok(ProviderRuntimeSlot::allocate(successor)?.bind_observed_process(2, 3)?)
+    }
+
+    /// ADR-069 R11 §8.6 m10: a provider-owned attempt of the fenced runtime
+    /// leaves the table only when the RCA1-echoed cancelled set names it.
+    #[test]
+    fn the_successor_drops_exactly_the_cancelled_provider_attempts() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let owned = admission.acquire([1; 16])?;
+        admission.retain_provider_state([1; 16])?;
+        let pending = admission.acquire([2; 16])?;
+        let closed = admission.close_and_snapshot()?;
+        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let runtime = successor_runtime(&successor)?;
+        assert_eq!(
+            admission.admit_successor(&closed.admitted, successor, runtime, &[[2; 16]]),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert!(admission.current().is_err());
+
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let runtime = successor_runtime(&successor)?;
+        admission.admit_successor(
+            &closed.admitted,
+            successor,
+            runtime,
+            &closed.live_attempt_ids,
+        )?;
+        assert!(admission
+            .state
+            .lock()
+            .map_err(|_| "admission lock poisoned")?
+            .attempts
+            .is_empty());
+        drop((owned, pending));
+        let current = admission.current()?;
+        assert!(!Arc::ptr_eq(&current, &closed.admitted));
+        drop(admission.acquire([1; 16])?);
+        Ok(())
+    }
+
+    #[test]
+    fn the_selected_transport_is_replaced_whole_and_fails_closed_when_poisoned() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.sock");
+        let second = directory.path().join("second.sock");
+        let _first_listener = UnixListener::bind(&first)?;
+        let _second_listener = UnixListener::bind(&second)?;
+        let selected =
+            SelectedProviderTransport::new(ProviderTransport::from_path_for_test(&first)?);
+        let before = selected.current()?;
+        selected.replace(ProviderTransport::from_path_for_test(&second)?)?;
+        let after = selected.current()?;
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert!(Arc::ptr_eq(&after, &selected.current()?));
+
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = selected
+                .0
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(
+            selected.current().err(),
+            Some(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            selected.replace(ProviderTransport::from_path_for_test(&first)?),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
         Ok(())
     }
 
@@ -4432,7 +4713,9 @@ mod tests {
             service: RootSelectorService {
                 admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
-                transport: ProviderTransport::from_path_for_test(&provider_path)?,
+                transport: SelectedProviderTransport::new(ProviderTransport::from_path_for_test(
+                    &provider_path,
+                )?),
                 peer_uid: owner,
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
                 recovery_directory: test_recovery_directory()?,
@@ -4440,6 +4723,8 @@ mod tests {
             },
             updates: Mutex::new(()),
             live_update_timeout: LIVE_UPDATE_TIMEOUT,
+            lifecycle: Box::new(InProcessProviderPort::refusing()),
+            executable_digest: test_executable_digest,
         });
         let administrator_fixture = ListenerTestDirectory::create()?;
         let administrator = OwnedAdministratorListener {
@@ -4929,7 +5214,10 @@ mod tests {
         assert!(poisoned.close().is_err());
         assert!(poisoned.close_and_snapshot().is_err());
         assert!(poisoned.reopen_previous(&previous).is_err());
-        assert!(poisoned.admit_successor(&previous, successor).is_err());
+        let runtime = successor_runtime(&successor)?;
+        assert!(poisoned
+            .admit_successor(&previous, successor, runtime, &[])
+            .is_err());
         assert!(poisoned.retire_previous(&previous).is_err());
         assert!(matches!(
             poisoned.begin_provider_execution([1; 16], &previous),

@@ -13,7 +13,7 @@ use pos_sandboxd::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = SystemdProviderLifecycle::connect()?;
-    RootSelectorRuntime::activate(&port)
+    RootSelectorRuntime::activate(port)
         .and_then(RootSelectorRuntime::serve)
         .map_err(Into::into)
 }
