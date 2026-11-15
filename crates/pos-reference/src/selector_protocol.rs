@@ -575,13 +575,12 @@ fn validate_encoded_evidence(
     receipt: &SandboxProviderReceipt,
     negative_probe: [u8; 32],
 ) -> Result<(), AdapterError> {
-    if !receipt_copies_negative_probe(receipt, negative_probe) {
-        return Err(AdapterError::ProtocolFailure);
-    }
-    let mut fields = vec![Value::Null; 11];
-    fields[5] = Value::Bytes(execute_request.to_vec());
-    fields[10] = Value::Array(audit_values.to_vec());
-    validate_evidence(&fields, result, grant, receipt)
+    require_negative_probe(receipt, negative_probe).and_then(|()| {
+        let mut fields = vec![Value::Null; 11];
+        fields[5] = Value::Bytes(execute_request.to_vec());
+        fields[10] = Value::Array(audit_values.to_vec());
+        validate_evidence(&fields, result, grant, receipt)
+    })
 }
 
 const fn local_phase_code(phase: SandboxLocalErrorPhase) -> u64 {
@@ -998,11 +997,15 @@ fn receipt_matches_grant(
 }
 
 /// SPR1 ordinal 21 is the admitted HCP1's ordinal 7, byte for byte.
-fn receipt_copies_negative_probe(
+fn require_negative_probe(
     receipt: &SandboxProviderReceipt,
     negative_probe: [u8; 32],
-) -> bool {
-    receipt.negative_probe_evidence == negative_probe
+) -> Result<(), AdapterError> {
+    if receipt.negative_probe_evidence == negative_probe {
+        Ok(())
+    } else {
+        Err(AdapterError::ProtocolFailure)
+    }
 }
 
 fn audit_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProviderReceipt) -> bool {
