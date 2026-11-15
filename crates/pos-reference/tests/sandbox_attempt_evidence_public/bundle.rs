@@ -5,9 +5,9 @@ use ciborium::value::Value;
 use pos_reference::sandbox_provider_protocol::{
     AttemptEvidence, AttemptEvidenceContext, Contradiction, EffectiveLimitRecord, FdIdentity,
     KernelObservationEvidence, LauncherReady, LauncherReadyFields, NamespaceIdentity,
-    ReceiptAuthority, RequestedConfigurationEvidence, SandboxExecutionMode, SandboxLimit,
-    SandboxProviderProtocolError as ProtocolError, SandboxProviderReceipt, TerminalCode,
-    TerminationEvidence,
+    ReceiptAuthority, RequestedConfigurationEvidence, SandboxArchitecture, SandboxExecutionMode,
+    SandboxLimit, SandboxProviderProtocolError as ProtocolError, SandboxProviderReceipt,
+    TerminalCode, TerminationEvidence,
 };
 
 use super::observed::provider_namespaces;
@@ -102,6 +102,7 @@ struct Fixture {
     limits: Vec<SandboxLimit>,
     broker_caps: [u8; 32],
     mode: SandboxExecutionMode,
+    architecture: SandboxArchitecture,
     provider: [NamespaceIdentity; 6],
     grant: ([u8; 16], [u8; 32]),
     elm1: Option<[u8; 32]>,
@@ -121,6 +122,7 @@ impl Fixture {
             limits: limits(5, WORK_LIMIT, 1, 0),
             broker_caps: BROKER_CAPS,
             mode: SandboxExecutionMode::AirGapped,
+            architecture: SandboxArchitecture::X86_64,
             provider: provider_namespaces(),
             grant: ([0x11; 16], [0x22; 32]),
             elm1: None,
@@ -208,6 +210,7 @@ impl Fixture {
                 runtime_attestation_key_id: RUNTIME_KEY,
             },
             mode: self.mode,
+            architecture: self.architecture,
             ready: self.ready.as_ref(),
             provider_namespaces: &self.provider,
         };
@@ -440,12 +443,23 @@ fn rule_4_work_capacity_is_exactly_the_limit_rounded_up_to_a_block() -> TestResu
     work(WORK_LIMIT, WORK_LIMIT - 4096)?.rejects("one block below the exact capacity")?;
     work(WORK_LIMIT, WORK_LIMIT + 4096)?.rejects("one block above the exact capacity")?;
     // 1_000_000 rounds up to 1_003_520 (4 KiB), 1_015_808 (16 KiB) and
-    // 1_048_576 (64 KiB) blocks; any other capacity is not a rounding.
-    for capacity in [1_003_520, 1_015_808, 1_048_576] {
-        work(1_000_000, capacity)?.accepts()?;
+    // 1_048_576 (64 KiB) blocks. An x86_64 host has only 4 KiB pages.
+    work(1_000_000, 1_003_520)?.accepts()?;
+    for capacity in [1_015_808, 1_048_576] {
+        work(1_000_000, capacity)?.rejects("an x86_64 capacity rounded to a larger page")?;
     }
-    work(1_000_000, 1_007_616)?.rejects("a multiple of no block's rounding")?;
+    // An aarch64 host may use any of its three page sizes.
+    for capacity in [1_003_520, 1_015_808, 1_048_576] {
+        let mut arm = work(1_000_000, capacity)?;
+        arm.architecture = SandboxArchitecture::Aarch64;
+        arm.accepts()?;
+    }
+    let mut arm = work(1_000_000, 1_007_616)?;
+    arm.architecture = SandboxArchitecture::Aarch64;
+    arm.rejects("a multiple of no page size's rounding")?;
     work(1_000_000, 1_000_001)?.rejects("an unaligned capacity")?;
+    // The rounding of a limit near `u64::MAX` overflows and is refused.
+    work(u64::MAX - 1, u64::MAX)?.rejects("a rounding that overflows")?;
     let unobserved = Fixture::released(TME1_A)?
         .koe1(&[7, 11], Value::Null)?
         .tme1(&[26], integer(2))?;
