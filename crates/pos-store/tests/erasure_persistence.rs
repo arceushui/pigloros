@@ -803,6 +803,7 @@ fn assert_committed_attempt_page_is_never_swept<
         0
     );
     assert_eq!(backend.read_object(page)?, bytes);
+    drop(backend);
     Ok(())
 }
 
