@@ -12,7 +12,9 @@ use zeroize::Zeroizing;
 use super::timing::ENROLLMENT_BUDGET;
 use crate::{BridgeError, ProtocolCode, ReplyImage, RequestImage};
 
-/// An enrollment budget: the ceremony fails once `limit` has passed since `start`.
+/// An enrollment budget checked at the start of each opening, loading or posted step.
+///
+/// A consuming step that starts within the budget is not interrupted by its expiry.
 ///
 /// Production code can only build the ADR-110 §8 budget of five minutes; the length is a
 /// constant of the protocol, not configuration.
@@ -198,6 +200,15 @@ impl CeremonyPlan {
     #[must_use]
     pub fn with_stored(self, stored: Option<StoredGet>) -> Self {
         Self { stored, ..self }
+    }
+
+    /// Supply the existing owner-window input for an isolated host fixture.
+    #[must_use]
+    pub fn with_test_owner_window(self, owner_window: u64) -> Self {
+        Self {
+            owner_window: Some(owner_window),
+            ..self
+        }
     }
 
     /// Start at `generation`.

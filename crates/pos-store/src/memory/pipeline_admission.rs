@@ -21,12 +21,12 @@ use pos_core::{
     PipelineReceiptLookupV1,
 };
 
-use super::MemoryStore;
+use super::{gateway_mode_binding::commit_epoch_in_state, MemoryStore};
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission,
     factual_tick_plan::{FactualInstallV1, PlannedTickV1},
-    install_or_reject, recovered_pipeline_receipt, retained_pipeline_receipt,
-    PipelinePersistedStateV1,
+    install_or_reject, pipeline_mode_binding_stale_outcome, recovered_pipeline_receipt,
+    retained_pipeline_receipt, PipelinePersistedStateV1,
 };
 
 #[cfg(test)]
@@ -84,23 +84,26 @@ impl MemoryStore {
             return Ok(PipelineOutcomeV1::AdmissionConflict);
         }
         self.retained_pipeline_events(timeline, record)
-            .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
+            .and_then(|(events, epoch)| recovered_pipeline_receipt(basis, timeline, &events, epoch))
     }
 
-    /// The committed logical Events a retained receipt record names.
+    /// The committed logical Events a retained receipt record names, with the
+    /// Gateway mode-binding epoch recorded for their commit.
     fn retained_pipeline_events(
         &self,
         timeline: TimelineId,
         record: PipelineReceiptRecordV1,
-    ) -> Result<Vec<Event>, CoreError> {
+    ) -> Result<(Vec<Event>, Option<std::num::NonZeroU64>), CoreError> {
         self.logical_prefix(timeline).and_then(|prefix| {
-            self.state(timeline)
+            let state = self.state(timeline);
+            state
                 .events
                 .iter()
                 .skip_while(|event| event.seq.as_u64() < record.first_local_seq)
                 .take(record.event_count)
                 .map(|event| Self::logical_event(prefix, event.clone()))
                 .collect::<Result<Vec<_>, _>>()
+                .map(|events| (events, commit_epoch_in_state(state, record.first_local_seq)))
         })
     }
 
@@ -118,12 +121,13 @@ impl MemoryStore {
                     return Ok(PipelineReceiptLookupV1::Conflict);
                 }
                 self.retained_pipeline_events(timeline, record)
-                    .and_then(|events| {
+                    .and_then(|(events, epoch)| {
                         retained_pipeline_receipt(
                             attempt_id,
                             timeline,
                             record.draft_batch_digest,
                             &events,
+                            epoch,
                         )
                     })
             }
@@ -198,20 +202,28 @@ impl MemoryStore {
         let mut staged = self.state(timeline).clone();
         let first_local_seq = staged.timeline.head.next().as_u64();
         let hasher = self.hasher.as_ref();
+        let mode = self.mode_binding.append_mode();
         basis
             .batch()
             .drafts()
             .iter()
             .map(|draft| {
-                Self::append_one_to_state(&mut staged, draft, hasher, self.key_registry.as_ref())
+                Self::append_one_to_state(
+                    &mut staged,
+                    draft,
+                    hasher,
+                    self.key_registry.as_ref(),
+                    mode,
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .and_then(|committed| {
+                let epoch = commit_epoch_in_state(&staged, first_local_seq);
                 committed
                     .iter()
                     .map(|event| Self::logical_event(prefix, event.clone()))
                     .collect::<Result<Vec<Event>, _>>()
-                    .and_then(|events| committed_pipeline_receipt(basis, timeline, &events))
+                    .and_then(|events| committed_pipeline_receipt(basis, timeline, &events, epoch))
                     .and_then(|receipt| {
                         staged_receipt_expiry(now)
                             .map(|expires_at| (committed, receipt, expires_at))
@@ -289,6 +301,7 @@ impl PipelineAdmissionPortV1 for MemoryStore {
                     .ensure_generic_fork_append_is_rejected(timeline)
                     .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                     .and_then(|()| store.admit_visible_pipeline_batch(timeline, basis, now))
+                    .or_else(pipeline_mode_binding_stale_outcome)
             })
         })
     }

@@ -232,27 +232,43 @@ impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
     }
 }
 
+/// The name of each outcome kind, indexed by
+/// [`pos_core::PipelineOutcomeKindV1`]. Its length is the kind count; the
+/// oracle test `every_outcome_kind_routes_through_the_name_table` fails to
+/// compile until a new outcome is named here.
+const OUTCOME_NAMES: [&str; pos_core::PipelineOutcomeKindV1::COUNT] = [
+    "Rejected",
+    "InvalidObservation",
+    "AuthorityRevoked",
+    "AuthorityExpired",
+    "PolicyIndeterminate",
+    "ResourceExhausted",
+    "InvalidPluginResult",
+    "InvalidProviderResult",
+    "DomainConflict",
+    "AdmissionConflict",
+    "Committed",
+    "RecoveredDuplicate",
+    "InvalidDependencyDeclaration",
+    "DependencySetExhausted",
+    "ModeBindingStale",
+];
+
 /// Name only the outcome discriminant so a rendered error never carries
-/// receipt data such as Event identities or digests. This is a flat name
-/// table: it has no wildcard, so every new outcome must add an arm here.
-const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
-    use pos_core::PipelineOutcomeV1 as Outcome;
-    match outcome {
-        Outcome::Rejected => "Rejected",
-        Outcome::InvalidObservation => "InvalidObservation",
-        Outcome::AuthorityRevoked => "AuthorityRevoked",
-        Outcome::AuthorityExpired => "AuthorityExpired",
-        Outcome::PolicyIndeterminate => "PolicyIndeterminate",
-        Outcome::ResourceExhausted => "ResourceExhausted",
-        Outcome::InvalidPluginResult => "InvalidPluginResult",
-        Outcome::InvalidProviderResult => "InvalidProviderResult",
-        Outcome::Committed(_) => "Committed",
-        Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
-        Outcome::DomainConflict => "DomainConflict",
-        Outcome::AdmissionConflict => "AdmissionConflict",
-        Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
-        Outcome::DependencySetExhausted => "DependencySetExhausted",
-    }
+/// receipt data such as Event identities or digests.
+fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+    kind_name(outcome.kind())
+}
+
+const _: () = assert!(OUTCOME_NAMES.len() == pos_core::PipelineOutcomeKindV1::COUNT);
+
+/// The name of one outcome kind; a kind past the table is `Unclassified`,
+/// never a success name.
+fn kind_name(kind: pos_core::PipelineOutcomeKindV1) -> &'static str {
+    OUTCOME_NAMES
+        .get(kind as usize)
+        .copied()
+        .unwrap_or("Unclassified")
 }
 
 #[cfg(test)]
@@ -351,6 +367,97 @@ mod tests {
         assert!(e.to_string().contains("Replay"));
     }
 
+    /// The exhaustive oracle of the name table: a new outcome kind fails to
+    /// compile here until it is named.
+    const fn oracle_name(kind: pos_core::PipelineOutcomeKindV1) -> &'static str {
+        use pos_core::PipelineOutcomeKindV1 as Kind;
+        match kind {
+            Kind::Rejected => "Rejected",
+            Kind::InvalidObservation => "InvalidObservation",
+            Kind::AuthorityRevoked => "AuthorityRevoked",
+            Kind::AuthorityExpired => "AuthorityExpired",
+            Kind::PolicyIndeterminate => "PolicyIndeterminate",
+            Kind::ResourceExhausted => "ResourceExhausted",
+            Kind::InvalidPluginResult => "InvalidPluginResult",
+            Kind::InvalidProviderResult => "InvalidProviderResult",
+            Kind::DomainConflict => "DomainConflict",
+            Kind::AdmissionConflict => "AdmissionConflict",
+            Kind::Committed => "Committed",
+            Kind::RecoveredDuplicate => "RecoveredDuplicate",
+            Kind::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
+            Kind::DependencySetExhausted => "DependencySetExhausted",
+            Kind::ModeBindingStale => "ModeBindingStale",
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_kind(
+        variant: pos_core::PipelineOutcomeKindV1,
+    ) -> Option<pos_core::PipelineOutcomeKindV1> {
+        match variant {
+            pos_core::PipelineOutcomeKindV1::Rejected => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidObservation)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidObservation => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityRevoked)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityRevoked => {
+                Some(pos_core::PipelineOutcomeKindV1::AuthorityExpired)
+            }
+            pos_core::PipelineOutcomeKindV1::AuthorityExpired => {
+                Some(pos_core::PipelineOutcomeKindV1::PolicyIndeterminate)
+            }
+            pos_core::PipelineOutcomeKindV1::PolicyIndeterminate => {
+                Some(pos_core::PipelineOutcomeKindV1::ResourceExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::ResourceExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidPluginResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidPluginResult => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidProviderResult)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidProviderResult => {
+                Some(pos_core::PipelineOutcomeKindV1::DomainConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::DomainConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::AdmissionConflict)
+            }
+            pos_core::PipelineOutcomeKindV1::AdmissionConflict => {
+                Some(pos_core::PipelineOutcomeKindV1::Committed)
+            }
+            pos_core::PipelineOutcomeKindV1::Committed => {
+                Some(pos_core::PipelineOutcomeKindV1::RecoveredDuplicate)
+            }
+            pos_core::PipelineOutcomeKindV1::RecoveredDuplicate => {
+                Some(pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration)
+            }
+            pos_core::PipelineOutcomeKindV1::InvalidDependencyDeclaration => {
+                Some(pos_core::PipelineOutcomeKindV1::DependencySetExhausted)
+            }
+            pos_core::PipelineOutcomeKindV1::DependencySetExhausted => {
+                Some(pos_core::PipelineOutcomeKindV1::ModeBindingStale)
+            }
+            pos_core::PipelineOutcomeKindV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_outcome_kind_routes_through_the_name_table() {
+        let mut walked = 0;
+        let mut last = pos_core::PipelineOutcomeKindV1::Rejected;
+        let mut current = Some(pos_core::PipelineOutcomeKindV1::Rejected);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(kind_name(variant), oracle_name(variant));
+            last = variant;
+            walked += 1;
+            current = next_kind(variant);
+        }
+        assert_eq!(walked, pos_core::PipelineOutcomeKindV1::COUNT);
+        assert_eq!(last as usize, pos_core::PipelineOutcomeKindV1::COUNT - 1);
+    }
+
     #[test]
     fn the_dependency_outcomes_are_named_by_their_discriminant() {
         use pos_core::PipelineOutcomeV1;
@@ -364,6 +471,7 @@ mod tests {
                 PipelineOutcomeV1::DependencySetExhausted,
                 "DependencySetExhausted",
             ),
+            (PipelineOutcomeV1::ModeBindingStale, "ModeBindingStale"),
         ] {
             assert_eq!(
                 RuntimeError::ScheduledPassNotAdmitted(Box::new(outcome)).to_string(),
