@@ -10,7 +10,7 @@
 //!
 //! The shipped adapter, [`KeyFileRuntimeSigner`], holds the provider's
 //! Ed25519 key, which the ADR-069 R11 §4.4 key file held: the provider
-//! installation's `RuntimeKey` (#1358) is the one loader of that file and its
+//! installation's `RuntimeKey` (#1066) is the one loader of that file and its
 //! contract. The key never leaves the process. The runtime-attestation key ID
 //! comes from the admitted SPM1, never from the file.
 
@@ -99,8 +99,12 @@ pub struct KeyFileRuntimeSigner {
 }
 
 impl KeyFileRuntimeSigner {
-    /// The signer of `key`, which the R11 §4.4 key file held, for the
-    /// SPM1-admitted `key_id`.
+    /// The signer of `key` for the SPM1-admitted `key_id`.
+    ///
+    /// This bypasses the R11 §4.4 key-file contract: it trusts that `key`
+    /// came from the key file. Only the provider's composition root calls
+    /// it, with the key it loaded and checked through `RuntimeKey` (#1066);
+    /// tests build signers from a fixed key.
     #[must_use]
     pub const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
         Self { key, key_id }
@@ -142,6 +146,11 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
+
+    use pos_reference::sandbox_provider_protocol::{
+        SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxProviderError,
+        SandboxProviderErrorCode, SandboxProviderErrorFields,
+    };
 
     use super::*;
 
@@ -230,6 +239,51 @@ mod tests {
         let verified = sign_verified(&signer, AdmittedRuntimeKey::new("runtime", &public), record)?;
         assert_eq!(verified.key(), &public);
         ExecutionRelease::new(verified, &public)?.verify_signature(&public)?;
+        Ok(())
+    }
+
+    #[test]
+    fn describe_responses_and_provider_errors_are_signed_only_for_the_admitted_key() -> TestResult {
+        let signer = signer([42; 32]);
+        let public = SigningKey::from_bytes(&[42; 32]).verifying_key();
+        let admitted = AdmittedRuntimeKey::new("runtime", &public);
+        let describe = |key_id: &str| SandboxDescribeResponseFields {
+            request_id: [1; 16],
+            spm1_digest: [2; 32],
+            provider_binary_digest: [3; 32],
+            hcp1_digest: [4; 32],
+            active_apt1_digest: [5; 32],
+            runtime_attestation_key_id: key_id.to_owned(),
+        };
+        let refusal = |key_id: &str| SandboxProviderErrorFields {
+            operation: Some(1),
+            request_id: Some([6; 16]),
+            request_digest: Some([7; 32]),
+            attempt_id: Some([8; 16]),
+            code: SandboxProviderErrorCode::SandboxUnavailable,
+            safe_detail: None,
+            runtime_attestation_key_id: key_id.to_owned(),
+        };
+        let record = SandboxDescribeResponse::self_digested(describe("runtime"))?;
+        let response =
+            SandboxDescribeResponse::new(sign_verified(&signer, admitted, record)?, &public)?;
+        SandboxDescribeResponse::from_canonical_cbor(&response.to_canonical_cbor()?)?
+            .verify_signature(&public)?;
+        let record = SandboxProviderError::self_digested(refusal("runtime"))?;
+        let error = SandboxProviderError::new(sign_verified(&signer, admitted, record)?, &public)?;
+        SandboxProviderError::from_canonical_cbor(&error.to_canonical_cbor()?)?
+            .verify_signature(&public)?;
+        // A record naming another key than the admitted one is not signed.
+        let other = SandboxDescribeResponse::self_digested(describe("other"))?;
+        assert!(matches!(
+            sign_verified(&signer, admitted, other),
+            Err(RuntimeSignerError::KeyIdMismatch)
+        ));
+        let other = SandboxProviderError::self_digested(refusal("other"))?;
+        assert!(matches!(
+            sign_verified(&signer, admitted, other),
+            Err(RuntimeSignerError::KeyIdMismatch)
+        ));
         Ok(())
     }
 }

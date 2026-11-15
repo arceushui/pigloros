@@ -325,8 +325,8 @@ pub struct SandboxDescribeResponse {
     pub hcp1_digest: [u8; 32],
     pub active_apt1_digest: [u8; 32],
     pub runtime_attestation_key_id: String,
-    pub response_digest: [u8; 32],
-    pub signature: [u8; 64],
+    response_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 /// SCQ1 cancel request.
@@ -636,6 +636,18 @@ impl SandboxDescribeResponse {
             bytes_value(&self.response_digest),
             bytes_value(&self.signature),
         ]))
+    }
+
+    /// The SDY1 self-digest.
+    #[must_use]
+    pub const fn response_digest(&self) -> [u8; 32] {
+        self.response_digest
+    }
+
+    /// The runtime-attestation signature over the self-digest.
+    #[must_use]
+    pub const fn signature(&self) -> [u8; 64] {
+        self.signature
     }
 
     fn fields(&self) -> SandboxDescribeResponseFields {

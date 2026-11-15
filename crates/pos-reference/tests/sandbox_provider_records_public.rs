@@ -315,6 +315,7 @@ fn only_a_signature_under_the_admitted_key_becomes_a_record() -> TestResult {
     assert!(error
         .signature_message()
         .starts_with(b"PiglorOS.SPE1.Signature.v1\0"));
+    assert_eq!(describe.key_id(), KEY_ID);
     assert_eq!(error.key_id(), KEY_ID);
     Ok(())
 }
