@@ -2258,6 +2258,16 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(repeated["code"], "invalid-request");
+        // So is a repeated page limit, even when both copies are in range.
+        let (status, repeated) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&limit=1&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(repeated["code"], "invalid-request");
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
         assert!(gateway
