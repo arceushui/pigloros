@@ -7533,63 +7533,63 @@ mod coverage_paths {
         Ok(())
     }
 
+    struct LegacyInventoryPersistencePort;
+
+    impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
+        fn complete_erasure_inventory_snapshot(
+            &mut self,
+            _maximum_requests: usize,
+        ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
+        }
+
+        fn erasure_authority_snapshot_with_limits(
+            &mut self,
+            _limits: ErasureRecoveryLimitsV1,
+        ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn retain_erasure_object(
+            &mut self,
+            _canonical: &[u8],
+            _max_bytes: usize,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn commit_local_owner_effect(
+            &mut self,
+            _effect: LocalOwnerEffectV1,
+            _elo1: &[u8],
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn init_erasure_store_identity(
+            &mut self,
+            _id: crate::Hash,
+        ) -> Result<crate::Hash, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn sweep_unreferenced_erasure_objects(
+            &mut self,
+            _tags: &[&str],
+            _keep: &[ErasureReferenceV1],
+            _max: usize,
+        ) -> Result<usize, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
     #[test]
     fn limit_aware_inventory_queries_fail_closed_without_an_override() -> Result<(), ErasureErrorV1>
     {
-        struct LegacyInventoryPersistencePort;
-
-        impl ErasureInventoryPersistencePortV1 for LegacyInventoryPersistencePort {
-            fn complete_erasure_inventory_snapshot(
-                &mut self,
-                _maximum_requests: usize,
-            ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-                ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
-            }
-
-            fn erasure_authority_snapshot_with_limits(
-                &mut self,
-                _limits: ErasureRecoveryLimitsV1,
-            ) -> Result<ErasureAuthoritySnapshotV1, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-
-            fn retain_erasure_object(
-                &mut self,
-                _canonical: &[u8],
-                _max_bytes: usize,
-            ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-
-            fn commit_local_owner_effect(
-                &mut self,
-                _effect: LocalOwnerEffectV1,
-                _elo1: &[u8],
-            ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-
-            fn erasure_store_identity(&mut self) -> Result<Option<crate::Hash>, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-
-            fn init_erasure_store_identity(
-                &mut self,
-                _id: crate::Hash,
-            ) -> Result<crate::Hash, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-
-            fn sweep_unreferenced_erasure_objects(
-                &mut self,
-                _tags: &[&str],
-                _keep: &[ErasureReferenceV1],
-                _max: usize,
-            ) -> Result<usize, ErasureErrorV1> {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
-        }
-
         struct LegacyInventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
         impl ErasureVerifiedInventoryQueryV1 for LegacyInventoryQuery {

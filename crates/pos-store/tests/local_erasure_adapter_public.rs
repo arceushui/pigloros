@@ -303,7 +303,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
 
     // The tombstone and its ELO1 commit together.
     let tombstone = LocalOwnerEffectV1::KeyTombstone {
-        request: key_request(),
+        request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),
     };
     let elo1 = record("ELO1", 200);
@@ -325,7 +325,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
 
     // A tombstone the registry refuses commits no ELO1.
     let refused_tombstone = LocalOwnerEffectV1::KeyTombstone {
-        request: key_request(),
+        request: Box::new(key_request()),
         deletion_receipt: Hash::from_bytes([3; 32]),
     };
     let late = record("ELO1", 202);

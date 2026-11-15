@@ -190,7 +190,7 @@ pub enum LocalOwnerEffectV1 {
     /// The final key-registry tombstone of one key destruction.
     KeyTombstone {
         /// The key destruction whose pending phase is already durable.
-        request: KeyDestructionRequestV1,
+        request: Box<KeyDestructionRequestV1>,
         /// The tombstone's deletion receipt.
         deletion_receipt: Hash,
     },
@@ -226,7 +226,7 @@ impl PreparedLocalOwnerEffectV1 {
             LocalOwnerEffectV1::KeyTombstone {
                 request,
                 deletion_receipt,
-            } => (Some((request, deletion_receipt)), Ok(None)),
+            } => (Some((*request, deletion_receipt)), Ok(None)),
             LocalOwnerEffectV1::ArtifactDisposition(record) => {
                 (None, tagged_object(record, "ELAD1").map(Some))
             }
