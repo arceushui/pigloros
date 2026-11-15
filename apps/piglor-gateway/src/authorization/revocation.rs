@@ -43,7 +43,7 @@ const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.GatewayConsentRevocation.v1\0";
 const REVOCATION_KEY_CONTEXT: &str = "pigloros gateway consent revocation key v1";
 
 /// The outcome of one revocation request.
-pub(crate) enum ConsentRevocationOutcomeV1 {
+pub enum ConsentRevocationOutcomeV1 {
     /// The revocation this request recorded (`201`).
     Recorded(Value),
     /// The consent's original revocation (`200`).

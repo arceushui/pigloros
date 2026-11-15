@@ -27,13 +27,12 @@ use thiserror::Error;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock};
 
 mod consent;
-mod revocation;
+pub mod revocation;
 mod session;
 
 pub use consent::{
     GatewayConsentRevocationV1, GatewayConsentV1, GatewayConsentedAuthorityV1, GatewayConsentsV1,
 };
-pub(crate) use revocation::ConsentRevocationOutcomeV1;
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 /// Denial records one Principal may cause per window before further denials

@@ -741,16 +741,19 @@ async fn post_consent_revocation(
     authority: OperationAuthority<RevokeConsentOperation>,
     ContractJson(body): ContractJson<ConsentRevocationRequestV1>,
 ) -> Result<Response, GatewayError> {
-    let permit = authority.authorize(&state.gateway, None).await?;
     let outcome = state
         .gateway
-        .revoke_consent_v1(permit, pos_core::EventId::from_ulid(body.consent_ref), &key)
+        .revoke_consent_v1(
+            authority.authorize(&state.gateway, None).await?,
+            pos_core::EventId::from_ulid(body.consent_ref),
+            &key,
+        )
         .await?;
     Ok(match outcome {
-        crate::authorization::ConsentRevocationOutcomeV1::Recorded(body) => {
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Recorded(body) => {
             (StatusCode::CREATED, Json(body)).into_response()
         }
-        crate::authorization::ConsentRevocationOutcomeV1::Original(body) => {
+        crate::authorization::revocation::ConsentRevocationOutcomeV1::Original(body) => {
             (StatusCode::OK, Json(body)).into_response()
         }
     })

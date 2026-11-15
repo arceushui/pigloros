@@ -216,15 +216,9 @@ impl LocalPrincipalProvisionV1 {
         principal: &PrincipalRefV1,
         actor_entity_ids: impl IntoIterator<Item = EntityId>,
         operations: impl IntoIterator<Item = GatewayOperationV1>,
-        consent: Option<LocalConsentDraftV1>,
+        consent: Option<&LocalConsentDraftV1>,
     ) -> Result<Self, LocalPrincipalErrorV1> {
-        Self::try_new_provisioned(
-            principal,
-            actor_entity_ids,
-            operations,
-            consent.as_ref(),
-            None,
-        )
+        Self::try_new_provisioned(principal, actor_entity_ids, operations, consent, None)
     }
 
     /// [`Self::try_new`], also recording `governance_record` as the host's
@@ -568,9 +562,10 @@ fn consented_grants(
         .collect()
 }
 
-/// Record the consents of `provision` on the Principal's consent Timeline
-/// of the store `host` owns, after checking that the Timeline holds no
-/// other consents; a provisioning that binds none records nothing.
+/// Record the consents of `provision` on the Principal's consent Timeline.
+///
+/// The Timeline belongs to the store `host` owns; it must hold no other
+/// consents, and a provisioning that binds none records nothing.
 ///
 /// The consent Timeline is opened under its well-known identity and each
 /// consent is appended as one `consent.granted.v1` Event, in document order,
@@ -782,9 +777,11 @@ pub fn provision_local_principal_from_credentials(
     })
 }
 
-/// Attach the offline writer to the store `host` owns, refuse a Principal
-/// its mode does not allow or a store that holds another Principal, then
-/// record the consents and persist the Principal of `provision`.
+/// Provision `provision` into the store `host` owns, as an offline writer.
+///
+/// It attaches the offline writer, refuses a Principal its mode does not
+/// allow or a store that holds another Principal, then records the consents
+/// and persists the Principal.
 ///
 /// Nothing is written before every check passed: the store's recorded root
 /// grant must be this document's, and its consent Timeline must hold no
@@ -1511,7 +1508,7 @@ pub fn local_principal_consent_timeline() -> TimelineId {
 }
 
 /// The bounds of one complete consent Timeline read.
-pub(crate) fn consent_bounds() -> EventReadBounds {
+pub(crate) const fn consent_bounds() -> EventReadBounds {
     EventReadBounds::new(
         crate::MAX_EVENT_PAYLOAD_BYTES,
         crate::MAX_EVENT_TYPE_BYTES,
@@ -3132,7 +3129,7 @@ mod tests {
             &principal()?,
             [actor()?],
             CONSENTED_OPERATIONS,
-            Some(consent_of(vec![
+            Some(&consent_of(vec![
                 grant_draft("operation", &["timeline"], false),
                 grant_draft("operation", &["society.signal"], true),
                 grant_draft("action", &["world.action.v1"], false),
@@ -3404,7 +3401,7 @@ mod tests {
                 GatewayOperationV1::REVOKE_CONSENT,
                 GatewayOperationV1::READ_SESSION,
             ],
-            Some(consent_of(vec![grant_draft(
+            Some(&consent_of(vec![grant_draft(
                 "operation",
                 &["timeline"],
                 false,
@@ -3569,7 +3566,7 @@ mod tests {
             &principal()?,
             [actor()?],
             CONSENTED_OPERATIONS,
-            Some(consent_of(vec![grant_draft(
+            Some(&consent_of(vec![grant_draft(
                 "operation",
                 &["timeline", "society.signal"],
                 false,
@@ -3619,7 +3616,7 @@ mod tests {
                 &principal()?,
                 [actor()?],
                 granted.iter().copied(),
-                Some(consent),
+                Some(&consent),
             ) == Err(LocalPrincipalErrorV1::Invalid))
         };
         let operations = &CONSENTED_OPERATIONS[..];
@@ -3710,7 +3707,7 @@ mod tests {
                 GatewayOperationV1::READ_SESSION,
                 GatewayOperationV1::CREATE_TIMELINE,
             ],
-            Some(consent_of(vec![grant_draft(
+            Some(&consent_of(vec![grant_draft(
                 "operation",
                 &["timeline"],
                 true,
@@ -3748,7 +3745,7 @@ mod tests {
                 &principal()?,
                 [actor()?],
                 CONSENTED_OPERATIONS,
-                Some(consent_of(vec![grant_draft(
+                Some(&consent_of(vec![grant_draft(
                     "operation",
                     &["timeline"],
                     true,
@@ -3975,7 +3972,7 @@ mod tests {
                 &principal()?,
                 [actor()?],
                 CONSENTED_OPERATIONS,
-                Some(consent_of(grants)?),
+                Some(&consent_of(grants)?),
             )?)
         };
         // Consented actions beside root-chain signals, then root-chain
