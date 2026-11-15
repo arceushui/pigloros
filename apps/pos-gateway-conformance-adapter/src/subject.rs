@@ -32,16 +32,17 @@ pub const ABI_MINOR: u16 = 0;
 pub const SCHEMA_ID: &str = "pigloros.gateway-client-conformance.case.v2";
 
 /// The route capabilities the adapter implements, sorted.
-pub const CAPABILITY_IDS: [&str; 6] = [
+pub const CAPABILITY_IDS: [&str; 7] = [
     "gateway.health.read",
     "gateway.ledger.read",
+    "session.read",
     "timeline.create",
     "timeline.events.read",
     "timeline.signals.append",
     "world.action.v1.submit",
 ];
 
-/// The actor of the `authorized` composition's fixture Local Principal.
+/// The actor of the authorized compositions' fixture Local Principal.
 pub const ACTOR_ENTITY_ID: &str = "01JC0GATEWAYF1XTVREACT0R00";
 
 /// The World body the fixture action payloads name.
