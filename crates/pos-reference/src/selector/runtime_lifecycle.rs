@@ -26,7 +26,9 @@ const MAX_CGROUP_PATH_BYTES: usize = 4096;
 /// the tuple field is private, so it cannot be constructed.
 ///
 /// ```compile_fail,E0423
-/// let _ = pos_reference::selector::runtime_lifecycle::ObservationChallenge([7; 16]);
+/// use pos_reference::selector::runtime_lifecycle::ObservationChallenge;
+///
+/// let _ = ObservationChallenge([7; 16]);
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationChallenge([u8; 16]);
