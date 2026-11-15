@@ -40,8 +40,8 @@ use super::termination::{
     ServiceResultCode, StartJobResult, TerminalCode,
 };
 use super::{
-    LauncherReady, SandboxExecutionMode, SandboxLimit, SandboxProviderProtocolError,
-    SandboxProviderReceipt,
+    LauncherReady, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
+    SandboxProviderProtocolError, SandboxProviderReceipt,
 };
 
 pub use observed::{
@@ -64,12 +64,17 @@ const WORK_BYTES_LIMIT: u8 = 9;
 const LIVE_ATTEMPTS_LIMIT: u8 = 13;
 const INCOMPLETE_INPUTS_LIMIT: u8 = 14;
 
-/// The tmpfs block sizes (`f_bsize`, the page size) of the supported
-/// architectures. `/work` capacity is ELM1 limit 9 rounded up to a multiple
-/// of the host's (R9 §4.4). No record names the page size, and `AArch64`
-/// kernels use all three, so a capacity is exact when it is the limit
-/// rounded up to one of them.
-const WORK_BLOCK_BYTES: [u64; 3] = [4096, 16_384, 65_536];
+/// The tmpfs block size (`f_bsize`, the page size) of an admitted
+/// architecture: `/work` capacity is ELM1 limit 9 rounded up to a multiple
+/// of it (R9 §4.4). `x86_64` has one page size. An `aarch64` kernel may use
+/// any of three, and no admitted record (HCP1, SCS1 or the policy) pins
+/// one, so each of them is a candidate.
+const fn work_block_bytes(architecture: SandboxArchitecture) -> &'static [u64] {
+    match architecture {
+        SandboxArchitecture::X86_64 => &[4096],
+        SandboxArchitecture::Aarch64 => &[4096, 16_384, 65_536],
+    }
+}
 
 /// Each closed code is its R9 number, and every other number is rejected.
 macro_rules! closed_codes {
@@ -238,6 +243,9 @@ pub struct AttemptEvidenceContext<'a> {
     pub limits: EffectiveLimitRecord<'a>,
     /// The admitted execution mode.
     pub mode: SandboxExecutionMode,
+    /// The admitted host architecture (HCP1 and SCS1), which fixes the
+    /// `/work` block size.
+    pub architecture: SandboxArchitecture,
     /// The accepted `ReadyV1`; `None` when none was accepted.
     pub ready: Option<&'a LauncherReady>,
     /// The provider's own namespaces, retained once for the runtime.
@@ -390,7 +398,11 @@ impl AttemptEvidence {
             ) => {
                 *ready1_digest == ready.digest
                     && observation.matches_ready(ready, context.provider_namespaces)
-                    && work_capacity_matches(observation.work, work_limit)
+                    && work_capacity_matches(
+                        observation.work,
+                        work_limit,
+                        work_block_bytes(context.architecture),
+                    )
             }
             _ => false,
         }
@@ -492,11 +504,11 @@ impl Limits {
 }
 
 /// KOE1 `work` is null exactly when ELM1 limit 9 is zero, and otherwise its
-/// capacity is exactly the limit rounded up to a supported tmpfs block.
-fn work_capacity_matches(work: Option<super::WorkMountFacts>, limit: u64) -> bool {
+/// capacity is exactly the limit rounded up to one of `blocks`.
+fn work_capacity_matches(work: Option<super::WorkMountFacts>, limit: u64, blocks: &[u64]) -> bool {
     work.map_or(limit == 0, |work| {
         limit != 0
-            && WORK_BLOCK_BYTES.iter().any(|block| {
+            && blocks.iter().any(|block| {
                 limit.div_ceil(*block).checked_mul(*block) == Some(work.capacity_bytes)
             })
     })

@@ -224,13 +224,17 @@ pub(super) fn rejects_malformed_encodings(
     let mut indefinite = replace(0, &[0x9f]);
     indefinite.push(0xff);
     let count = bytes[header];
+    // The magic as a definite-length text of the invalid UTF-8 `c3 28`.
+    let mut invalid_utf8 = bytes[..magic].to_vec();
+    invalid_utf8.extend_from_slice(&[0x62, 0xc3, 0x28]);
+    invalid_utf8.extend_from_slice(&bytes[magic + 5..]);
     let cases = [
         ("non-preferred integer", replace(version, &[0x18, 0x01])),
         ("map", replace(version, &[0xa0])),
         ("tag", replace(version, &[0xc1, 0x01])),
         ("float", replace(version, &[0xf9, 0x3c, 0x00])),
         ("indefinite length", indefinite),
-        ("invalid UTF-8", replace(magic + 1, &[0xff])),
+        ("invalid UTF-8", invalid_utf8),
         ("one field too many", replace(header, &[count + 1])),
         ("one field too few", replace(header, &[count - 1])),
     ];
