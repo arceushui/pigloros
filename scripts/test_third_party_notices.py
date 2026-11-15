@@ -253,7 +253,7 @@ class PolicyMirrorTests(WorkspaceTest):
     def test_scope_settings_are_required(self) -> None:
         cases = {
             "targets": (
-                'targets = ["x86_64-unknown-linux-gnu"]',
+                'targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]',
                 'targets = ["aarch64-apple-darwin"]',
             ),
             "ignore-dev-dependencies": (

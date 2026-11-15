@@ -84,6 +84,13 @@ impl SchemaRegistry {
         self.insert_vacant(schema).unwrap_or_default();
     }
 
+    /// The JSON Schema registered for `event_type`, if any.
+    pub(crate) fn json_schema(&self, event_type: &str) -> Option<&str> {
+        self.schemas
+            .get(event_type)
+            .and_then(|schema| schema.json_schema.as_deref())
+    }
+
     /// Returns `true` if the event type is registered.
     #[must_use]
     pub fn contains(&self, event_type: &str) -> bool {

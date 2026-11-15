@@ -47,6 +47,70 @@ fn serves_the_exact_pinned_owner_response_once() -> TestResult {
     let served = listener.served();
     assert_eq!(served.count, 1);
     assert!(served.integrity_ok);
+    assert_eq!(listener.received_request_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
+    use pos_owner_bridge::listener::FixtureProfile;
+
+    let core = include_str!("../assets/owner-core.js");
+    for profile in [
+        FixtureProfile::Pending,
+        FixtureProfile::Popup,
+        FixtureProfile::PopupReceipt,
+        FixtureProfile::Permission,
+        FixtureProfile::External,
+        FixtureProfile::Navigation,
+        FixtureProfile::Download,
+        FixtureProfile::Authentication,
+        FixtureProfile::ReadOnlyWrite,
+        FixtureProfile::ReadOnlyControl,
+        FixtureProfile::DuplicateRequest,
+        FixtureProfile::InterleavedPair,
+        FixtureProfile::DelayedDelivery,
+        FixtureProfile::SuccessfulGet,
+        FixtureProfile::SuccessfulGetReleaseDelay,
+        FixtureProfile::SuccessfulGetWritingDelay,
+        FixtureProfile::WithheldDelivery,
+    ] {
+        let config = ListenerConfig::fixture(profile);
+        let listener = start(config)?;
+        let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+        let digest: [u8; 32] = Sha256::digest(&response).into();
+        assert_eq!(&digest, config.expected_digest());
+        assert_ne!(
+            config.expected_digest(),
+            ListenerConfig::adr().expected_digest()
+        );
+        let text = std::str::from_utf8(&response)?;
+        assert!(text.contains(core));
+        assert!(!text.contains("navigator.credentials"));
+        assert!(text.contains("connect-src 'none'"));
+        assert_eq!(listener.served().count, 1);
+        assert!(listener.served().integrity_ok);
+        assert_eq!(listener.received_request_count(), 1);
+        let other = exchange(
+            listener.v4_addr(),
+            b"GET /denied-navigation HTTP/1.1\r\nHost: localhost:49291\r\n\
+Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+        )?;
+        assert!(
+            other.starts_with(b"HTTP/1.1 404 Not Found\r\n"),
+            "{profile:?}: {other:?}"
+        );
+        assert_eq!(listener.served().count, 1);
+        if profile == FixtureProfile::Permission {
+            let diagnostic = exchange(
+                listener.v4_addr(),
+                b"GET /permission-diag/noresult HTTP/1.1\r\nHost: localhost:49291\r\n\
+Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+            )?;
+            assert!(diagnostic.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+            assert_eq!(listener.served().count, 1);
+        }
+    }
     Ok(())
 }
 
@@ -70,6 +134,7 @@ fn a_second_completion_raises_the_served_count_and_navigation_resets_it() -> Tes
     assert_eq!(listener.served().count, 2);
     listener.begin_navigation();
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 2);
     assert!(listener.served().integrity_ok);
     Ok(())
 }
@@ -82,6 +147,7 @@ Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n";
     let response = exchange(listener.v4_addr(), request)?;
     assert!(response.starts_with(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"));
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -91,6 +157,7 @@ fn a_malformed_request_gets_the_fixed_400() -> TestResult {
     let response = exchange(listener.v4_addr(), b"POST /owner.html HTTP/1.1\r\n\r\n")?;
     assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n"));
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -108,6 +175,7 @@ fn a_silent_connection_is_closed_after_the_first_byte_timeout_without_a_response
     let started = Instant::now();
     let response = exchange(listener.v4_addr(), b"")?;
     assert!(response.is_empty());
+    assert_eq!(listener.received_request_count(), 0);
     // Only the lower bound is deterministic. A loaded runner may take longer, and the client's
     // own ten-second read timeout turns a hung listener into a failure.
     assert!(started.elapsed() >= Duration::from_millis(900));
@@ -127,6 +195,46 @@ fn an_incomplete_header_block_is_closed_at_the_header_deadline_without_a_respons
     let response = exchange(listener.v4_addr(), b"GET /owner.html HTTP/1.1\r\nHost")?;
     assert!(response.is_empty());
     assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(listener.received_request_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn two_held_silent_connections_leave_capacity_for_owner_document() -> TestResult {
+    let timeouts = ListenerTimeouts {
+        first_byte: Duration::from_secs(30),
+        ..ListenerConfig::adr().timeouts()
+    };
+    let config = ListenerConfig::new(timeouts, *ListenerConfig::adr().expected_digest());
+    let listener = start(config)?;
+    let silent: Vec<_> = (0..2)
+        .map(|_| TcpStream::connect(listener.v4_addr()))
+        .collect::<io::Result<_>>()?;
+    let limit = Instant::now() + Duration::from_secs(10);
+    while listener.observation().handling < 2 {
+        if Instant::now() >= limit {
+            return Err("silent connections were not accepted".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+    assert!(is_the_pinned_owner_response(&response));
+    let limit = Instant::now() + Duration::from_secs(10);
+    let observation = loop {
+        let observation = listener.observation();
+        if observation.handling == 2 {
+            break observation;
+        }
+        if Instant::now() >= limit {
+            return Err("owner connection did not retire".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(observation.silent, 0);
+    assert_eq!(observation.handling, 2);
+    assert_eq!(listener.served().count, 1);
+    assert!(listener.served().integrity_ok);
+    drop(silent);
     Ok(())
 }
 
@@ -140,11 +248,67 @@ fn silent_preconnect_sockets_cannot_starve_a_real_navigation() -> TestResult {
     let started = Instant::now();
     let response = exchange(address, OWNER_REQUEST)?;
     assert!(is_the_pinned_owner_response(&response));
+    assert_eq!(listener.received_request_count(), 1);
     // The three silent sockets hold every slot until their first-byte deadline, so the real
     // request cannot have been answered earlier. There is no upper bound: see above.
     assert!(started.elapsed() >= Duration::from_millis(900));
     assert_eq!(listener.served().count, 1);
     drop(silent);
+    Ok(())
+}
+
+#[test]
+fn aggregate_connection_observations_track_silent_and_served_sockets() -> TestResult {
+    let listener = start(ListenerConfig::adr())?;
+    let silent = TcpStream::connect(listener.v4_addr())?;
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = listener.observation();
+        if observation.accepted >= 1 && observation.handling >= 1 {
+            break;
+        }
+        if Instant::now() >= limit {
+            return Err("silent socket was not accepted".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(silent);
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = listener.observation();
+        if observation.silent >= 1 && observation.handling == 0 {
+            break;
+        }
+        if Instant::now() >= limit {
+            return Err("silent socket did not retire".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+    assert!(is_the_pinned_owner_response(&response));
+    let observation = listener.observation();
+    assert_eq!(observation.accepted, 2);
+    assert_eq!(observation.silent, 1);
+    assert_eq!(observation.silent_eof, 1);
+    assert_eq!(observation.silent_timeout, 0);
+    assert_eq!(observation.silent_error, 0);
+    assert_eq!(observation.complete, 1);
+    assert_eq!(listener.received_request_count(), 1);
+    assert_eq!(listener.served().count, 1);
+    Ok(())
+}
+
+#[test]
+fn a_silent_socket_timeout_is_distinguished_from_eof() -> TestResult {
+    let listener = start(ListenerConfig::adr())?;
+    let response = exchange(listener.v4_addr(), b"")?;
+    assert!(response.is_empty());
+    let observation = listener.observation();
+    assert_eq!(observation.silent, 1);
+    assert_eq!(observation.silent_timeout, 1);
+    assert_eq!(observation.silent_eof, 0);
+    assert_eq!(observation.silent_error, 0);
+    assert_eq!(listener.received_request_count(), 0);
     Ok(())
 }
 
