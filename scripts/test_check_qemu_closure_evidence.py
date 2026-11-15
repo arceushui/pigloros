@@ -102,8 +102,8 @@ def qemu_argv(architecture: str, *extra: str) -> bytes:
     argv = [f"{PATHS['qemu']}/bin/qemu-system-{architecture}", *machine[architecture],
             "-accel", "tcg", "-cpu", "max", "-name", "piglor-qemu-evidence", "-m", "2048",
             "-device", "virtio-rng-pci", "-virtfs", "local,path=/nix/store,security_model=none,mount_tag=nix-store",
-            "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=xchg",
-            "-virtfs", "local,path=/tmp/w/xchg,security_model=none,mount_tag=shared",
+            "-virtfs", "local,path=/tmp/qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=xchg",
+            "-virtfs", "local,path=/tmp/qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=shared",
             *devices[architecture],
             "-kernel", f"{PATHS['toplevel']}/kernel", "-initrd", f"{store('initrd')}/initrd",
             "-append", f"loglevel=4 init={PATHS['toplevel']}/init regInfo=/x console=ttyS0",
@@ -481,6 +481,11 @@ class EvidenceTests(unittest.TestCase):
         wrapped = f"{PATHS['qemu']}/bin/.qemu-system-x86_64-wrapped\n"
         self.verdict(change=lambda f: f.update({"host/qemu-exe": wrapped}))
 
+    def test_aarch64_devices_are_its_own(self):
+        self.refuses(lambda f: f.update({"host/qemu-argv": qemu_argv("aarch64", "-usb")}), "aarch64")
+        self.refuses(lambda f: f.update({"host/qemu-argv": qemu_argv("aarch64").replace(
+            b"-device\0virtio-gpu-pci\0", b"")}), "aarch64")
+
     def test_systemctl_omits_an_empty_environment_files_list(self):
         key = "guest/mountfsd-service-properties"
         self.verdict(change=lambda f: f.update({key: f[key].replace("EnvironmentFiles=\n", "")}))
@@ -553,6 +558,18 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-blk-pci,drive=d")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home,mount_tag=home")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-virtfs", "local,path=/home")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "vmxnet3")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-fs-pci")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "usb-host,hostbus=1")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-device", "virtio-rng-pci")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-device\0usb-tablet,bus=usb-bus.0\0", b"")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(b"-usb\0", b"")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64", "-usb")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=xchg",
+                b"qemu-evidence.AbCdEf0123/../xchg,security_model=none,mount_tag=xchg")}),
+            lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
+                b"/tmp/qemu-evidence.AbCdEf0123/xchg", b"/nix/store/xchg")}),
             *[lambda f, o=option: f.update({"host/qemu-argv": qemu_argv("x86_64", o, "x")})
               for option in ("-hdc", "-hdd", "-fda", "-pflash", "-sd", "-mtdblock", "-global",
                              "-usbdevice", "-cdrom")],
@@ -563,7 +580,7 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
                 b"path=/nix/store,", b"path=/,")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
-                b"path=/tmp/w/xchg,security_model=none,mount_tag=shared", b"path=/home,security_model=none,mount_tag=shared")}),
+                b"path=/tmp/qemu-evidence.AbCdEf0123/xchg,security_model=none,mount_tag=shared", b"path=/home,security_model=none,mount_tag=shared")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(
                 b"security_model=none,mount_tag=xchg", b"security_model=passthrough,mount_tag=xchg")}),
             lambda f: f.update({"host/qemu-argv": qemu_argv("x86_64").replace(

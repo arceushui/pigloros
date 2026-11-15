@@ -6,7 +6,7 @@ One QMP exchange over QEMU's Unix socket: the greeting, `qmp_capabilities`
 printed as JSON. Asynchronous events are skipped. The connect is retried
 while the socket does not exist yet, and only while QEMU is still running.
 
-Usage: qemu_qmp_query_kvm.py SOCKET QEMU_PID
+Usage: qemu_qmp_query_kvm.py SOCKET QEMU_PID QEMU_START_TIME
 """
 
 from __future__ import annotations
@@ -26,17 +26,18 @@ class QmpError(RuntimeError):
     """QEMU did not answer the exchange as QMP requires."""
 
 
-def running(pid: int) -> bool:
-    """True while the process exists and is not a zombie."""
+def running(pid: int, start: str) -> bool:
+    """True while that exact process (PID and start time) runs, not as a zombie."""
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as stat:
-            state = stat.read().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
+            fields = stat.read().rsplit(")", 1)[1].split()
+    except OSError:
         return False
-    return state not in ("Z", "X")
+    return len(fields) > 19 and fields[0] not in ("Z", "X") and fields[19] == start
 
 
-def connect(path: str, pid: int, attempts: int = ATTEMPTS, interval: float = INTERVAL) -> socket.socket:
+def connect(path: str, pid: int, start: str, attempts: int = ATTEMPTS,
+            interval: float = INTERVAL) -> socket.socket:
     for _ in range(attempts):
         client = socket.socket(socket.AF_UNIX)
         client.settimeout(TIMEOUT)
@@ -45,7 +46,7 @@ def connect(path: str, pid: int, attempts: int = ATTEMPTS, interval: float = INT
             return client
         except (FileNotFoundError, ConnectionRefusedError):
             client.close()
-        if not running(pid):
+        if not running(pid, start):
             raise QmpError("QEMU exited before its QMP socket accepted a connection")
         time.sleep(interval)
     raise QmpError("QMP socket never accepted a connection")
@@ -78,11 +79,11 @@ def query_kvm(client: socket.socket) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or not argv[1].isdigit():
+    if len(argv) != 3 or not argv[1].isdigit() or not argv[2].isdigit():
         print(__doc__.rsplit("Usage: ", 1)[1].strip(), file=sys.stderr)
         return 2
     try:
-        with connect(argv[0], int(argv[1])) as client:
+        with connect(argv[0], int(argv[1]), argv[2]) as client:
             answer = query_kvm(client)
     except (QmpError, OSError, ValueError) as error:
         print(f"qmp: {error}", file=sys.stderr)

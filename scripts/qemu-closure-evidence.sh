@@ -102,7 +102,7 @@ process_stat() { # PID
   [[ -n ${stat} ]] || return 0
   local fields
   read -r -a fields <<<"${stat##*) }"
-  printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+  printf '%s %s\n' "${fields[0]:-}" "${fields[19]:-}"
 }
 
 # True when the process PID that started at START has exited: it is gone,
@@ -154,21 +154,21 @@ write_cleanup_record() { # PID START WORK OUT
 # the console and guest record, stop the exact QEMU process, remove the
 # working directory and record both (ADR-069 R13 §4). Fails only at the end.
 finish_boot() { # LAUNCHER QEMU_PID QEMU_START OBSERVE_FAILED WORK OUT
-  local status=0 stopped=0
+  local status=0 stopped=0 kept=0
   wait "$1" || status=$?
-  printf '%s\n' "${status}" >"$6/host/vm-exit-status"
+  printf '%s\n' "${status}" >"$6/host/vm-exit-status" || kept=1
   tail -n 200 "$6/host/serial-console.log" || true
   if [[ -d "$5/xchg/guest" ]]; then
-    cp -R -- "$5/xchg/guest" "$6/guest"
+    cp -R -- "$5/xchg/guest" "$6/guest" || kept=1
   fi
   if [[ -n $2 ]]; then
     stop_qemu "$2" "$3" || stopped=1
   fi
   rm -rf -- "$5"
   write_cleanup_record "$2" "$3" "$5" "$6"
-  if [[ -z $2 || ${status} -ne 0 || $4 -ne 0 || ${stopped} -ne 0 ]]; then
-    printf 'VM observation failed (QEMU PID %s, exit status %s, observation failed %s, stop failed %s)\n' \
-      "${2:-none}" "${status}" "$4" "${stopped}" >&2
+  if [[ -z $2 || ${status} -ne 0 || $4 -ne 0 || ${stopped} -ne 0 || ${kept} -ne 0 ]]; then
+    printf 'VM observation failed (QEMU PID %s, exit status %s, observation failed %s, stop failed %s, record failed %s)\n' \
+      "${2:-none}" "${status}" "$4" "${stopped}" "${kept}" >&2
     return 1
   fi
 }
@@ -177,7 +177,7 @@ boot() {
   local architecture="$1" out="$2" work runner qemu qemu_pid="" qemu_start="" pid observe_failed=0
   require_architecture "${architecture}"
   qemu="$(store_path qemu "${out}")"
-  work="$(mktemp -d)"
+  work="$(mktemp -d /tmp/qemu-evidence.XXXXXXXXXX)"
   mkdir -p "${work}/xchg"
   shopt -s nullglob
   local runners=("$(store_path vm "${out}")"/bin/run-*-vm)
@@ -223,7 +223,7 @@ boot() {
   if [[ -n ${qemu_pid} ]]; then
     record_qemu "${qemu_pid}" "${out}" || observe_failed=1
     # The accelerator QEMU itself reports (ADR-069 R13 §2.3).
-    python3 -I "${root}/scripts/qemu_qmp_query_kvm.py" "${work}/qmp.sock" "${qemu_pid}" \
+    python3 -I "${root}/scripts/qemu_qmp_query_kvm.py" "${work}/qmp.sock" "${qemu_pid}" "${qemu_start}" \
       >"${out}/host/qemu-query-kvm.json" || observe_failed=1
   else
     # Say why, so the next run names the cause rather than a timeout.

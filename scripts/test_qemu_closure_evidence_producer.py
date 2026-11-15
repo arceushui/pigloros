@@ -178,6 +178,17 @@ class ProducerShellTests(unittest.TestCase):
         self.assertIn(self.state(running.pid), ("Z", ""))
         self.assertEqual((out / "host/vm-cleanup").read_text(),
                          "qemu-process\texited\nwork-directory\tremoved\n")
+        # A record that cannot be kept fails the step, after the same cleanup.
+        out = self.base / "blocked"
+        (out / "host").mkdir(parents=True)
+        (out / "host/serial-console.log").write_text("")
+        (out / "guest").write_text("a file where the guest record goes")
+        (self.base / "w/xchg/guest").mkdir(parents=True)
+        result = self.shell.run(f'true & finish_boot $! "{zombie.pid}" "{start_time(zombie.pid)}" 0 "{self.base}/w" "{out}"')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("record failed 1", result.stderr)
+        self.assertFalse((self.base / "w").exists())
+        self.assertEqual((out / "host/vm-cleanup").read_text(), "qemu-process\texited\nwork-directory\tremoved\n")
         # No observed QEMU always fails, after the same cleanup.
         result, out = self.finish("", "", 0)
         self.assertEqual(result.returncode, 1)
@@ -226,10 +237,10 @@ class QmpTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.socket = pathlib.Path(directory.name) / "qmp.sock"
 
-    def run_main(self, pid: int | str = os.getpid()) -> tuple[int, str, str]:
+    def run_main(self, pid: int = os.getpid()) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = qmp.main([str(self.socket), str(pid)])
+            code = qmp.main([str(self.socket), str(pid), start_time(pid)])
         return code, out.getvalue(), err.getvalue()
 
     def test_reports_query_kvm_after_capabilities_and_skips_events(self):
@@ -262,11 +273,14 @@ class QmpTests(unittest.TestCase):
     def test_retries_while_qemu_runs_and_stops_once_it_exits(self):
         start = time.monotonic()
         with self.assertRaisesRegex(qmp.QmpError, "never accepted"):
-            qmp.connect(str(self.socket), os.getpid(), attempts=3, interval=0.01)
+            qmp.connect(str(self.socket), os.getpid(), start_time(os.getpid()), attempts=3, interval=0.01)
         exited = subprocess.Popen(["true"])
         exited.wait()
         with self.assertRaisesRegex(qmp.QmpError, "exited before"):
-            qmp.connect(str(self.socket), exited.pid, attempts=1000, interval=0.5)
+            qmp.connect(str(self.socket), exited.pid, "1", attempts=1000, interval=0.5)
+        # A live process with another start time is a recycled PID, not QEMU.
+        with self.assertRaisesRegex(qmp.QmpError, "exited before"):
+            qmp.connect(str(self.socket), os.getpid(), "1", attempts=1000, interval=0.5)
         self.assertLess(time.monotonic() - start, 5)
 
         def late_server():
@@ -281,15 +295,17 @@ class QmpTests(unittest.TestCase):
     def test_zombie_qemu_counts_as_exited(self):
         zombie = subprocess.Popen(["true"])
         deadline = time.monotonic() + 10
-        while qmp.running(zombie.pid):
+        zombie_start = start_time(zombie.pid)
+        while qmp.running(zombie.pid, zombie_start):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
         self.addCleanup(zombie.wait)
-        self.assertFalse(qmp.running(zombie.pid))
-        self.assertTrue(qmp.running(os.getpid()))
+        self.assertFalse(qmp.running(zombie.pid, zombie_start))
+        self.assertTrue(qmp.running(os.getpid(), start_time(os.getpid())))
 
     def test_bad_arguments_are_refused(self):
-        for argv in ([], [str(self.socket)], [str(self.socket), "pid"]):
+        for argv in ([], [str(self.socket)], [str(self.socket), "1"], [str(self.socket), "pid", "1"],
+                     [str(self.socket), "1", "start"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
                 self.assertEqual(qmp.main(argv), 2)
 

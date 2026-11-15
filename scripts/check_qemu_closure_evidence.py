@@ -79,15 +79,16 @@ REQUIRED_USERSPACE_VERITY_WORD = "systemd.allow_userspace_verity=0"
 FORBIDDEN_QEMU_OPTIONS = {"enable-kvm", "net", "netdev", "drive", "blockdev", "hda", "hdb",
                           "hdc", "hdd", "fda", "fdb", "cdrom", "pflash", "sd", "mtdblock",
                           "snapshot", "fsdev", "usbdevice", "global"}
-# -usb is allowed: qemu-vm's x86_64 runner passes `-usb -device usb-tablet` for
-# input. USB storage and network models stay banned by device type below.
-# Disk and network device models. qemu-vm's aarch64 input and display
-# devices (virtio-keyboard, virtio-gpu-pci, usb-ehci, usb-kbd, usb-tablet)
-# are neither.
-FORBIDDEN_DEVICE_PREFIXES = ("virtio-net", "virtio-blk", "virtio-scsi", "vhost-", "nvme", "scsi-",
-                             "ide-", "ahci", "floppy", "sdhci", "sd-card", "usb-storage", "usb-uas",
-                             "usb-bot", "usb-net", "megasas", "lsi53c", "pvscsi", "e1000",
-                             "rtl8139")
+# -usb is checked per architecture below.
+# The exact -device models and -usb use of qemu-vm's runner for this guest,
+# as recorded on the hosted runners. Any other device is foreign: no disk,
+# network or host-passthrough model can be added unnoticed.
+DEVICES = {
+    "x86_64": ["virtio-keyboard", "virtio-rng-pci", "usb-tablet"],
+    "aarch64": ["usb-ehci", "usb-kbd", "usb-tablet", "virtio-gpu-pci", "virtio-keyboard",
+                "virtio-rng-pci"],
+}
+USB_OPTION = {"x86_64": 1, "aarch64": 0}
 # Block-device file systems; the guest mounts none of them.
 BLOCK_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "msdos", "exfat", "ntfs", "ntfs3",
                  "f2fs", "erofs", "squashfs", "iso9660", "udf", "jfs", "reiserfs", "bcachefs"}
@@ -390,7 +391,7 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
     images = (executable, f"{paths['qemu']}/bin/.qemu-system-{architecture}-wrapped")
     if evidence.line("host/qemu-exe") not in images or argv[0] != executable:
         raise EvidenceError("the running QEMU is not the recorded package's system emulator")
-    accelerators, nics, kernels, appends, shares = [], [], [], [], []
+    accelerators, nics, kernels, appends, shares, devices = [], [], [], [], [], []
     for index, flag in enumerate(argv[1:], start=1):
         value = argv[index + 1] if index + 1 < len(argv) else ""
         if flag.lstrip("-") in FORBIDDEN_QEMU_OPTIONS and flag.startswith("-"):
@@ -405,10 +406,12 @@ def check_runner(evidence: Evidence, architecture: str, paths: dict) -> dict:
             kernels.append(value)
         if flag in ("-append", "--append"):
             appends.append(value)
-        if flag in ("-device", "--device") and value.split(",", 1)[0].startswith(FORBIDDEN_DEVICE_PREFIXES):
-            raise EvidenceError(f"the evidence guest must have no network or disk device: {value}")
+        if flag in ("-device", "--device"):
+            devices.append(value.split(",", 1)[0])
         if flag in ("-machine", "--machine", "-M") and "accel" in value:
             raise EvidenceError("the accelerator must come from -accel, not -machine")
+    if sorted(devices) != sorted(DEVICES[architecture]) or argv.count("-usb") != USB_OPTION[architecture]:
+        raise EvidenceError(f"QEMU devices {sorted(devices)} are not the reviewed runner's")
     # ADR-069 R13 §2.3: started with `-accel tcg` only, and QEMU reports no KVM.
     if accelerators != ["tcg"]:
         raise EvidenceError(f"QEMU must be started with exactly -accel tcg, not {accelerators}")
@@ -451,7 +454,8 @@ def check_virtfs(shares: list[str]) -> dict[str, str]:
         parsed[options["mount_tag"]] = options["path"]
     exchange = parsed.get("xchg", "")
     if sorted(parsed) != ["nix-store", "shared", "xchg"] or parsed["nix-store"] != "/nix/store" \
-            or not re.fullmatch(r"/[^,]+/xchg", exchange) or parsed["shared"] != exchange:
+            or not re.fullmatch(r"/tmp/qemu-evidence\.[A-Za-z0-9]{10}/xchg", exchange) \
+            or parsed["shared"] != exchange:
         raise EvidenceError(f"QEMU shares {parsed}, not the store and the run's exchange directory")
     return parsed
 
