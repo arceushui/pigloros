@@ -137,7 +137,7 @@ impl ExchangeV2 {
 }
 
 /// One route of the documented Gateway route table (requirements section 2).
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RouteV2 {
     /// The path without its query; [`TIMELINE_SLOT`] stands for one non-empty segment.
     path: &'static str,

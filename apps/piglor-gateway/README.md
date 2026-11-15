@@ -55,6 +55,13 @@ composition-verified: they are not installed EPF1 profiles and claim no reproduc
     --from gateway-mode-local-v1 --to gateway-mode-air-gapped-v1
   ```
 
+  Air-Gapped mode has no network, so it refuses a Local Principal that holds the network
+  capability `gateway.network.v1`: `provision-local-principal` refuses such a document on an
+  Air-Gapped store, `serve` refuses to compose over one, and `migrate-mode` to Air-Gapped refuses a
+  store whose Principal holds it, leaving the binding unchanged. A store holds one Principal and
+  rotation is not supported, so keep the Local mode, or provision a new store whose Principal
+  omits the capability.
+
 - **One lock per store.** `serve` and the offline writers (`owntracks pair|rotate|revoke`,
   `provision-local-fork-authority`, `provision-local-principal`) hold a shared non-blocking lock on
   `<sqlite-path>.gateway-mode.lock`; `migrate-mode` holds it exclusively. Offline writers need a

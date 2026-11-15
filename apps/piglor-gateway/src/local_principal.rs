@@ -752,10 +752,34 @@ fn admit_in_mode(
     provision: &LocalPrincipalProvisionV1,
     mode: crate::mode_profile::GatewayModeProfileIdV1,
 ) -> Result<(), crate::mode_profile::GatewayModeErrorV1> {
-    if crate::authorization::scope_names(provision.grant.scope(), GatewayOperationV1::NETWORK) {
-        crate::mode_profile::refuse_air_gapped(mode)
-    } else {
-        Ok(())
+    crate::mode_profile::refuse_principal_network_v1(
+        mode,
+        crate::authorization::scope_names(provision.grant.scope(), GatewayOperationV1::NETWORK),
+    )
+}
+
+/// Whether the Local Principal recorded in `store` holds the network
+/// capability. A store that records no Local Principal holds none.
+///
+/// # Errors
+/// Returns the unavailable store error when the authority records cannot be
+/// read or decoded, so a caller fails closed instead of treating an
+/// unreadable store as one without the capability.
+pub(crate) fn names_network_capability<S>(
+    store: &S,
+) -> Result<bool, crate::mode_profile::GatewayModeErrorV1>
+where
+    S: AuthorityPersistencePortV1 + ?Sized,
+{
+    match store.load_authority(local_principal_grant_id()) {
+        // The store resolves no chain for an absent leaf grant.
+        Err(AuthorityPersistenceErrorV1::Conflict) => Ok(false),
+        Err(_) => Err(crate::mode_profile::GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        )),
+        Ok(persisted) => Ok(persisted.chain().grants().iter().any(|grant| {
+            crate::authorization::scope_names(grant.scope(), GatewayOperationV1::NETWORK)
+        })),
     }
 }
 
@@ -1923,6 +1947,43 @@ mod tests {
     }
 
     #[test]
+    fn the_network_capability_check_fails_closed_on_an_unreadable_store() -> TestResult {
+        use crate::mode_profile::GatewayModeErrorV1;
+        let unavailable = Err(GatewayModeErrorV1::Store(
+            pos_core::GatewayModeBindingErrorV1::Unavailable,
+        ));
+        // No Principal recorded: no capability, and a migration may proceed.
+        assert_eq!(names_network_capability(&MemoryStore::new()), Ok(false));
+        assert_eq!(
+            names_network_capability(&FailingStore(AuthorityPersistenceErrorV1::Conflict)),
+            Ok(false)
+        );
+        for error in [
+            AuthorityPersistenceErrorV1::Unavailable,
+            AuthorityPersistenceErrorV1::InvalidRecord,
+            AuthorityPersistenceErrorV1::StaleEpoch,
+            AuthorityPersistenceErrorV1::TimelineOrder,
+        ] {
+            assert_eq!(names_network_capability(&FailingStore(error)), unavailable);
+        }
+        for (operations, names) in [
+            (
+                vec![
+                    GatewayOperationV1::READ_SESSION,
+                    GatewayOperationV1::NETWORK,
+                ],
+                true,
+            ),
+            (vec![GatewayOperationV1::READ_SESSION], false),
+        ] {
+            let mut store = MemoryStore::new();
+            provision_local_principal(&mut store, &provision(operations)?)?;
+            assert_eq!(names_network_capability(&store), Ok(names));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn store_faults_map_to_closed_failures() -> TestResult {
         let provision = served_provision()?;
         for (error, expected) in [
@@ -2312,14 +2373,14 @@ mod tests {
         {
             assert_eq!(
                 admit_in_mode(&networked, AirGapped),
-                Err(crate::mode_profile::GatewayModeErrorV1::RefusedInMode)
+                Err(crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused)
             );
             assert_eq!(admit_in_mode(&networked, Local), Ok(()));
             assert_eq!(admit_in_mode(&reader, AirGapped), Ok(()));
         }
         let refused = read_session(&networked, (AirGapped, &[]), false, Some(actor()?)).await;
         assert!(
-            refused.is_err_and(|error| error.to_string().contains("refuses this operation")),
+            refused.is_err_and(|error| error.to_string().contains("gateway.network.v1")),
             "an Air-Gapped composition refuses a networked Principal"
         );
         let (status, session) =
@@ -2926,6 +2987,24 @@ mod tests {
         provision_local_principal_from_credentials(path, &credentials)?;
         install(&padded(MAX_LOCAL_PRINCIPAL_CREDENTIAL_BYTES + 1)?)?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());
+
+        // ADR-134 §4: an Air-Gapped store refuses a Principal network grant
+        // at provisioning, and records nothing.
+        let air_gapped = directory.path().join("air-gapped.db");
+        let air_gapped = air_gapped.to_str().ok_or("temporary path is not UTF-8")?;
+        crate::mode_profile::bind_test_store(
+            &mut SqliteStore::open(air_gapped)?,
+            crate::mode_profile::GatewayModeProfileIdV1::AirGapped,
+        )?;
+        install(document(&actor, "\"session.read\", \"gateway.network.v1\"").as_bytes())?;
+        assert!(
+            provision_local_principal_from_credentials(air_gapped, &credentials)
+                .is_err_and(|error| error.to_string().contains("gateway.network.v1"))
+        );
+        assert!(load_local_principal(&SqliteStore::open(air_gapped)?)?.is_none());
+        install(document(&actor, "\"session.read\"").as_bytes())?;
+        provision_local_principal_from_credentials(air_gapped, &credentials)?;
+        assert!(load_local_principal(&SqliteStore::open(air_gapped)?)?.is_some());
 
         install(document(&actor, "\"timeline.events.read\"").as_bytes())?;
         assert!(provision_local_principal_from_credentials(path, &credentials).is_err());

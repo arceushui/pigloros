@@ -6,7 +6,10 @@
 # #[ignore]: cargo test -- --include-ignored (CI still runs them).
 
 [graph]
-targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-pc-windows-msvc" },
+]
 all-features = true
 
 [advisories]

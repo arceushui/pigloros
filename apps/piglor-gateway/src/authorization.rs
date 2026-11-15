@@ -1359,9 +1359,10 @@ impl GatewayAuthorization {
     ///
     /// # Errors
     /// Returns [`crate::mode_profile::GatewayModeErrorV1::RefusedInMode`] for
-    /// an Air-Gapped binding of an authorizer without a store source, and for
-    /// a binding to a mode without network of an authority whose grant names
-    /// [`GatewayOperationV1::NETWORK`].
+    /// an Air-Gapped binding of an authorizer without a store source, and
+    /// [`crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused`]
+    /// for a binding to a mode without network of an authority whose grant
+    /// names [`GatewayOperationV1::NETWORK`].
     pub fn with_mode_binding(
         mut self,
         mode: &crate::mode_profile::GatewayModeBindingV1,
@@ -1397,7 +1398,7 @@ impl GatewayAuthorization {
                 .any(|grant| scope_names(grant.scope(), GatewayOperationV1::NETWORK));
         (!refused)
             .then_some(self)
-            .ok_or(crate::mode_profile::GatewayModeErrorV1::RefusedInMode)
+            .ok_or(crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused)
     }
 
     /// The pinned authority registry digest, revocation-freshness claim and
