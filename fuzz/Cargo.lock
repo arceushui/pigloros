@@ -1494,6 +1494,7 @@ name = "pos-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "getrandom 0.4.3",
  "indexmap",
  "pos-conformance",
  "pos-core",
@@ -1503,6 +1504,7 @@ dependencies = [
  "pos-plugin-release",
  "pos-state",
  "pos-store",
+ "serde",
  "serde_json",
  "thiserror",
  "ulid",
