@@ -1098,6 +1098,23 @@ struct SelectorAdmissionState {
     attempts: BTreeMap<[u8; 16], AttemptAdmissionState>,
 }
 
+impl SelectorAdmissionState {
+    /// Admission is closed on exactly `previous`, and every provider-owned
+    /// attempt of the fenced runtime is in the RCA1-echoed `cancelled` set.
+    fn admits_successor_of(
+        &self,
+        previous: &Arc<AdmittedSelectorProvider>,
+        cancelled: &[[u8; 16]],
+    ) -> bool {
+        !self.open
+            && Arc::ptr_eq(&self.admitted, previous)
+            && self
+                .attempts
+                .iter()
+                .all(|(id, attempt)| !attempt.provider_owned || cancelled.contains(id))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AttemptAdmissionState {
     active_requests: usize,
@@ -1259,13 +1276,7 @@ impl SelectorAdmission {
         cancelled: &[[u8; 16]],
     ) -> Result<(), SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
-        if state.open
-            || !Arc::ptr_eq(&state.admitted, previous)
-            || state
-                .attempts
-                .iter()
-                .any(|(id, attempt)| attempt.provider_owned && !cancelled.contains(id))
-        {
+        if !state.admits_successor_of(previous, cancelled) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         state.admitted = Arc::new(successor);
