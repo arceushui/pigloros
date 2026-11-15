@@ -22,8 +22,11 @@ use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1
 /// The record tag of retained TPS1 evidence in the erasure object store.
 const RETAINED_TPS1_TAG: &str = "TPS1";
 
-/// The most retained TPS1 objects composition reads: one per request head
-/// the store can hold. A store holding more stays closed.
+/// The most retained TPS1 objects composition reads. Each freeze and each
+/// retry admission can pin a different TPS1, so this is not one per request
+/// head: it is the store request-head cap, chosen as a fixed read bound.
+/// A store retaining more TPS1 objects cannot be checked within it and
+/// stays closed with `ErasureTrustAnchorRotated`.
 const MAX_RETAINED_TPS1: usize = ERASURE_MAX_INVENTORY_REQUESTS;
 
 /// The closed, payload-free reasons a Local erasure composition stays
@@ -241,6 +244,14 @@ where
 /// The ADR-136 Q17 interim rule: a store without erasure requests always
 /// passes; one with requests passes only when it can be read and every
 /// retained TPS1 verifies under the pinned operator key.
+///
+/// An empty retained set passes even when requests exist. ERQ1 pins no
+/// trust revision (ADR-136 §5): submission references only ERAZ1, ELP1,
+/// ELSEL1 and ELIDEM1, and a TPS1 is retained first with the freeze and
+/// retry admissions that pin one. Requests that are only submitted or
+/// authorized therefore legitimately retain no TPS1. A committed pin
+/// whose TPS1 bytes were removed is refused where that evidence is read,
+/// when recovery resolves the pinned ELB1 and TPS1 by reference.
 fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
 where
     S: ErasureInventoryPersistencePortV1 + ?Sized,

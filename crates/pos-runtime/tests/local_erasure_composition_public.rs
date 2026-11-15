@@ -695,6 +695,17 @@ fn retained_trust_needs_no_check_while_the_store_holds_no_request() -> TestResul
 }
 
 #[test]
+fn a_submitted_request_that_pins_no_trust_needs_no_retained_tps1() -> TestResult {
+    // ERQ1 pins no trust revision, so a store whose only request is
+    // submitted holds no retained TPS1, and composition opens.
+    let case = Case::valid()?;
+    let directory = tempfile::tempdir()?;
+    let mut store = sqlite_store(&directory, &[], true)?;
+    assert!(case.compose(&mut store).is_ok());
+    Ok(())
+}
+
+#[test]
 fn a_store_with_requests_opens_only_when_every_retained_tps1_verifies() -> TestResult {
     let case = Case::valid()?;
     let directory = tempfile::tempdir()?;

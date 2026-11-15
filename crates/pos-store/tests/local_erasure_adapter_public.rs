@@ -505,6 +505,30 @@ fn retained_objects_are_read_by_tag_and_bounded_on_both_adapters() -> TestResult
 }
 
 #[test]
+fn a_retained_row_without_its_bytes_is_missing_provenance() -> TestResult {
+    // MemoryStore changes the row and its bytes together, so only SQLite,
+    // whose rows carry no foreign key, can lose the bytes under a row.
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("retained-orphan.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let bytes = record("TPS1", 1)?;
+    let orphan = store.retain_erasure_object(&bytes, 1_024)?;
+    assert_eq!(store.retained_erasure_objects("TPS1", 1)?, vec![bytes]);
+    rusqlite::Connection::open(path)?.execute(
+        "DELETE FROM erasure_evidence WHERE reference_digest = ?1",
+        rusqlite::params![orphan.digest().as_slice()],
+    )?;
+    assert_eq!(
+        store.retained_erasure_objects("TPS1", 1),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn retained_record_tags_follow_the_record_grammar() -> TestResult {
     for (tag, accepted) in [
         ("ELB1S", true),
