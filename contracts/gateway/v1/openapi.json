@@ -823,18 +823,23 @@
     "/v1/scenario-rooms": {
       "post": {
         "operationId": "createScenarioRoom",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Create revision 1 of a Scenario Room from a declarative descriptor (ADR-041 validation, bounds, governance, consent and composition). Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Create revision 1 of a Scenario Room from a declarative ADR-041 descriptor (#303). The server assigns the room ID and correlation ID, sorts the lists canonically, resolves every plugin against the reviewed host catalogue entry it ships, and computes the three ADR-041 hashes (Redmine #303 amendment of ADR-041). The decision requires `scenario-room.create` for the acting entity and covers every `persona` participant as an actor; `governance_ref` must name the host's governance record.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -957,21 +962,26 @@
     "/v1/scenario-rooms/{room_id}/revisions": {
       "post": {
         "operationId": "deriveScenarioRoomRevision",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (ADR-041 sections 5, 7 and 9). Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Derive the next immutable revision of a Scenario Room from its head revision `parent_revision` (#303; ADR-041 sections 5, 7 and 9). A complete new descriptor; there is no automatic merge. Requires `scenario-room.derive`, with the same persona and governance rules as `createScenarioRoom`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/RoomId"
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "requestBody": {
@@ -1104,21 +1114,26 @@
     "/v1/scenario-rooms/{room_id}/revisions/{revision}": {
       "get": {
         "operationId": "getScenarioRoomRevision",
-        "x-pigloros-status": "draft",
-        "x-pigloros-owner": "#303",
+        "x-pigloros-status": "served",
         "x-pigloros-listeners": [
           "loopback"
         ],
-        "tags": [
-          "scenario-room"
-        ],
-        "description": "Draft (#303): Inspect one immutable Scenario Room revision. Not served yet; only its golden examples validate. #303 turns it into a served, drift-checked operation.",
+        "description": "Read one immutable Scenario Room revision (#303). Requires `scenario-room.read` for the acting entity; the decision precedes the lookup, and an unknown room or revision answers like a protected one.",
         "parameters": [
           {
             "$ref": "#/components/parameters/RoomId"
           },
           {
             "$ref": "#/components/parameters/Revision"
+          },
+          {
+            "name": "x-piglor-actor-entity",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "description": "The acting entity; the Local Principal's grant must cover it, and every `persona` participant. Without it the operation is `401 unauthenticated`."
           }
         ],
         "responses": {
@@ -1174,6 +1189,16 @@
           },
           "503": {
             "description": "`temporarily-unavailable`; retryable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`resource-limit-exceeded`: the denial-record bound; retryable, with `Retry-After`.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3507,7 +3532,6 @@
         "$id": "urn:pigloros:gateway:v1:schema:committed-event-receipt",
         "type": "object",
         "additionalProperties": false,
-        "x-pigloros-maturity": "draft",
         "required": [
           "schema_id",
           "timeline_id",
@@ -4246,7 +4270,6 @@
       },
       "ScenarioRoomInput": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-input",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "The participant-authored members of one ADR-041 ScenarioRoomDescriptor. Unknown members are rejected; the room ID, revision, correlation ID and hashes are server-owned and cannot be supplied. The server admits the lists sorted (plugins by `plugin_id`, rules by `rule_id`, participants by `entity_id`, initial conditions by `entity_id` then `dimension`) and refuses a duplicate key, a `plugin_id` containing `.`, a `rule_id` whose first `.`-separated segment names no requested plugin, and an initial condition whose `entity_id` is not a participant. Every plugin must be bundled by the deployment at exactly its `version`. The canonical descriptor is at most 4,096 bytes (`x-pigloros-limits.room_descriptor_bytes`), measured on the admitted `room.revision.v1` payload.",
@@ -4402,7 +4425,6 @@
       },
       "CreateScenarioRoomRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:create-scenario-room-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -4416,7 +4438,6 @@
       },
       "DeriveScenarioRoomRevisionRequest": {
         "$id": "urn:pigloros:gateway:v1:schema:derive-scenario-room-revision-request",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "A complete new descriptor derived from `parent_revision`; there is no automatic merge.",
@@ -4437,7 +4458,6 @@
       },
       "ScenarioRoomDescriptor": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-descriptor",
-        "x-pigloros-maturity": "draft",
         "type": "object",
         "additionalProperties": false,
         "description": "The admitted ADR-041 descriptor: the payload of one `room.revision.v1` Event, encoded as the RFC 8785 bytes of this object. `plugin_composition_hash`, `rule_set_hash` and `descriptor_hash` are defined by the Redmine #303 amendment of ADR-041; a client recomputes `rule_set_hash` and `descriptor_hash` from the members.",
@@ -4622,9 +4642,8 @@
       },
       "ScenarioRoomRevision": {
         "$id": "urn:pigloros:gateway:v1:schema:scenario-room-revision",
-        "x-pigloros-maturity": "draft",
         "type": "object",
-        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID).",
+        "description": "One immutable Scenario Room revision. `id` is the room ID; `commit` is the `room.revision.v1` Event that recorded it. Every accepted derive appends a new revision, even one whose content equals the head's, because `descriptor_hash` covers the room ID and the revision number. The only deduplication besides an exact `Idempotency-Key` retry is ADR-041 section 7: a derive whose `parent_revision` is no longer the head, and whose descriptor equals the revision already derived from that parent, answers that existing revision with 200; any other stale derive is `409 append-conflict`. `provenance.origin` is `principal-authored`, and `provenance.digest` is BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of `descriptor.descriptor_hash` decoded from hex || the 16 bytes of the 128-bit big-endian value of `commit.event_id` decoded as a Crockford base32 ULID), in lower-case hex.",
         "allOf": [
           {
             "$ref": "urn:pigloros:gateway:v1:schema:resource-envelope"
@@ -6829,7 +6848,7 @@
       "scope": "per-input",
       "origin": "adr",
       "source": "ADR-041 section 1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "request",
       "enforced_by": {
         "runtime": {
@@ -6844,7 +6863,7 @@
       "scope": "structural",
       "origin": "adr",
       "source": "ADR-041 section 1; pos-runtime MAX_REQUIRED_PLUGINS_V1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -6860,7 +6879,7 @@
       "scope": "structural",
       "origin": "adr",
       "source": "ADR-041 section 1",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -6875,7 +6894,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -6890,7 +6909,7 @@
       "scope": "structural",
       "origin": "new",
       "source": "chosen by #1313",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [
@@ -6905,7 +6924,7 @@
       "scope": "operation-wide",
       "origin": "code",
       "source": "pos-runtime counterfactual MAX_SUFFIX_TICK_SPAN",
-      "surface": "draft",
+      "surface": "served",
       "direction": "both",
       "enforced_by": {
         "schema": [

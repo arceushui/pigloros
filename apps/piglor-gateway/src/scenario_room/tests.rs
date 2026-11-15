@@ -8,9 +8,9 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn the_golden_examples_carry_the_derived_provenance_digest() -> TestResult {
     for example in [
-        include_str!("../../../../contracts/gateway/v1/examples/draft-scenario-room-create.json"),
-        include_str!("../../../../contracts/gateway/v1/examples/draft-scenario-room-get.json"),
-        include_str!("../../../../contracts/gateway/v1/examples/draft-scenario-room-derive.json"),
+        include_str!("../../../../contracts/gateway/v1/examples/scenario-room-create.json"),
+        include_str!("../../../../contracts/gateway/v1/examples/scenario-room-get.json"),
+        include_str!("../../../../contracts/gateway/v1/examples/scenario-room-derive.json"),
     ] {
         let body = &serde_json::from_str::<serde_json::Value>(example)?["response"]["body"];
         let hex = body["descriptor"]["descriptor_hash"]

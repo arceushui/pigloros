@@ -1,12 +1,14 @@
 {
-  "name": "draft-scenario-room-not-found",
+  "name": "scenario-room-not-found",
   "operation_id": "getScenarioRoomRevision",
   "request": {
     "path": {
       "room_id": "01JC0GATEWAYW9R00M00000001",
       "revision": 9
     },
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {

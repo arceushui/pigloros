@@ -65,10 +65,18 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   `execution-mode-profiles.schema.json`); `mode_profile_digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), and the checker
   pins the golden digests the examples must name.
+- The Scenario Room routes are served (#303): `createScenarioRoom`, `deriveScenarioRoomRevision`
+  and `getScenarioRoomRevision`, each under its own grant (`scenario-room.create`, `.derive`,
+  `.read`). Every `persona` participant must be an actor the Principal's grant covers, and
+  `governance_ref` must be the host's governance record: the optional `governance_record_id` of
+  the Local Principal provisioning document. A room may name only the Plugin of the reviewed host
+  catalogue entry the Gateway ships (`gateway-world-actions` `0.1.0`). Each room is one Timeline,
+  and the revision's `commit` is its `room.revision.v1` Event. The `privacy_export_ref` consent
+  check follows with #309.
 - A `ScenarioRoomRevision` (#303) is `principal-authored`. Its `provenance.digest` is
   BLAKE3(UTF-8 `PiglorOS.GatewayScenarioRoomRevision.v1` || 0x00 || the 32 bytes of
   `descriptor.descriptor_hash` || the 16 big-endian bytes of `commit.event_id` decoded as a
-  Crockford base32 ULID). The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
+  Crockford base32 ULID), in lower-case hex. The descriptor's `rule_set_hash` and `descriptor_hash` are the RFC 8785
   hashes of the ADR-041 amendment of #303; `plugin_composition_hash` depends on the host's bundled
   Plugins and cannot be recomputed by a client.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
@@ -219,7 +227,7 @@ since the merge base with `main`: a pull request cannot loosen the baseline toge
 contract. `servers` and `info.version` are not frozen: a client must not hard-code the server
 URL, and the description's revision label is not part of the wire contract. The golden examples
 `unsupported-version-api-major`, `not-found-unrouted-path`, `unknown-required-schema-event-type`,
-`unsupported-version-legacy-event-type`, `draft-scenario-room-unsupported-schema-version`,
+`unsupported-version-legacy-event-type`, `scenario-room-unsupported-schema-version`,
 `draft-decision-preview-incompatible-profile`, `draft-decision-preview-profile-not-installed`,
 `draft-replay-incompatible-profile` and
 `compatible-unknown-optional-member-ignored` are the negotiation and unknown-member cases.
