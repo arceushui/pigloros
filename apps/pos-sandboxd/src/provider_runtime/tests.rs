@@ -9,13 +9,12 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
+use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 use pos_reference::selector::SelectorBoundaryError;
-
-use pos_reference::sandbox_provider_protocol::SandboxLimit;
 
 use super::{required_slots, ProviderRuntimeAuthority, ProviderStartupError};
 use crate::{ProviderInstallation, ProviderInstallationError, ReleaseSigner};
