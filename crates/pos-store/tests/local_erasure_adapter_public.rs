@@ -9,7 +9,7 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1,
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, LocalOwnerEffectV1, Seq, TimelineId, TimelineMeta, TimelineMode,
-    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1,
+    ERASURE_RETAINED_OBJECT_MAX_BYTES_V1, LOCAL_OWNER_EFFECT_MAX_BYTES_V1,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -27,16 +27,18 @@ impl<T> LocalErasureStore for T where
 }
 
 /// One canonical definite CBOR record `[tag, 1, value]`.
-fn record(tag: &str, value: u8) -> Vec<u8> {
-    let mut bytes = vec![0x83, 0x60 | u8::try_from(tag.len()).unwrap_or(0)];
-    bytes.extend_from_slice(tag.as_bytes());
-    bytes.push(0x01);
-    if value < 24 {
-        bytes.push(value);
-    } else {
-        bytes.extend_from_slice(&[0x18, value]);
-    }
-    bytes
+fn record(tag: &str, value: u8) -> Result<Vec<u8>, std::num::TryFromIntError> {
+    u8::try_from(tag.len()).map(|length| {
+        let mut bytes = vec![0x83, 0x60 | length];
+        bytes.extend_from_slice(tag.as_bytes());
+        bytes.push(0x01);
+        if value < 24 {
+            bytes.push(value);
+        } else {
+            bytes.extend_from_slice(&[0x18, value]);
+        }
+        bytes
+    })
 }
 
 fn address(bytes: &[u8]) -> Result<ErasureReferenceV1, ErasureErrorV1> {
@@ -198,7 +200,7 @@ fn sqlite_snapshot_refuses_a_malformed_owner_row() -> TestResult {
 }
 
 fn retain_contract(store: &mut impl LocalErasureStore) -> TestResult {
-    let els1 = record("ELS1", 1);
+    let els1 = record("ELS1", 1)?;
     let reference = store.retain_erasure_object(&els1, 1_024)?;
     assert_eq!(reference, address(&els1)?);
     assert_eq!(store.retain_erasure_object(&els1, 1_024)?, reference);
@@ -256,43 +258,62 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
 
 fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
     seed_pending_destruction(store)?;
-    for (effect, tag) in [
+    for (effect, tag, seed) in [
         (
-            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)),
+            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
             "ELAD1",
+            10,
         ),
         (
-            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)),
+            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)?),
             "ELCG1",
+            11,
         ),
-        (LocalOwnerEffectV1::Negative(record("ELNEG1", 1)), "ELNEG1"),
+        (
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
+            "ELNEG1",
+            12,
+        ),
     ] {
-        let elo1 = record("ELO1", tag.as_bytes()[3]);
+        let elo1 = record("ELO1", seed)?;
         assert_eq!(
             store.commit_local_owner_effect(effect, &elo1)?,
             address(&elo1)?
         );
         assert_eq!(store.read_object(address(&elo1)?)?, elo1);
         assert_eq!(
-            store.read_object(address(&record(tag, 1))?)?,
-            record(tag, 1)
+            store.read_object(address(&record(tag, 1)?)?)?,
+            record(tag, 1)?
         );
     }
 
-    // A record effect under the wrong tag, or a non-ELO1 owner result,
-    // commits nothing.
-    let refused = record("ELO1", 100);
+    // Each owner record has its own ADR-136 size bound.
+    let mut oversized = vec![0x83, 0x65];
+    oversized.extend_from_slice(b"ELAD1");
+    oversized.extend_from_slice(&[0x01, 0x59, 0x04, 0x00]);
+    oversized.resize(oversized.len() + LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 0);
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::ArtifactDisposition(record("ELCG1", 2)),
+            LocalOwnerEffectV1::ArtifactDisposition(oversized),
+            &record("ELO1", 99)?
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    // A record effect under the wrong tag, or a non-ELO1 owner result,
+    // commits nothing.
+    let refused = record("ELO1", 100)?;
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::ArtifactDisposition(record("ELCG1", 2)?),
             &refused
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );
     assert_eq!(
         store.commit_local_owner_effect(
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 2)),
-            &record("ELS1", 2)
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 2)?),
+            &record("ELS1", 2)?
         ),
         Err(ErasureErrorV1::InvalidEncoding)
     );
@@ -306,7 +327,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),
     };
-    let elo1 = record("ELO1", 200);
+    let elo1 = record("ELO1", 200)?;
     assert_eq!(
         store.commit_local_owner_effect(tombstone.clone(), &elo1)?,
         address(&elo1)?
@@ -317,7 +338,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
 
     // Repeating the committed tombstone is idempotent: a positive result
     // bound to the existing effect.
-    let repeated = record("ELO1", 201);
+    let repeated = record("ELO1", 201)?;
     assert_eq!(
         store.commit_local_owner_effect(tombstone, &repeated)?,
         address(&repeated)?
@@ -328,7 +349,7 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         request: Box::new(key_request()),
         deletion_receipt: Hash::from_bytes([3; 32]),
     };
-    let late = record("ELO1", 202);
+    let late = record("ELO1", 202)?;
     assert_eq!(
         store.commit_local_owner_effect(refused_tombstone, &late),
         Err(ErasureErrorV1::KeyDestructionFailed)
@@ -352,32 +373,31 @@ fn owner_effects_commit_with_their_owner_result_on_both_adapters() -> TestResult
 }
 
 fn sweep_contract(store: &mut impl LocalErasureStore) -> TestResult {
-    let kept = store.retain_erasure_object(&record("ELS1", 1), 1_024)?;
-    let swept = [
-        store.retain_erasure_object(&record("ELS1", 2), 1_024)?,
-        store.retain_erasure_object(&record("ELS1", 3), 1_024)?,
-        store.retain_erasure_object(&record("ELS1", 4), 1_024)?,
-    ];
-    let other_tag = store.retain_erasure_object(&record("ELO1", 1), 1_024)?;
-    let mut ordered = swept;
-    ordered.sort_unstable();
+    let kept_bytes = record("ELS1", 1)?;
+    let kept = store.retain_erasure_object(&kept_bytes, 1_024)?;
+    let mut swept = std::collections::BTreeMap::new();
+    for seed in 2..=4 {
+        let bytes = record("ELS1", seed)?;
+        swept.insert(store.retain_erasure_object(&bytes, 1_024)?, bytes);
+    }
+    let other_bytes = record("ELO1", 1)?;
+    let other_tag = store.retain_erasure_object(&other_bytes, 1_024)?;
 
+    // The sweep goes in increasing address order and stops at `max`.
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ELS1"], &[kept], 2)?,
         2
     );
-    assert_eq!(
-        store.read_object(ordered[0]),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        store.read_object(ordered[1]),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    assert_eq!(
-        store.read_object(ordered[2])?,
-        record_for(&swept, ordered[2])
-    );
+    let mut remaining = swept.into_iter();
+    for (reference, _) in remaining.by_ref().take(2) {
+        assert_eq!(
+            store.read_object(reference),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    for (reference, bytes) in remaining {
+        assert_eq!(store.read_object(reference)?, bytes);
+    }
     assert_eq!(
         store.sweep_unreferenced_erasure_objects(&["ELS1"], &[kept], 16)?,
         1
@@ -386,17 +406,10 @@ fn sweep_contract(store: &mut impl LocalErasureStore) -> TestResult {
         store.sweep_unreferenced_erasure_objects(&["ELS1"], &[kept], 16)?,
         0
     );
-    assert_eq!(store.read_object(kept)?, record("ELS1", 1));
-    assert_eq!(store.read_object(other_tag)?, record("ELO1", 1));
+    assert_eq!(store.sweep_unreferenced_erasure_objects(&[], &[], 16)?, 0);
+    assert_eq!(store.read_object(kept)?, kept_bytes);
+    assert_eq!(store.read_object(other_tag)?, other_bytes);
     Ok(())
-}
-
-fn record_for(swept: &[ErasureReferenceV1; 3], reference: ErasureReferenceV1) -> Vec<u8> {
-    let index = swept
-        .iter()
-        .position(|candidate| *candidate == reference)
-        .unwrap_or(0);
-    record("ELS1", u8::try_from(index).unwrap_or(0) + 2)
 }
 
 #[test]
@@ -411,7 +424,7 @@ fn sweep_deletes_only_unkept_retained_objects_of_the_named_tags() -> TestResult 
 }
 
 #[test]
-fn retained_record_tags_follow_the_record_grammar() {
+fn retained_record_tags_follow_the_record_grammar() -> TestResult {
     for (tag, accepted) in [
         ("ELB1S", true),
         ("ELIDEM1", true),
@@ -422,7 +435,7 @@ fn retained_record_tags_follow_the_record_grammar() {
         ("EL-1", false),
     ] {
         assert_eq!(
-            ErasureRetainedObjectV1::new(&record(tag, 1), 1_024).is_ok(),
+            ErasureRetainedObjectV1::new(&record(tag, 1)?, 1_024).is_ok(),
             accepted,
             "{tag}"
         );
@@ -436,13 +449,129 @@ fn retained_record_tags_follow_the_record_grammar() {
         ErasureRetainedObjectV1::new(&not_text, 1_024),
         Err(ErasureErrorV1::InvalidEncoding)
     );
-    let object = ErasureRetainedObjectV1::new(&record("ELS1", 1), 1_024);
+    let object = ErasureRetainedObjectV1::new(&record("ELS1", 1)?, 1_024);
     assert_eq!(
         object.as_ref().map(ErasureRetainedObjectV1::tag),
         Ok("ELS1")
     );
     assert_eq!(
         object.as_ref().map(ErasureRetainedObjectV1::canonical_cbor),
-        Ok(record("ELS1", 1).as_slice())
+        Ok(record("ELS1", 1)?.as_slice())
     );
+    Ok(())
+}
+
+fn rejoin_proof() -> Result<pos_core::ErasureRejoinProofV1, ErasureErrorV1> {
+    let reference = |seed: u8| ErasureReferenceV1::from_digest([seed; 32]);
+    pos_core::ErasureRejoinProofV1::new(pos_core::ErasureRejoinProofInputV1 {
+        request: reference(1),
+        terminal_receipt: reference(2),
+        replica_set: reference(3),
+        replica_id: reference(4),
+        inventory_generation: reference(5),
+        entries: Vec::new(),
+        attestation: reference(6),
+    })
+}
+
+/// An address the evidence path wrote first is never a sweep candidate, even
+/// after the same bytes are retained again.
+fn coordinator_object_survives_sweep(
+    store: &mut (impl LocalErasureStore + pos_store::ErasureRejoinPersistencePortV1),
+) -> TestResult {
+    let proof = rejoin_proof()?;
+    store.store_rejoin_proof(&proof)?;
+    let bytes = proof.to_canonical_cbor()?;
+    assert_eq!(
+        store.retain_erasure_object(&bytes, 1_024)?,
+        proof.reference()
+    );
+    assert_eq!(
+        store.sweep_unreferenced_erasure_objects(&["ERRJ1"], &[], 16)?,
+        0
+    );
+    assert_eq!(store.read_object(proof.reference())?, bytes);
+    Ok(())
+}
+
+#[test]
+fn sweep_never_takes_an_object_the_evidence_path_wrote_first() -> TestResult {
+    coordinator_object_survives_sweep(&mut MemoryStore::new())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("coordinator-object.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    coordinator_object_survives_sweep(&mut pos_store::sqlite::SqliteStore::open(path)?)
+}
+
+fn unbound_registry_refuses(store: &mut impl LocalErasureStore) -> TestResult {
+    let elo1 = record("ELO1", 1)?;
+    assert_eq!(
+        store.commit_local_owner_effect(
+            LocalOwnerEffectV1::KeyTombstone {
+                request: Box::new(key_request()),
+                deletion_receipt: deletion_receipt(&key_request()),
+            },
+            &elo1
+        ),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    assert_eq!(
+        store.read_object(address(&elo1)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_tombstone_without_a_key_registry_fails_alike_on_both_adapters() -> TestResult {
+    unbound_registry_refuses(&mut MemoryStore::new())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("unbound-registry.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    unbound_registry_refuses(&mut pos_store::sqlite::SqliteStore::open(path)?)
+}
+
+/// A write from another connection makes the installed inventory stale. The
+/// authority snapshot does not rebind it, so the tombstone stays refused until
+/// the inventory snapshot is installed again.
+#[test]
+fn sqlite_authority_snapshot_does_not_rebind_a_stale_inventory() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("stale-inventory.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    seed_pending_destruction(&mut store)?;
+    store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
+
+    let mut peer = pos_store::sqlite::SqliteStore::open(path)?;
+    peer.retain_erasure_object(&record("ELS1", 1)?, 1_024)?;
+    store.erasure_authority_snapshot_with_limits(limits()?)?;
+
+    let tombstone = || LocalOwnerEffectV1::KeyTombstone {
+        request: Box::new(key_request()),
+        deletion_receipt: deletion_receipt(&key_request()),
+    };
+    let stale = record("ELO1", 1)?;
+    assert_eq!(
+        store.commit_local_owner_effect(tombstone(), &stale),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    assert_eq!(
+        store.read_object(address(&stale)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    store.complete_erasure_inventory_snapshot_with_limits(limits()?)?;
+    let current = record("ELO1", 2)?;
+    assert_eq!(
+        store.commit_local_owner_effect(tombstone(), &current)?,
+        address(&current)?
+    );
+    Ok(())
 }

@@ -5144,13 +5144,12 @@ mod tests {
         ErasureReferenceV1::from_digest([seed; 32])
     }
 
-    fn empty_authority_view() -> ErasureAuthoritySnapshotViewV1 {
+    fn empty_authority_view() -> Result<ErasureAuthoritySnapshotViewV1, ErasureErrorV1> {
         ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1)
             .and_then(|inventory| {
                 pos_core::ErasureAuthoritySnapshotV1::new(inventory, Vec::new(), None)
             })
             .map(ErasureAuthoritySnapshotViewV1::new)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
     }
 
     fn verified_empty_inventory(
@@ -5872,6 +5871,7 @@ mod tests {
         transition_lookup_calls: Arc<std::sync::atomic::AtomicUsize>,
         lineage_read_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
+        authority_snapshot_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
 
@@ -6443,6 +6443,7 @@ mod tests {
             &mut self,
             limits: ErasureRecoveryLimitsV1,
         ) -> Result<pos_core::ErasureAuthoritySnapshotV1, ErasureErrorV1> {
+            self.authority_snapshot_calls += 1;
             self.inner.erasure_authority_snapshot_with_limits(limits)
         }
 
@@ -8146,6 +8147,60 @@ mod tests {
     }
 
     #[test]
+    fn hosted_port_reads_one_authority_view_until_a_durable_write() -> Result<(), ErasureErrorV1> {
+        let mut store = fault_store(FaultModeV1::BindGate);
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &UNUSED_COORDINATOR_AUTHORITY,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let first = port.authority_view()?;
+            assert!(Rc::ptr_eq(&first, &port.authority_view()?));
+        }
+        assert_eq!(store.authority_snapshot_calls, 1);
+
+        // Submit writes one CAS; the rejection's authority call must read a
+        // fresh view of the store that now holds the request.
+        let authority = RejectedCoordinatorAuthorityV1::default();
+        let request = coordinator_request()?;
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &authority,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+            coordinator.submit(request.clone(), request.provenance())?;
+            coordinator.reject(request.reference(), reference(31))?;
+        }
+        assert_eq!(store.authority_snapshot_calls, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_port_drops_its_authority_view_after_a_recovery_error() {
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        {
+            let port = HostedCoordinatorPortV1::new(
+                &mut store,
+                &UNUSED_COORDINATOR_AUTHORITY,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            );
+            let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
+            for _ in 0..2 {
+                assert_eq!(
+                    coordinator.verified_inventory(4),
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                );
+            }
+        }
+        // Each failed recovery appends its recovery error, so the second
+        // recovery reads a fresh view instead of the cached one.
+        assert_eq!(store.authority_snapshot_calls, 2);
+    }
+
+    #[test]
     fn hosted_coordinator_port_retains_recovery_failures() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
         let request = reference(34);
@@ -8241,17 +8296,18 @@ mod tests {
     }
 
     #[test]
-    fn default_candidate_observation_fails_closed() {
+    fn default_candidate_observation_fails_closed() -> Result<(), ErasureErrorV1> {
         assert_eq!(
             ErasureCoordinatorAuthorityV1::verified_topology_observation_for_candidate(
                 &UnusedCoordinatorAuthorityV1::rejecting(),
-                &empty_authority_view(),
+                &empty_authority_view()?,
                 reference(1),
                 reference(2),
                 &TimelineMeta::root("candidate"),
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
     }
 
     fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
@@ -8764,6 +8820,7 @@ mod tests {
                 transition_lookup_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 lineage_read_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
+                authority_snapshot_calls: 0,
                 fork_recovery_override: None,
             },
             resolve_control,
@@ -10705,7 +10762,9 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_recovery_rejects_incomplete_authoritative_state() {
+    fn identified_fork_recovery_rejects_incomplete_authoritative_state(
+    ) -> Result<(), ErasureErrorV1> {
+        let view = empty_authority_view()?;
         let parent = TimelineId::new();
         let child = TimelineId::new();
         let operation = reference(60);
@@ -10739,11 +10798,7 @@ mod tests {
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(
-                &empty_authority_view(),
-                &changed_input,
-                &recovered,
-            ),
+            ErasureExecutionHostV1::recover_identified_fork(&view, &changed_input, &recovered,),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -10773,7 +10828,7 @@ mod tests {
         };
         assert_eq!(
             ErasureExecutionHostV1::recover_identified_fork(
-                &empty_authority_view(),
+                &view,
                 &missing_inventory_input,
                 &recovered,
             ),
@@ -10804,8 +10859,7 @@ mod tests {
         let gate = Arc::clone(&host.gate);
         let mut transition_failure = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            let result =
-                host.prepare_identified_fork(&empty_authority_view(), &prepare_input, permit);
+            let result = host.prepare_identified_fork(&view, &prepare_input, permit);
             if let Err(error) = &result {
                 transition_failure = Some(*error);
             }
@@ -10816,6 +10870,7 @@ mod tests {
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(transition_failure, Some(ErasureErrorV1::StaleGeneration));
+        Ok(())
     }
 
     #[test]

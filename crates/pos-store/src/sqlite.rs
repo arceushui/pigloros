@@ -683,10 +683,18 @@ const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         ],
         constraints: &[
             "CHECK (length(reference_digest) = 32)",
+            // Bound by `ERASURE_RECORD_TAG_{MIN,MAX}_BYTES_V1`; see the const assert below.
             "CHECK (length(tag) BETWEEN 2 AND 8)",
         ],
     },
 ];
+
+// The `erasure_retained_objects.tag` CHECK above spells the shared record-tag
+// bounds; this keeps the literal and the core constants in step.
+const _: () = assert!(
+    pos_core::ERASURE_RECORD_TAG_MIN_BYTES_V1 == 2
+        && pos_core::ERASURE_RECORD_TAG_MAX_BYTES_V1 == 8
+);
 
 const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     SqliteSchemaTable {

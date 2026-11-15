@@ -49,8 +49,8 @@ fn the_view_reports_exactly_its_snapshot() -> Result<(), Box<dyn std::error::Err
     assert_eq!(read.request_count(), 0);
     assert_eq!(read.store_identity(), Some(identity));
 
-    // Reading the view changes nothing: the store still yields the same
-    // snapshot.
+    // The view is a value over its snapshot. The non-mutation check over a
+    // committed request lives in `erasure_coordinator_host_public.rs`.
     assert_eq!(
         store.erasure_authority_snapshot_with_limits(limits)?,
         snapshot

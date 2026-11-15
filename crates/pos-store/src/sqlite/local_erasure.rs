@@ -261,39 +261,37 @@ fn insert_retained(
         })
 }
 
+/// The first `max` retained objects of the named tags outside `keep`, in
+/// increasing address order. Tags are filtered in SQL and rows are streamed,
+/// so the scan stops at the `max`-th candidate.
 fn sweep_candidates(
     connection: &Connection,
     tags: &[&str],
     keep: &[ErasureReferenceV1],
     max: usize,
 ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+    let placeholders = vec!["?"; tags.len()].join(", ");
     connection
-        .prepare(
-            "SELECT reference_digest, tag FROM erasure_retained_objects ORDER BY reference_digest",
-        )
+        .prepare(&format!(
+            "SELECT reference_digest FROM erasure_retained_objects
+             WHERE tag IN ({placeholders}) ORDER BY reference_digest"
+        ))
         .map_err(map_erasure_receipt_failure)
         .and_then(|mut statement| {
             statement
-                .query_map([], |row| <(Vec<u8>, String)>::try_from(row))
+                .query_map(rusqlite::params_from_iter(tags), |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .map_err(map_erasure_receipt_failure)
                 .and_then(|rows| {
                     rows.map(|row| {
                         row.map_err(map_erasure_receipt_failure)
-                            .and_then(|(reference, tag)| {
-                                reference_from_sql(reference).map(|reference| (reference, tag))
-                            })
+                            .and_then(reference_from_sql)
                     })
-                    .collect::<Result<Vec<_>, _>>()
+                    .filter(|row| !row.as_ref().is_ok_and(|reference| keep.contains(reference)))
+                    .take(max)
+                    .collect()
                 })
-        })
-        .map(|rows| {
-            rows.into_iter()
-                .filter(|(reference, tag)| {
-                    tags.contains(&tag.as_str()) && !keep.contains(reference)
-                })
-                .map(|(reference, _)| reference)
-                .take(max)
-                .collect()
         })
 }
 
@@ -314,4 +312,36 @@ fn delete_retained(
         })
         .map(|_| ())
         .map_err(map_erasure_receipt_failure)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The inventory and the Timeline rows come from one read transaction, so
+    /// a Timeline another connection commits between the two reads is in
+    /// neither.
+    #[test]
+    fn authority_snapshot_reads_share_one_read_transaction(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("isolation.sqlite3");
+        let path = path
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?;
+        let mut store = SqliteStore::open(path)?;
+        store.create("before")?;
+        let limits = ErasureRecoveryLimitsV1::from_maximum_requests(4)?;
+        let transaction = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let inventory = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
+        SqliteStore::open(path)?.create("during")?;
+        let rows = timeline_rows(&transaction, limits)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(inventory.topology().len(), 1);
+        assert!(ErasureAuthoritySnapshotV1::new(inventory, rows, None).is_ok());
+        Ok(())
+    }
 }

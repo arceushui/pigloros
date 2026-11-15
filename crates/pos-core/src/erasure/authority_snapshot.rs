@@ -31,7 +31,24 @@ use ciborium::value::Value;
 pub const ERASURE_RETAINED_OBJECT_MAX_BYTES_V1: usize = 1024 * 1024;
 
 /// The largest definite array inside a retained object.
-const RETAINED_OBJECT_MAX_ARRAY: usize = 4_097;
+///
+/// It equals the TPS1 nested-array ceiling (`MAX_NESTED_ARRAY_ITEMS` in
+/// `pos-conformance`): the V1 per-category maximum of 4,096 entries
+/// ([`super::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY`]) plus one, so the largest
+/// retained record, a bound TPS1 snapshot, always decodes.
+const RETAINED_OBJECT_MAX_ARRAY: usize = super::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY + 1;
+
+/// The shortest record tag of a retained object, in bytes.
+pub const ERASURE_RECORD_TAG_MIN_BYTES_V1: usize = 2;
+
+/// The longest record tag of a retained object, in bytes.
+pub const ERASURE_RECORD_TAG_MAX_BYTES_V1: usize = 8;
+
+/// The largest ELAD1, ELCG1 or ELNEG1 owner-effect record (ADR-136 §4a).
+pub const LOCAL_OWNER_EFFECT_MAX_BYTES_V1: usize = 1024;
+
+/// The largest ELO1 owner-result record (ADR-136 §4).
+pub const LOCAL_OWNER_RESULT_MAX_BYTES_V1: usize = 4 * 1024;
 
 /// The owner and Fork relation of one Timeline in an authority snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,7 +194,7 @@ fn record_tag(value: &Value) -> Result<String, ErasureErrorV1> {
 
 fn is_record_tag(tag: &str) -> bool {
     let bytes = tag.as_bytes();
-    (2..=8).contains(&bytes.len())
+    (ERASURE_RECORD_TAG_MIN_BYTES_V1..=ERASURE_RECORD_TAG_MAX_BYTES_V1).contains(&bytes.len())
         && bytes[0].is_ascii_uppercase()
         && bytes[1..]
             .iter()
@@ -190,6 +207,10 @@ pub enum LocalOwnerEffectV1 {
     /// The final key-registry tombstone of one key destruction.
     KeyTombstone {
         /// The key destruction whose pending phase is already durable.
+        ///
+        /// Boxed only to keep the variants of this enum a similar size
+        /// (`clippy::large_enum_variant`); the value is ADR-136's unboxed
+        /// `KeyDestructionRequestV1`.
         request: Box<KeyDestructionRequestV1>,
         /// The tombstone's deletion receipt.
         deletion_receipt: Hash,
@@ -227,19 +248,22 @@ impl PreparedLocalOwnerEffectV1 {
                 request,
                 deletion_receipt,
             } => (Some((*request, deletion_receipt)), Ok(None)),
-            LocalOwnerEffectV1::ArtifactDisposition(record) => {
-                (None, tagged_object(record, "ELAD1").map(Some))
-            }
-            LocalOwnerEffectV1::CacheGeneration(record) => {
-                (None, tagged_object(record, "ELCG1").map(Some))
-            }
-            LocalOwnerEffectV1::Negative(record) => {
-                (None, tagged_object(record, "ELNEG1").map(Some))
-            }
+            LocalOwnerEffectV1::ArtifactDisposition(record) => (
+                None,
+                tagged_object(record, "ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+            ),
+            LocalOwnerEffectV1::CacheGeneration(record) => (
+                None,
+                tagged_object(record, "ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+            ),
+            LocalOwnerEffectV1::Negative(record) => (
+                None,
+                tagged_object(record, "ELNEG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1).map(Some),
+            ),
         };
         effect_object
             .and_then(|effect_object| {
-                tagged_object(elo1.to_vec(), "ELO1")
+                tagged_object(elo1.to_vec(), "ELO1", LOCAL_OWNER_RESULT_MAX_BYTES_V1)
                     .map(|owner_result| (effect_object, owner_result))
             })
             .map(|(effect_object, owner_result)| Self {
@@ -268,14 +292,16 @@ impl PreparedLocalOwnerEffectV1 {
     }
 }
 
-fn tagged_object(record: Vec<u8>, tag: &str) -> Result<ErasureRetainedObjectV1, ErasureErrorV1> {
-    ErasureRetainedObjectV1::from_owned(record, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1).and_then(
-        |object| {
-            if object.tag() == tag {
-                Ok(object)
-            } else {
-                Err(ErasureErrorV1::InvalidEncoding)
-            }
-        },
-    )
+fn tagged_object(
+    record: Vec<u8>,
+    tag: &str,
+    max_bytes: usize,
+) -> Result<ErasureRetainedObjectV1, ErasureErrorV1> {
+    ErasureRetainedObjectV1::from_owned(record, max_bytes).and_then(|object| {
+        if object.tag() == tag {
+            Ok(object)
+        } else {
+            Err(ErasureErrorV1::InvalidEncoding)
+        }
+    })
 }
