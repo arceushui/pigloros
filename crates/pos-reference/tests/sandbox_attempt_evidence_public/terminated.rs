@@ -316,7 +316,7 @@ fn tme1_facts_are_the_classification_view() -> TestResult {
 #[test]
 fn tme1_rule_1_envelope_size_and_types() -> TestResult {
     checks_envelope(&unhex(TME1_A)?, decode)?;
-    rejects_malformed_encodings(&unhex(TME1_A)?, decode)?;
+    rejects_malformed_encodings(&unhex(TME1_A)?, decode);
     bounds_raw_size(64 * 1024, decode);
     for record in [
         unhex(TME1_A)?,

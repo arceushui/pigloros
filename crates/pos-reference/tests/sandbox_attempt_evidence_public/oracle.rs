@@ -208,7 +208,7 @@ pub(super) fn checks_envelope(
 pub(super) fn rejects_malformed_encodings(
     bytes: &[u8],
     decode: impl Fn(&[u8]) -> Result<(), ProtocolError>,
-) -> TestResult {
+) {
     // `[unsigned, digest]`: the unsigned header, then the magic, then the
     // version 1.
     let header = if bytes[1] == 0x98 { 2 } else { 1 };
@@ -241,5 +241,4 @@ pub(super) fn rejects_malformed_encodings(
             "{case}"
         );
     }
-    Ok(())
 }

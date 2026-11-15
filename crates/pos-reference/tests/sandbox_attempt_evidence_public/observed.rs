@@ -157,7 +157,7 @@ fn koe1_digest_is_the_sau1_event_11_observed_state_digest() -> TestResult {
 fn koe1_rule_1_envelope_size_types_and_devices() -> TestResult {
     let vector = unhex(KOE1_A)?;
     checks_envelope(&vector, decode)?;
-    rejects_malformed_encodings(&vector, decode)?;
+    rejects_malformed_encodings(&vector, decode);
     bounds_raw_size(4096, decode);
     rejects_every_retyped_node(&vector, decode)?;
     rejects_every_retyped_node(&unhex(KOE1_B)?, decode)?;
