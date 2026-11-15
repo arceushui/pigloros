@@ -48,10 +48,6 @@ use crate::{
 
 const TRUST_DOMAIN: &str = "local.experiment";
 const DOMAIN: &[u8] = b"PiglorOS.LocalScheduledAdmission.v1\0";
-/// The composition-root seal the local session root builds its registry
-/// snapshot with (ADR-129 A5.9, #1374); private to this host.
-const AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
-    AuthorityTrustRootSealV1::for_composition_root();
 /// The local session root's actor, principal, and authority Timeline identity.
 const LOCAL_ROOT: u128 = 1;
 /// Label of the local policy revision, shared by the session grant and the
@@ -80,12 +76,16 @@ pub struct LocalScheduledAdmissionHostV1 {
 impl LocalScheduledAdmissionHostV1 {
     /// Return the process-wide local admission host.
     ///
+    /// The local experiment composition root passes its
+    /// [`AuthorityTrustRootSealV1`] (ADR-129 A5.9, #1374): the host builds its
+    /// session registry snapshot with it on first use.
+    ///
     /// # Errors
     /// Returns [`RuntimeError::Authority`] when the local session authority
     /// root cannot be composed.
-    pub fn shared() -> Result<&'static Self, RuntimeError> {
+    pub fn shared(seal: &AuthorityTrustRootSealV1) -> Result<&'static Self, RuntimeError> {
         SHARED
-            .get_or_init(|| Self::compose().ok())
+            .get_or_init(|| Self::compose(seal).ok())
             .as_ref()
             .ok_or(RuntimeError::Authority(
                 AuthorityErrorV1::PrincipalUnresolved,
@@ -287,7 +287,7 @@ impl LocalScheduledAdmissionHostV1 {
             .map_err(RuntimeError::AuthorityPersistence)
     }
 
-    fn compose() -> Result<Self, AuthorityErrorV1> {
+    fn compose(seal: &AuthorityTrustRootSealV1) -> Result<Self, AuthorityErrorV1> {
         let registry_digest = keyed(b"registry", &[]);
         PrincipalRefV1::try_new(LOCAL_ROOT.to_be_bytes(), TRUST_DOMAIN)
             .and_then(|principal| {
@@ -319,7 +319,7 @@ impl LocalScheduledAdmissionHostV1 {
                     .binding_digest()
                     .and_then(|binding| {
                         AuthorityRegistrySnapshotV1::try_new(
-                            &AUTHORITY_TRUST_ROOT,
+                            seal,
                             registry_digest,
                             vec![keyed(b"authentication", &[])],
                             vec![binding],

@@ -18,9 +18,9 @@ test-support = [
 # Exposes the process-wide local scheduled-admission host to the local
 # experiment composition root. Keeps the host out of deployable Plugin,
 # Driver, and provider graphs; it is not an in-process security boundary.
-# The host builds its local trust roots with the composition-root seal
-# (`pos-core/authority-trust-root`, scripts/check_authority_trust_root_seal.py).
-local-admission-host = ["pos-core/authority-trust-root"]
+# The host takes the composition-root seal from its caller and never mints it
+# (`scripts/check_authority_trust_root_seal.py` forbids forwarding it here).
+local-admission-host = []
 
 [dependencies]
 blake3 = { workspace = true }

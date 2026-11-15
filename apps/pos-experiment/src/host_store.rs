@@ -531,18 +531,44 @@ impl EventStore for HostedExperimentStore {
     }
 }
 
+/// The store error of each erasure host error, indexed by its stable code
+/// (`ErasureHostErrorV1::code`). The oracle test
+/// `every_host_error_routes_through_the_experiment_table` fails to compile
+/// until a new host error is routed here.
+const HOST_ERRORS: [fn() -> CoreError; ErasureHostErrorV1::COUNT] = [
+    containment_unavailable,
+    || CoreError::ErasureAccessFrozen,
+    containment_unavailable,
+    experiment_operation_rejected,
+    experiment_operation_rejected,
+    experiment_operation_rejected,
+    gateway_bound_store,
+];
+
+const _: () = assert!(HOST_ERRORS.len() == ErasureHostErrorV1::COUNT);
+
+/// The store error of `error`; a host error past the table fails closed as
+/// unavailable containment.
 fn host_error(error: ErasureHostErrorV1) -> CoreError {
-    match error {
-        ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
-        ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
-            CoreError::ErasureContainmentUnavailable
-        }
-        ErasureHostErrorV1::AuthorizationDenied
-        | ErasureHostErrorV1::Conflict
-        | ErasureHostErrorV1::AdapterFailure => {
-            CoreError::Storage("erasure host rejected experiment operation".to_owned())
-        }
-    }
+    HOST_ERRORS
+        .get(error as usize)
+        .copied()
+        .unwrap_or(containment_unavailable)()
+}
+
+const fn containment_unavailable() -> CoreError {
+    CoreError::ErasureContainmentUnavailable
+}
+
+fn gateway_bound_store() -> CoreError {
+    CoreError::Storage(
+        "the store is bound to a Gateway execution mode; only Gateway processes write it"
+            .to_owned(),
+    )
+}
+
+fn experiment_operation_rejected() -> CoreError {
+    CoreError::Storage("erasure host rejected experiment operation".to_owned())
 }
 
 #[cfg(test)]
@@ -1200,6 +1226,57 @@ mod host_store_tests {
         ] {
             assert!(matches!(host_error(error), CoreError::Storage(_)));
         }
+        assert!(host_error(ErasureHostErrorV1::ModeBindingStale)
+            .to_string()
+            .contains("bound to a Gateway execution mode"));
         Ok(())
+    }
+
+    /// The exhaustive oracle of the host error table: a new host error fails
+    /// to compile here until it is routed.
+    fn oracle_error(error: ErasureHostErrorV1) -> CoreError {
+        match error {
+            ErasureHostErrorV1::RecoveryUnavailable | ErasureHostErrorV1::StaleGeneration => {
+                CoreError::ErasureContainmentUnavailable
+            }
+            ErasureHostErrorV1::AccessFrozen => CoreError::ErasureAccessFrozen,
+            ErasureHostErrorV1::AuthorizationDenied
+            | ErasureHostErrorV1::Conflict
+            | ErasureHostErrorV1::AdapterFailure => experiment_operation_rejected(),
+            ErasureHostErrorV1::ModeBindingStale => gateway_bound_store(),
+        }
+    }
+
+    /// The exhaustive successor of each variant, `None` after the last: a new
+    /// variant fails to compile here until it joins the walk.
+    const fn next_host_error(variant: ErasureHostErrorV1) -> Option<ErasureHostErrorV1> {
+        match variant {
+            ErasureHostErrorV1::RecoveryUnavailable => Some(ErasureHostErrorV1::AccessFrozen),
+            ErasureHostErrorV1::AccessFrozen => Some(ErasureHostErrorV1::StaleGeneration),
+            ErasureHostErrorV1::StaleGeneration => Some(ErasureHostErrorV1::AuthorizationDenied),
+            ErasureHostErrorV1::AuthorizationDenied => Some(ErasureHostErrorV1::Conflict),
+            ErasureHostErrorV1::Conflict => Some(ErasureHostErrorV1::AdapterFailure),
+            ErasureHostErrorV1::AdapterFailure => Some(ErasureHostErrorV1::ModeBindingStale),
+            ErasureHostErrorV1::ModeBindingStale => None,
+        }
+    }
+
+    #[test]
+    fn every_host_error_routes_through_the_experiment_table() {
+        let mut walked = 0;
+        let mut last = ErasureHostErrorV1::RecoveryUnavailable;
+        let mut current = Some(ErasureHostErrorV1::RecoveryUnavailable);
+        while let Some(variant) = current {
+            assert_eq!(variant as usize, walked);
+            assert_eq!(
+                format!("{:?}", host_error(variant)),
+                format!("{:?}", oracle_error(variant))
+            );
+            last = variant;
+            walked += 1;
+            current = next_host_error(variant);
+        }
+        assert_eq!(walked, ErasureHostErrorV1::COUNT);
+        assert_eq!(last as usize, ErasureHostErrorV1::COUNT - 1);
     }
 }
