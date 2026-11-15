@@ -182,7 +182,10 @@ ALLOWED_SOURCES = {
     + "    "
     + SEAL_USE
     + "}\n// pub use pos_core::AuthorityTrustRootSealV1;\n// "
-    + SEAL_USE,
+    + SEAL_USE
+    + "/* outer /* inner */ still a comment: "
+    + SEAL_USE
+    + " */\n",
     "crates/pos-core/src/authority.rs": CORE_SEAL
     + TEST_MODULE
     + "    impl Clone for super::AuthorityTrustRootSealV1 {}\n}\n",
@@ -574,6 +577,16 @@ REJECTED_SOURCES = {
         "apps/piglor-gateway/build.rs",
         'fn main() {\n    println!("{}", "AuthorityTrustRootSealV1::for_composition_root()");\n}\n',
         "apps/piglor-gateway/build.rs: build code names the seal",
+    ),
+    "mint after a nested block comment": (
+        "crates/pos-state/src/lib.rs",
+        "/* outer /* inner */ outer */\n" + SEAL_USE,
+        PINNED,
+    ),
+    "mint after a test module with a continued string": (
+        "crates/pos-state/src/lib.rs",
+        TEST_MODULE + '    const S: &str = "a\\\n        {";\n}\n' + SEAL_USE,
+        PINNED,
     ),
     "workflow": (".github/workflows/ci.yml", "run: " + FEATURES_FLAG, CONFIG),
     "Dockerfile": ("docker/Dockerfile", "RUN " + FEATURES_FLAG, CONFIG),
