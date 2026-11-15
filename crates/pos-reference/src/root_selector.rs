@@ -1603,6 +1603,9 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             return write_provider_unavailable(stream, decoded);
         };
         let admitted = admission.admitted.as_ref();
+        // Read before the admission is released: SPR1 ordinal 21 must copy
+        // it (ADR-069 R9 §4.5).
+        let negative_probe = admitted.provider().host_profile().negative_probe_evidence;
         let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
             return write_policy_error(stream, decoded);
         };
@@ -1696,7 +1699,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             &spx1,
             terminal,
             namespace_execution.conflict,
-            admitted.provider().host_profile().negative_probe_evidence,
+            negative_probe,
         )
     }
 }
