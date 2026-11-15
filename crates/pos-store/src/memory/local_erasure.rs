@@ -110,32 +110,30 @@ impl MemoryStore {
         candidates.len()
     }
 
-    /// Every retained object of `tag`; a retained row whose bytes are gone
-    /// is [`ErasureErrorV1::ProvenanceMissing`], as on `SQLite`. The two maps
-    /// change together, so this only guards their shared invariant.
+    /// Every retained object of `tag`, read from the object map itself, so
+    /// each listed object has its bytes by construction: the retained index
+    /// only selects which of those objects are candidates.
     pub(super) fn local_erasure_retained(
         &self,
         tag: &str,
         max: usize,
     ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
-        self.erasure_retained_objects
+        let objects = self
+            .erasure_evidence
             .iter()
-            .filter(|(_, retained)| retained.as_str() == tag)
+            .filter(|(reference, _)| {
+                self.erasure_retained_objects
+                    .get(*reference)
+                    .is_some_and(|retained| retained == tag)
+            })
+            .map(|(_, bytes)| bytes.clone())
             .take(max.saturating_add(1))
-            .map(|(reference, _)| {
-                self.erasure_evidence
-                    .get(reference)
-                    .cloned()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .and_then(|objects| {
-                if objects.len() > max {
-                    Err(ErasureErrorV1::ScopeInvalid)
-                } else {
-                    Ok(objects)
-                }
-            })
+            .collect::<Vec<_>>();
+        if objects.len() > max {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(objects)
+        }
     }
 
     /// An address is retainable when it is free or already holds exactly
