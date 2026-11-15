@@ -133,7 +133,16 @@ boot() {
     # The interfaces of QEMU's own network namespace.
     sudo cat "/proc/${qemu_pid}/net/dev" >"${out}/host/qemu-net-dev"
   else
-    printf 'QEMU was not observed; launcher PID file: %s\n' "${pid:-missing}" >&2
+    # Say why, so the next run names the cause rather than a timeout.
+    {
+      printf 'QEMU was not observed; launcher PID file: %s\n' "${pid:-missing}"
+      if [[ ${pid} =~ ^[0-9]+$ ]]; then
+        sudo ls -l "/proc/${pid}/exe" || true
+        sudo cat "/proc/${pid}/comm" || true
+        readlink "/proc/${pid}/exe" || true
+      fi
+      ps -o pid,ppid,user,stat,comm,args -u "$(id -u)" || true
+    } >&2
   fi
   wait "${launcher}" || status=$?
   printf '%s\n' "${status}" >"${out}/host/vm-exit-status"
