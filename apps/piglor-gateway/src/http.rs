@@ -456,7 +456,6 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
@@ -2234,8 +2233,8 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["events"][0]["seq"], 2);
-        // Hex digits are case-insensitive: an uppercase digest names the
-        // same generation and resumes at the same position.
+        // The contract's cursor digest is 64 lowercase hex digits; an
+        // uppercase rendering of a live cursor is malformed, not a synonym.
         let mut parts = cursor.split('.').map(str::to_owned).collect::<Vec<_>>();
         parts[1] = parts[1].to_ascii_uppercase();
         assert_ne!(parts[1], cursor.split('.').nth(1).test_ok());
@@ -2247,10 +2246,10 @@ osf_link = \"https://osf.io/example\"\n";
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(upper["events"], second["events"]);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(upper["code"], "invalid-request");
         // A repeated cursor is malformed even when both copies are valid.
-        let (status, _) = json_request(
+        let (status, repeated) = json_request(
             app.clone(),
             "GET",
             &format!("/v1/timelines/{id}/events?cursor={cursor}&cursor={cursor}&limit=1"),
@@ -2258,6 +2257,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(repeated["code"], "invalid-request");
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
         assert!(gateway
@@ -2308,7 +2308,7 @@ osf_link = \"https://osf.io/example\"\n";
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = json_request(
             app,
             "GET",
@@ -2730,8 +2730,9 @@ osf_link = \"https://osf.io/example\"\n";
         let wrong_actor = EntityId::new().to_string();
         for limit in [0, MAX_EVENTS_PER_POLL + 1] {
             let uri = format!("/v1/timelines/{id}/events?limit={limit}");
-            let (status, _) = json_request(app.clone(), "GET", &uri, None).await;
+            let (status, problem) = json_request(app.clone(), "GET", &uri, None).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(problem["code"], "invalid-request", "{uri}");
             let request = Request::builder()
                 .method("GET")
                 .uri(&uri)
@@ -2740,6 +2741,11 @@ osf_link = \"https://osf.io/example\"\n";
                 .test_ok();
             let response = app.clone().oneshot(request).await.test_ok();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .test_ok();
+            let problem: serde_json::Value = serde_json::from_slice(&body).test_ok();
+            assert_eq!(problem["code"], "invalid-request", "{uri}");
         }
 
         let request = Request::builder()
