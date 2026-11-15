@@ -19,7 +19,8 @@ packaged NixOS 26.05 closure and on both architectures:
 scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
 itself, independently of the kernel. A published artifact can be checked
-again: its checker-verdict.json and SHA256SUMS sit beside guest/ and host/.
+again: its checker-verdict.json and SHA256SUMS sit beside guest/ and host/,
+and every file must then match SHA256SUMS.
 Usage:
 
   check_qemu_closure_evidence.py --architecture ARCH --certificate PEM \
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import pathlib
 import re
@@ -217,7 +219,26 @@ class Evidence:
         for path in self.root.rglob("*"):
             if path.is_symlink() or not (path.is_dir() or path.is_file()):
                 raise EvidenceError(f"evidence entry is not a regular file: {path}")
+        if "SHA256SUMS" in top:
+            self._verify_manifest()
         return processes
+
+    def _verify_manifest(self) -> None:
+        """A sealed artifact must match its manifest, file for file."""
+        manifest = self.root / "SHA256SUMS"
+        files = sorted(f"./{path.relative_to(self.root).as_posix()}" for path in self.root.rglob("*")
+                       if path.is_file() and path != manifest)
+        listed = {}
+        for line in (self.root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (\./.+)", line)
+            if not match or match.group(2) in listed:
+                raise EvidenceError(f"malformed SHA256SUMS line: {line!r}")
+            listed[match.group(2)] = match.group(1)
+        if sorted(listed) != files:
+            raise EvidenceError("SHA256SUMS does not list exactly the evidence files")
+        for name, digest in listed.items():
+            if hashlib.sha256((self.root / name).read_bytes()).hexdigest() != digest:
+                raise EvidenceError(f"{name} differs from SHA256SUMS")
 
     def raw(self, name: str) -> bytes:
         return (self.root / name).read_bytes()

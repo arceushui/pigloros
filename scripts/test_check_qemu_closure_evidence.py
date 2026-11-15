@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import pathlib
@@ -292,11 +293,32 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(verdict["nixpkgs"]["narHash"], checker.PINNED_NIXPKGS_NAR_HASH)
                 self.assertEqual(verdict["kernel_command_line"], CMDLINE.rstrip("\n"))
 
-    def test_sealed_evidence_can_be_checked_again(self):
-        def sealed(files):
-            files["checker-verdict.json"] = "{}"
-            files["SHA256SUMS"] = "0  ./host/runner\n"
-        self.assertEqual(self.verdict(change=sealed)["accelerator"], "tcg")
+    def test_sealed_evidence_can_be_checked_again_against_its_manifest(self):
+        def seal(edit=None):
+            def change(files):
+                files["checker-verdict.json"] = "{}"
+                digests = {f"./{name}": hashlib.sha256(
+                    content if isinstance(content, bytes) else content.encode()).hexdigest()
+                    for name, content in files.items()}
+                lines = [f"{digest}  {name}" for name, digest in sorted(digests.items())]
+                if edit:
+                    lines = edit(lines)
+                files["SHA256SUMS"] = "".join(line + "\n" for line in lines)
+            return change
+        self.assertEqual(self.verdict(change=seal())["accelerator"], "tcg")
+        for edit in (
+            lambda lines: lines[1:],
+            lambda lines: [*lines, lines[0]],
+            lambda lines: [*lines, "0" * 64 + "  ./host/missing"],
+            lambda lines: ["0" * 64 + lines[0][64:], *lines[1:]],
+            lambda lines: [lines[0].replace("  ", " "), *lines[1:]],
+        ):
+            with self.subTest(edit=edit):
+                self.refuses(seal(edit))
+        def tampered(files):
+            seal()(files)
+            files["guest/status"] = "complete\n\n"
+        self.refuses(tampered)
 
     def test_fallbacks_recorded_as_not_set_still_hold(self):
         def not_set(files):

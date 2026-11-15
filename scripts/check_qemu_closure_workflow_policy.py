@@ -31,7 +31,7 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.event.pull_request.head
 PRODUCER_SHA256 = {
     "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
     "scripts/qemu-closure-evidence.sh": "0e597b8e8ca19f01b3e9dd77efebbeed5a06cfb71c7ebd5c4d5ca185df1ba0bb",
-    "scripts/check_qemu_closure_evidence.py": "26a0261013dad048f4eb02329b1d42a4c71d8f885fc0bba6e2a08ce89f47ea29",
+    "scripts/check_qemu_closure_evidence.py": "69613b1e7354b9797aafa99804dbf18b8e08f38895786fa2839885b7b483e35a",
     "deploy/nixos/flake.nix": "cb21f5011b0e1c1d319a55f6d01b89427de4a19346b8a05c3c778a9d4ab4e999",
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
