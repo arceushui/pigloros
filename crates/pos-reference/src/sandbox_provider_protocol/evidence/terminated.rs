@@ -1,4 +1,5 @@
-//! TME1, the termination evidence of ADR-069 R9 §4.6.
+//! TME1, the termination evidence of ADR-069 R9 §4.6, with the R10 §4.8
+//! stdin feed `adapter-input` and launch failures 3 to 5.
 
 use std::num::NonZeroU64;
 
@@ -27,6 +28,9 @@ const MAX_SOURCE_BYTES: usize = 4096;
 const MAX_TRANSFER_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIVE_ATTEMPTS: u64 = 256;
 const MAX_SIGNAL: u8 = 64;
+/// The shortest framed EAO1 stream: a 7-byte EAO1 frame and a 6-byte EOE1
+/// body prefix, each after its 4-byte length (R10 §4.6).
+const MIN_FRAMED_BYTES: u64 = 21;
 
 /// TME1 `cleanup.empty-basis`: how the cgroup was proved empty.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,7 +95,7 @@ impl CgroupSources {
     }
 }
 
-/// TME1 `input` or `output-transfer`.
+/// TME1 `input`, `output-transfer` or `adapter-input`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferRecord {
     /// When the transfer started (`CLOCK_MONOTONIC` nanoseconds).
@@ -170,6 +174,12 @@ impl OutputCaptureRecord {
             ceiling_reached: bool_value(ceiling)?,
             complete_frame: bool_value(frame)?,
         })
+    }
+
+    /// R10 §7 rule 9: a complete frame is never a ceiling stop, and it
+    /// holds at least the shortest framed stream.
+    const fn ordered(self) -> bool {
+        !self.complete_frame || (!self.ceiling_reached && self.accepted_bytes >= MIN_FRAMED_BYTES)
     }
 }
 
@@ -311,6 +321,9 @@ pub struct TerminationEvidenceFields {
     pub previous_tme1_digest: Option<[u8; 32]>,
     /// 26: the terminal code; `None` is `Completed`.
     pub terminal_code: Option<TerminalCode>,
+    /// 27: the provider's stdin feed after `ReleaseV1`, under ELM1 ID 16
+    /// (R10 §4.5); present only at progress 2.
+    pub adapter_input: Option<TransferRecord>,
 }
 
 /// The decoded snapshots' parsed counters.
@@ -346,17 +359,18 @@ impl TerminationEvidenceFields {
             self.cleanup.value(),
             optional_value(self.previous_tme1_digest.as_ref(), digest_value),
             optional_value(self.terminal_code, code_value),
+            optional_value(self.adapter_input, TransferRecord::value),
         ]
     }
 
-    fn decode(fields: &[Value; 27]) -> Result<(Self, Snapshots)> {
+    fn decode(fields: &[Value; 28]) -> Result<(Self, Snapshots)> {
         let (attempt_id, agr1_digest, elm1_digest, koe1_digest) = bindings(fields)?;
         let (progress, launch_failure, start_job, unit) = launch(fields)?;
         let ((baseline, baseline_snapshot), (terminal, terminal_snapshot)) = snapshots(fields)?;
         let (contradiction, service, ending, barrier_failure) = outcome(fields)?;
         let (input, output_capture, output_transfer, local_network) = transfers(fields)?;
         let (admission, work_after, watchdog_deadline, cancel_source) = ledger(fields)?;
-        let (cleanup, previous_tme1_digest, terminal_code) = conclusion(fields)?;
+        let (cleanup, previous_tme1_digest, terminal_code, adapter_input) = conclusion(fields)?;
         let decoded = Self {
             attempt_id,
             agr1_digest,
@@ -383,6 +397,7 @@ impl TerminationEvidenceFields {
             cleanup,
             previous_tme1_digest,
             terminal_code,
+            adapter_input,
         };
         consistent(decoded.shaped() && decoded.ordered())
             .map(|()| (decoded, (baseline_snapshot, terminal_snapshot)))
@@ -402,8 +417,8 @@ impl TerminationEvidenceFields {
                 == (self.cleanup.result == CleanupResult::Proved && self.unit.is_some())
     }
 
-    /// Progress 0: no unit and nothing after it; only a root activation or
-    /// pre-start recheck failure.
+    /// Progress 0: no unit and nothing after it; only a root activation,
+    /// pre-start recheck, output reservation or stdio channel failure.
     const fn not_started_shape(&self) -> bool {
         !matches!(self.launch_failure, Some(LaunchFailure::UnitRefFailed))
             && self.start_job.is_none()
@@ -417,10 +432,11 @@ impl TerminationEvidenceFields {
             && self.output_transfer.is_none()
             && self.local_network.is_none()
             && self.work_after.is_none()
+            && self.adapter_input.is_none()
     }
 
     /// Progress 1: a start job; snapshots only with a unit, both or neither;
-    /// no ending, capture or output transfer; only a pin failure.
+    /// no ending, capture, feed or output transfer; only a pin failure.
     const fn started_shape(&self) -> bool {
         matches!(
             self.launch_failure,
@@ -431,11 +447,13 @@ impl TerminationEvidenceFields {
             && self.ending.is_none()
             && self.output_capture.is_none()
             && self.output_transfer.is_none()
+            && self.adapter_input.is_none()
             && (self.unit.is_some() || self.work_after.is_none())
     }
 
     /// Progress 2: a done start job, the unit, both snapshots, an ending and
-    /// a capture; no launch or barrier failure.
+    /// a capture; no launch or barrier failure. A null `adapter-input` is
+    /// missing evidence, not a shape error (R10 §4.8).
     const fn released_shape(&self) -> bool {
         self.launch_failure.is_none()
             && matches!(self.start_job, Some(StartJobResult::Done))
@@ -447,15 +465,38 @@ impl TerminationEvidenceFields {
             && self.output_capture.is_some()
     }
 
-    /// R9 §6 rule 9 within the record: each transfer is ordered, and the
-    /// cleanup finished no earlier than the terminal snapshot.
+    /// R9 §6 rule 9 within the record, as R10 §7 extends it: each transfer
+    /// is ordered, the capture is consistent, the stdin feed lies within the
+    /// released run, and the cleanup finished no earlier than the terminal
+    /// snapshot.
     fn ordered(&self) -> bool {
         self.input.ordered()
             && self.output_transfer.is_none_or(TransferRecord::ordered)
+            && self.output_capture.is_none_or(OutputCaptureRecord::ordered)
+            && self
+                .adapter_input
+                .is_none_or(|feed| self.feed_ordered(feed))
             && self
                 .terminal
                 .as_ref()
                 .is_none_or(|terminal| self.cleanup.finished_at >= terminal.observed_at)
+    }
+
+    /// R10 §4.8 and §7 rule 9: the stdin feed is ordered, carries exactly
+    /// the verified input, starts after the input transfer finished and
+    /// after the baseline, and finishes by the terminal snapshot.
+    fn feed_ordered(&self, feed: TransferRecord) -> bool {
+        feed.ordered()
+            && feed.expected_bytes == self.input.expected_bytes
+            && feed.start >= self.input.finish
+            && self
+                .baseline
+                .as_ref()
+                .is_some_and(|baseline| feed.start >= baseline.observed_at)
+            && self
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| feed.finish <= terminal.observed_at)
     }
 }
 
@@ -537,6 +578,7 @@ impl TerminationEvidence {
             ending: fields.ending,
             barrier_failure: fields.barrier_failure,
             input_complete: fields.input.complete,
+            adapter_input_complete: fields.adapter_input.map(|feed| feed.complete),
             output_capture: fields.output_capture.map(|capture| OutputCaptureFacts {
                 ceiling_reached: capture.ceiling_reached,
                 complete_frame: capture.complete_frame,
@@ -575,7 +617,7 @@ impl TerminationEvidence {
 /// `attempt-id`, `agr1-digest`, `elm1-digest` and `koe1-digest`.
 type Bindings = ([u8; 16], [u8; 32], [u8; 32], [u8; 32]);
 
-fn bindings(fields: &[Value; 27]) -> Result<Bindings> {
+fn bindings(fields: &[Value; 28]) -> Result<Bindings> {
     Ok((
         id16(&fields[2])?,
         digest(&fields[3])?,
@@ -591,7 +633,7 @@ type Launch = (
     Option<UnitIdentity>,
 );
 
-fn launch(fields: &[Value; 27]) -> Result<Launch> {
+fn launch(fields: &[Value; 28]) -> Result<Launch> {
     Ok((
         code(&fields[6])?,
         optional(&fields[7], code)?,
@@ -602,7 +644,7 @@ fn launch(fields: &[Value; 27]) -> Result<Launch> {
 
 type Snapshot = (Option<CgroupSources>, Option<CgroupSnapshot>);
 
-fn snapshots(fields: &[Value; 27]) -> Result<(Snapshot, Snapshot)> {
+fn snapshots(fields: &[Value; 28]) -> Result<(Snapshot, Snapshot)> {
     let snapshot = |value: &Value| {
         optional(value, CgroupSources::decode).map(|decoded| match decoded {
             Some((sources, snapshot)) => (Some(sources), Some(snapshot)),
@@ -619,7 +661,7 @@ type Outcome = (
     Option<BarrierFailure>,
 );
 
-fn outcome(fields: &[Value; 27]) -> Result<Outcome> {
+fn outcome(fields: &[Value; 28]) -> Result<Outcome> {
     Ok((
         optional(&fields[12], code)?,
         optional(&fields[13], service)?,
@@ -635,7 +677,7 @@ type Transfers = (
     Option<LocalNetworkRecord>,
 );
 
-fn transfers(fields: &[Value; 27]) -> Result<Transfers> {
+fn transfers(fields: &[Value; 28]) -> Result<Transfers> {
     Ok((
         TransferRecord::decode(&fields[16])?,
         optional(&fields[17], OutputCaptureRecord::decode)?,
@@ -651,7 +693,7 @@ type Ledger = (
     Option<CancelSource>,
 );
 
-fn ledger(fields: &[Value; 27]) -> Result<Ledger> {
+fn ledger(fields: &[Value; 28]) -> Result<Ledger> {
     Ok((
         AdmissionLedger::decode(&fields[20])?,
         optional(&fields[21], work_statfs)?,
@@ -660,13 +702,19 @@ fn ledger(fields: &[Value; 27]) -> Result<Ledger> {
     ))
 }
 
-type Conclusion = (CleanupRecord, Option<[u8; 32]>, Option<TerminalCode>);
+type Conclusion = (
+    CleanupRecord,
+    Option<[u8; 32]>,
+    Option<TerminalCode>,
+    Option<TransferRecord>,
+);
 
-fn conclusion(fields: &[Value; 27]) -> Result<Conclusion> {
+fn conclusion(fields: &[Value; 28]) -> Result<Conclusion> {
     Ok((
         CleanupRecord::decode(&fields[24])?,
         optional(&fields[25], digest)?,
         optional(&fields[26], code)?,
+        optional(&fields[27], TransferRecord::decode)?,
     ))
 }
 

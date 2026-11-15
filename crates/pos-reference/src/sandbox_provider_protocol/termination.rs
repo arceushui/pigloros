@@ -1,4 +1,5 @@
-//! The total ADR-069 R9 terminal classifier (§4.6.4 and §4.6.5).
+//! The total ADR-069 R9 terminal classifier (§4.6.4 and §4.6.5), as R10
+//! §4.8 extends it with the stdin feed and the pre-start launch failures.
 //!
 //! [`TerminationFacts`] is the typed view of everything the terminal code
 //! depends on: the classification fields of one TME1, the status of the RQE1
@@ -126,6 +127,15 @@ pub enum LaunchFailure {
     PreStartRecheckFailed = 1,
     /// 2: `RefUnit` failed, so the unit's result could not be pinned.
     UnitRefFailed = 2,
+    /// 3: the aggregate staging ledger refused the attempt's output
+    /// reservation (R10 §4.7).
+    OutputReservationRefused = 3,
+    /// 4: a stdio channel could not be created, or descriptor 2 is not the
+    /// character device 1:3 (R10 §4.1).
+    StdioChannelFailed = 4,
+    /// 5: the staging ledger was closed after a cleanup failure, so the
+    /// output reservation was refused (R10 §4.7, D5).
+    AdmissionClosed = 5,
 }
 
 /// TME1 `start-job-result`: systemd's `JobRemoved` result of the start job.
@@ -567,6 +577,9 @@ pub struct TerminationFacts {
     pub barrier_failure: Option<BarrierFailure>,
     /// TME1 `input.complete`.
     pub input_complete: bool,
+    /// TME1 `adapter-input.complete`: whether the stdin feed was accepted
+    /// completely by its deadline (R10 §4.5); `None` when it is null.
+    pub adapter_input_complete: Option<bool>,
     /// TME1 `output-capture`.
     pub output_capture: Option<OutputCaptureFacts>,
     /// TME1 `output-transfer.complete`; `None` when no output transfer
@@ -710,9 +723,9 @@ impl TerminationFacts {
 
     /// Required evidence is absent (R9 O6).
     ///
-    /// That is unit evidence out of step with the unit, a field §4.6.3
-    /// requires at this progress, or one of KOE1 `work` and `work-after`
-    /// without the other.
+    /// That is unit evidence out of step with the unit, a field §4.6.3 or
+    /// R10 §4.8 requires at this progress, or one of KOE1 `work` and
+    /// `work-after` without the other.
     const fn missing_evidence(&self) -> bool {
         let released = matches!(self.progress, AttemptProgressCode::Released);
         self.unit_evidence_missing()
@@ -720,7 +733,8 @@ impl TerminationFacts {
                 && (self.unit.is_none()
                     || self.service.is_none()
                     || self.ending.is_none()
-                    || self.output_capture.is_none()))
+                    || self.output_capture.is_none()
+                    || self.adapter_input_complete.is_none()))
             || (!matches!(self.progress, AttemptProgressCode::NotStarted)
                 && self.start_job.is_none())
             || (self.unit.is_none()
@@ -757,7 +771,10 @@ impl TerminationFacts {
     /// The code-2 candidates other than a contradiction.
     fn cleanup_failed(&self) -> bool {
         matches!(self.cleanup, CleanupResult::NotProved)
-            || matches!(self.launch_failure, Some(LaunchFailure::UnitRefFailed))
+            || matches!(
+                self.launch_failure,
+                Some(LaunchFailure::UnitRefFailed | LaunchFailure::AdmissionClosed)
+            )
             || matches!(self.service_result(), Some(ServiceResultCode::Watchdog))
             || self.enforcement_disagrees()
             || self.missing_evidence()
@@ -792,8 +809,10 @@ impl TerminationFacts {
     }
 
     fn ipc_failed(&self) -> bool {
-        self.barrier_failure
-            .is_some_and(BarrierFailure::channel_fault)
+        matches!(self.launch_failure, Some(LaunchFailure::StdioChannelFailed))
+            || self
+                .barrier_failure
+                .is_some_and(BarrierFailure::channel_fault)
             || self
                 .local_network_termination
                 .is_some_and(LocalNetworkTerminationCode::channel_fault)
@@ -804,7 +823,11 @@ impl TerminationFacts {
             .is_some_and(BarrierFailure::content_fault)
             || matches!(
                 self.launch_failure,
-                Some(LaunchFailure::RootNotActivated | LaunchFailure::PreStartRecheckFailed)
+                Some(
+                    LaunchFailure::RootNotActivated
+                        | LaunchFailure::PreStartRecheckFailed
+                        | LaunchFailure::OutputReservationRefused
+                )
             )
             || self
                 .start_job
@@ -820,6 +843,7 @@ impl TerminationFacts {
 
     fn transfer_failed(&self) -> bool {
         !self.input_complete
+            || self.adapter_input_complete == Some(false)
             || self.output_transfer_complete == Some(false)
             || self.ending.is_some_and(EndingCode::protocol_failure)
             || matches!(

@@ -1,4 +1,5 @@
-//! RQE1: the R9 §7.1 and §7.2 vectors, and R9 §6 rules 1 to 3.
+//! RQE1: the R9 §7.1 and §7.2 vectors, the R10 §8.2 vector, and R9 §6
+//! rules 1 to 3 as R10 §7 extends them.
 
 use ciborium::value::Value;
 use pos_reference::sandbox_provider_protocol::{
@@ -10,7 +11,7 @@ use super::oracle::{
     bounds_raw_size, checks_envelope, encode, filled, integer, rejects_every_retyped_node,
     rejects_malformed_encodings, seal, text, unhex, with, TestResult,
 };
-use super::vectors::{RQE1_A, RQE1_A_DIGEST, RQE1_B, RQE1_B_DIGEST};
+use super::vectors::{RQE1_A, RQE1_A_DIGEST, RQE1_B, RQE1_B_DIGEST, RQE1_C, RQE1_C_DIGEST};
 
 fn decode(bytes: &[u8]) -> Result<(), ProtocolError> {
     RequestedConfigurationEvidence::from_canonical_cbor(bytes).map(|_| ())
@@ -130,11 +131,13 @@ fn every_code() -> TestResult<(Vec<Value>, Vec<Value>)> {
         "ExtraFileDescriptors",
         dbus(9, Value::Array(vec![text("release")])),
     ));
+    requested.push(entry("StandardInputFileDescriptor", dbus(10, Value::Null)));
     let mut readback = shared;
     readback.push(entry(
         "ExtraFileDescriptors",
         dbus(4, Value::Array(vec![text("release")])),
     ));
+    readback.push(entry("StandardInputFileDescriptor", dbus(1, text(""))));
     readback.push(entry("RootImagePolicy", dbus(1, text("root=verity"))));
     Ok((sorted(requested)?, sorted(readback)?))
 }
@@ -210,7 +213,7 @@ fn rqe1_every_value_code_round_trips() -> TestResult {
         .map(|property| property.value.code())
         .collect::<Vec<_>>();
     codes.sort_unstable();
-    assert_eq!(codes, (0..=9).collect::<Vec<_>>());
+    assert_eq!(codes, (0..=10).collect::<Vec<_>>());
     let values = requested
         .into_iter()
         .map(|property| property.value)
@@ -235,6 +238,7 @@ fn rqe1_every_value_code_round_trips() -> TestResult {
             false,
         )]),
         DbusValue::DescriptorNames(strings(&["release"])),
+        DbusValue::Descriptor,
     ] {
         assert!(values.contains(&expected), "{expected:?} did not decode");
     }
@@ -376,7 +380,7 @@ fn rqe1_value_codes_and_payloads_are_bounded() -> TestResult {
         |arguments: usize| Value::Array(vec![text("/l"), texts(arguments), Value::Bool(false)]);
     let repeated = |value: &Value, count: usize| Value::Array(vec![value.clone(); count]);
     for (value, accepted) in [
-        (dbus(10, integer(0)), false),
+        (dbus(11, integer(0)), false),
         (dbus(1, text(&longest)), true),
         (dbus(1, text(&format!("{longest}y"))), false),
         (dbus(3, integer(u64::from(u32::MAX))), true),
@@ -447,6 +451,12 @@ fn rqe1_rule_3_readback_codes_follow_the_table() -> TestResult {
             ),
             ("MemoryMax", dbus(3, integer(1024))),
             ("Type", dbus(2, integer(1))),
+            // R10: code 10 is never read back.
+            ("StandardInputFileDescriptor", dbus(10, Value::Null)),
+            (
+                "StandardInputFileDescriptor",
+                dbus(4, Value::Array(Vec::new())),
+            ),
         ] {
             assert_eq!(
                 decode(&readback_with(status, name, &value)?),
@@ -552,6 +562,12 @@ fn rqe1_rule_3_requested_codes_follow_the_table() -> TestResult {
         ("TemporaryFileSystem", 7, empty()),
         ("ExecStart", 8, empty()),
         ("ExtraFileDescriptors", 9, empty()),
+        ("StandardInput", 1, text("null")),
+        ("StandardOutput", 1, text("null")),
+        ("StandardError", 1, text("null")),
+        ("StandardInputFileDescriptor", 10, Value::Null),
+        ("StandardOutputFileDescriptor", 10, Value::Null),
+        ("StandardErrorFileDescriptor", 10, Value::Null),
     ] {
         assert_eq!(
             decode(&requested_only(vec![entry(name, dbus(code, payload))])?),
@@ -598,6 +614,137 @@ fn rqe1_rule_3_requested_codes_follow_the_table() -> TestResult {
             Err(ProtocolError::InconsistentFields),
             "status {status}"
         );
+    }
+    Ok(())
+}
+
+const STDIO_ENUMS: [&str; 3] = ["StandardError", "StandardInput", "StandardOutput"];
+const STDIO_DESCRIPTORS: [&str; 3] = [
+    "StandardErrorFileDescriptor",
+    "StandardInputFileDescriptor",
+    "StandardOutputFileDescriptor",
+];
+
+/// The R10 §8.2 fields, written out from the R10 text.
+fn vector_c_fields() -> RequestedConfigurationEvidenceFields {
+    let enums = STDIO_ENUMS.map(|name| property(name, DbusValue::String("null".to_owned())));
+    let requested = enums
+        .iter()
+        .cloned()
+        .chain(STDIO_DESCRIPTORS.map(|name| property(name, DbusValue::Descriptor)))
+        .collect();
+    let readback = enums
+        .into_iter()
+        .chain([property(
+            "RootImagePolicy",
+            DbusValue::String("root=verity+signed+absent".to_owned()),
+        )])
+        .chain(STDIO_DESCRIPTORS.map(|name| property(name, DbusValue::String(String::new()))))
+        .collect();
+    RequestedConfigurationEvidenceFields {
+        attempt_id: [0x11; 16],
+        agr1_digest: [0x22; 32],
+        status: RequestedConfigurationStatus::Verified,
+        requested: Some(requested),
+        readback: Some(readback),
+    }
+}
+
+/// RQE1-C with every entry named `name` in the list at `list` (5 requested,
+/// 6 readback) replaced by `value`, or removed when it is `None`.
+fn vector_c_with(
+    status: u64,
+    list: usize,
+    name: &str,
+    value: Option<Value>,
+) -> TestResult<Vec<u8>> {
+    super::oracle::edit(&unhex(RQE1_C)?, |fields| {
+        fields[4] = integer(status);
+        let Value::Array(entries) = &mut fields[list] else {
+            return Err("property list".into());
+        };
+        entries.retain_mut(|entry| match entry {
+            Value::Array(parts) if parts[0] == text(name) => value.clone().is_some_and(|value| {
+                parts[1] = value;
+                true
+            }),
+            _ => true,
+        });
+        Ok(())
+    })
+}
+
+#[test]
+fn rqe1_c_vector_decodes_and_encodes_byte_for_byte() -> TestResult {
+    let bytes = unhex(RQE1_C)?;
+    let decoded = RequestedConfigurationEvidence::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded.fields(), &vector_c_fields());
+    assert_eq!(decoded.digest().to_vec(), unhex(RQE1_C_DIGEST)?);
+    assert_eq!(
+        RequestedConfigurationEvidence::new(&vector_c_fields())?.canonical_bytes(),
+        bytes.as_slice()
+    );
+    rejects_every_retyped_node(&bytes, decode)
+}
+
+#[test]
+fn rqe1_r10_rule_3_code_10_names_only_the_stdio_descriptors() -> TestResult {
+    for name in ["StandardInput", "ExtraFileDescriptors", "Unfixed"] {
+        assert_eq!(
+            decode(&requested_only(vec![entry(name, dbus(10, Value::Null))])?),
+            Err(ProtocolError::InconsistentFields),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        decode(&requested_only(vec![entry(
+            "StandardOutputFileDescriptor",
+            dbus(10, integer(1))
+        )])?),
+        Err(ProtocolError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn rqe1_r10_rule_3_a_verified_readback_has_the_stdio_values() -> TestResult {
+    let null = || Some(dbus(1, text("null")));
+    let empty = || Some(dbus(1, text("")));
+    for (list, name, value, verified) in [
+        // `StandardErrorFileDescriptor` omitted from `requested`.
+        (5, "StandardErrorFileDescriptor", None, false),
+        (6, "StandardErrorFileDescriptor", None, false),
+        (6, "StandardOutput", Some(dbus(1, text("journal"))), false),
+        (6, "StandardInput", Some(dbus(1, text("fd"))), false),
+        (6, "StandardError", Some(dbus(1, text("inherit"))), false),
+        (
+            6,
+            "StandardInputFileDescriptor",
+            Some(dbus(1, text("stdin"))),
+            false,
+        ),
+        (
+            6,
+            "StandardErrorFileDescriptor",
+            Some(dbus(1, text("x"))),
+            false,
+        ),
+        (6, "StandardOutputFileDescriptor", empty(), true),
+        (6, "StandardError", null(), true),
+    ] {
+        assert_eq!(
+            decode(&vector_c_with(0, list, name, value.clone())?),
+            if verified {
+                Ok(())
+            } else {
+                Err(ProtocolError::InconsistentFields)
+            },
+            "status 0: {name} {value:?}"
+        );
+        // A mismatch records whatever was read back under the right code.
+        if value.is_some() {
+            assert_eq!(decode(&vector_c_with(2, list, name, value)?), Ok(()));
+        }
     }
     Ok(())
 }
