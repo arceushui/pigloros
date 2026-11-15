@@ -301,6 +301,7 @@ fn rls1_signer_rejects_every_zero_field_and_a_zero_signature() -> TestResult {
     let verified = record.clone().verify(signature, &key.verifying_key())?;
     assert_eq!(verified.record(), &record);
     assert_eq!(verified.signature(), signature);
+    assert_eq!(verified.key(), &key.verifying_key());
     assert_eq!(record.key_id(), "runtime-key");
     let release = ExecutionRelease::new(verified);
     assert_eq!(release.digest, record.digest());

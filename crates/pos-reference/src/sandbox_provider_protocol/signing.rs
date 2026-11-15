@@ -102,18 +102,21 @@ impl<M: RuntimeSigned> SelfDigested<M> {
         .map(|()| Verified {
             record: self,
             signature,
+            key: *key,
         })
         .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)
     }
 }
 
-/// A self-digested record with a signature that verified under the key it
-/// was checked against. Only [`SelfDigested::verify`] constructs one, so no
-/// signed record can be assembled from an unverified signature.
+/// A record with a signature and the public key it verified under.
+///
+/// Only [`SelfDigested::verify`] constructs one, so no signed record can be
+/// assembled from an unverified signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Verified<M: RuntimeSigned> {
     record: SelfDigested<M>,
     signature: [u8; 64],
+    key: VerifyingKey,
 }
 
 impl<M: RuntimeSigned> Verified<M> {
@@ -127,6 +130,12 @@ impl<M: RuntimeSigned> Verified<M> {
     #[must_use]
     pub const fn signature(&self) -> [u8; 64] {
         self.signature
+    }
+
+    /// The public key the signature verified under.
+    #[must_use]
+    pub const fn key(&self) -> &VerifyingKey {
+        &self.key
     }
 
     pub(super) fn into_parts(self) -> (M::Body, [u8; 32], [u8; 64]) {

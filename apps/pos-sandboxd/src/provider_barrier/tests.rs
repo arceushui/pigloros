@@ -65,6 +65,10 @@ enum Behaviour {
     HangsAfterFirstRead,
     /// The second `MainPID` read names another process.
     MainPidDrifts,
+    /// The third `InvocationID` read, the recheck's observation, fails.
+    InvocationBreaksOnRecheck,
+    /// The third `MainPID` read, the recheck's observation, never answers.
+    HangsOnRecheck,
 }
 
 struct TestIdentity {
@@ -91,6 +95,7 @@ impl TestIdentity {
         match self.behaviour {
             Behaviour::Hangs => true,
             Behaviour::HangsAfterFirstRead => reads > 0,
+            Behaviour::HangsOnRecheck => reads == 2,
             _ => false,
         }
     }
@@ -131,6 +136,7 @@ impl UnitIdentitySource for TestIdentity {
         match self.behaviour {
             Behaviour::InvocationDown => Err(IdentityDown),
             Behaviour::InvocationBreaksAfterFirstRead if reads > 0 => Err(IdentityDown),
+            Behaviour::InvocationBreaksOnRecheck if reads == 2 => Err(IdentityDown),
             Behaviour::InvocationDrifts if reads > 0 => Ok([0x13; 16]),
             _ => Ok(INVOCATION),
         }
@@ -1167,6 +1173,15 @@ mod kernel_observation {
         observing: Observing,
         behaviour: Behaviour,
     ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
+        observed_within(observing, behaviour, GENEROUS_MS).await
+    }
+
+    /// [`observed_with`] under a deadline `milliseconds` away.
+    async fn observed_within(
+        observing: Observing,
+        behaviour: Behaviour,
+        milliseconds: u64,
+    ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
         let attempt =
             AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
         let identity = TestIdentity::behaving(own_pid(), behaviour);
@@ -1174,13 +1189,95 @@ mod kernel_observation {
         barrier.check.observed = TestObserved::new(observing)?;
         let launcher = launcher(&mut barrier)?;
         let released = barrier
-            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .release(&active(attempt, milliseconds), cgroup_view())
             .await;
         let evidence = barrier.evidence();
         drop(barrier);
         let received = launcher.join().map_err(|_| "launcher thread")?;
         assert_eq!(received.as_ref(), evidence.release());
         Ok((evidence, released))
+    }
+
+    /// R9 barrier failure 8: the recheck's manager read failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_whose_identity_read_fails_records_barrier_failure_8() -> TestResult {
+        let (evidence, released) =
+            observed_with(Observing::ReadsUnit, Behaviour::InvocationBreaksOnRecheck).await?;
+        let error = released.err().ok_or("released")?;
+        assert!(matches!(
+            error,
+            BarrierError::Refused(RecheckRefusal::Identity(_))
+        ));
+        assert_eq!(
+            error.barrier_failure(),
+            Some(BarrierFailure::RecheckIdentityUnreadable)
+        );
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    /// R9 barrier failure 10: the recheck's manager read outlived the
+    /// attempt deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_whose_identity_read_outlives_the_deadline_records_barrier_failure_10(
+    ) -> TestResult {
+        let (evidence, released) =
+            observed_within(Observing::ReadsUnit, Behaviour::HangsOnRecheck, 3_000).await?;
+        let error = released.err().ok_or("released")?;
+        assert!(matches!(
+            error,
+            BarrierError::Refused(RecheckRefusal::Expired)
+        ));
+        assert_eq!(
+            error.barrier_failure(),
+            Some(BarrierFailure::RecheckExpired)
+        );
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    /// A signer that outlasts the attempt deadline before it signs.
+    struct SlowSigner(TestSigner, Duration);
+
+    impl RuntimeAttestationSigner for SlowSigner {
+        fn runtime_attestation_key_id(&self) -> &str {
+            self.0.runtime_attestation_key_id()
+        }
+
+        fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+            thread::sleep(self.1);
+            self.0.sign(record)
+        }
+    }
+
+    /// A release sent after the recheck, once the deadline then passed, is
+    /// no barrier failure: the attempt has progress 2 (R9 §4.6.3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_sent_before_the_deadline_passed_records_no_barrier_failure() -> TestResult {
+        let (parts, attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        let mut barrier = ProviderReleaseBarrier::new(
+            &attempt,
+            parts.parameters.nonce,
+            parts.evidence,
+            SlowSigner(test_signer(), Duration::from_millis(2_500)),
+            parts.identity,
+            parts.check,
+        )?;
+        let launcher = launcher(&mut barrier)?;
+        let error = barrier
+            .release(&active(attempt, 2_000), cgroup_view())
+            .await
+            .err()
+            .ok_or("no expiry")?;
+        assert!(matches!(error, BarrierError::ExpiredAfterRelease));
+        assert_eq!(error.barrier_failure(), None);
+        let sent = barrier.sent_release().cloned();
+        assert!(sent.is_some());
+        drop(barrier);
+        let received = launcher.join().map_err(|_| "launcher thread")?;
+        assert_eq!(received, sent);
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -346,6 +346,7 @@ mod tests {
             Err(RuntimeSignerError::KeyIdMismatch)
         ));
         let verified = sign_verified(&signer, AdmittedRuntimeKey::new("runtime", &public), record)?;
+        assert_eq!(verified.key(), &public);
         ExecutionRelease::new(verified).verify_signature(&public)?;
         Ok(())
     }

@@ -503,14 +503,13 @@ impl BarrierError {
     /// Before any `ReadyV1` was received, the barrier could not read the
     /// unit, hold its launcher, arm the receive or meet the deadline: no
     /// `ReadyV1` became available, which is `0 ReadyUnavailable` (R9 §11
-    /// O15). A setup failure before the launch records none (O15). After
-    /// `ReleaseV1` was sent the attempt has progress 2, where R9 §4.6.3
+    /// O15). After `ReleaseV1` was sent the attempt has progress 2, where R9 §4.6.3
     /// requires a null `barrier-failure`. `None` is also recorded for a
     /// cancellation (TME1 `cancel-source` records it), a first observation
     /// that failed (KOE1 status 2 records it), a signature that did not
-    /// verify under the admitted key (a provider fault), and the failures
-    /// that precede the launch; the classifier's fallback or another
-    /// candidate decides the terminal code.
+    /// verify under the admitted key (a provider fault), and the setup
+    /// failures that precede the launch (O15); the classifier's fallback or
+    /// another candidate decides the terminal code.
     #[must_use]
     pub const fn barrier_failure(&self) -> Option<BarrierFailure> {
         match self {
