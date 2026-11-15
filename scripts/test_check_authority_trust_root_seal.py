@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_authority_trust_root_seal.py"
+sys.path.insert(0, str(CHECKER.parent))
+SPEC = importlib.util.spec_from_file_location("check_authority_trust_root_seal", CHECKER)
+assert SPEC is not None and SPEC.loader is not None
+POLICY = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(POLICY)
+ADMISSION_HOLDERS = POLICY.ADMISSION_HOLDERS
+holder_violations = POLICY.holder_violations
 
 ENABLING = 'pos-core = { path = "../pos-core", features = ["authority-trust-root"] }\n'
 DEV_ONLY = "[dev-dependencies]\n" + ENABLING
@@ -106,7 +114,8 @@ ALLOWED_SOURCES = {
     "apps/piglor-gateway/src/local_principal.rs": "const SEAL: AuthorityTrustRootSealV1 = " + MINT,
     "crates/pos-store/src/community/owner.rs": "pub(crate) fn seal() "
     + "-> AuthorityTrustRootSealV1 {\n"
-    + "pub fn install(seal: &AuthorityTrustRootSealV1) -> u8 {\n",
+    + "pub fn install(seal: &AuthorityTrustRootSealV1) -> u8 {\n"
+    + "pub trait Installer {\n    fn install(&self, seal: &AuthorityTrustRootSealV1) -> u8;\n}\n",
     "crates/pos-store/src/lib.rs": "pub use pos_core::{CoreError, Seq};\n"
     + "use pos_core::AuthorityTrustRootSealV1;\n"
     + "pub(crate) use pos_core as core_api;\n"
@@ -198,6 +207,37 @@ REJECTED_SOURCES = {
         "pub enum Minted { Seal(AuthorityTrustRootSealV1) }\n",
         ITEM,
     ),
+    "public enum variant line": (
+        "crates/pos-state/src/lib.rs",
+        "pub enum Minted {\n    Empty,\n    Seal(AuthorityTrustRootSealV1),\n}\n",
+        ITEM,
+    ),
+    "public enum after a struct-like variant": (
+        "crates/pos-state/src/lib.rs",
+        "pub enum Minted { Empty { x: u8 }, Seal(AuthorityTrustRootSealV1) }\n",
+        ITEM,
+    ),
+    "public trait method after a default body": (
+        "crates/pos-state/src/lib.rs",
+        "pub trait Minter {\n    fn a(&self) { }\n"
+        + "    fn seal(&self) -> AuthorityTrustRootSealV1;\n}\n",
+        RETURNS,
+    ),
+    "private type alias": (
+        "crates/pos-store/src/lib.rs",
+        "type Root = pos_core::AuthorityTrustRootSealV1;\npub fn root() -> Root {\n",
+        ITEM,
+    ),
+    "crate type alias": (
+        "crates/pos-state/src/lib.rs",
+        "pub(crate) type Root<'a> = &'a AuthorityTrustRootSealV1;\n",
+        ITEM,
+    ),
+    "public trait method": (
+        "crates/pos-state/src/lib.rs",
+        "pub trait Minter {\n    fn seal(&self) -> AuthorityTrustRootSealV1;\n}\n",
+        RETURNS,
+    ),
     "public field": (
         "apps/pos-experiment/src/lib.rs",
         "pub(crate) struct Holder {\n    pub seal: AuthorityTrustRootSealV1,\n}\n",
@@ -261,6 +301,14 @@ def main() -> None:
     for case, (relative, text, reason) in REJECTED_SOURCES.items():
         result = with_files({**CRATE_MANIFEST, relative: text})
         expect_rejected(f"the seal in a {case}", result, reason)
+    if holder_violations(tuple(reversed(ADMISSION_HOLDERS))):
+        raise SystemExit("checker rejected the pinned local-admission-host holders")
+    for widened in (
+        (*ADMISSION_HOLDERS, "apps/fixture/Cargo.toml"),
+        ADMISSION_HOLDERS[:1],
+    ):
+        if not holder_violations(widened):
+            raise SystemExit(f"checker accepted local-admission-host holders {widened}")
 
 
 if __name__ == "__main__":

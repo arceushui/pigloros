@@ -22,10 +22,12 @@ counterfactual-adapter = []
 fixture-instant = []
 # Mints `AuthorityTrustRootSealV1`, which builds the authenticated-principal
 # results and registry snapshots the authority evaluator trusts (ADR-129 A5.9,
-# #1374). Only the trusted composition roots (`piglor-gateway`, `pos-store`,
-# `pos-experiment`, and `pos-runtime` through `local-admission-host`) may enable
-# it outside dev-dependencies; scripts/check_authority_trust_root_seal.py
-# enforces that in CI.
+# #1374). Only the trusted composition roots may enable it outside
+# dev-dependencies: `piglor-gateway` (the Local Principal adapter),
+# `pos-experiment` (its `test-support` harness), `pos-runtime` through
+# `local-admission-host` (and so that feature's enablers), and `pos-store`,
+# reserved for the ADR-129 community owner (#560), which does not enable it yet.
+# scripts/check_authority_trust_root_seal.py enforces that in CI.
 authority-trust-root = []
 
 [dependencies]

@@ -10,13 +10,21 @@ only with `pos-core`'s `authority-trust-root` feature, so:
   `authority-trust-root` in a deployable dependency table or forward it from a feature;
   `crates/pos-runtime` may forward it only from its `local-admission-host` feature; every
   manifest may enable it from `[dev-dependencies]`;
+- `local-admission-host` therefore carries the seal minter to every crate that enables it.
+  `scripts/check_fixture_instant_confinement.py` (rule 5) confines its deployable enablers to
+  `apps/pos-experiment` and `apps/pos-plugin-conformance-adapter`, plus features named
+  `test-support` (which `scripts/check_test_support_features.py` keeps out of deployable graphs).
+  This checker pins that list: it fails if the other checker's list changes, so widening it is
+  also a change to this seal's boundary. The adapter compiles the minter through `pos-runtime`
+  and never calls it; the source rules below apply to it;
 - no `default` feature closure reaches `authority-trust-root` or a feature that forwards it, and
   no `pos-core` feature forwards it;
 - outside `crates/pos-core/` and the crates' top-level `tests` directories, no source re-exports
   the seal: no `pub use` names it, globs over a `pos_core` path, re-exports
-  `pos_core::authority`, or re-exports the `pos_core` crate itself; no public fn returns it; and
-  no bare `pub` type, static, const, struct, enum or field line names it
-  (`pub(crate)`/`pub(super)` items stay allowed);
+  `pos_core::authority`, or re-exports the `pos_core` crate itself; no public fn, and no fn in a
+  `pub trait`, returns it; no `pub enum` body names it; no type alias of any visibility names
+  it; and no bare `pub` static, const, struct or field line names it
+  (`pub(crate)`/`pub(super)` items other than aliases stay allowed);
 - CI workflows, Dockerfiles and `.cargo/config*` never name the `authority-trust-root` feature,
   so no build flag can enable it outside the manifests above.
 
@@ -43,6 +51,7 @@ from check_counterfactual_adapter_seal import (
     _in_crate_tests,
     _kept,
 )
+from check_fixture_instant_confinement import ADMISSION_MANIFESTS
 from check_test_support_features import default_closure
 from check_trusted_clock_port_impls import strip_comments
 
@@ -58,6 +67,13 @@ PUBLIC_ITEM = re.compile(
 SEAL_RETURN = re.compile(
     r"\bpub\s+(?:(?:const|async|unsafe|extern\s+\"[^\"]*\")\s+)*fn\b[^{;]*?->[^{;]*"
     rf"\b{SEAL_NAME}\b"
+)
+PUBLIC_BODY = re.compile(r"\bpub\s+(trait|enum)\b[^{;]*\{")
+BODY_RETURN = re.compile(rf"\bfn\b[^{{;]*?->[^{{;]*\b{SEAL_NAME}\b")
+ALIAS = re.compile(rf"\btype\s+\w+(?:<[^>]*>)?\s*=[^;]*\b{SEAL_NAME}\b")
+ADMISSION_HOLDERS = (
+    "apps/pos-experiment/Cargo.toml",
+    "apps/pos-plugin-conformance-adapter/Cargo.toml",
 )
 ENABLING_MANIFESTS = (
     "apps/piglor-gateway/Cargo.toml",
@@ -114,6 +130,21 @@ def _pos_core_leak(compact: str) -> bool:
     return "*" in compact or SEAL_MODULE.search(compact) is not None
 
 
+def _public_bodies(code: str, keyword: str) -> list[str]:
+    """Return the brace-balanced bodies of every `pub trait` or `pub enum` in `code`."""
+    bodies: list[str] = []
+    for match in PUBLIC_BODY.finditer(code):
+        if match.group(1) != keyword:
+            continue
+        depth = 1
+        index = match.end()
+        while index < len(code) and depth:
+            depth += {"{": 1, "}": -1}.get(code[index], 0)
+            index += 1
+        bodies.append(code[match.end() : index])
+    return bodies
+
+
 def _leaks(name: str, code: str) -> list[str]:
     found: list[str] = []
     for statement in PUBLIC_USE.findall(code):
@@ -122,9 +153,11 @@ def _leaks(name: str, code: str) -> list[str]:
             found.append(f"{name}: re-exports the pos_core crate")
         elif SEAL.search(statement) or _pos_core_leak(compact):
             found.append(f"{name}: re-exports the authority trust-root seal")
-    if PUBLIC_ITEM.search(code):
+    enum_leak = any(SEAL.search(body) for body in _public_bodies(code, "enum"))
+    if PUBLIC_ITEM.search(code) or enum_leak or ALIAS.search(code):
         found.append(f"{name}: exposes the authority trust-root seal from a public item")
-    if SEAL_RETURN.search(code):
+    trait_leak = any(BODY_RETURN.search(body) for body in _public_bodies(code, "trait"))
+    if SEAL_RETURN.search(code) or trait_leak:
         found.append(f"{name}: returns the authority trust-root seal from a public fn")
     return found
 
@@ -143,6 +176,16 @@ def source_violations(root: Path) -> list[str]:
     return found
 
 
+def holder_violations(admission_manifests: tuple[str, ...]) -> list[str]:
+    if tuple(sorted(admission_manifests)) == tuple(sorted(ADMISSION_HOLDERS)):
+        return []
+    return [
+        "scripts/check_fixture_instant_confinement.py: local-admission-host enablers "
+        f"{sorted(admission_manifests)} differ from the seal's pinned holders "
+        f"{sorted(ADMISSION_HOLDERS)}"
+    ]
+
+
 def config_violations(root: Path) -> list[str]:
     return [
         f"{path.relative_to(root).as_posix()}: enables {FEATURE} outside a manifest"
@@ -155,7 +198,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     root = parser.parse_args().root.resolve()
-    found = manifest_violations(root) + source_violations(root) + config_violations(root)
+    found = [
+        *holder_violations(ADMISSION_MANIFESTS),
+        *manifest_violations(root),
+        *source_violations(root),
+        *config_violations(root),
+    ]
     if found:
         raise SystemExit("\n".join(found))
     print(f"{FEATURE} and its seal stay inside the trusted composition roots")

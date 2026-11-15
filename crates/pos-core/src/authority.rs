@@ -15,9 +15,10 @@
 //! this crate's `authority-trust-root` cargo feature. Only the trusted
 //! composition roots and the authentication adapters they install
 //! (`piglor-gateway`, `pos-store`, `pos-experiment`, and `pos-runtime`
-//! through `local-admission-host`) enable that feature outside
-//! dev-dependencies, and no other crate may re-export or return the seal; CI
-//! enforces both with `scripts/check_authority_trust_root_seal.py`.
+//! through `local-admission-host`, which reaches that feature's confined
+//! enablers) enable that feature outside dev-dependencies, and no crate but
+//! this one may re-export or return the seal; CI enforces both with
+//! `scripts/check_authority_trust_root_seal.py`.
 //!
 //! The seal cannot be forged, copied or defaulted:
 //!
