@@ -341,7 +341,7 @@ fn an_unknown_schema_version_is_refused() -> TestResult {
 #[test]
 fn each_list_bound_admits_its_limit_and_refuses_one_more() -> TestResult {
     let persona = |index: u64| RoomParticipantV1 {
-        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(index, index)),
+        entity_id: EntityId::from_ulid(ulid::Ulid::from_parts(index, u128::from(index))),
         kind: RoomParticipantKindV1::Agent,
     };
     let plugins = |count: usize| {
