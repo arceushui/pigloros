@@ -10059,6 +10059,14 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         self.local_erasure_sweep(tags, keep, max)
     }
 
+    fn retained_erasure_objects(
+        &mut self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+        self.local_erasure_retained(tag, max)
+    }
+
     fn begin_protected_effect_interval(
         &self,
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {

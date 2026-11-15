@@ -469,6 +469,41 @@ fn sweep_deletes_only_unkept_retained_objects_of_the_named_tags() -> TestResult 
     sweep_contract(&mut pos_store::sqlite::SqliteStore::open(path)?)
 }
 
+fn retained_read_contract(store: &mut impl LocalErasureStore) -> TestResult {
+    assert!(store.retained_erasure_objects("TPS1", 0)?.is_empty());
+    let mut expected = std::collections::BTreeMap::new();
+    for seed in 1..=3 {
+        let bytes = record("TPS1", seed)?;
+        expected.insert(store.retain_erasure_object(&bytes, 1_024)?, bytes);
+    }
+    let other = record("ELB1", 1)?;
+    store.retain_erasure_object(&other, 1_024)?;
+    // Exactly `max` objects of the tag are read whole, in address order.
+    assert_eq!(
+        store.retained_erasure_objects("TPS1", 3)?,
+        expected.into_values().collect::<Vec<_>>()
+    );
+    assert_eq!(store.retained_erasure_objects("ELB1", 1)?, vec![other]);
+    // One object over `max` refuses the read instead of truncating it.
+    assert_eq!(
+        store.retained_erasure_objects("TPS1", 2),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert!(store.retained_erasure_objects("ELO1", 0)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn retained_objects_are_read_by_tag_and_bounded_on_both_adapters() -> TestResult {
+    retained_read_contract(&mut MemoryStore::new())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("retained.sqlite3");
+    let path = path
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    retained_read_contract(&mut pos_store::sqlite::SqliteStore::open(path)?)
+}
+
 #[test]
 fn retained_record_tags_follow_the_record_grammar() -> TestResult {
     for (tag, accepted) in [

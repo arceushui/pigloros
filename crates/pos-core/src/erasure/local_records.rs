@@ -84,7 +84,7 @@ fn fixed<const N: usize>(value: &Value) -> Result<[u8; N], ErasureErrorV1> {
     }
 }
 
-fn truth(value: &Value) -> Result<bool, ErasureErrorV1> {
+const fn truth(value: &Value) -> Result<bool, ErasureErrorV1> {
     match value {
         Value::Bool(value) => Ok(*value),
         _ => Err(ErasureErrorV1::InvalidEncoding),
@@ -275,6 +275,21 @@ pub fn local_erasure_owner_ref_v1(
     .map(|bytes| ErasureReferenceV1::from_digest(domain_digest("ELOWN1", &bytes)))
 }
 
+/// `CA("ELCOORD1", [store_identity])`, the coordinator identity of the
+/// Local erasure composition of one store.
+///
+/// It depends only on the write-once store identity, so it stays stable
+/// across bundle rotation, as ERS1 coordinator continuity requires.
+///
+/// # Errors
+/// Returns the canonical encoding error.
+pub fn local_erasure_coordinator_v1(
+    store_identity: ErasureReferenceV1,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    encode_limited(&Value::Array(vec![digest(store_identity)]), KIB)
+        .map(|bytes| ErasureReferenceV1::from_digest(domain_digest("ELCOORD1", &bytes)))
+}
+
 /// One ELB1 owner row: an acknowledgement class served by one owner.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct LocalErasureOwnerRowV1 {
@@ -298,7 +313,9 @@ pub struct LocalErasureExecutionBindingV1 {
 /// ELB1, the Local erasure authority bundle (ADR-136 §4).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalErasureBundleV1 {
-    /// The digest of the TPS1 snapshot that admits the bundle root.
+    /// The digest of the TPS1 snapshot that admitted the bundle root at
+    /// issuance. It is an issuance record, not compared with the installed
+    /// TPS1, so a routine TPS1 refresh does not force re-signing the bundle.
     pub tps1: ErasureReferenceV1,
     /// The write-once erasure store identity.
     pub store_identity: ErasureReferenceV1,
@@ -321,7 +338,10 @@ pub struct LocalErasureBundleV1 {
     pub signer_key_id: String,
     /// The TPS1 root key id, with the `erasure-bundle/` prefix.
     pub issued_by: String,
-    /// The expiry; 0 means valid until TPS1 revokes it.
+    /// The expiry; 0 means valid until TPS1 revokes it. Like TPS1 expiry it
+    /// closes new admissions only and never decides an outcome, so it is
+    /// enforced at admission (the `LocalErasureAuthorityV1` slice), not at
+    /// composition.
     pub expiry: u64,
 }
 
@@ -1012,11 +1032,12 @@ impl LocalRecordV1 for LocalErasureLineageRuleV1 {
 
 local_record_api!(LocalErasureLineageRuleV1);
 
-/// ERCB1, the purpose-2 signing preimage of one receipt: `["ERCB1", 1,
-/// erc1_body]`, where `erc1_body` is the canonical ERC1 array without its
-/// `receipt_digest` and `signature` elements, every other element kept in
-/// ERC1 order. It is acyclic: the ELS1 over it is what ERC1's signature
-/// names.
+/// ERCB1, the purpose-2 signing preimage of one receipt.
+///
+/// It is `["ERCB1", 1, erc1_body]`, where `erc1_body` is the canonical ERC1
+/// array without its `receipt_digest` and `signature` elements, every other
+/// element kept in ERC1 order. It is acyclic: the ELS1 over it is what
+/// ERC1's signature names.
 ///
 /// The input receipt's `signature` and `receipt_digest` are ignored, so a
 /// signer can pass placeholders for both before the ELS1 exists.

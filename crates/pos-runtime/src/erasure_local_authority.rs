@@ -5,30 +5,49 @@
 //! (ADR-136 §4, *Bundle*). The authority, executor, signer and driver of
 //! ADR-136 §1 are later slices of the same module.
 
+use std::sync::Arc;
+
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, CanonicalBytes, ErasureInventoryPersistencePortV1,
-    ErasureReferenceV1, EventStore, KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1,
-    LocalErasureBundleV1, LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
+    local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1, CanonicalBytes,
+    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, EventStore,
+    KeyIdentityV1, KeyRoleV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
+    LocalErasureExecutionBindingV1, OwnerIdV1, PublicKey, Signature,
+    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_crypto::signing::{verify, verifying_key_from_public_key};
-use pos_store::trust_policy_registry::CurrentTrustPolicyV1;
+use pos_store::trust_policy_registry::{tps1_signed_by_operator_v1, CurrentTrustPolicyV1};
 
-use crate::ErasureCoordinatorCompositionV1;
+use crate::{ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1};
+
+/// The record tag of retained TPS1 evidence in the erasure object store.
+const RETAINED_TPS1_TAG: &str = "TPS1";
+
+/// The most retained TPS1 objects composition reads: one per request head
+/// the store can hold. A store holding more stays closed.
+const MAX_RETAINED_TPS1: usize = ERASURE_MAX_INVENTORY_REQUESTS;
 
 /// The closed, payload-free reasons a Local erasure composition stays
 /// closed (ADR-136 §4a).
+///
+/// Composition fails closed on a store it cannot read: an unreadable store
+/// identity or key registry is reported as [`Self::BundleMismatch`], and an
+/// unreadable inventory or retained TPS1 set as
+/// [`Self::ErasureTrustAnchorRotated`], indistinguishable from a store that
+/// differs from the bundle or fails the Q17 rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalErasureCompositionErrorV1 {
     /// ELB1 or ELB1S is not canonical, ELB1S names another bundle, no TPS1
     /// root carries the `issued_by` key id, or the root signature is invalid.
     BundleInvalid,
-    /// The bundle names another policy, executor, store identity or signer
-    /// key than this binary and store.
+    /// The bundle names another policy, executor, Local Principal registry,
+    /// store identity or live signer key than this binary and store, or the
+    /// store identity or key registry cannot be read.
     BundleMismatch,
     /// The installed TPS1 revokes the bundle root or the bundle signer.
     TrustRevoked,
-    /// The store holds erasure requests whose retained TPS1 the currently
-    /// pinned operator key cannot verify (ADR-136 Q17).
+    /// The store holds erasure requests and a retained TPS1 the currently
+    /// pinned operator key cannot verify (ADR-136 Q17), or its inventory or
+    /// retained TPS1 set cannot be read.
     ErasureTrustAnchorRotated,
 }
 
@@ -54,6 +73,12 @@ pub struct LocalErasureCompositionInputsV1<'a> {
     pub bundle_signature: &'a [u8],
     /// The current TPS1 of the profile's deployment trust state store.
     pub trust: &'a CurrentTrustPolicyV1,
+    /// The operator key pinned in the deployment release configuration
+    /// (ADR-104); retained TPS1 evidence must verify under it (Q17).
+    pub operator_public_key: [u8; 32],
+    /// The authority registry digest of the Local Principal the store
+    /// records.
+    pub authority_registry_digest: ErasureReferenceV1,
     /// `CA(ELP1)` of the policy compiled into this binary.
     pub policy: ErasureReferenceV1,
     /// The composed executor, or `None` for a root that composes no
@@ -63,15 +88,22 @@ pub struct LocalErasureCompositionInputsV1<'a> {
 
 impl ErasureCoordinatorCompositionV1 {
     /// Verify the installed Local erasure bundle (ADR-136 §4) and compose
-    /// the root over it.
+    /// the root over it, before the host takes ownership of `store`.
     ///
     /// The bundle must be signed, over `["ELB1-SIG", 1, CA(ELB1)]`, by the
     /// current TPS1 root its `issued_by` names; neither that root nor the
-    /// signer may be revoked; and its policy, execution binding, store
-    /// identity and role-2 signer key must equal this binary's and store's.
+    /// signer may be revoked; its Local Principal registry digest, policy,
+    /// execution binding and store identity must equal this deployment's;
+    /// and the key registry must hold its role-2 signer key live, not
+    /// destroyed. When the store holds any erasure request, every retained
+    /// TPS1 must verify under the pinned operator key.
     ///
-    /// The composed authority is still the closed authority: it proves only
-    /// an empty store until the `LocalErasureAuthorityV1` slice installs the
+    /// A composition only admits new work: recovery of committed evidence
+    /// verifies against the retained ELB1 and TPS1, never this check.
+    ///
+    /// The coordinator identity is `CA("ELCOORD1", [store_identity])`. The
+    /// composed authority is still the closed authority: it proves only an
+    /// empty store until the `LocalErasureAuthorityV1` slice installs the
     /// verified bundle.
     ///
     /// # Errors
@@ -85,12 +117,28 @@ impl ErasureCoordinatorCompositionV1 {
         S: ErasureInventoryPersistencePortV1 + EventStore + ?Sized,
     {
         verified_bundle(inputs)
-            .and_then(|bundle| matches_store(&bundle, store))
-            .map(|()| Self::closed())
+            .and_then(|bundle| matches_store(&bundle, store).map(|()| bundle))
+            .and_then(|bundle| {
+                retained_trust_verifies(inputs.operator_public_key, store)
+                    .then_some(bundle)
+                    .ok_or(LocalErasureCompositionErrorV1::ErasureTrustAnchorRotated)
+            })
+            .and_then(|bundle| {
+                local_erasure_coordinator_v1(bundle.store_identity)
+                    .ok()
+                    .and_then(|coordinator| {
+                        Self::new(Arc::new(ClosedErasureCoordinatorAuthorityV1), coordinator).ok()
+                    })
+                    .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
+            })
     }
 }
 
-/// Decode the bundle and check it against the TPS1 anchor and this binary.
+/// Decode the bundle and check it against the TPS1 anchor and this
+/// deployment.
+///
+/// ELB1 `tps1` is an issuance record and is not compared with the installed
+/// TPS1, so a routine TPS1 refresh does not force re-signing the bundle.
 fn verified_bundle(
     inputs: &LocalErasureCompositionInputsV1<'_>,
 ) -> Result<LocalErasureBundleV1, LocalErasureCompositionErrorV1> {
@@ -119,11 +167,13 @@ fn verified_bundle(
             }
         })
         .and_then(|bundle| {
-            let binds_binary = bundle.policy == inputs.policy
+            let binds_deployment = bundle.authority_registry_digest
+                == inputs.authority_registry_digest
+                && bundle.policy == inputs.policy
                 && inputs
                     .execution_binding
                     .is_none_or(|binding| *binding == bundle.execution_binding);
-            binds_binary
+            binds_deployment
                 .then_some(bundle)
                 .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
         })
@@ -155,7 +205,8 @@ fn root_signed(
         })
 }
 
-/// Check the bundle's store identity and role-2 signer key against `store`.
+/// Check the bundle's store identity and live role-2 signer key against
+/// `store`.
 fn matches_store<S>(
     bundle: &LocalErasureBundleV1,
     store: &mut S,
@@ -179,9 +230,31 @@ where
                 bundle.signer_identity.epoch,
             ))
         })
+        .filter(|record| record.private_material_digest.is_some())
         .and_then(|record| record.public_verification_key)
         .is_some_and(|key| *key.as_bytes() == bundle.signer_public_key);
     (same_store && registered_signer)
         .then_some(())
         .ok_or(LocalErasureCompositionErrorV1::BundleMismatch)
+}
+
+/// The ADR-136 Q17 interim rule: a store without erasure requests always
+/// passes; one with requests passes only when it can be read and every
+/// retained TPS1 verifies under the pinned operator key.
+fn retained_trust_verifies<S>(operator_public_key: [u8; 32], store: &mut S) -> bool
+where
+    S: ErasureInventoryPersistencePortV1 + ?Sized,
+{
+    store
+        .erasure_authority_snapshot_with_limits(ErasureRecoveryLimitsV1::compiled_maximum())
+        .is_ok_and(|snapshot| {
+            snapshot.inventory().request_heads().is_empty()
+                || store
+                    .retained_erasure_objects(RETAINED_TPS1_TAG, MAX_RETAINED_TPS1)
+                    .is_ok_and(|retained| {
+                        retained
+                            .iter()
+                            .all(|tps1| tps1_signed_by_operator_v1(tps1, &operator_public_key))
+                    })
+        })
 }

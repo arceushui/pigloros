@@ -110,6 +110,25 @@ impl MemoryStore {
         candidates.len()
     }
 
+    pub(super) fn local_erasure_retained(
+        &self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+        let objects = self
+            .erasure_retained_objects
+            .iter()
+            .filter(|(_, retained)| retained.as_str() == tag)
+            .filter_map(|(reference, _)| self.erasure_evidence.get(reference).cloned())
+            .take(max.saturating_add(1))
+            .collect::<Vec<_>>();
+        if objects.len() > max {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(objects)
+        }
+    }
+
     /// An address is retainable when it is free or already holds exactly
     /// these bytes.
     fn retainable(&self, object: &ErasureRetainedObjectV1) -> Result<(), ErasureErrorV1> {

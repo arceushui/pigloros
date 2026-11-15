@@ -113,6 +113,40 @@ impl SqliteStore {
         })
     }
 
+    /// The exact bytes of the retained objects of `tag`, in increasing
+    /// address order, streamed so the read stops one row past `max`.
+    pub(super) fn local_erasure_retained(
+        &self,
+        tag: &str,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+        self.conn
+            .prepare(
+                "SELECT evidence.object_cbor FROM erasure_retained_objects AS retained
+                 JOIN erasure_evidence AS evidence
+                   ON evidence.reference_digest = retained.reference_digest
+                 WHERE retained.tag = ?1 ORDER BY retained.reference_digest",
+            )
+            .map_err(map_erasure_receipt_failure)
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![tag], |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(map_erasure_receipt_failure)
+                    .and_then(|rows| {
+                        rows.take(max.saturating_add(1))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(map_erasure_receipt_failure)
+                    })
+            })
+            .and_then(|objects| {
+                if objects.len() > max {
+                    Err(ErasureErrorV1::ScopeInvalid)
+                } else {
+                    Ok(objects)
+                }
+            })
+    }
+
     /// Complete one pending key destruction inside the caller's transaction,
     /// exactly as the key-registry tombstone command does.
     fn complete_tombstone(

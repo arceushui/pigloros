@@ -3,9 +3,9 @@
 
 use ciborium::value::Value;
 use pos_core::{
-    local_erasure_bundle_signing_message_v1, local_erasure_owner_ref_v1,
-    local_erasure_signature_message_v1, local_erasure_signer_key_id_v1, ArtifactDataClassV1,
-    EntityId, ErasureErrorV1, ErasureReferenceV1, ErasureRetainedObjectV1,
+    local_erasure_bundle_signing_message_v1, local_erasure_coordinator_v1,
+    local_erasure_owner_ref_v1, local_erasure_signature_message_v1, local_erasure_signer_key_id_v1,
+    ArtifactDataClassV1, EntityId, ErasureErrorV1, ErasureReferenceV1, ErasureRetainedObjectV1,
     LocalErasureAuthorizationV1, LocalErasureBundleSignatureV1, LocalErasureBundleV1,
     LocalErasureClassificationV1, LocalErasureDisclosureV1, LocalErasureExecutionBindingV1,
     LocalErasureIdempotencyV1, LocalErasureLineageRuleV1, LocalErasureOwnerResultV1,
@@ -1231,5 +1231,23 @@ fn receipt_body_is_the_erc1_array_without_its_self_binding_fields() -> TestResul
     assert_eq!(pos_core::local_erasure_receipt_body_v1(&resigned)?, body);
     let repoliced = pos_core::ErasureReceiptV1::new(receipt_input(reference(14), reference(8)))?;
     assert_ne!(pos_core::local_erasure_receipt_body_v1(&repoliced)?, body);
+    Ok(())
+}
+
+#[test]
+fn the_coordinator_identity_is_the_domain_tagged_digest_of_the_store_identity() -> TestResult {
+    let store_identity = [0x5a; 32];
+    // CA("ELCOORD1", [store_identity]): BLAKE3 over the tag, a zero byte and
+    // the canonical one-element array holding the 32-byte identity.
+    let mut preimage = b"ELCOORD1\0\x81\x58\x20".to_vec();
+    preimage.extend_from_slice(&store_identity);
+    assert_eq!(
+        local_erasure_coordinator_v1(ErasureReferenceV1::from_digest(store_identity))?,
+        ErasureReferenceV1::from_digest(*blake3::hash(&preimage).as_bytes())
+    );
+    assert_ne!(
+        local_erasure_coordinator_v1(ErasureReferenceV1::from_digest([0x5b; 32]))?,
+        local_erasure_coordinator_v1(ErasureReferenceV1::from_digest(store_identity))?
+    );
     Ok(())
 }

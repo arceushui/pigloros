@@ -413,6 +413,24 @@ fn storage_unavailable(_: rusqlite::Error) -> TrustPolicyRegistryErrorV1 {
     TrustPolicyRegistryErrorV1::StorageUnavailable
 }
 
+/// The TPS1 operator-signature context of a deployment trust state store.
+const OPERATOR_SIGNATURE_CONTEXT: &str = "deployment-operator";
+
+/// Whether `exact_tps1` is a canonical TPS1 whose deployment-operator
+/// signature verifies under `operator_public_key`.
+///
+/// This is how retained TPS1 evidence is checked against the currently
+/// pinned operator key (ADR-136 Q17), independently of the TPS1 the state
+/// store currently holds.
+#[must_use]
+pub fn tps1_signed_by_operator_v1(exact_tps1: &[u8], operator_public_key: &[u8; 32]) -> bool {
+    TrustPolicySnapshotV1::from_canonical_cbor(exact_tps1).is_ok_and(|snapshot| {
+        snapshot
+            .verify_operator_signature_v1(operator_public_key, OPERATOR_SIGNATURE_CONTEXT)
+            .is_ok()
+    })
+}
+
 fn authenticate(
     bytes: &[u8],
     release: &OperatorReleaseTrustV1,
@@ -423,7 +441,7 @@ fn authenticate(
         return Err(TrustPolicyRegistryErrorV1::InvalidSnapshot);
     }
     snapshot
-        .verify_operator_signature_v1(&release.operator_public_key, "deployment-operator")
+        .verify_operator_signature_v1(&release.operator_public_key, OPERATOR_SIGNATURE_CONTEXT)
         .map_err(|_| TrustPolicyRegistryErrorV1::InvalidOperatorSignature)?;
     Ok(snapshot)
 }
