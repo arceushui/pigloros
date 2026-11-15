@@ -94,6 +94,8 @@ enum Fault {
     BadListing,
     /// The listing repeats every row.
     DuplicateListing,
+    /// The runtime listing also names an alias of the unit in slot 0.
+    Alias,
     /// Every `GetUnit` is denied.
     LookupDenied,
     /// A listed unit resolves to another object.
@@ -198,6 +200,11 @@ impl Manager {
                 rows.push(bad);
             }
             Fault::DuplicateListing => rows.extend(rows.clone()),
+            Fault::Alias if prefix.ends_with("runtime-") => {
+                let mut alias = rows.first().cloned().ok_or_else(|| failed("no row"))?;
+                alias.0 = runtime_name(0xaa);
+                rows.push(alias);
+            }
             _ => {}
         }
         drop(state);
@@ -229,7 +236,13 @@ impl Manager {
             .iter()
             .position(|unit| unit.loaded && unit.name == name);
         let elsewhere = state.fault == Fault::ListedElsewhere;
+        let alias = state.fault == Fault::Alias
+            && name == runtime_name(0xaa)
+            && state.units.first().is_some_and(|unit| unit.loaded);
         drop(state);
+        if alias {
+            return OwnedObjectPath::try_from(UNIT_PATHS[0]).map_err(|error| failed(error).into());
+        }
         if elsewhere && slot.is_some() {
             return OwnedObjectPath::try_from(OTHER_PATH).map_err(|error| failed(error).into());
         }
@@ -933,6 +946,7 @@ fn inconsistent_listings_are_unavailable() -> TestResult {
     for fault in [
         Fault::BadListing,
         Fault::DuplicateListing,
+        Fault::Alias,
         Fault::LookupDenied,
         Fault::ListedElsewhere,
     ] {
