@@ -2201,9 +2201,9 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
-        let (gateway, app, id, actor) = host_cursor_fixture("cursor-owner").await;
+    /// A host Timeline with two Events and the live cursor after the first.
+    async fn live_host_cursor(name: &str) -> (Gateway, Router, String, String) {
+        let (gateway, app, id, actor) = host_cursor_fixture(name).await;
         for marker in 1..=2 {
             gateway
                 .append_action(
@@ -2223,7 +2223,42 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let cursor = first["next_cursor"].as_str().test_ok();
+        let cursor = first["next_cursor"].as_str().test_ok().to_owned();
+        (gateway, app, id, cursor)
+    }
+
+    #[tokio::test]
+    async fn malformed_renderings_of_a_live_cursor_query_are_invalid_requests() {
+        let (gateway, app, id, cursor) = live_host_cursor("cursor-malformed").await;
+        // The contract's cursor digest is 64 lowercase hex digits; an
+        // uppercase rendering of a live cursor is malformed, not a synonym.
+        let mut parts = cursor.split('.').map(str::to_owned).collect::<Vec<_>>();
+        parts[1] = parts[1].to_ascii_uppercase();
+        assert_ne!(parts[1], cursor.split('.').nth(1).test_ok());
+        let uppercase = parts.join(".");
+        for query in [
+            format!("cursor={uppercase}&limit=1"),
+            // A repeated cursor or page limit is malformed even when both
+            // copies are valid.
+            format!("cursor={cursor}&cursor={cursor}&limit=1"),
+            format!("cursor={cursor}&limit=1&limit=1"),
+        ] {
+            let (status, problem) = json_request(
+                app.clone(),
+                "GET",
+                &format!("/v1/timelines/{id}/events?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(problem["code"], "invalid-request", "{query}");
+        }
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let (gateway, app, id, cursor) = live_host_cursor("cursor-owner").await;
         let (status, second) = json_request(
             app.clone(),
             "GET",
@@ -2233,41 +2268,6 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(second["events"][0]["seq"], 2);
-        // The contract's cursor digest is 64 lowercase hex digits; an
-        // uppercase rendering of a live cursor is malformed, not a synonym.
-        let mut parts = cursor.split('.').map(str::to_owned).collect::<Vec<_>>();
-        parts[1] = parts[1].to_ascii_uppercase();
-        assert_ne!(parts[1], cursor.split('.').nth(1).test_ok());
-        let uppercase = parts.join(".");
-        let (status, upper) = json_request(
-            app.clone(),
-            "GET",
-            &format!("/v1/timelines/{id}/events?cursor={uppercase}&limit=1"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(upper["code"], "invalid-request");
-        // A repeated cursor is malformed even when both copies are valid.
-        let (status, repeated) = json_request(
-            app.clone(),
-            "GET",
-            &format!("/v1/timelines/{id}/events?cursor={cursor}&cursor={cursor}&limit=1"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(repeated["code"], "invalid-request");
-        // So is a repeated page limit, even when both copies are in range.
-        let (status, repeated) = json_request(
-            app.clone(),
-            "GET",
-            &format!("/v1/timelines/{id}/events?cursor={cursor}&limit=1&limit=1"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(repeated["code"], "invalid-request");
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
         assert!(gateway
