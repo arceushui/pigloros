@@ -17,10 +17,10 @@ MINT = "AuthorityTrustRootSealV1::for_composition_root();\n"
 SEAL_USE = "let seal = pos_core::AuthorityTrustRootSealV1::for_composition_root();\n"
 
 ALLOWED_MANIFESTS = {
-    "apps/piglor-gateway/Cargo.toml": "[dependencies]\n" + ENABLING,
-    "crates/pos-store/Cargo.toml": '[features]\nowner = ["pos-core/authority-trust-root"]\n'
+    "apps/piglor-gateway/Cargo.toml": '[features]\nowner = ["pos-core/authority-trust-root"]\n'
     + "[target.'cfg(unix)'.dependencies]\n"
     + ENABLING,
+    "crates/pos-store/Cargo.toml": DEV_ONLY,
     "apps/pos-experiment/Cargo.toml": "[features]\n"
     + 'test-support = ["pos-core?/authority-trust-root"]\n'
     + "[build-dependencies]\n"
@@ -38,6 +38,12 @@ ITEM = "exposes the authority trust-root seal from a public item"
 RETURNS = "returns the authority trust-root seal from a public fn"
 CONFIG = "enables authority-trust-root outside a manifest"
 DEFAULT = "default feature enables authority-trust-root"
+PINNED = "mints the authority trust-root seal outside its pinned mint sites"
+MINT_SITE_FILES = (
+    "apps/piglor-gateway/src/local_principal.rs",
+    "apps/pos-experiment/src/lib.rs",
+    "apps/pos-plugin-conformance-adapter/src/main.rs",
+)
 FEATURES_FLAG = "cargo test -p pos-state --features pos-core/authority-trust-root\n"
 
 REJECTED_MANIFESTS = {
@@ -104,8 +110,19 @@ REJECTED_MANIFESTS = {
         '[features]\ndefault = ["authority-trust-root"]\nauthority-trust-root = []\n',
         DEFAULT,
     ),
-    "allowed crate default feature": (
+    "store dependency": ("crates/pos-store/Cargo.toml", "[dependencies]\n" + ENABLING, DEPENDENCY),
+    "store forwarding feature": (
         "crates/pos-store/Cargo.toml",
+        '[features]\nowner = ["pos-core/authority-trust-root"]\n',
+        "feature owner forwards authority-trust-root",
+    ),
+    "indirect local admission host forwarding": (
+        "apps/pos-experiment/Cargo.toml",
+        '[features]\nlocal-admission-host = ["roots"]\nroots = ["pos-core/authority-trust-root"]\n',
+        "feature local-admission-host reaches authority-trust-root through roots",
+    ),
+    "allowed crate default feature": (
+        "apps/piglor-gateway/Cargo.toml",
         '[features]\ndefault = ["owner"]\nowner = ["pos-core/authority-trust-root"]\n',
         DEFAULT,
     ),
@@ -117,8 +134,32 @@ REJECTED_MANIFESTS = {
     ),
 }
 
+CORE_SEAL = (
+    "#[derive(Debug)]\npub struct AuthorityTrustRootSealV1(());\n"
+    + "impl AuthorityTrustRootSealV1 {\n"
+    + "    pub const fn for_composition_root() -> Self {\n        Self(())\n    }\n}\n"
+)
+TEST_MODULE = "#[cfg(test)]\n#[cfg_attr(coverage_nightly, coverage(off))]\nmod tests {\n"
+
 ALLOWED_SOURCES = {
-    "apps/piglor-gateway/src/local_principal.rs": "const SEAL: AuthorityTrustRootSealV1 = " + MINT,
+    "apps/piglor-gateway/src/local_principal.rs": "static SEAL: AuthorityTrustRootSealV1 = "
+    + MINT
+    + TEST_MODULE
+    + "    fn helper() {\n        "
+    + SEAL_USE
+    + "    }\n}\n",
+    "apps/piglor-gateway/src/lib.rs": "#[cfg(test)]\n#[cfg_attr(coverage_nightly, coverage(off))]\n"
+    + "mod e2e;\nmod local_principal;\n",
+    "apps/piglor-gateway/src/e2e.rs": "mod child;\n" + SEAL_USE,
+    "apps/piglor-gateway/src/e2e/child.rs": SEAL_USE,
+    "apps/pos-experiment/src/lib.rs": "use pos_core::AuthorityTrustRootSealV1;\n"
+    + "static AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 = "
+    + MINT,
+    "apps/pos-plugin-conformance-adapter/src/main.rs": "static ROOT: AuthorityTrustRootSealV1 = "
+    + MINT,
+    "apps/pos-plugin-conformance-adapter/src/runner/tests.rs": SEAL_USE,
+    "apps/pos-plugin-conformance-adapter/src/runner.rs": "#[cfg(test)]\nmod tests;\n"
+    + "pub fn open(seal: &'static AuthorityTrustRootSealV1) {}\n",
     "crates/pos-store/src/community/owner.rs": "pub(crate) fn seal() "
     + "-> AuthorityTrustRootSealV1 {\n"
     + "pub fn install(seal: &AuthorityTrustRootSealV1) -> u8 {\n"
@@ -126,17 +167,24 @@ ALLOWED_SOURCES = {
     "crates/pos-store/src/lib.rs": "pub use pos_core::{CoreError, Seq};\n"
     + "use pos_core::AuthorityTrustRootSealV1;\n"
     + "pub(crate) use pos_core as core_api;\n"
-    + "pub use pos_core::authority_persistence::AuthorityViewV1;\n"
-    + "pub(super) const SEAL: AuthorityTrustRootSealV1 = "
-    + MINT,
-    "crates/pos-state/src/lib.rs": SEAL_USE + "// pub use pos_core::AuthorityTrustRootSealV1;\n",
-    "crates/pos-core/src/authority.rs": "pub struct AuthorityTrustRootSealV1(());\n"
-    + "pub const fn for_composition_root() -> AuthorityTrustRootSealV1 {\n",
+    + "pub use pos_core::authority_persistence::AuthorityViewV1;\n",
+    "crates/pos-state/src/lib.rs": TEST_MODULE
+    + "    "
+    + SEAL_USE
+    + "}\n// pub use pos_core::AuthorityTrustRootSealV1;\n// "
+    + SEAL_USE,
+    "crates/pos-core/src/authority.rs": CORE_SEAL
+    + TEST_MODULE
+    + "    impl Clone for super::AuthorityTrustRootSealV1 {}\n}\n",
     "crates/pos-core/src/lib.rs": "pub use authority::AuthorityTrustRootSealV1;\n",
+    "crates/pos-core/tests/authority_public.rs": "fn forge() -> AuthorityTrustRootSealV1 {\n"
+    + "    AuthorityTrustRootSealV1(())\n}\n",
     "crates/pos-state/tests/support/mod.rs": "pub fn seal() "
     + "-> pos_core::AuthorityTrustRootSealV1 {\n"
-    + "pub use pos_core::AuthorityTrustRootSealV1;\n",
+    + "pub use pos_core::AuthorityTrustRootSealV1;\n"
+    + SEAL_USE,
 }
+
 
 CRATE_MANIFEST = {"crates/pos-state/Cargo.toml": DEV_ONLY}
 
@@ -255,6 +303,78 @@ REJECTED_SOURCES = {
         "pub const fn seal() -> pos_core::AuthorityTrustRootSealV1 {\n",
         RETURNS,
     ),
+    "second adapter mint": (
+        "apps/pos-plugin-conformance-adapter/src/main.rs",
+        "static ROOT: AuthorityTrustRootSealV1 = " + MINT + SEAL_USE,
+        "mints the authority trust-root seal 2 times, expected 1",
+    ),
+    "adapter library mint": ("apps/pos-plugin-conformance-adapter/src/lib.rs", SEAL_USE, PINNED),
+    "runtime source mint": (
+        "crates/pos-runtime/src/scheduled_admission_host/local.rs",
+        SEAL_USE,
+        PINNED,
+    ),
+    "non-enabling crate mint": ("plugins/agent/src/provider_driver.rs", SEAL_USE, PINNED),
+    "unpinned enabling crate mint": ("apps/piglor-gateway/src/http.rs", SEAL_USE, PINNED),
+    "mint in a test-named module without cfg(test)": (
+        "crates/pos-state/src/lib.rs",
+        "mod tests {\n    " + SEAL_USE + "}\n",
+        PINNED,
+    ),
+    "mint in a cfg(all(test, ..)) module": (
+        "crates/pos-state/src/lib.rs",
+        "#[cfg(all(test, unix))]\nmod tests {\n    " + SEAL_USE + "}\n",
+        PINNED,
+    ),
+    "mint in a module declared without cfg(test)": (
+        "crates/pos-state/src/tests.rs",
+        SEAL_USE,
+        PINNED,
+    ),
+    "trait impl on the seal": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl Default for AuthorityTrustRootSealV1 {\n",
+        "implements a trait for the authority trust-root seal",
+    ),
+    "generic From impl on the seal": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl<T> From<T> for crate::AuthorityTrustRootSealV1 {\n",
+        "implements a trait for the authority trust-root seal",
+    ),
+    "second core constructor": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace(
+            "    pub const fn",
+            "    pub fn forge() -> Self {\n        Self(())\n    }\n    pub const fn",
+        ),
+        "the seal's only constructor must be for_composition_root",
+    ),
+    "second inherent impl": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL + "impl AuthorityTrustRootSealV1 {\n    fn forge() {}\n}\n",
+        "the seal's only constructor must be for_composition_root",
+    ),
+    "missing core constructor": (
+        "crates/pos-core/src/authority.rs",
+        "#[derive(Debug)]\npub struct AuthorityTrustRootSealV1(());\n",
+        "the seal's only constructor must be for_composition_root",
+    ),
+    "cloneable seal": (
+        "crates/pos-core/src/authority.rs",
+        CORE_SEAL.replace("derive(Debug)", "derive(Clone, Debug)"),
+        "the seal may derive only Debug",
+    ),
+    "inherent impl elsewhere in core": (
+        "crates/pos-core/src/store.rs",
+        "impl AuthorityTrustRootSealV1 {\n    pub const fn forge() {}\n}\n",
+        "adds an inherent impl to the authority trust-root seal",
+    ),
+    "literal elsewhere in core": (
+        "crates/pos-core/src/store.rs",
+        "fn forge() -> crate::AuthorityTrustRootSealV1 {\n"
+        + "    crate::AuthorityTrustRootSealV1(())\n}\n",
+        "constructs the seal outside for_composition_root",
+    ),
     "workflow": (".github/workflows/ci.yml", "run: " + FEATURES_FLAG, CONFIG),
     "Dockerfile": ("docker/Dockerfile", "RUN " + FEATURES_FLAG, CONFIG),
     "cargo config": (
@@ -302,6 +422,15 @@ def main() -> None:
     allowed = with_files({**ALLOWED_MANIFESTS, **ALLOWED_SOURCES})
     if allowed.returncode != 0:
         raise SystemExit(f"checker rejected an allowed use:\n{allowed.stderr}")
+    for missing in MINT_SITE_FILES:
+        result = with_files(
+            {
+                path: text
+                for path, text in {**ALLOWED_MANIFESTS, **ALLOWED_SOURCES}.items()
+                if path != missing
+            }
+        )
+        expect_rejected(f"an allowed layout without {missing}", result, "pinned mint site is missing")
     for case, (relative, text, reason) in REJECTED_MANIFESTS.items():
         result = with_files({relative: text})
         expect_rejected(f"a {case} enabling the trust-root feature", result, reason)

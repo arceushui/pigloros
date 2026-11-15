@@ -32,12 +32,6 @@ use pos_core::{
     ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ManifestPluginRosterV1,
     PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
-/// The composition-root seal of the local experiment host (ADR-129 A5.9, #1374): this crate
-/// is the trusted composition root of its sessions and the only place it is minted. Private to
-/// the crate; it is passed only by reference.
-const AUTHORITY_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
-    pos_core::AuthorityTrustRootSealV1::for_composition_root();
-
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ManifestRegistrationErrorV1, PluginExecutionModeV1,
     PluginRegistry, ScheduledAdmissionStoreV1,
@@ -46,6 +40,12 @@ use pos_store::StoreConfig;
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// The composition-root seal of the local experiment host (ADR-129 A5.9, #1374): this crate
+/// is the trusted composition root of its sessions and the only place it is minted. Private to
+/// the crate; it is passed only by reference.
+static AUTHORITY_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

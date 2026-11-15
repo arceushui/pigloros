@@ -65,7 +65,7 @@ const GATEWAY_AUDIENCE: &str = "gateway";
 /// its pinned evidence and attesting registry with (ADR-129 A5.9, #1374).
 ///
 /// It stays private to this adapter and is never re-exported.
-const AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
+static AUTHORITY_TRUST_ROOT: AuthorityTrustRootSealV1 =
     AuthorityTrustRootSealV1::for_composition_root();
 
 /// Closed Local Principal provisioning and composition failures.
