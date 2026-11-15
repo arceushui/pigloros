@@ -4161,7 +4161,7 @@ const EARLY_SNAPSHOT_REFUSED: &str = "renderer snapshot unavailable or ambiguous
 const RENDERER_START_MISSED: &str =
     "renderer load phase ended or timed out before the renderer started";
 
-/// WebView2 starts the main renderer asynchronously after navigation
+/// `WebView2` starts the main renderer asynchronously after navigation
 /// commits, so a load-phase snapshot can precede it. Only that transient
 /// absence is resampled; a navigating snapshot is classified as taken.
 fn renderer_start_pending(phase: EarlyRendererPhase, presence: crate::RendererPresence) -> bool {
