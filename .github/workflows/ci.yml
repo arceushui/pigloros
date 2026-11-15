@@ -59,8 +59,12 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The core gates then run together, followed by at
-# most eight standard jobs. Mutation and ASan are the final expensive stages.
+# any Cargo-heavy work. The core gates then run together; core-gate releases
+# at most eight heavy standard jobs plus the lightweight cargo-crap analysis.
+# Mutation and the ASan shards follow standard-gate as the final expensive
+# stage and run beside each other. The native Windows owner lane starts after
+# the ledger Windows runner and runs beside every other stage: only cargo-crap
+# (native LCOV) waits for it, and ci-gate requires both results directly.
 
 jobs:
 
@@ -73,6 +77,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
+      owner_windows: ${{ steps.owner_windows.outputs.owner_windows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -99,6 +104,38 @@ jobs:
         id: full
         if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+      # Only an explicit 'false' from successful detection skips the native
+      # Windows owner lane. paths-filter emits nothing for a key the base
+      # revision's filter file lacks, and failed detection, non-pull-request
+      # events and a missing filter file all leave the value empty: run it.
+      # The pull-request files API lists at most 3000 files, and a rename may
+      # move a lane input out of a matched path, so either also runs it, as
+      # does any failure to list the renames.
+      - name: Resolve the Windows-owner scope
+        id: owner_windows
+        env:
+          DETECTED: ${{ github.event_name == 'pull_request' && steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scope=true
+          if [[ "${DETECTED}" = false ]]; then
+            if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then
+              echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'
+            elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo '::warning::The pull request number is unavailable; running the Windows owner lane.'
+            elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \
+              --jq '.[] | select(.status == "renamed") | .filename')"; then
+              echo '::warning::Renamed files could not be listed; running the Windows owner lane.'
+            elif [[ -n "${renamed}" ]]; then
+              echo 'A renamed file may move a lane input; running the Windows owner lane.'
+            else
+              scope=false
+            fi
+          fi
+          printf 'owner_windows=%s\n' "${scope}" >> "$GITHUB_OUTPUT"
 
   trunk-pr:
     # Keep this display name stable: the main-branch ruleset requires it.
@@ -186,10 +223,10 @@ jobs:
     name: rustdoc
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -379,10 +416,10 @@ jobs:
     name: reference-evaluator-release
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -398,7 +435,9 @@ jobs:
           shared-key: reference-evaluator-release
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install evaluator packaging tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Build and verify standalone evaluator release evidence
         run: |
           shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
@@ -434,7 +473,9 @@ jobs:
           # The Gateway contract check compares compatibility/ with the merge base of main.
           fetch-depth: 0
       - name: Install fixture verification tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Obtain pinned offline SCS1 derivation inputs
         env:
           SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
@@ -491,11 +532,11 @@ jobs:
     needs:
       - ci_change_scope
       - conformance-fixtures
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.conformance-fixtures.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -509,7 +550,9 @@ jobs:
           shared-key: conformance-materialization
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fixture verification tools
-        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Reject non-main manual artifact publication
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
@@ -667,6 +710,20 @@ jobs:
       - name: Exercise native-width canonical length arithmetic
         run: cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked canonical_length_tests -- --include-ignored
 
+  # The owner lane reuses the completed ledger Windows runner and then runs
+  # beside the core and standard stages instead of gating preflight. It is not
+  # a standard-stage runner: only cargo-crap (which consumes its native LCOV)
+  # and ci-gate depend on it, so a failed lane never hides standard-stage
+  # findings. Pull requests run it only for Windows-owner changes; every other
+  # event always runs it.
+  owner-bridge-windows:
+    name: owner-bridge-windows
+    needs: [ci_change_scope, ledger-windows]
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' && needs.ci_change_scope.outputs.owner_windows == 'true' }}
+    uses: ./.github/workflows/owner-bridge-windows.yml
+    permissions:
+      contents: read
+
   clippy:
     name: clippy
     needs: [ci_change_scope, preflight-gate]
@@ -681,6 +738,7 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy
+          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: clippy
@@ -691,6 +749,10 @@ jobs:
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
+      - name: Cross-target lint the Windows owner shim
+        run: >
+          cargo clippy -p pos-owner-bridge-windows --target x86_64-pc-windows-msvc
+          --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
       - name: Exercise Windows shim coverage exclusions with real metadata
@@ -731,6 +793,7 @@ jobs:
       - name: Install the musl and aarch64 cross toolchains
         run: |
           set -euo pipefail
+          bash scripts/prepare-ubuntu-package-mirror.sh
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build the provider binary as a static ELF for each architecture
@@ -910,9 +973,12 @@ jobs:
       - ci_change_scope
       - coverage
       - core-gate
+      - owner-bridge-windows
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
-    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # The native lane must succeed unless the trusted scope explicitly left it
+    # out of this pull request.
+    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -931,6 +997,28 @@ jobs:
         with:
           name: coverage-lcov-${{ github.sha }}
           path: ${{ runner.temp }}
+      - name: Download hosted native LCOV
+        if: ${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: owner-windows-lcov-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-windows-lcov
+      - name: Bind native and Linux coverage to this checkout
+        if: ${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}
+        run: >
+          python scripts/merge_owner_bridge_lcov.py
+          --linux "${{ runner.temp }}/coverage.lcov"
+          --native "${{ runner.temp }}/owner-windows-lcov/owner-windows.lcov"
+          --receipt "${{ runner.temp }}/owner-windows-lcov/owner-windows-lcov-receipt.json"
+          --workspace "${{ github.workspace }}"
+          --checkout "${{ github.sha }}"
+          --output "${{ runner.temp }}/cargo-crap-coverage.lcov"
+      # Without the native lane the shim has no measured counters. Score the
+      # Linux LCOV alone and hide only the shim from scoring (below), so its
+      # functions are neither invented green nor scored pessimistically.
+      - name: Use Linux coverage without the unmeasured native shim
+        if: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}
+        run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       - name: Resolve trusted cargo-crap baseline
@@ -949,11 +1037,21 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.baseline.outputs.run-id }}
+      - name: Drop the unmeasured native shim from the trusted baseline
+        if: ${{ steps.baseline.outputs.run-id != '' && needs.ci_change_scope.outputs.owner_windows == 'false' }}
+        run: |
+          set -euo pipefail
+          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
+          jq -e '.entries |= map(select(.file | gsub("\\\\"; "/") | test("(^|/)crates/pos-owner-bridge-windows/") | not))' \
+            "${baseline}" > "${baseline}.scoped"
+          mv "${baseline}.scoped" "${baseline}"
       - name: Generate trusted current baseline
         if: ${{ steps.baseline.outputs.bootstrap == 'true' }}
+        env:
+          NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
         run: >
           cargo crap --workspace
-          --lcov "${{ runner.temp }}/coverage.lcov"
+          --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
           --missing pessimistic
           --jobs 2
           --exclude 'tests/**'
@@ -989,12 +1087,15 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
+        env:
+          NATIVE_SHIM_ALLOW: ${{ needs.ci_change_scope.outputs.owner_windows == 'false' && 'crates/pos-owner-bridge-windows/**' || '' }}
         run: >
           cargo crap --workspace
-          --lcov "${{ runner.temp }}/coverage.lcov"
+          --lcov "${{ runner.temp }}/cargo-crap-coverage.lcov"
           --missing pessimistic
           --jobs 2
           --exclude 'tests/**'
@@ -1030,6 +1131,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
@@ -1059,10 +1161,10 @@ jobs:
     name: dependency-policy (audit / deny / shear)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1098,17 +1200,16 @@ jobs:
   # Always runs, including for documentation-only pull requests: the main
   # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
   # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
-  # still wait for cargo-crap; documentation-only PRs (cargo-crap skipped) do not.
+  # wait for core-gate; documentation-only PRs run it even if preflight fails.
   codeql:
     name: CodeQL (Rust)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      (needs.cargo-crap.result == 'success' ||
-      (needs.ci_change_scope.outputs.rust == 'false' &&
-      needs.cargo-crap.result == 'skipped')) }}
+      (needs.core-gate.result == 'success' ||
+      needs.ci_change_scope.outputs.rust == 'false') }}
     permissions:
       actions: read
       contents: read
@@ -1143,10 +1244,10 @@ jobs:
     name: asan build (nextest archive)
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1198,9 +1299,9 @@ jobs:
     needs:
       - ci_change_scope
       - standard-gate
-      - mutation-checks
       - asan-build
-    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # The shards run beside diff mutation testing; ci-gate requires both.
+    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -1351,11 +1452,11 @@ jobs:
     name: docker-build
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
       - third-party-notices
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       needs.third-party-notices.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
@@ -1405,10 +1506,10 @@ jobs:
     name: world-client-wasm
     needs:
       - ci_change_scope
-      - cargo-crap
+      - core-gate
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
+      needs.core-gate.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -1471,7 +1572,6 @@ jobs:
     needs:
       - ci_change_scope
       - core-gate
-      - cargo-crap
       - rustdoc
       - reference-evaluator-release
       - materialize-conformance-bundles
@@ -1490,7 +1590,6 @@ jobs:
         env:
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           CORE_RESULT: ${{ needs.core-gate.result }}
-          CARGO_CRAP_RESULT: ${{ needs.cargo-crap.result }}
           RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
           REFERENCE_RESULT: ${{ needs.reference-evaluator-release.result }}
           MATERIALIZE_RESULT: ${{ needs.materialize-conformance-bundles.result }}
@@ -1511,7 +1610,7 @@ jobs:
             expected=skipped
           fi
           for result in \
-            "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
+            "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \
             "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
             "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}" \
@@ -1660,10 +1759,12 @@ jobs:
       - name: Test Windows shim coverage exclusions
         run: python scripts/test_owner_bridge_windows_cov_ignore.py
 
+  # Main-only reports keep running only after every normal check, including
+  # cargo-crap, which standard-gate no longer covers.
   modules-structure:
     name: modules-structure (reports only)
-    needs: standard-gate
-    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
+    needs: [standard-gate, cargo-crap]
+    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1700,8 +1801,8 @@ jobs:
 
   depgraph:
     name: depgraph
-    needs: standard-gate
-    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
+    needs: [standard-gate, cargo-crap]
+    if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1715,7 +1816,9 @@ jobs:
         with:
           tool: cargo-depgraph
       - name: Install graphviz
-        run: sudo apt-get update && sudo apt-get install -y graphviz
+        run: |
+          bash scripts/prepare-ubuntu-package-mirror.sh
+          sudo apt-get update && sudo apt-get install -y graphviz
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts
@@ -1737,8 +1840,10 @@ jobs:
       - preflight-gate
       - core-gate
       - standard-gate
+      - cargo-crap
       - mutation-checks
       - asan-gate
+      - owner-bridge-windows
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1750,8 +1855,11 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           CORE_RESULT: ${{ needs.core-gate.result }}
           STANDARD_RESULT: ${{ needs.standard-gate.result }}
+          CARGO_CRAP_RESULT: ${{ needs.cargo-crap.result }}
           MUTATION_RESULT: ${{ needs.mutation-checks.result }}
           ASAN_RESULT: ${{ needs.asan-gate.result }}
+          OWNER_WINDOWS_SCOPE: ${{ needs.ci_change_scope.outputs.owner_windows }}
+          OWNER_WINDOWS_RESULT: ${{ needs.owner-bridge-windows.result }}
         run: |
           set -euo pipefail
           failed=0
@@ -1768,12 +1876,35 @@ jobs:
             fi
           done
 
+          # cargo-crap waits for the native Windows lane, so it is required
+          # here rather than in standard-gate, which mutation and ASan follow.
+          expected_cargo_crap=success
+          if [[ "${RUST_SCOPE_RESULT}" = false ]]; then
+            expected_cargo_crap=skipped
+          fi
+          if [[ "${CARGO_CRAP_RESULT}" != "${expected_cargo_crap}" ]]; then
+            echo "CARGO_CRAP_RESULT=${CARGO_CRAP_RESULT}" >&2
+            failed=1
+          fi
+
           expected_mutation=skipped
           if [[ "${EVENT_NAME}" = pull_request && "${RUST_SCOPE_RESULT}" = true ]]; then
             expected_mutation=success
           fi
           if [[ "${MUTATION_RESULT}" != "${expected_mutation}" ]]; then
             echo "MUTATION_RESULT=${MUTATION_RESULT}" >&2
+            failed=1
+          fi
+
+          # Every non-pull-request event runs the native Windows owner lane; a
+          # pull request runs it for Rust-affecting Windows-owner changes.
+          expected_owner_windows=skipped
+          if [[ "${EVENT_NAME}" != pull_request \
+            || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_WINDOWS_SCOPE}" != false ) ]]; then
+            expected_owner_windows=success
+          fi
+          if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then
+            echo "OWNER_WINDOWS_RESULT=${OWNER_WINDOWS_RESULT}" >&2
             failed=1
           fi
 

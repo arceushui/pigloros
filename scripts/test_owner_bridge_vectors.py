@@ -22,6 +22,11 @@ CHECKER = "scripts/owner_bridge_vectors.py"
 BRIDGE = "crates/pos-owner-bridge"
 COPIED = (
     CHECKER,
+    "scripts/owner_bridge_assets.py",
+    "scripts/owner_bridge_webauthn_fixtures.py",
+    f"{BRIDGE}/assets/owner-core.js",
+    f"{BRIDGE}/assets/owner-shell.html",
+    f"{BRIDGE}/assets/owner-production.js",
     f"{BRIDGE}/assets/owner.html",
     f"{BRIDGE}/assets/manifest.v1",
     f"{BRIDGE}/src/listener/assets.rs",
@@ -78,6 +83,8 @@ class OwnerBridgeVectorChecker(unittest.TestCase):
             target = self.tree / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / relative, target)
+        shutil.copytree(ROOT / BRIDGE / "assets/qualification", self.tree / BRIDGE / "assets/qualification")
+        shutil.copy(ROOT / BRIDGE / "src/listener/fixture_assets.rs", self.tree / BRIDGE / "src/listener/fixture_assets.rs")
 
     def edit(self, relative: str, transform: Callable[[str], str]) -> None:
         path = self.tree / relative
@@ -101,6 +108,35 @@ class OwnerBridgeVectorChecker(unittest.TestCase):
         result = self.run_checker()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ALL MATCH", result.stdout)
+
+    def test_a_fixture_cannot_diverge_from_the_shared_core(self) -> None:
+        self.edit(f"{BRIDGE}/assets/qualification/pending.html", replace_once("var STATE = 10;", "var STATE = 9;"))
+        self.assert_rejected("owner bundle drift")
+
+    def test_permission_diagnostic_cannot_be_retargeted(self) -> None:
+        self.edit(
+            f"{BRIDGE}/assets/qualification/permission.html",
+            replace_once("http://localhost:49291/permission-diag/noresult", "https://example.invalid/noresult"),
+        )
+        self.assert_rejected("owner bundle drift")
+
+    def test_permission_fixture_requests_only_notification_permission(self) -> None:
+        page = (self.tree / BRIDGE / "assets/qualification/permission.html").read_text(encoding="utf-8")
+        self.assertEqual(page.count("window.Notification.requestPermission()"), 1)
+        self.assertNotIn("navigator.geolocation", page)
+        self.assertNotIn("new Notification(", page)
+        self.assertIn('window.Notification.permission !== "default"', page)
+        self.assertIn('permission-diag/noresult"); }, 12000)', page)
+        for stage in ("denied", "default", "unexpectedgranted", "unexpectedstate", "rejected", "exception", "unavailable", "noresult", "unknown"):
+            self.assertEqual(page.count(f"http://localhost:49291/permission-diag/{stage}\""), 1)
+
+    def test_a_fixture_cannot_change_its_response_headers(self) -> None:
+        self.edit(f"{BRIDGE}/src/listener/fixture_assets.rs", replace_first("geolocation=()", "geolocation=(self)"))
+        self.assert_rejected("owner bundle drift")
+
+    def test_a_fixture_cannot_change_the_bound_digest(self) -> None:
+        self.edit(f"{BRIDGE}/src/listener/fixture_assets.rs", replace_first("0x", "0x1"))
+        self.assert_rejected("owner bundle drift")
 
     def test_a_wrong_document_digest_is_rejected(self) -> None:
         self.edit(ASSETS_RS, flip_first_byte("OWNER_HTML_SHA256"))
@@ -167,7 +203,7 @@ class OwnerBridgeVectorChecker(unittest.TestCase):
         self.assert_rejected("CSP_SCRIPT_SHA256")
 
     def test_a_missing_constant_is_rejected(self) -> None:
-        self.edit(ASSETS_RS, replace_once("OWNER_RESPONSE_SHA256", "OWNER_RESPONSE_HASH"))
+        self.edit(ASSETS_RS, replace_once("const OWNER_RESPONSE_SHA256", "const OWNER_RESPONSE_HASH"))
         self.assert_rejected()
 
     def test_a_wrong_vector_hex_is_rejected(self) -> None:
