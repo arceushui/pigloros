@@ -300,7 +300,9 @@ process.
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the
-`ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.
+`ReleaseRecheck` port, and sends one `ReleaseV1` signed through
+`RuntimeAttestationSigner` and verified under the admitted runtime key before
+it is sent.
 
 ## Local attempt namespaces (#911)
 
