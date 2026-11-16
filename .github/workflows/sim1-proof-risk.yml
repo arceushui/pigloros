@@ -41,9 +41,7 @@ jobs:
           shared-key: sim1-proof-risk
       - name: Install heap profiler
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends valgrind
+          bash scripts/prepare-ubuntu-package-mirror.sh --no-install-recommends valgrind
       - name: Build the public admission test executable
         run: |
           set -euo pipefail
