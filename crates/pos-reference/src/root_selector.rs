@@ -824,7 +824,7 @@ impl RootSelectorComposition {
                                 &cancelled_attempt_ids,
                             )
                         })
-                        .inspect_err(|_| runtime_start::stop_started_runtime(&*self.lifecycle))
+                        .inspect_err(|_| runtime_start::stop_unadmitted_runtime(&*self.lifecycle))
                 })
             })
             .or_else(|_| self.service.admission.retire_previous(previous))
