@@ -1,9 +1,12 @@
 //! Final composition and activation for ADR-069's root-owned selector.
 //!
 //! This module owns no caller-configurable authority. It opens exactly one
-//! SIC1 state, fails closed while SIR1 recovery is pending, binds the fixed
-//! administrative listener before the evaluator listener, and keeps both
-//! pathname identities under one admission lifetime.
+//! SIC1 state and binds the fixed administrative listener before anything
+//! else. Without a pending SIR1 it admits the provider runtime, binds the
+//! evaluator listener, and keeps both pathname identities under one admission
+//! lifetime. With a pending SIR1 it stays closed: it binds no evaluator
+//! listener and serves only that transaction's mode-1 challenge (ADR-069 R12
+//! §8).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -44,11 +47,13 @@ use crate::selector::installation::authority::{
     InstallationRecoverySnapshot, InstallationUpdateCommitError,
 };
 use crate::selector::installation::{
-    open_directory_chain, InstallationObjectKind, InstalledSelectorState,
+    open_directory_chain, FixedInstallation, InstallationObjectKind, InstalledSelectorState,
 };
+use crate::selector::recovery::PendingRecoveryTarget;
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
+mod recovery_pending;
 mod runtime_start;
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
@@ -90,9 +95,9 @@ fn map_to_unit_error<T>(_: T) {}
 
 /// Authenticated selector composition before fixed runtime activation.
 ///
-/// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
-/// rejects it before any capability can be returned. [`RootSelectorRuntime`]
-/// owns the only production activation path.
+/// It is opened only from an admissible installation: with a pending SIR1 the
+/// selector never authenticates the current SIC1 for admission.
+/// [`RootSelectorRuntime`] owns the only production activation path.
 struct RootSelectorComposition {
     service: RootSelectorService<SelectedProviderTransport>,
     updates: Mutex<()>,
@@ -218,11 +223,33 @@ struct OwnedAdministratorListener {
     inner: OwnedSelectorListener,
 }
 
-/// Fully activated root selector with both fixed listeners owned together.
+/// Activated root selector: the fixed administrative listener and what the
+/// installation state lets it serve.
 pub struct RootSelectorRuntime {
-    composition: RootSelectorComposition,
     administrator: OwnedAdministratorListener,
-    evaluator: OwnedSelectorListener,
+    mode: SelectorMode,
+}
+
+/// What an activated selector serves (ADR-069 R12 §8).
+enum SelectorMode {
+    /// Normal open: the provider runtime is admitted and the evaluator
+    /// listener is bound beside the administrative one.
+    Admitting {
+        composition: RootSelectorComposition,
+        evaluator: OwnedSelectorListener,
+    },
+    /// A SIR1 is pending. No evaluator pathname exists, and the administrative
+    /// listener answers only the pending transaction.
+    RecoveryPending(recovery_pending::PendingRecovery),
+}
+
+impl SelectorMode {
+    fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
+        match self {
+            Self::Admitting { evaluator, .. } => evaluator.set_nonblocking(),
+            Self::RecoveryPending(_) => Ok(()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -432,13 +459,16 @@ impl RootSelectorRuntime {
     ///
     /// The runtime is started only after the selector allocated its slot and
     /// the port proved every stale runtime and recovery unit gone (ADR-069 R11
-    /// §5.0). `apps/pos-root-selector` is the only production caller.
+    /// §5.0). With a pending SIR1 the selector instead loads it, starts and
+    /// stops nothing, and exposes only the administrative listener (R12 §8).
+    /// `apps/pos-root-selector` is the only production caller.
     ///
     /// # Errors
     /// Returns a closed boundary error unless the runtime starts and passes
     /// every selector check, provider synchronization succeeds, the
     /// administrative listener is valid first, and the evaluator listener can
-    /// then be bound without replacing any existing node.
+    /// then be bound without replacing any existing node. With a pending SIR1,
+    /// returns one unless that SIR1 is authenticated.
     pub fn activate<P>(port: P) -> Result<Self, SelectorBoundaryError>
     where
         P: ProviderLifecyclePort + Send + Sync + 'static,
@@ -451,33 +481,71 @@ impl RootSelectorRuntime {
         executable_digest: runtime_start::ExecutableDigest,
     ) -> Result<Self, SelectorBoundaryError> {
         let administrator = OwnedAdministratorListener::bind()?;
-        let composition = RootSelectorComposition::open(port, executable_digest)?;
-        administrator.verify()?;
-        let evaluator = OwnedSelectorListener::bind()?;
-        administrator.verify()?;
-        administrator.set_nonblocking()?;
-        evaluator.set_nonblocking()?;
-        Ok(Self {
-            composition,
-            administrator,
-            evaluator,
-        })
+        open_recovery_directory()
+            .and_then(|recovery_directory| {
+                InstalledSelectorState::open_fixed()
+                    .map(|installed| (recovery_directory, installed))
+            })
+            .and_then(|(recovery_directory, installed)| match installed {
+                FixedInstallation::Admissible(installed) => RootSelectorComposition::open(
+                    installed,
+                    recovery_directory,
+                    port,
+                    executable_digest,
+                )
+                .and_then(|composition| {
+                    administrator
+                        .verify()
+                        .and_then(|()| OwnedSelectorListener::bind())
+                        .map(|evaluator| SelectorMode::Admitting {
+                            composition,
+                            evaluator,
+                        })
+                }),
+                FixedInstallation::RecoveryPending(installed) => {
+                    PendingRecoveryTarget::load(&installed)
+                        .map(|target| {
+                            SelectorMode::RecoveryPending(recovery_pending::PendingRecovery::fixed(
+                                target,
+                            ))
+                        })
+                        .map_err(SelectorBoundaryError::from)
+                }
+            })
+            .and_then(|mode| {
+                administrator
+                    .verify()
+                    .and_then(|()| administrator.set_nonblocking())
+                    .and_then(|()| mode.set_nonblocking())
+                    .map(|()| mode)
+            })
+            .map(|mode| Self {
+                administrator,
+                mode,
+            })
     }
 
-    /// Serve both fixed root-only endpoints until a listener invariant fails.
+    /// Serve the fixed root-only endpoints until a listener invariant fails.
     ///
     /// Administrative transactions are serialized; evaluator connections may
-    /// overlap and are fenced by the root-owned admission registry.
+    /// overlap and are fenced by the root-owned admission registry. While a
+    /// SIR1 is pending, only the administrative listener is served.
     ///
     /// # Errors
-    /// Returns after closing admission when either fixed listener loses its
+    /// Returns after closing admission when a fixed listener loses its
     /// retained pathname identity or its accept loop encounters a local error.
     pub fn serve(self) -> Result<(), SelectorBoundaryError> {
         let Self {
-            composition,
             administrator,
-            evaluator,
+            mode,
         } = self;
+        let (composition, evaluator) = match mode {
+            SelectorMode::Admitting {
+                composition,
+                evaluator,
+            } => (composition, evaluator),
+            SelectorMode::RecoveryPending(recovery) => return recovery.serve(&administrator),
+        };
         let composition = Arc::new(composition);
         let administrator = Arc::new(administrator);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -672,44 +740,45 @@ fn remove_matching_socket(
 }
 
 impl RootSelectorComposition {
-    /// Opens and authenticates the exact fixed installation, then starts and
+    /// Authenticates the admissible fixed installation, then starts and
     /// admits the selected provider's runtime.
     ///
-    /// A pending SIR1 fails `InstalledSelectorState::open`, so no stale unit is
-    /// stopped and no runtime is started while recovery is pending.
+    /// Only an installation without a pending SIR1 reaches this point, so no
+    /// stale unit is stopped and no runtime is started while recovery is
+    /// pending (ADR-069 R12 §8).
     ///
     /// # Errors
     ///
-    /// Returns a closed boundary error for missing, invalid, pending-recovery,
-    /// or unavailable installation/provider state.
+    /// Returns a closed boundary error for invalid or unavailable
+    /// installation/provider state.
     fn open(
+        installed: InstalledSelectorState,
+        recovery_directory: File,
         port: Box<dyn ProviderLifecyclePort + Send + Sync>,
         executable_digest: runtime_start::ExecutableDigest,
     ) -> Result<Self, SelectorBoundaryError> {
-        open_recovery_directory().and_then(|recovery_directory| {
-            InstalledSelectorState::open()
-                .and_then(InstalledSelectorState::authenticate_bootstrap)
-                .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-                .and_then(|admitted| {
-                    runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
-                        |(transport, runtime)| Self {
-                            service: RootSelectorService {
-                                admission_time: SystemTime::now,
-                                admission: SelectorAdmission::new(admitted, runtime),
-                                transport: SelectedProviderTransport::new(transport),
-                                peer_uid: ROOT_UID,
-                                evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                                recovery_directory: Arc::new(recovery_directory),
-                                recovery_owner: ROOT_UID,
-                            },
-                            updates: Mutex::new(()),
-                            live_update_timeout: LIVE_UPDATE_TIMEOUT,
-                            lifecycle: port,
-                            executable_digest,
+        installed
+            .authenticate_bootstrap()
+            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+            .and_then(|admitted| {
+                runtime_start::start_provider_runtime(&*port, &admitted, executable_digest).map(
+                    |(transport, runtime)| Self {
+                        service: RootSelectorService {
+                            admission_time: SystemTime::now,
+                            admission: SelectorAdmission::new(admitted, runtime),
+                            transport: SelectedProviderTransport::new(transport),
+                            peer_uid: ROOT_UID,
+                            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                            recovery_directory: Arc::new(recovery_directory),
+                            recovery_owner: ROOT_UID,
                         },
-                    )
-                })
-        })
+                        updates: Mutex::new(()),
+                        live_update_timeout: LIVE_UPDATE_TIMEOUT,
+                        lifecycle: port,
+                        executable_digest,
+                    },
+                )
+            })
     }
 
     /// Evaluates one already-accepted root peer without binding any socket.
@@ -3898,7 +3967,10 @@ mod tests {
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let mut runtime = activate_in_process(Arc::clone(&port))?;
         let control_listener = started_runtime.recv()?;
-        runtime.composition.live_update_timeout = INITIAL_IO_TIMEOUT;
+        let SelectorMode::Admitting { composition, .. } = &mut runtime.mode else {
+            return Err("the installed state is admissible".into());
+        };
+        composition.live_update_timeout = INITIAL_IO_TIMEOUT;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let runtime = std::thread::spawn(move || runtime.serve());
@@ -3931,6 +4003,71 @@ mod tests {
             .is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+        Ok(())
+    }
+
+    /// ADR-069 R12 §8 and I13: with a SIR1 pending, activation starts and
+    /// stops no runtime, binds no evaluator pathname, and the administrative
+    /// listener answers only the pending transaction's mode-1 challenge.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_recovery_activation_serves_only_the_pending_transaction() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::pending_recovery_activation_serves_only_the_pending_transaction"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
+        drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
+        let update_fixture =
+            crate::selector::installation::tests::updates::UpdateFixture::at(root)?;
+        let (_committed, pending_update) =
+            update_fixture.commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let recovery_record = root.join("installation-update.cbor");
+        let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
+        let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);
+
+        let runtime = activate_in_process(Arc::new(InProcessProviderPort::refusing()))?;
+        assert!(!evaluator.exists());
+        assert!(administrator.exists());
+        let runtime = std::thread::spawn(move || runtime.serve());
+
+        let mut changed = pending_update.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        for update in [&pending_update, &changed, &pending_update] {
+            let mut connection = UnixStream::connect(administrator)?;
+            connection.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+            let challenge =
+                crate::evaluator_protocol::decode_canonical(&read_frame(&mut connection)?)?;
+            let challenge = crate::evaluator_protocol::array(&challenge, 5)?;
+            assert_eq!(crate::evaluator_protocol::uint(&challenge[4])?, 1);
+            write_frame(&mut connection, update)?;
+            connection.shutdown(std::net::Shutdown::Write)?;
+            let mut reply = Vec::new();
+            connection.read_to_end(&mut reply)?;
+            assert!(reply.is_empty());
+            assert!(recovery_record.exists());
+            assert!(!evaluator.exists());
+        }
+
+        fs::remove_file(administrator)?;
+        assert!(runtime
+            .join()
+            .map_err(|_| "root selector runtime panicked")?
+            .is_err());
+        assert!(!evaluator.exists());
+        assert!(recovery_record.exists());
+
+        // A SIR1 that fails authentication closes activation.
+        fs::set_permissions(&recovery_record, fs::Permissions::from_mode(0o600))?;
+        assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
+        assert!(!evaluator.exists());
         Ok(())
     }
 

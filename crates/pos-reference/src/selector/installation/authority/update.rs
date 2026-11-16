@@ -1,6 +1,7 @@
 //! Single-use administrator challenges and revocation-only SIC1 validation.
 
 mod durability;
+mod pending_recovery;
 
 pub use durability::CommittedInstallationUpdate;
 use std::fs::File;
@@ -30,7 +31,17 @@ fn map_io_to_boundary_failure<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
 
-/// One fresh selector-issued challenge owned by one administrative connection.
+/// SICN1 `challenge-mode`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChallengeMode {
+    /// A fresh selector nonce that one new SIU1 must sign (mode 0).
+    Fresh = 0,
+    /// The previous SIC1 digest and RCU1 nonce of the pending SIR1 (mode 1).
+    /// Only the byte-identical pending SIU1 answers it.
+    PendingTransaction = 1,
+}
+
+/// One selector-issued challenge owned by one administrative connection.
 ///
 /// The value cannot be cloned. Validation consumes it, which prevents replay
 /// across requests even before the connection owner closes the stream.
@@ -39,10 +50,23 @@ pub struct InstallationChallenge {
     installation: [u8; 32],
     nonce: [u8; 16],
     expires_at: Instant,
+    mode: ChallengeMode,
 }
 
 impl InstallationChallenge {
-    /// Encode the exact fresh-mode SICN1 challenge.
+    /// The mode-1 challenge of one pending SIR1: its previous SIC1 digest and
+    /// the nonce of its exact committed RCU1. This replays an authenticated
+    /// transaction; it issues no fresh nonce.
+    pub(crate) fn for_pending_transaction(installation: [u8; 32], nonce: [u8; 16]) -> Self {
+        Self {
+            installation,
+            nonce,
+            expires_at: Instant::now() + CHALLENGE_LIFETIME,
+            mode: ChallengeMode::PendingTransaction,
+        }
+    }
+
+    /// Encode the exact SICN1 challenge.
     ///
     /// # Errors
     /// Returns a closed boundary error after expiry or on local encoding failure.
@@ -53,20 +77,27 @@ impl InstallationChallenge {
             Value::Integer(1_u64.into()),
             Value::Bytes(self.installation.to_vec()),
             Value::Bytes(self.nonce.to_vec()),
-            Value::Integer(0_u64.into()),
+            Value::Integer((self.mode as u64).into()),
         ]))
         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
     }
 
-    fn require_live(&self) -> Result<(), SelectorBoundaryError> {
+    /// Rejects a challenge whose 30-second lifetime has ended.
+    ///
+    /// # Errors
+    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] after expiry.
+    pub(crate) fn require_live(&self) -> Result<(), SelectorBoundaryError> {
         (Instant::now() < self.expires_at)
             .then_some(())
             .ok_or(SelectorBoundaryError::ArtifactInvalid)
     }
 
+    /// Only a fresh challenge authorizes a new SIU1.
     fn consume(self) -> Result<([u8; 32], [u8; 16], Instant), SelectorBoundaryError> {
         self.require_live()?;
-        Ok((self.installation, self.nonce, self.expires_at))
+        (self.mode == ChallengeMode::Fresh)
+            .then_some((self.installation, self.nonce, self.expires_at))
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)
     }
 
     #[cfg(test)]
@@ -102,11 +133,12 @@ struct DecodedInstallationUpdate {
     revocation_update_bytes: Vec<u8>,
 }
 
-struct OpenedInstallationUpdate {
-    decoded: DecodedInstallationUpdate,
+/// One successor SIC1 and its RCU1, authenticated against this state.
+struct AuthenticatedSuccessor {
     next_manifest: InstallationManifest,
     next_policy: HeldInstallationArtifact,
     next_revocation: HeldInstallationArtifact,
+    revocation_update: RevocationUpdateRequest,
 }
 
 impl AuthenticatedSelectorBootstrap {
@@ -119,6 +151,7 @@ impl AuthenticatedSelectorBootstrap {
             installation: self.installed.manifest().digest(),
             nonce,
             expires_at: Instant::now() + CHALLENGE_LIFETIME,
+            mode: ChallengeMode::Fresh,
         })
     }
 
@@ -138,8 +171,30 @@ impl AuthenticatedSelectorBootstrap {
         challenge
             .consume()
             .and_then(|parts| self.decode_challenged_update(parts, bytes))
-            .and_then(|decoded| self.open_challenged_update(decoded))
-            .and_then(|opened| self.authenticate_challenged_update(opened))
+            .and_then(|decoded| {
+                self.authenticate_successor(
+                    &decoded.next_manifest_bytes,
+                    &decoded.revocation_update_bytes,
+                )
+                .map(|successor| (decoded, successor))
+            })
+            .and_then(|(decoded, successor)| {
+                if successor.revocation_update.selector_nonce == decoded.nonce
+                    && Instant::now() < decoded.expires_at
+                {
+                    Ok(ValidatedInstallationUpdate {
+                        previous_manifest: self.installed.manifest_bytes().to_vec(),
+                        next_manifest_bytes: decoded.next_manifest_bytes,
+                        next_manifest: successor.next_manifest,
+                        revocation_update_bytes: decoded.revocation_update_bytes,
+                        revocation_update: successor.revocation_update,
+                        next_policy: successor.next_policy,
+                        next_revocation: successor.next_revocation,
+                    })
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
     }
 
     fn decode_challenged_update(
@@ -160,11 +215,16 @@ impl AuthenticatedSelectorBootstrap {
         })
     }
 
-    fn open_challenged_update(
+    /// Authenticates one successor SIC1 and its RCU1 against this state: the
+    /// revocation-only successor rules, the next APT1 and RVS1 objects, and
+    /// the RCU1 signature and authority. Both a fresh SIU1 and a pending
+    /// SIR1 (ADR-069 R12 §4.1) are authenticated here.
+    fn authenticate_successor(
         &self,
-        decoded: DecodedInstallationUpdate,
-    ) -> Result<OpenedInstallationUpdate, SelectorBoundaryError> {
-        InstallationManifest::from_canonical_cbor(&decoded.next_manifest_bytes)
+        next_manifest_bytes: &[u8],
+        revocation_update_bytes: &[u8],
+    ) -> Result<AuthenticatedSuccessor, SelectorBoundaryError> {
+        InstallationManifest::from_canonical_cbor(next_manifest_bytes)
             .map_err(map_protocol_to_artifact_invalid)
             .and_then(|next_manifest| {
                 self.installed
@@ -185,52 +245,29 @@ impl AuthenticatedSelectorBootstrap {
                     &next_manifest,
                     InstallationObjectKind::ADMINISTRATOR_POLICY,
                 )
-                .map(|next_policy| OpenedInstallationUpdate {
-                    decoded,
-                    next_manifest,
-                    next_policy,
-                    next_revocation,
-                })
+                .map(|next_policy| (next_manifest, next_policy, next_revocation))
             })
-    }
-
-    fn authenticate_challenged_update(
-        &self,
-        opened: OpenedInstallationUpdate,
-    ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
-        opened
-            .next_revocation
-            .read_control(MANIFEST_LIMIT)
-            .and_then(|next_revocation_bytes| {
-                opened
-                    .next_policy
+            .and_then(|(next_manifest, next_policy, next_revocation)| {
+                next_revocation
                     .read_control(MANIFEST_LIMIT)
-                    .map(|next_policy_bytes| (next_policy_bytes, next_revocation_bytes))
-            })
-            .and_then(|(next_policy_bytes, next_revocation_bytes)| {
-                self.authenticate_update_records(
-                    &opened.next_manifest,
-                    &next_policy_bytes,
-                    &next_revocation_bytes,
-                    &opened.decoded.revocation_update_bytes,
-                )
-            })
-            .and_then(|revocation_update| {
-                if revocation_update.selector_nonce == opened.decoded.nonce
-                    && Instant::now() < opened.decoded.expires_at
-                {
-                    Ok(ValidatedInstallationUpdate {
-                        previous_manifest: self.installed.manifest_bytes().to_vec(),
-                        next_manifest_bytes: opened.decoded.next_manifest_bytes,
-                        next_manifest: opened.next_manifest,
-                        revocation_update_bytes: opened.decoded.revocation_update_bytes,
-                        revocation_update,
-                        next_policy: opened.next_policy,
-                        next_revocation: opened.next_revocation,
+                    .and_then(|next_revocation_bytes| {
+                        next_policy
+                            .read_control(MANIFEST_LIMIT)
+                            .and_then(|next_policy_bytes| {
+                                self.authenticate_update_records(
+                                    &next_manifest,
+                                    &next_policy_bytes,
+                                    &next_revocation_bytes,
+                                    revocation_update_bytes,
+                                )
+                            })
                     })
-                } else {
-                    Err(SelectorBoundaryError::ArtifactInvalid)
-                }
+                    .map(|revocation_update| AuthenticatedSuccessor {
+                        next_manifest,
+                        next_policy,
+                        next_revocation,
+                        revocation_update,
+                    })
             })
     }
 
