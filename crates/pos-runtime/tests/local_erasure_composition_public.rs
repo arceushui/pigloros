@@ -4138,14 +4138,6 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
     drop(host);
     let mut host = attempted.host()?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
-    // A complete request no longer holds its subject.
-    assert_eq!(
-        host.command_sender()?
-            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
-            .map_err(fail)?
-            .lifecycle(),
-        ErasureLifecycleV1::Submitted
-    );
     Ok(())
 }
 
@@ -4510,4 +4502,119 @@ fn a_bundle_owner_of_another_class_is_unencodable() -> TestResult {
     assert!(wrong.to_canonical_cbor().is_err());
     assert!(Case::signed(&wrong, &bundle_root(), &[]).is_err());
     Ok(())
+}
+
+impl Attempted {
+    /// Complete request 1: every owner result positive, and the receipt
+    /// finalized at 2 + the obligations.
+    fn completed(&self) -> TestResult {
+        let acknowledgements = self.owner_results(&self.obligations, |_| None)?;
+        self.acknowledged(&acknowledgements)?;
+        let issue = 2 + u64::try_from(self.obligations.len())?;
+        let body = self.receipt_body(&receipt_input(&self.obligations, issue, reference(0xee)))?;
+        let signed = signature_record(
+            LocalErasureSignaturePurposeV1::ReceiptBody,
+            body,
+            &erasure_signer(),
+            1,
+        )?;
+        self.store.retain(&[signed.clone()])?;
+        let receipt = self.host()?.command_sender()?.finalize_erasure_request(
+            self.request,
+            &receipt_input(&self.obligations, issue, signature_address(&signed)?),
+        )?;
+        assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+        Ok(())
+    }
+}
+
+/// Overwrite the stored ERCRP1 manifest of erasure request `request` with
+/// `bytes`, and return the bytes it held.
+fn overwrite_manifest(
+    store: &LocalStore,
+    request: ErasureReferenceV1,
+    bytes: &[u8],
+) -> TestResult<Vec<u8>> {
+    let connection = rusqlite::Connection::open(&store.path)?;
+    let digest = request.digest();
+    let original: Vec<u8> = connection.query_row(
+        "SELECT manifest_cbor FROM erasure_records WHERE request_digest = ?1",
+        [digest.as_slice()],
+        |row| row.get(0),
+    )?;
+    let changed = connection.execute(
+        "UPDATE erasure_records SET manifest_cbor = ?2 WHERE request_digest = ?1",
+        rusqlite::params![digest.as_slice(), bytes],
+    )?;
+    assert_eq!(changed, 1);
+    Ok(original)
+}
+
+/// With terminal `request`'s manifest unreadable on an open host, a new
+/// submission of key `key` still passes the subject check, because a
+/// complete or rejected request is never read; reading it would hold the
+/// subject (`Concurrent`). The submission's commit then fails the host's
+/// recovery of that manifest, and once the manifest is restored the new
+/// request is installed.
+fn assert_unread_terminal_frees_subject(
+    store: &LocalStore,
+    case: &Case,
+    request: ErasureReferenceV1,
+    key: u8,
+) -> TestResult {
+    let mut host = store.host(case, 4_096)?;
+    let original = overwrite_manifest(store, request, &[0])?;
+    let submitted = host
+        .command_sender()?
+        .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
+        .map(drop);
+    assert_ne!(submitted, Err(LocalErasureSubmitErrorV1::Concurrent));
+    drop(host);
+    overwrite_manifest(store, request, &original)?;
+    let mut host = store.host(case, 4_096)?;
+    assert_eq!(
+        lifecycle(&mut host, request_of(key)?)?,
+        ErasureLifecycleV1::Submitted
+    );
+    Ok(())
+}
+
+#[test]
+fn a_complete_request_frees_its_subject() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    attempted.completed()?;
+    assert_eq!(
+        attempted
+            .host()?
+            .command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?
+            .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unreadable_complete_request_never_holds_its_subject() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    attempted.completed()?;
+    assert_unread_terminal_frees_subject(&attempted.store, &attempted.case, attempted.request, 2)
+}
+
+#[test]
+fn an_unreadable_rejected_request_never_holds_its_subject() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1])?;
+    let case = local_case()?;
+    {
+        let mut host = store.host(&case, 4_096)?;
+        let mut sender = host.command_sender()?;
+        sender
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+        let state = sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+        assert_eq!(state.lifecycle(), ErasureLifecycleV1::Rejected);
+    }
+    assert_unread_terminal_frees_subject(&store, &case, request_of(1)?, 2)
 }
