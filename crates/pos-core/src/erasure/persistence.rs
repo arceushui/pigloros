@@ -420,40 +420,50 @@ pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
                                 .ok_or(ErasureErrorV1::ProvenanceMissing)
                         })
                         .and_then(|scope| {
-                            port.scope_index_count(request)
-                                .and_then(|count| {
-                                    (0..count).try_fold(
-                                        (Vec::new(), None),
-                                        |(mut extensions, predecessor), ordinal| {
-                                            port.scope_node_ref(request, ordinal)
-                                                .and_then(|node| {
-                                                    node.ok_or(ErasureErrorV1::ProvenanceMissing)
-                                                })
-                                                .and_then(|node| {
-                                                    load_scope_link(
-                                                        port,
-                                                        node,
-                                                        ScopeLinkV1 {
-                                                            request,
-                                                            scope: Some(reference),
-                                                            ordinal,
-                                                            predecessor,
-                                                        },
-                                                    )
-                                                    .map_err(RecoveryFailureV1::error)
-                                                    .map(|(_, extension)| {
-                                                        extensions.push(extension);
-                                                        (extensions, Some(node))
-                                                    })
-                                                })
-                                        },
-                                    )
-                                })
-                                .map(|(extensions, _)| (scope, extensions))
+                            recorded_scope_extensions(port, request, reference)
+                                .map(|extensions| (scope, extensions))
                         })
                 })
                 .transpose()
         })
+}
+
+/// The ERSE1 chain of `request` under the committed scope `scope`, in
+/// ordinal order, each node and extension checked by [`load_scope_link`]
+/// exactly as recovery checks them.
+fn recorded_scope_extensions<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+    scope: ErasureReferenceV1,
+) -> Result<Vec<ErasureScopeExtensionV1>, ErasureErrorV1> {
+    port.scope_index_count(request).and_then(|count| {
+        (0..count)
+            .try_fold(
+                (Vec::new(), None),
+                |(mut extensions, predecessor), ordinal| {
+                    port.scope_node_ref(request, ordinal)
+                        .and_then(|node| node.ok_or(ErasureErrorV1::ProvenanceMissing))
+                        .and_then(|node| {
+                            load_scope_link(
+                                port,
+                                node,
+                                ScopeLinkV1 {
+                                    request,
+                                    scope: Some(scope),
+                                    ordinal,
+                                    predecessor,
+                                },
+                            )
+                            .map_err(RecoveryFailureV1::error)
+                            .map(|(_, extension)| {
+                                extensions.push(extension);
+                                (extensions, Some(node))
+                            })
+                        })
+                },
+            )
+            .map(|(extensions, _)| extensions)
+    })
 }
 
 /// Read the admission of a request's active attempt through its current
@@ -3536,6 +3546,7 @@ mod tests {
         resolution_references: Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>,
         objects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
         manifest: Option<StoredErasureManifestV1>,
+        scope_nodes: Vec<ErasureReferenceV1>,
     }
 
     impl TestPersistencePort {
@@ -3548,6 +3559,7 @@ mod tests {
                 resolution_references: Vec::new(),
                 objects: BTreeMap::new(),
                 manifest: None,
+                scope_nodes: Vec::new(),
             }
         }
     }
@@ -3605,13 +3617,16 @@ mod tests {
         fn scope_node_ref(
             &self,
             _request: ErasureReferenceV1,
-            _ordinal: u64,
+            ordinal: u64,
         ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-            Ok(None)
+            Ok(usize::try_from(ordinal)
+                .ok()
+                .and_then(|ordinal| self.scope_nodes.get(ordinal))
+                .copied())
         }
 
         fn scope_index_count(&self, _request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-            Ok(0)
+            u64::try_from(self.scope_nodes.len()).map_err(|_| ErasureErrorV1::ScopeInvalid)
         }
 
         fn administrative_resolution_ref(
@@ -3836,6 +3851,98 @@ mod tests {
             ),
             Ok(Some((committed, Vec::new())))
         );
+        Ok(())
+    }
+
+    /// A port whose scope index lists `nodes`, each stored under its own
+    /// address, and which holds `objects`.
+    fn chain_port(
+        nodes: &[ScopeNodeV1],
+        objects: Vec<(ErasureReferenceV1, Vec<u8>)>,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        for node in nodes {
+            let bytes = node.canonical_cbor()?;
+            let address = addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, &bytes);
+            port.objects.insert(address, bytes);
+            port.scope_nodes.push(address);
+        }
+        port.objects.extend(objects);
+        Ok(port)
+    }
+
+    #[test]
+    fn the_recorded_scope_chain_is_linked_like_recovery() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let scope = reference(0x60);
+        let extension_of = |fork| {
+            ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+                request,
+                scope_commitment: scope,
+                fork,
+                child_timeline: crate::TimelineId::new(),
+                lineage_rule: reference(50),
+                predecessor_extension: None,
+                admission_provenance: reference(51),
+            })
+        };
+        let first = extension_of(reference(0x61))?;
+        let second = extension_of(reference(0x62))?;
+        let node = |extension: &ErasureScopeExtensionV1, ordinal, predecessor| ScopeNodeV1 {
+            request,
+            scope,
+            extension: extension.reference(),
+            ordinal,
+            predecessor,
+            reference: reference(0),
+        };
+        let first_node = node(&first, 0, None);
+        let first_address = addressed(
+            ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+            &first_node.canonical_cbor()?,
+        );
+        let second_node = node(&second, 1, Some(first_address));
+        let objects = vec![
+            (first.reference(), first.to_canonical_cbor()?),
+            (second.reference(), second.to_canonical_cbor()?),
+        ];
+        let linked = chain_port(&[first_node, second_node], objects.clone())?;
+        assert_eq!(
+            recorded_scope_extensions(&linked, request, scope),
+            Ok(vec![first.clone(), second.clone()])
+        );
+        let missing = Err(ErasureErrorV1::ProvenanceMissing);
+        // Another committed scope does not own this chain.
+        assert_eq!(
+            recorded_scope_extensions(&linked, request, reference(0x5f)),
+            missing
+        );
+        // The second node must name the first as its predecessor.
+        let unlinked = chain_port(&[first_node, node(&second, 1, None)], objects.clone())?;
+        assert_eq!(
+            recorded_scope_extensions(&unlinked, request, scope),
+            missing
+        );
+        // Another extension stored under a node's extension address.
+        let swapped = chain_port(
+            &[first_node],
+            vec![(first.reference(), second.to_canonical_cbor()?)],
+        )?;
+        assert_eq!(recorded_scope_extensions(&swapped, request, scope), missing);
+        // A node of another request, or at another ordinal.
+        for wrong in [
+            ScopeNodeV1 {
+                request: reference(2),
+                ..first_node
+            },
+            ScopeNodeV1 {
+                ordinal: 1,
+                ..first_node
+            },
+        ] {
+            let port = chain_port(&[wrong], objects.clone())?;
+            assert_eq!(recorded_scope_extensions(&port, request, scope), missing);
+        }
         Ok(())
     }
 
