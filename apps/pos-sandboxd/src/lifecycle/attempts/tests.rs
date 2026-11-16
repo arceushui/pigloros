@@ -10,7 +10,9 @@ mod cases {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pos_reference::sandbox_provider_protocol::{RequestAuthority, SandboxExecutionMode};
+    use pos_reference::sandbox_provider_protocol::{
+        CancelSource, RequestAuthority, SandboxExecutionMode,
+    };
 
     use super::super::*;
     use crate::test_fixtures::{
@@ -142,7 +144,7 @@ mod cases {
                 .as_ref()
                 .and_then(|state| state.get())
             {
-                state.cancel();
+                state.cancel(CancelSource::CancelRequest);
             }
             planned.prepare_fixture_directory()
         }
@@ -515,7 +517,7 @@ mod cases {
             let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
             let ended = runtime.run(FakeInput::new(id), &steps).await?;
             assert_eq!(ended.attempt_id(), [id; 16]);
-            assert!(!ended.cancelled());
+            assert_eq!(ended.cancel_source(), None);
             assert!(matches!(
                 ended.progress(),
                 AttemptProgress::Executed {
@@ -642,7 +644,7 @@ mod cases {
         // The cancellation lands after the run started, before its directory
         // could be fenced: the run sees it before activating anything.
         let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
         assert!(matches!(
             ended.progress(),
             AttemptProgress::CancelledBeforeActivation
@@ -669,7 +671,7 @@ mod cases {
             let (cancelled, ended) =
                 tokio::join!(cancel, Box::pin(owned.run_with(&steps, (), budget()?)));
             assert_eq!(cancelled?, SandboxCancellationResult::CancelledAndCleaned);
-            assert!(ended.cancelled());
+            assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
             assert!(matches!(
                 ended.progress(),
                 AttemptProgress::Executed {
@@ -707,14 +709,14 @@ mod cases {
                     });
                 let held = running.filter(|state| lock(&state.fence).is_some());
                 if let Some(state) = held {
-                    state.cancel();
+                    state.cancel(CancelSource::Revocation);
                     return;
                 }
                 tokio::task::yield_now().await;
             }
         };
         let ((), ended) = tokio::join!(fenced, run);
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
         assert!(matches!(
             ended.progress(),
             AttemptProgress::Failed {
@@ -839,7 +841,7 @@ mod cases {
         );
         assert_eq!(runtime.reserved(), 0);
         let ended = Box::pin(owned.run_with(&steps, (), budget()?)).await;
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
         assert!(matches!(ended.progress(), AttemptProgress::Withdrawn));
         assert!(matches!(ended.cleanup(), Ok(None)));
         let (progress, cleanup) = ended.into_parts();
@@ -866,7 +868,7 @@ mod cases {
             assert!(lifecycle.signal_cancel([1; 16], grant(1)).is_ok());
         }));
         let ended = runtime.run(FakeInput::new(1), &steps).await?;
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::CancelRequest));
         cleaned(&ended)?;
         assert_eq!(
             runtime
@@ -1193,7 +1195,7 @@ mod cases {
         };
         let (ended, snapshot) = tokio::join!(run, fence);
         // The execution's claim was fenced: no unit could start.
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
         assert!(matches!(
             ended.progress(),
             AttemptProgress::Failed {
@@ -1228,7 +1230,7 @@ mod cases {
             runtime.lifecycle.fence_and_snapshot().await
         };
         let (ended, snapshot) = tokio::join!(run, fence);
-        assert!(ended.cancelled());
+        assert_eq!(ended.cancel_source(), Some(CancelSource::Revocation));
         cleaned(&ended)?;
         let snapshot = snapshot?;
         assert_eq!(snapshot.attempts()[0].cgroup(), Some(cgroup));
@@ -1744,8 +1746,10 @@ mod cases {
                 unit.clone(),
                 "/org/freedesktop/systemd1/unit/attempt",
             )?;
-            let observed = crate::ObservedUnit::new(&crate::KernelObservation::fixture([7; 16]));
-            let release = ReleaseOutcome::new(Some([3; 32]), Some(observed), None);
+            let observation = crate::KernelObservation::fixture([7; 16]);
+            let evidence = observation.fixture_evidence()?;
+            let observed = crate::ObservedUnit::new(&observation);
+            let release = ReleaseOutcome::new(Some([3; 32]), Some((observed, evidence)), None);
             let mut progress = AttemptProgress::Failed {
                 error: ExecuteError::HostTimeout,
                 unit: UnitState::Killed,
