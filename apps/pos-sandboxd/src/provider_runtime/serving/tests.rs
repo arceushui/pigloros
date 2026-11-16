@@ -348,6 +348,10 @@ fn refuses_execute_while_starting(key: &VerifyingKey, staged: &StagedInstallatio
         ),
         Code::SandboxUnavailable,
     )?;
+    // Bytes after SPX1 are read after the answer, so the peer gets the
+    // SPE1 and a clean EOF.
+    let trailing = exchange(&[evaluation, staged.request(), b"trailing"])?;
+    assert_eq!(refusal(&trailing, key)?.code, Code::SandboxUnavailable);
     // Another TRS1 is another authority (step 6).
     let foreign_trust =
         staged.changed_request(|request| request.authority.trs1_digest = [0x66; 32])?;

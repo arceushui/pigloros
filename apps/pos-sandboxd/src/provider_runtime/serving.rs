@@ -220,9 +220,10 @@ impl<'a> Responder<'a> {
     ) -> Result<(), ProviderRuntimeError> {
         workers.answered.retain(|worker| !worker.is_finished());
         workers.refusing.retain(|worker| !worker.is_finished());
-        // While every refusal is in progress the execute listener is not
-        // polled; the control listener and both endpoint checks still are.
-        let accepting = workers.refusing.len() < pool.max(1);
+        // While every answered and every refusing slot is busy the execute
+        // listener is not polled; the control listener and both endpoint
+        // checks still are.
+        let accepting = workers.answered.len() < pool || workers.refusing.len() < pool.max(1);
         let mut ready = [
             PollFd::new(control.listener(), PollFlags::IN),
             PollFd::new(
@@ -254,13 +255,22 @@ impl<'a> Responder<'a> {
                 control_ready
                     .then(|| control.accept())
                     .transpose()
-                    .and_then(|_| execute_ready.then(|| execute.accept()).transpose())
-                    .map(|accepted| (execute_ready, accepted.flatten()))
+                    .map(|control_accepted| {
+                        control_accepted.is_some_and(|accepted| accepted.is_none())
+                    })
+                    .and_then(|control_missed| {
+                        execute_ready
+                            .then(|| execute.accept())
+                            .transpose()
+                            .map(|accepted| (control_missed, execute_ready, accepted.flatten()))
+                    })
             })
-            .map(|(execute_ready, accepted)| {
-                // An accept that produced nothing backs off briefly instead
-                // of spinning on a listener that stays readable.
-                thread::sleep(ACCEPT_BACKOFF * u32::from(execute_ready && accepted.is_none()));
+            .map(|(control_missed, execute_ready, accepted)| {
+                // An accept that produced nothing (such as `EMFILE`) backs
+                // off briefly instead of spinning on a listener that stays
+                // readable.
+                let missed = control_missed || (execute_ready && accepted.is_none());
+                thread::sleep(ACCEPT_BACKOFF * u32::from(missed));
                 let admission = if workers.answered.len() < pool {
                     Admission::Answered
                 } else {
@@ -313,6 +323,14 @@ impl<'a> Responder<'a> {
         response
             .and_then(|bytes| control_framing::write_frame(&mut writing, &bytes, FRAME_LIMIT).ok());
         stream.shutdown(std::net::Shutdown::Write).ok();
+        // Bytes the peer sends after its request (R11 does not require it to
+        // half-close an execute connection) are read until its EOF, so the
+        // close cannot reset the connection before the answer is read.
+        io::copy(
+            &mut Deadlined::new(stream, RESPONSE_DEADLINE),
+            &mut io::sink(),
+        )
+        .ok();
     }
 
     /// Validation precedence steps 1 to 6: the authenticated identities of

@@ -114,6 +114,31 @@ fn binds_an_owner_only_leaf() -> TestResult {
     Ok(())
 }
 
+/// A directory with an ancestor that a user other than root owns: a new
+/// directory chowned to `nobody`, or, where the container cannot chown, the
+/// read-only checkout when a non-root user owns it (as on hosted runners).
+/// Without either the test fails, unless
+/// `PIGLOROS_NO_FOREIGN_OWNER_DIRECTORY` declares the environment unable; then
+/// there is no such directory.
+fn foreign_owned_directory() -> TestResult<Option<std::path::PathBuf>> {
+    let created = Path::new("/run/pigloros/foreign");
+    fs::create_dir(created)?;
+    set_mode("/run/pigloros/foreign", 0o755)?;
+    if std::os::unix::fs::chown(created, Some(65_534), Some(65_534)).is_ok() {
+        return Ok(Some(created.join("nested")));
+    }
+    fs::remove_dir(created)?;
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let foreign = checkout
+        .ancestors()
+        .any(|directory| fs::metadata(directory).is_ok_and(|metadata| metadata.uid() != 0));
+    assert!(
+        foreign || std::env::var_os("PIGLOROS_NO_FOREIGN_OWNER_DIRECTORY").is_some(),
+        "no directory owned by another user: chown is refused and root owns the checkout"
+    );
+    Ok(foreign.then(|| checkout.to_path_buf()))
+}
+
 /// Every directory from `/` to the parent is opened beneath the one before
 /// it and must be a UID 0 directory that neither group nor other can write.
 fn refuses_unsafe_ancestors() -> TestResult {
@@ -154,15 +179,10 @@ fn refuses_unsafe_ancestors() -> TestResult {
     drop(current);
     fs::remove_file("/run/pigloros/link")?;
     fs::remove_dir("/run/pigloros/real")?;
-    // An ancestor owned by another user: the read-only checkout, when a
-    // non-root user owns it (as on hosted runners).
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if checkout
-        .ancestors()
-        .any(|directory| fs::metadata(directory).is_ok_and(|metadata| metadata.uid() != 0))
-    {
+    // An ancestor owned by another user.
+    if let Some(foreign) = foreign_owned_directory()? {
         assert_eq!(
-            ProviderEndpoint::bind(&checkout.join("provider.sock")).err(),
+            ProviderEndpoint::bind(&foreign.join("provider.sock")).err(),
             Some(ProviderRuntimeError::UnsafeEndpoint)
         );
     }
