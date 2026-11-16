@@ -1386,15 +1386,17 @@ fn registry_digest(
     for operation in operations {
         framed(&mut hasher, operation.name().as_bytes());
     }
-    consent
-        .into_iter()
-        .for_each(|consent| framed_consent(&mut hasher, consent));
+    framed_consent(&mut hasher, consent);
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Commit the registry digest to one consent draft: its subject, grantee and
-/// every grant's purpose, data categories and export permission.
-fn framed_consent(hasher: &mut blake3::Hasher, consent: &LocalConsentDraftV1) {
+/// Commit the registry digest to the document's consent draft, if any: its
+/// subject, grantee and every grant's purpose, data categories and export
+/// permission. A document without consents adds nothing.
+fn framed_consent(hasher: &mut blake3::Hasher, consent: Option<&LocalConsentDraftV1>) {
+    let Some(consent) = consent else {
+        return;
+    };
     hasher.update(&consent.subject.inner().to_bytes());
     hasher.update(&consent.grantee.inner().to_bytes());
     hasher.update(&(consent.grants.len() as u64).to_be_bytes());
