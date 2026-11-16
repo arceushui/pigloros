@@ -114,18 +114,37 @@ fn binds_an_owner_only_leaf() -> TestResult {
     Ok(())
 }
 
-/// A directory with an ancestor that a user other than root owns: a new
-/// directory chowned to `nobody`, or, where the container cannot chown, the
-/// read-only checkout when a non-root user owns it (as on hosted runners).
-/// Without either the test fails, unless
-/// `PIGLOROS_NO_FOREIGN_OWNER_DIRECTORY` declares the environment unable; then
-/// there is no such directory.
-fn foreign_owned_directory() -> TestResult<Option<std::path::PathBuf>> {
+/// A directory with an ancestor that a user other than root owns.
+struct ForeignOwned {
+    /// The directory whose ancestor is foreign-owned.
+    directory: std::path::PathBuf,
+    /// The directory this test created and chowned, removed on drop, even
+    /// when an assertion panics.
+    created: Option<&'static Path>,
+}
+
+impl Drop for ForeignOwned {
+    fn drop(&mut self) {
+        if let Some(created) = self.created {
+            drop(fs::remove_dir(created));
+        }
+    }
+}
+
+/// A new directory chowned to `nobody`, or, where the container cannot
+/// chown, the read-only checkout when a non-root user owns it (as on hosted
+/// runners). Without either the test fails, unless
+/// `PIGLOROS_NO_FOREIGN_OWNER_DIRECTORY` declares the environment unable;
+/// then there is no such directory.
+fn foreign_owned_directory() -> TestResult<Option<ForeignOwned>> {
     let created = Path::new("/run/pigloros/foreign");
     fs::create_dir(created)?;
     set_mode("/run/pigloros/foreign", 0o755)?;
     if std::os::unix::fs::chown(created, Some(65_534), Some(65_534)).is_ok() {
-        return Ok(Some(created.join("nested")));
+        return Ok(Some(ForeignOwned {
+            directory: created.join("nested"),
+            created: Some(created),
+        }));
     }
     fs::remove_dir(created)?;
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -136,7 +155,10 @@ fn foreign_owned_directory() -> TestResult<Option<std::path::PathBuf>> {
         foreign || std::env::var_os("PIGLOROS_NO_FOREIGN_OWNER_DIRECTORY").is_some(),
         "no directory owned by another user: chown is refused and root owns the checkout"
     );
-    Ok(foreign.then(|| checkout.to_path_buf()))
+    Ok(foreign.then(|| ForeignOwned {
+        directory: checkout.to_path_buf(),
+        created: None,
+    }))
 }
 
 /// Every directory from `/` to the parent is opened beneath the one before
@@ -182,14 +204,9 @@ fn refuses_unsafe_ancestors() -> TestResult {
     // An ancestor owned by another user.
     if let Some(foreign) = foreign_owned_directory()? {
         assert_eq!(
-            ProviderEndpoint::bind(&foreign.join("provider.sock")).err(),
+            ProviderEndpoint::bind(&foreign.directory.join("provider.sock")).err(),
             Some(ProviderRuntimeError::UnsafeEndpoint)
         );
-    }
-    // The chowned directory, when the container allowed it, is removed
-    // again, so a later run in the same root starts clean.
-    if Path::new("/run/pigloros/foreign").exists() {
-        fs::remove_dir("/run/pigloros/foreign")?;
     }
     Ok(())
 }
