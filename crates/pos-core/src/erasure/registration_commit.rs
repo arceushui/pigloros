@@ -628,24 +628,36 @@ pub fn prepare_artifact_registration_batch_v1(
             )
             .map_err(|_| ArtifactRegistrationPreparationErrorV1::OwnerRejected)?;
     }
-    // Checked last: only an otherwise valid, owner-verified closure is
-    // refused for its source Timeline.
-    if source_timeline.is_some_and(|source| source != run_timeline) {
-        return Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch);
-    }
-    let destruction_eligible = records
-        .iter()
-        .any(|record| !record.registration.fields().data_class.is_always_retained());
-    if destruction_eligible && source_timeline.is_none() {
-        return Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired);
-    }
-    Ok(PreparedArtifactRegistrationBatchV1 {
-        owner_id,
-        root_registration_address,
-        root_operation_id,
-        source_timeline,
-        records,
+    check_source_timeline(&records, source_timeline, run_timeline).map(|()| {
+        PreparedArtifactRegistrationBatchV1 {
+            owner_id,
+            root_registration_address,
+            root_operation_id,
+            source_timeline,
+            records,
+        }
     })
+}
+
+/// Checked after every format, graph and owner check, so only an otherwise
+/// valid, owner-verified closure is refused for its source Timeline.
+fn check_source_timeline(
+    records: &[PreparedArtifactRegistrationRecordV1],
+    source_timeline: Option<TimelineId>,
+    run_timeline: TimelineId,
+) -> Result<(), ArtifactRegistrationPreparationErrorV1> {
+    match source_timeline {
+        Some(source) if source != run_timeline => {
+            Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch)
+        }
+        None if records
+            .iter()
+            .any(|record| !record.registration.fields().data_class.is_always_retained()) =>
+        {
+            Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired)
+        }
+        Some(_) | None => Ok(()),
+    }
 }
 
 fn parse_artifact_inputs(
