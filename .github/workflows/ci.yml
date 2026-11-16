@@ -444,8 +444,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install evaluator packaging tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Build and verify standalone evaluator release evidence
         run: |
           shadow_directory="${RUNNER_TEMP}/caller-path-shadow"
@@ -482,8 +481,7 @@ jobs:
           fetch-depth: 0
       - name: Install fixture verification tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Obtain pinned offline SCS1 derivation inputs
         env:
           SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
@@ -563,8 +561,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fixture verification tools
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install --yes b3sum jq
+          bash scripts/prepare-ubuntu-package-mirror.sh b3sum jq
       - name: Reject non-main manual artifact publication
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
@@ -805,9 +802,7 @@ jobs:
       - name: Install the musl and aarch64 cross toolchains
         run: |
           set -euo pipefail
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          bash scripts/prepare-ubuntu-package-mirror.sh --no-install-recommends musl-tools gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build the provider binary as a static ELF for each architecture
         run: |
           set -euo pipefail
@@ -1873,8 +1868,7 @@ jobs:
           tool: cargo-depgraph
       - name: Install graphviz
         run: |
-          bash scripts/prepare-ubuntu-package-mirror.sh
-          sudo apt-get update && sudo apt-get install -y graphviz
+          bash scripts/prepare-ubuntu-package-mirror.sh graphviz
       - name: Generate dependency graph
         run: |
           mkdir -p artifacts
