@@ -9,6 +9,7 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -16,17 +17,21 @@ use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::sandbox_provider_protocol::{
-    SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse, SandboxExecuteRequest,
-    SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
+    RevocationUpdateRequest, SandboxCancelRequest, SandboxDescribeRequest, SandboxDescribeResponse,
+    SandboxExecuteRequest, SandboxProviderError, SandboxProviderErrorCode, SandboxReconcileRequest,
 };
+use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 
-use super::{root_peer, Responder};
+use super::{
+    exchange_deadline, root_peer, ControlState, Responder, EXECUTE_CLOSED, FENCED, LIVE, REVOKED,
+};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
     bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
     revocation_update, spi1, test_lifecycle, Scripted, TestResult, RUNTIME_SEED,
 };
+use crate::provider_runtime::ExchangeObserver;
 use crate::provider_runtime::{
     serve_with, AdmissionState, ProviderRuntimeError, ProviderStartupError, RuntimeAuthority,
 };
@@ -820,6 +825,7 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
+    the_control_state_only_advances(&admitted)?;
     let starting = OnceLock::new();
     // An acknowledged update fences the runtime for good; describe still
     // answers and execute is refused with 11 (invariant 24).
@@ -860,5 +866,48 @@ fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> Tes
         Ok(())
     })?;
     drop(staged);
+    Ok(())
+}
+
+#[test]
+fn a_control_exchange_ends_100_ms_after_its_accept() {
+    let accepted = Instant::now();
+    assert_eq!(
+        exchange_deadline(accepted),
+        accepted + Duration::from_millis(100)
+    );
+}
+
+/// The live control state only advances: the fence and an acknowledgement
+/// that does not revoke this runtime leave it `Fenced`; one that revokes
+/// its SPM1 makes it `Revoked` (R11 §7.1).
+fn the_control_state_only_advances(admitted: &AdmittedSelectorProvider) -> TestResult {
+    let bootstrap = admitted.bootstrap();
+    let next = |providers: &[[u8; 32]], nonce| -> TestResult<_> {
+        let (update, _) = revocation_update(admitted, providers, nonce)?;
+        Ok(RevocationUpdateRequest::authenticate(
+            &update,
+            bootstrap.trust(),
+            bootstrap.revocation(),
+        )?
+        .next_revocation)
+    };
+    let control = ControlState {
+        state: AtomicU8::new(LIVE),
+        admitted,
+    };
+    let state = || control.state.load(Ordering::SeqCst);
+    control.advance(EXECUTE_CLOSED);
+    assert_eq!(state(), EXECUTE_CLOSED);
+    control.fencing();
+    assert_eq!(state(), FENCED);
+    control.advance(EXECUTE_CLOSED);
+    assert_eq!(state(), FENCED);
+    control.acknowledging(bootstrap.trust(), &next(&[], 7)?);
+    assert!(!control.revoked());
+    let manifest = admitted.provider().manifest().manifest_digest;
+    control.acknowledging(bootstrap.trust(), &next(&[manifest], 8)?);
+    assert!(control.revoked());
+    assert_eq!(state(), REVOKED);
     Ok(())
 }

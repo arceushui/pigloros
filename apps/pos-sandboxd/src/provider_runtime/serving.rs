@@ -70,8 +70,8 @@ use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
 use super::{
-    unavailable, AdmissionState, ExchangeOutcome, LiveAttempts, ProviderRuntimeError,
-    RevocationUpdateResponder,
+    unavailable, AdmissionState, ExchangeObserver, ExchangeOutcome, LiveAttempts,
+    ProviderRuntimeError, RevocationUpdateResponder,
 };
 use crate::{sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner, RuntimeSignerError};
 
@@ -99,6 +99,53 @@ const LIVE: u8 = 0;
 const EXECUTE_CLOSED: u8 = 1;
 const FENCED: u8 = 2;
 const REVOKED: u8 = 3;
+
+/// The end of a control exchange `accepted` at that instant.
+fn exchange_deadline(accepted: Instant) -> Instant {
+    accepted + CONTROL_EXCHANGE
+}
+
+/// The live runtime's control state (R11 §7.1, §8.4). It only advances:
+/// `Live`, `ExecuteClosed` once an exchange began, `Fenced` once one
+/// reached the fence, and `Revoked` once an acknowledged RVS1 revokes this
+/// runtime's key, SPM1 or binary. Execute admission may open only while it
+/// is `Live`; no execute port is composed yet, so only `Revoked` changes an
+/// answer here.
+#[derive(Debug)]
+struct ControlState<'a> {
+    state: AtomicU8,
+    admitted: &'a AdmittedSelectorProvider,
+}
+
+impl ControlState<'_> {
+    fn advance(&self, state: u8) {
+        self.state.fetch_max(state, Ordering::AcqRel);
+    }
+
+    fn revoked(&self) -> bool {
+        self.state.load(Ordering::Acquire) == REVOKED
+    }
+}
+
+impl ExchangeObserver for ControlState<'_> {
+    fn fencing(&self) {
+        self.advance(FENCED);
+    }
+
+    fn acknowledging(&self, trust: &SandboxTrustSnapshot, next: &SandboxRevocationSnapshot) {
+        let manifest = self.admitted.provider().manifest();
+        let revoked = next.provider_revoked(&manifest.manifest_digest)
+            || next.provider_revoked(&manifest.binary_digest)
+            || next
+                .active_key(
+                    trust,
+                    &manifest.runtime_attestation_key_id,
+                    SandboxTrustRole::ProviderRuntimeAttestation,
+                )
+                .is_err();
+        self.advance(if revoked { REVOKED } else { FENCED });
+    }
+}
 
 /// The SPE1 operation codes.
 const DESCRIBE: u8 = 0;
@@ -212,8 +259,8 @@ pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
     admission: &'a OnceLock<AdmissionState>,
-    revocation: RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>>,
-    control: AtomicU8,
+    revocation:
+        RevocationUpdateResponder<'a, KeyFileRuntimeSigner, LiveAttempts<'a>, ControlState<'a>>,
 }
 
 impl<'a> Responder<'a> {
@@ -237,8 +284,11 @@ impl<'a> Responder<'a> {
                     retained_revocation_digest: admitted.bootstrap().revocation().snapshot_digest(),
                 },
                 LiveAttempts(admission),
+                ControlState {
+                    state: AtomicU8::new(LIVE),
+                    admitted,
+                },
             ),
-            control: AtomicU8::new(LIVE),
         }
     }
 
@@ -312,7 +362,7 @@ impl<'a> Responder<'a> {
                         control_accepted.is_some_and(|accepted| {
                             accepted
                                 .as_ref()
-                                .map(|stream| self.exchange(stream))
+                                .map(|stream| self.exchange(stream, Instant::now()))
                                 .is_none()
                         })
                     })
@@ -351,53 +401,29 @@ impl<'a> Responder<'a> {
     /// peer that is not root is dropped with zero bytes read and written; so
     /// is every peer once the runtime is `Revoked`, after the peer check.
     fn answer(&self, stream: &UnixStream, admission: Admission) {
-        if root_peer(stream) && self.control.load(Ordering::Acquire) != REVOKED {
+        if root_peer(stream) && !self.revocation.observer().revoked() {
             self.answer_root(stream, admission);
         }
     }
 
-    /// Answer one control-socket connection of a root peer through the
-    /// revocation responder, and record the control state it leaves.
-    fn exchange(&self, stream: &UnixStream) {
+    /// Answer one control-socket connection of a root peer, `accepted` at
+    /// that instant, through the revocation responder. The exchange closes
+    /// execute admission before anything is read; the responder reports the
+    /// fence and the acknowledgement before each has an effect.
+    fn exchange(&self, stream: &UnixStream, accepted: Instant) {
         if root_peer(stream) {
-            let deadline = Instant::now() + CONTROL_EXCHANGE;
-            let outcome = self
+            self.revocation.observer().advance(EXECUTE_CLOSED);
+            let deadline = exchange_deadline(accepted);
+            match self
                 .revocation
-                .respond(&mut Deadlined::until(stream, deadline), deadline);
-            let state = match outcome {
-                ExchangeOutcome::Acknowledged { trust, next } => {
+                .respond(&mut Deadlined::until(stream, deadline), deadline)
+            {
+                ExchangeOutcome::Acknowledged | ExchangeOutcome::Resent => {
                     stream.shutdown(std::net::Shutdown::Write).ok();
-                    if self.revokes(&trust, &next) {
-                        self.revocation.close_signing();
-                        REVOKED
-                    } else {
-                        FENCED
-                    }
                 }
-                ExchangeOutcome::Resent => {
-                    stream.shutdown(std::net::Shutdown::Write).ok();
-                    FENCED
-                }
-                ExchangeOutcome::Refused { fenced: true } => FENCED,
-                ExchangeOutcome::Refused { fenced: false } => EXECUTE_CLOSED,
-            };
-            self.control.fetch_max(state, Ordering::AcqRel);
+                ExchangeOutcome::Refused { .. } => {}
+            }
         }
-    }
-
-    /// Whether the acknowledged `next` RVS1 under `trust` revokes this
-    /// runtime's key, SPM1 or binary (R11 §7.1 `Revoked`).
-    fn revokes(&self, trust: &SandboxTrustSnapshot, next: &SandboxRevocationSnapshot) -> bool {
-        let manifest = self.admitted.provider().manifest();
-        next.provider_revoked(&manifest.manifest_digest)
-            || next.provider_revoked(&manifest.binary_digest)
-            || next
-                .active_key(
-                    trust,
-                    &manifest.runtime_attestation_key_id,
-                    SandboxTrustRole::ProviderRuntimeAttestation,
-                )
-                .is_err()
     }
 
     /// Answer a root peer's connection: read it under the initial control

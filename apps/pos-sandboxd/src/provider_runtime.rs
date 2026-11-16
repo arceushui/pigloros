@@ -63,7 +63,8 @@ use crate::{
 };
 use reconcile::Reconcile;
 pub use revocation::{
-    AttemptCleanupState, AttemptStateSource, ExchangeOutcome, RevocationUpdateResponder,
+    AttemptCleanupState, AttemptStateSource, ExchangeObserver, ExchangeOutcome,
+    RevocationUpdateResponder,
 };
 
 /// The process's own executable, followed through its magic link.

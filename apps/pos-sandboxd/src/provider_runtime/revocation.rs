@@ -17,11 +17,12 @@
 //! 6. build RCA1 (`remaining-matching-attempts = 0`), sign it through the
 //!    one runtime-attestation signer, verify it, and write it.
 //!
-//! Every other outcome writes zero bytes. The last acknowledged exchange is
+//! Every other outcome writes zero bytes. The acknowledged exchange is
 //! retained: a byte-identical RCC1 and RCU1 get the retained RCA1 bytes
-//! again, with no new signature and without repeating steps 3 to 5. Once
-//! signing is closed (a self-revoking update was acknowledged), only that
-//! resend remains.
+//! again, with no new signature and without repeating steps 3 to 5, and
+//! every other exchange afterwards gets zero bytes. The
+//! [`ExchangeObserver`] learns of the fence before the source is awaited,
+//! and of the acknowledgement before its bytes are written.
 //!
 //! The responder takes a stream that already passed the UID 0 peer check
 //! and knows nothing of endpoints, units or modes. Its only variable input
@@ -30,8 +31,7 @@
 
 use std::future::Future;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use pos_reference::control_framing;
@@ -64,17 +64,25 @@ pub trait AttemptStateSource {
     fn attempt_states(&self) -> impl Future<Output = Option<Vec<AttemptCleanupState>>> + Send;
 }
 
+/// How the responder's owner learns how far an exchange got.
+///
+/// Each step is reported before it has an effect (R11 §7.1, §8.4). The
+/// live runtime advances its control state; the recovery peer has none to
+/// advance.
+pub trait ExchangeObserver {
+    /// Step 4 begins: the attempt state source is about to be awaited.
+    fn fencing(&self);
+
+    /// An RCA1 acknowledging `next` under the unchanged `trust` is signed
+    /// and about to be written.
+    fn acknowledging(&self, trust: &SandboxTrustSnapshot, next: &SandboxRevocationSnapshot);
+}
+
 /// What one exchange did.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExchangeOutcome {
-    /// A fresh RCA1 was written, acknowledging the authenticated `next`
-    /// RVS1 under `trust`.
-    Acknowledged {
-        /// The unchanged TRS1.
-        trust: Box<SandboxTrustSnapshot>,
-        /// The acknowledged RVS1.
-        next: Box<SandboxRevocationSnapshot>,
-    },
+    /// A fresh RCA1 was written.
+    Acknowledged,
     /// The retained RCA1 was written again.
     Resent,
     /// Zero bytes were written; `fenced` once the attempt state source was
@@ -94,74 +102,84 @@ struct Acknowledged {
 }
 
 /// The one RCC1/RCU1 → RCA1 responder of a provider process.
+///
+/// Exchanges are answered one at a time.
 #[derive(Debug)]
-pub struct RevocationUpdateResponder<'a, S, A> {
+pub struct RevocationUpdateResponder<'a, S, A, O> {
     signer: &'a S,
     key: AdmittedRuntimeKey<'a>,
     resolution: AuthorityResolution,
     source: A,
-    acknowledged: Mutex<Option<Acknowledged>>,
-    signing_closed: AtomicBool,
+    observer: O,
+    acknowledged: Mutex<Option<Arc<Acknowledged>>>,
 }
 
-impl<'a, S: RuntimeAttestationSigner, A: AttemptStateSource> RevocationUpdateResponder<'a, S, A> {
+impl<'a, S, A, O> RevocationUpdateResponder<'a, S, A, O>
+where
+    S: RuntimeAttestationSigner,
+    A: AttemptStateSource,
+    O: ExchangeObserver,
+{
     /// The responder that signs with `signer` under the admitted `key`,
-    /// resolves RCU1 authority under `resolution` and reads attempt state
-    /// from `source`.
+    /// resolves RCU1 authority under `resolution`, reads attempt state from
+    /// `source` and reports its steps to `observer`.
     pub const fn new(
         signer: &'a S,
         key: AdmittedRuntimeKey<'a>,
         resolution: AuthorityResolution,
         source: A,
+        observer: O,
     ) -> Self {
         Self {
             signer,
             key,
             resolution,
             source,
+            observer,
             acknowledged: Mutex::new(None),
-            signing_closed: AtomicBool::new(false),
         }
     }
 
-    /// Sign nothing more: only the retained RCA1 may be resent (R11 §8.4).
-    pub fn close_signing(&self) {
-        self.signing_closed.store(true, Ordering::Release);
+    /// The observer the steps are reported to.
+    pub const fn observer(&self) -> &O {
+        &self.observer
     }
 
     /// Answer the exchange on `stream`, whose reads and writes end at
     /// `deadline`, as `deadline` also bounds the fence. The caller sends
     /// server write EOF after an RCA1.
+    ///
+    /// Once an exchange was acknowledged, only a byte-identical RCC1 and
+    /// RCU1 are answered, with the retained RCA1 (R11 §8.4).
     pub fn respond(&self, stream: &mut (impl Read + Write), deadline: Instant) -> ExchangeOutcome {
         let frames = read_exchange(stream);
         let retained = self
             .acknowledged
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .filter(|retained| {
-                frames
-                    .as_ref()
-                    .is_some_and(|(context_bytes, update_bytes)| {
-                        *context_bytes == retained.rcc1 && *update_bytes == retained.rcu1
-                    })
-            })
-            .map(|retained| retained.rca1.clone());
+            .clone();
         match (retained, frames) {
-            (Some(acknowledgement_bytes), _) => write_record(stream, &acknowledgement_bytes)
-                .map_or(ExchangeOutcome::Refused { fenced: false }, |()| {
-                    ExchangeOutcome::Resent
-                }),
-            (None, Some((context_bytes, update_bytes)))
-                if !self.signing_closed.load(Ordering::Acquire) =>
+            (Some(retained), Some((context_bytes, update_bytes)))
+                if context_bytes == retained.rcc1 && update_bytes == retained.rcu1 =>
             {
+                write_record(stream, &retained.rca1)
+                    .map_or(ExchangeOutcome::Refused { fenced: false }, |()| {
+                        ExchangeOutcome::Resent
+                    })
+            }
+            (None, Some((context_bytes, update_bytes))) => {
                 self.acknowledge(stream, context_bytes, update_bytes, deadline)
             }
-            (None, _) => ExchangeOutcome::Refused { fenced: false },
+            _ => ExchangeOutcome::Refused { fenced: false },
         }
     }
 
     /// Steps 2 to 6 for an exchange that is not a resend.
+    ///
+    /// An RCA1 that was signed but could not be written is not retained, so
+    /// a retry cannot get it: the fence is permanent and the live runtime
+    /// yields no second view. Recovery follows, as for every other outcome
+    /// that writes no RCA1 (R11 §8.4).
     fn acknowledge(
         &self,
         stream: &mut impl Write,
@@ -185,8 +203,8 @@ impl<'a, S: RuntimeAttestationSigner, A: AttemptStateSource> RevocationUpdateRes
         let Some((context, authority, request)) = authenticated else {
             return ExchangeOutcome::Refused { fenced: false };
         };
-        let fields = self
-            .fenced_view(deadline)
+        self.observer.fencing();
+        self.fenced_view(deadline)
             .filter(|view| {
                 view.iter().all(|attempt| {
                     attempt.cleanup_proved
@@ -195,17 +213,19 @@ impl<'a, S: RuntimeAttestationSigner, A: AttemptStateSource> RevocationUpdateRes
                             .contains(&attempt.attempt_id)
                 })
             })
-            .map(|_| RevocationAcknowledgementFields {
-                request_id: request.request_id,
-                revocation_digest: request.next_revocation.snapshot_digest(),
-                sir1_digest: context.sir1_digest,
-                previous_provider_binding_digest: context.previous_provider_binding_digest,
-                cancelled_attempt_ids: context.required_cancelled_attempt_ids.clone(),
-                runtime_attestation_key_id: self.signer.runtime_attestation_key_id().to_owned(),
-            });
-        fields
-            .and_then(|fields| self.sign(fields))
+            .and_then(|_| {
+                self.sign(RevocationAcknowledgementFields {
+                    request_id: request.request_id,
+                    revocation_digest: request.next_revocation.snapshot_digest(),
+                    sir1_digest: context.sir1_digest,
+                    previous_provider_binding_digest: context.previous_provider_binding_digest,
+                    cancelled_attempt_ids: context.required_cancelled_attempt_ids.clone(),
+                    runtime_attestation_key_id: self.signer.runtime_attestation_key_id().to_owned(),
+                })
+            })
             .and_then(|acknowledgement_bytes| {
+                self.observer
+                    .acknowledging(authority.trust(), &request.next_revocation);
                 write_record(stream, &acknowledgement_bytes)
                     .ok()
                     .map(|()| acknowledgement_bytes)
@@ -216,15 +236,12 @@ impl<'a, S: RuntimeAttestationSigner, A: AttemptStateSource> RevocationUpdateRes
                     *self
                         .acknowledged
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(Acknowledged {
+                        .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(Acknowledged {
                         rcc1: context_bytes,
                         rcu1: update_bytes,
                         rca1: acknowledgement_bytes,
-                    });
-                    ExchangeOutcome::Acknowledged {
-                        trust: Box::new(authority.trust().clone()),
-                        next: Box::new(request.next_revocation),
-                    }
+                    }));
+                    ExchangeOutcome::Acknowledged
                 },
             )
     }

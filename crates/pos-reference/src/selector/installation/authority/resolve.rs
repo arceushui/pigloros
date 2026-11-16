@@ -47,17 +47,27 @@ pub enum AuthorityResolution {
 }
 
 /// The verified TRS1 and previous RVS1 that authenticate one RCU1. It
-/// yields no admission.
-// Stable rustdoc checks only that this example fails to compile; nightly
-// rustdoc, as the mutation baseline runs it, also checks its error code.
+/// yields no admission: it neither converts into an admitted provider nor
+/// coerces to the installation state.
+// Stable rustdoc checks only that these examples fail to compile; nightly
+// rustdoc, as the mutation baseline runs it, also checks their error codes.
 #[cfg_attr(
     target_os = "linux",
     doc = r"
-```compile_fail,E0599
-fn admit(
-    resolved: pos_reference::selector::installation::authority::InstalledAuthorityObjects,
-) {
-    let _admitted = resolved.admit_provider();
+```compile_fail,E0277
+use pos_reference::selector::installation::authority::{
+    AdmittedSelectorProvider, InstalledAuthorityObjects,
+};
+fn admit(resolved: InstalledAuthorityObjects) -> AdmittedSelectorProvider {
+    resolved.into()
+}
+```
+
+```compile_fail,E0308
+use pos_reference::selector::installation::authority::InstalledAuthorityObjects;
+use pos_reference::selector::installation::InstalledSelectorState;
+fn installed(resolved: &InstalledAuthorityObjects) -> &InstalledSelectorState {
+    resolved
 }
 ```
 "
