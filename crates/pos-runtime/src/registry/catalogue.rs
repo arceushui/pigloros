@@ -391,32 +391,27 @@ impl PluginRegistry {
     /// once, checks the actual Plugin and approver against the reviewed
     /// specification, freezes CFG1, resolves the host-verified EPF1 of the
     /// selected profile, checks every retained link, and commits atomically.
-    /// A mode that selects no profile (`None`) and a profile with no installed
-    /// EPF1 both fail closed before any registry mutation; positive installed
-    /// registration arrives with #461 (and #1372 for Air-Gapped).
+    /// Every execution mode selects a profile (ADR-134 field 9: Local
+    /// `live-local-v1`, Air-Gapped `live-air-gapped-v1`, ADR-135); a profile
+    /// with no installed EPF1 fails closed before any registry mutation, and
+    /// positive installed registration arrives with #461.
     ///
     /// # Errors
-    /// Rejects an absent profile selection, a foreign Plugin or approver,
+    /// Rejects a foreign Plugin or approver,
     /// invalid configuration, an unavailable installed EPF1, a broken artifact
     /// link, or a registration conflict, without changing the registry.
     pub fn register_from_host_catalogue_entry<F: InstalledPluginFactoryV1>(
         &mut self,
         entry: &HostCatalogueEntryV1<F>,
         frozen_configuration: &F::Configuration,
-        registration_profile_id: Option<&str>,
+        registration_profile_id: &str,
     ) -> Result<(), RuntimeError> {
-        registration_profile_id
-            .ok_or(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" },
-            ))
-            .and_then(|profile_id| {
-                self.register_catalogue_entry(
-                    entry,
-                    frozen_configuration,
-                    CatalogueEvidenceV1::Installed,
-                    profile_id,
-                )
-            })
+        self.register_catalogue_entry(
+            entry,
+            frozen_configuration,
+            CatalogueEvidenceV1::Installed,
+            registration_profile_id,
+        )
     }
 
     /// Register a selected catalogue entry with nonproduction evidence.

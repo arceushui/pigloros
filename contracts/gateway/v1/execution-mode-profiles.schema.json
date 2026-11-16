@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:pigloros:gateway:v1:declaration:execution-mode-profiles",
   "title": "Gateway execution-mode profile declaration (GMD1)",
-  "description": "The public, reviewed declaration of the Gateway execution-mode profiles (GMP1, ADR-134 §3). `piglor-gateway`'s build script compiles it into canonical GMP1 records; clients recompute `mode_profile_digest` from it. It is closed at every level. `profiles` is sorted by identifier bytes (checked by scripts/check_gateway_contract.py) and holds exactly the two v1 profiles. Each string enumeration maps one to one onto a GMP1 tag: mode local=1, air-gapped=2; ingress loopback-http=1, public-read-only=2, fork-admission-socket=3; startup predicates linux=1, listeners-within-ingress=2, network-features-granted=3, no-network-ledger-source=4, store-mode-binding=5; revocation freshness current-by-construction=1, observed-persisted=2. A change of meaning requires an amendment of ADR-134; any byte change bumps `semantic_version` and sets `previous_mode_profile_digest` to the replaced digest.",
+  "description": "The public, reviewed declaration of the Gateway execution-mode profiles (GMP1, ADR-134 §3). `piglor-gateway`'s build script compiles it into canonical GMP1 records; clients recompute `mode_profile_digest` from it. It is closed at every level. `profiles` is sorted by identifier bytes (checked by scripts/check_gateway_contract.py) and holds exactly the two v1 profiles. Each string enumeration maps one to one onto a GMP1 tag: mode local=1, air-gapped=2; ingress loopback-http=1, public-read-only=2, fork-admission-socket=3; startup predicates linux=1, listeners-within-ingress=2, network-features-granted=3, no-network-ledger-source=4, store-mode-binding=5, air-gapped-no-route=6 (ADR-135 §4, Air-Gapped only); revocation freshness current-by-construction=1, observed-persisted=2. A change of meaning requires an amendment of ADR-134; any byte change bumps `semantic_version` and sets `previous_mode_profile_digest` to the replaced digest.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -86,13 +86,20 @@
           }
         },
         "startup_predicates": {
-          "const": [
-            "linux",
-            "listeners-within-ingress",
-            "network-features-granted",
-            "no-network-ledger-source",
-            "store-mode-binding"
-          ]
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "linux",
+              "listeners-within-ingress",
+              "network-features-granted",
+              "no-network-ledger-source",
+              "store-mode-binding",
+              "air-gapped-no-route"
+            ]
+          }
         },
         "revocation_freshness": {
           "enum": [
@@ -101,15 +108,9 @@
           ]
         },
         "registration_profile_id": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "enum": [
-                "live-local-v1"
-              ]
-            }
+          "enum": [
+            "live-air-gapped-v1",
+            "live-local-v1"
           ]
         },
         "previous_mode_profile_digest": {
@@ -156,6 +157,15 @@
               },
               "registration_profile_id": {
                 "const": "live-local-v1"
+              },
+              "startup_predicates": {
+                "const": [
+                  "linux",
+                  "listeners-within-ingress",
+                  "network-features-granted",
+                  "no-network-ledger-source",
+                  "store-mode-binding"
+                ]
               }
             }
           }
@@ -189,7 +199,17 @@
                 "const": "current-by-construction"
               },
               "registration_profile_id": {
-                "const": null
+                "const": "live-air-gapped-v1"
+              },
+              "startup_predicates": {
+                "const": [
+                  "linux",
+                  "listeners-within-ingress",
+                  "network-features-granted",
+                  "no-network-ledger-source",
+                  "store-mode-binding",
+                  "air-gapped-no-route"
+                ]
               }
             }
           }

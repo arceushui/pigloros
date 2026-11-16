@@ -36,6 +36,33 @@ use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// Set only for a test re-executed inside the Air-Gapped test shape.
+const IN_AIR_GAPPED_NAMESPACE: &str = "PIGLOROS_AIR_GAPPED_TEST_NAMESPACE";
+
+/// Run `body` as the test `name` of this binary inside the ADR-135 §4 test
+/// shape (#1422): the `authorized-air-gapped` composition binds the
+/// Air-Gapped mode, whose `air-gapped-no-route` predicate holds only there.
+/// The parent re-executes this test binary under
+/// `scripts/air-gapped-namespace.sh` and requires the child to pass.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn in_air_gapped_namespace(name: &str, body: impl FnOnce() -> TestResult) -> TestResult {
+    if std::env::var_os(IN_AIR_GAPPED_NAMESPACE).is_some() {
+        return body();
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/air-gapped-namespace.sh");
+    let status = std::process::Command::new(script)
+        .arg(std::env::current_exe()?)
+        .args(["--exact", name, "--nocapture"])
+        .env(IN_AIR_GAPPED_NAMESPACE, "1")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{name} failed in the Air-Gapped test namespace: {status}").into())
+    }
+}
+
 const LAYER: &str = "gateway-client-conformance";
 /// The CPF1 wire code of claim layer `GatewayClientConformance`.
 const LAYER_CODE: u64 = 3;
@@ -262,6 +289,13 @@ fn wanted_record(family: &RealFamilyMembers, name: &str, runs: &[(&str, &CaseOut
 
 #[test]
 fn every_gateway_family_dispatches_exactly_and_flips_only_when_verified() -> TestResult {
+    in_air_gapped_namespace(
+        "every_gateway_family_dispatches_exactly_and_flips_only_when_verified",
+        every_gateway_family_dispatches_exactly_and_flips_only_when_verified_body,
+    )
+}
+
+fn every_gateway_family_dispatches_exactly_and_flips_only_when_verified_body() -> TestResult {
     let fixtures = real_fixtures()?;
     let mut reports = Vec::new();
     for (mode, label) in MODES {
@@ -297,6 +331,13 @@ fn every_gateway_family_dispatches_exactly_and_flips_only_when_verified() -> Tes
 
 #[test]
 fn a_missing_or_mismatched_gateway_executor_runs_no_exchange() -> TestResult {
+    in_air_gapped_namespace(
+        "a_missing_or_mismatched_gateway_executor_runs_no_exchange",
+        a_missing_or_mismatched_gateway_executor_runs_no_exchange_body,
+    )
+}
+
+fn a_missing_or_mismatched_gateway_executor_runs_no_exchange_body() -> TestResult {
     let fixtures = real_fixtures()?;
     let corpus = corpus(&fixtures, 0)?;
     let exact = executor_declaration(corpus.subject_digest);

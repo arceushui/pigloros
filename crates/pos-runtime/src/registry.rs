@@ -6359,11 +6359,7 @@ mod tests {
         let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = gated_registry();
         assert!(matches!(
-            registry.register_from_host_catalogue_entry(
-                &selected,
-                &configuration,
-                Some("live-local-v1")
-            ),
+            registry.register_from_host_catalogue_entry(&selected, &configuration, "live-local-v1"),
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch
             ))
@@ -6384,18 +6380,22 @@ mod tests {
         assert_eq!(registry.projections.reducer_names().len(), 0);
     }
 
-    /// ADR-134 §7: a bound mode that selects no registration profile (the
-    /// Air-Gapped execution-mode profile field 9 until #1372) fails closed
-    /// before the factory runs or the registry changes.
+    /// ADR-134 §7 and ADR-135: the Air-Gapped mode selects
+    /// `live-air-gapped-v1`, which has no installed EPF1 until #461, so its
+    /// registration fails closed after the one factory build and before the
+    /// registry changes.
     #[test]
     fn production_registration_follows_the_bound_mode_selection_and_fails_closed() {
         let selected = fixture_catalogue_entry();
         let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = gated_registry();
-        let unselected =
-            registry.register_from_host_catalogue_entry(&selected, &configuration, None);
+        let air_gapped = registry.register_from_host_catalogue_entry(
+            &selected,
+            &configuration,
+            "live-air-gapped-v1",
+        );
         assert_eq!(
-            unselected.err().map(|error| error.to_string()),
+            air_gapped.err().map(|error| error.to_string()),
             Some(
                 RuntimeError::OutputAdmission(crate::OutputAdmissionErrorV1::ArtifactInvalid {
                     kind: "EPF1"
@@ -6403,7 +6403,7 @@ mod tests {
                 .to_string()
             )
         );
-        assert_eq!(configuration.builds.get(), 0);
+        assert_eq!(configuration.builds.get(), 1);
         assert!(registry.is_empty());
         assert!(registry.approver_map.is_empty());
     }

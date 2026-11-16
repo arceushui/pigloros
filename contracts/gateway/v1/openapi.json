@@ -3551,7 +3551,7 @@
         "not": {
           "pattern": "^gateway-mode-"
         },
-        "description": "An ADR-058 execution profile family: a versioned lower-case slug, never in the `gateway-mode-` namespace of `GatewayModeProfileId`. The set is open so a later family (such as the live Air-Gapped family of #1372) stays within v1; a client handles an identifier it does not know as an unknown profile. Server invariant in v1: the Gateway names only `replay-v1`, `deterministic-local-v1`, `deterministic-air-gapped-v1` and `live-local-v1`, and a Local deployment never reports an Air-Gapped profile (the servable sets of README rule 3)."
+        "description": "An ADR-058 execution profile family: a versioned lower-case slug, never in the `gateway-mode-` namespace of `GatewayModeProfileId`. The set is open so a later family stays within v1, as the live Air-Gapped family `live-air-gapped-v1` (ADR-135) did; a client handles an identifier it does not know as an unknown profile. Server invariant in v1: the Gateway names only `replay-v1`, `deterministic-local-v1`, `deterministic-air-gapped-v1`, `live-local-v1` and `live-air-gapped-v1`, and a Local deployment never reports an Air-Gapped profile (the servable sets of README rule 3)."
       },
       "ExecutionProfile": {
         "$id": "urn:pigloros:gateway:v1:schema:execution-profile",

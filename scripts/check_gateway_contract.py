@@ -121,6 +121,8 @@ MODE_PROFILES_SCHEMA = CONTRACT / "execution-mode-profiles.schema.json"
 MODE_PROFILE_ROTATION_CHAINS = {
     "gateway-mode-air-gapped-v1": (
         "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
+        # 2.0.0 (ADR-135 §7.3): air-gapped-no-route, live-air-gapped-v1.
+        "d1513a3395c47d6a9102f75b575daef58123c7d62306c7c0398709db8c0daebb",
     ),
     "gateway-mode-local-v1": (
         "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",

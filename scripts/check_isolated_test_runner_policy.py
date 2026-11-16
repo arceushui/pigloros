@@ -47,9 +47,13 @@ NAMESPACE_DIGESTS = {
     NAMESPACE_RUNNER: "fdf4de1050bb49fbb3872811fe157b45606e87e0246221252fbc9068b475ea1b",
     NAMESPACE_HELPER: "5ac85eff890ffc95977879725d9104e78b997f658f889810d13d67a19dc0890d",
 }
+# The owner accepted this class on 2026-11-16 (#1400, #1422) with these owners, and the two
+# in-crate test sources #1423 needs for the Air-Gapped bind and serve tests.
 NAMESPACE_OWNER_ROOTS = (
     "apps/piglor-gateway/tests/",
     "apps/pos-gateway-conformance-adapter/tests/",
+    "apps/piglor-gateway/src/mode_profile/tests.rs",
+    "apps/piglor-gateway/src/main.rs",
 )
 NAMESPACE_SUDO = "exec sudo -n -E unshare --net"
 # The one other mention of sudo: the check that it exists before the fallback.

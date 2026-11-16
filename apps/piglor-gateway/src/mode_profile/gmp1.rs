@@ -15,9 +15,9 @@ pub(super) const GMP1_PLATFORM_LINUX: u8 = 1;
 pub(super) const LOCAL_MODE_PROFILE_ID: &str = "gateway-mode-local-v1";
 /// The Air-Gapped profile identifier.
 pub(super) const AIR_GAPPED_MODE_PROFILE_ID: &str = "gateway-mode-air-gapped-v1";
-/// Startup predicates both modes require: linux, listeners-within-ingress,
-/// network-features-granted, no-network-ledger-source, store-mode-binding.
-pub(super) const STARTUP_PREDICATES: [u8; 5] = [1, 2, 3, 4, 5];
+/// Startup predicate tag 6, `air-gapped-no-route` (ADR-135 §4), valid only in
+/// the Air-Gapped profile.
+pub(super) const AIR_GAPPED_NO_ROUTE: u8 = 6;
 
 /// The reviewed meaning of one identifier: fields 2 and 4 to 9. Changing it
 /// needs an ADR-134 amendment.
@@ -26,8 +26,12 @@ struct ReviewedMeaningV1 {
     mode: u8,
     network_allowed: bool,
     ingress: &'static [u8],
+    /// linux, listeners-within-ingress, network-features-granted,
+    /// no-network-ledger-source and store-mode-binding in both modes, plus
+    /// `air-gapped-no-route` in Air-Gapped (ADR-135 §7.1).
+    startup_predicates: &'static [u8],
     revocation_freshness: u8,
-    registration_profile_id: Option<&'static str>,
+    registration_profile_id: &'static str,
 }
 
 const REVIEWED_MEANINGS: [ReviewedMeaningV1; 2] = [
@@ -36,16 +40,18 @@ const REVIEWED_MEANINGS: [ReviewedMeaningV1; 2] = [
         mode: 2,
         network_allowed: false,
         ingress: &[1, 3],
+        startup_predicates: &[1, 2, 3, 4, 5, AIR_GAPPED_NO_ROUTE],
         revocation_freshness: 1,
-        registration_profile_id: None,
+        registration_profile_id: "live-air-gapped-v1",
     },
     ReviewedMeaningV1 {
         id: LOCAL_MODE_PROFILE_ID,
         mode: 1,
         network_allowed: true,
         ingress: &[1, 2, 3],
+        startup_predicates: &[1, 2, 3, 4, 5],
         revocation_freshness: 2,
-        registration_profile_id: Some("live-local-v1"),
+        registration_profile_id: "live-local-v1",
     },
 ];
 
@@ -60,7 +66,7 @@ pub(super) struct Gmp1RecordV1 {
     pub(super) ingress: Vec<u8>,
     pub(super) startup_predicates: Vec<u8>,
     pub(super) revocation_freshness: u8,
-    pub(super) registration_profile_id: Option<String>,
+    pub(super) registration_profile_id: String,
     pub(super) previous_mode_profile_digest: Option<[u8; 32]>,
 }
 
@@ -79,9 +85,9 @@ impl Gmp1RecordV1 {
                 let matches = meaning.mode == self.mode
                     && meaning.network_allowed == self.network_allowed
                     && meaning.ingress == self.ingress.as_slice()
-                    && STARTUP_PREDICATES.as_slice() == self.startup_predicates.as_slice()
+                    && meaning.startup_predicates == self.startup_predicates.as_slice()
                     && meaning.revocation_freshness == self.revocation_freshness
-                    && meaning.registration_profile_id == self.registration_profile_id.as_deref();
+                    && meaning.registration_profile_id == self.registration_profile_id;
                 matches.then_some(()).ok_or_else(|| {
                     format!(
                         "{} does not match its reviewed meaning",
@@ -111,9 +117,7 @@ impl Gmp1RecordV1 {
             tags(&self.ingress),
             tags(&self.startup_predicates),
             Value::Integer(self.revocation_freshness.into()),
-            self.registration_profile_id
-                .clone()
-                .map_or(Value::Null, Value::Text),
+            Value::Text(self.registration_profile_id.clone()),
             Value::Integer(GMP1_PLATFORM_LINUX.into()),
             self.previous_mode_profile_digest
                 .map_or(Value::Null, |digest| Value::Bytes(digest.to_vec())),

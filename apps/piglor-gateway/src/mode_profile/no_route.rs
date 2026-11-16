@@ -86,7 +86,9 @@ pub enum AirGappedNoRouteDenialV1 {
     #[error("a device other than lo holds a multicast membership")]
     Membership,
     /// The process holds a network capability.
-    #[error("the process holds CAP_NET_ADMIN, CAP_NET_RAW or CAP_SYS_ADMIN")]
+    #[error(
+        "the process holds a network capability (network or system administration, raw sockets)"
+    )]
     Capability,
     /// The process could regain a network capability by `execve`.
     #[error("the bounding set keeps a network capability without no_new_privs")]
@@ -98,7 +100,7 @@ pub enum AirGappedNoRouteDenialV1 {
 
 /// The text of every fact `air-gapped-no-route` reads; `None` is a file
 /// that is absent or unreadable.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct AirGappedHostFactsV1 {
     /// `/proc/self/net/dev`.
     pub dev: Option<String>,
@@ -143,24 +145,34 @@ impl AirGappedHostFactsV1 {
 ///
 /// # Errors
 /// Returns the first denial, in the order of the facts.
-pub fn check_air_gapped_no_route_v1(
-    facts: &AirGappedHostFactsV1,
+pub fn check_air_gapped_no_route_v1<'a>(
+    facts: &'a AirGappedHostFactsV1,
 ) -> Result<(), AirGappedNoRouteDenialV1> {
     use AirGappedHostFactV1 as Fact;
-    let ipv6 = |text: &Option<String>| facts.ipv6_disabled.then_some("").or(text.as_deref());
+    let ipv6 = |text: Option<&'a str>| facts.ipv6_disabled.then_some("").or(text);
     fact(facts.dev.as_deref(), Fact::Dev)
         .and_then(devices)
         .and_then(|()| fact(facts.route.as_deref(), Fact::Route).and_then(routes))
-        .and_then(|()| fact(ipv6(&facts.ipv6_route), Fact::Ipv6Route).and_then(ipv6_routes))
-        .and_then(|()| fact(ipv6(&facts.if_inet6), Fact::IfInet6).and_then(ipv6_addresses))
+        .and_then(|()| {
+            fact(ipv6(facts.ipv6_route.as_deref()), Fact::Ipv6Route).and_then(ipv6_routes)
+        })
+        .and_then(|()| {
+            fact(ipv6(facts.if_inet6.as_deref()), Fact::IfInet6).and_then(ipv6_addresses)
+        })
         .and_then(|()| fact(facts.fib_trie.as_deref(), Fact::FibTrie).and_then(fib_trie))
         .and_then(|()| fact(facts.igmp.as_deref(), Fact::Igmp).and_then(igmp))
-        .and_then(|()| fact(ipv6(&facts.igmp6), Fact::Igmp6).and_then(igmp6))
+        .and_then(|()| fact(ipv6(facts.igmp6.as_deref()), Fact::Igmp6).and_then(igmp6))
         .and_then(|()| fact(facts.status.as_deref(), Fact::Status).and_then(status))
 }
 
-fn fact(text: Option<&str>, fact: AirGappedHostFactV1) -> Result<&str, AirGappedNoRouteDenialV1> {
-    text.ok_or(AirGappedNoRouteDenialV1::Unreadable(fact))
+const fn fact(
+    text: Option<&str>,
+    fact: AirGappedHostFactV1,
+) -> Result<&str, AirGappedNoRouteDenialV1> {
+    match text {
+        Some(text) => Ok(text),
+        None => Err(AirGappedNoRouteDenialV1::Unreadable(fact)),
+    }
 }
 
 const fn deny(

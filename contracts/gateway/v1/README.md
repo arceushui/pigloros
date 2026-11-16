@@ -165,7 +165,7 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    profile the deployment cannot serve is `409 incompatible-profile`; a Local deployment never
    reports or serves an Air-Gapped profile. The servable sets are Local {`replay-v1`,
    `deterministic-local-v1`, `live-local-v1`} and Air-Gapped {`replay-v1`,
-   `deterministic-air-gapped-v1`, plus the live Air-Gapped family once #1372 is accepted}. They
+   `deterministic-air-gapped-v1`, `live-air-gapped-v1`} (ADR-135 §6). They
    are a server invariant, not a schema rule: an `installed` `execution_profile.profile_id` is
    always in the servable set of the resource's `mode_profile.mode`, while the schema keeps the
    identifier open so a later family stays within v1. A profile in the set is served only once
@@ -177,7 +177,7 @@ compatibility policy of section 11 of the Wave 9 acceptance specification.
    | `deterministic-local-v1` | 409 | 409 always (not servable) | Local: #1364 |
    | `deterministic-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #1364 |
    | `live-local-v1` | 409 | 409 always (not servable) | Local: #461 |
-   | live Air-Gapped family | n/a | 409 | Air-Gapped: #1372, then #461 |
+   | `live-air-gapped-v1` | 409 always (not servable) | 409 | Air-Gapped: #461 installs its EPF1 |
 
    The positive Draft examples that bind a profile show the answer once that profile is served.
 4. **Unknown members are handled as each schema declares.** An open request object (no

@@ -61,6 +61,22 @@ def example(name: str) -> dict:
     return checker.load(checker.EXAMPLES / f"{name}.json")  # type: ignore[return-value]
 
 
+def without_annotations(value: object) -> object:
+    """`value` without its annotation keywords (`checker.ANNOTATIONS`). The compatibility
+    comparison ignores them, and a description may be updated within v1 (ADR-135 §6), while
+    `--append-only` keeps the baseline's frozen text: a fresh freeze then equals the baseline
+    in everything but those annotations. A schema map keyed by a property name is kept."""
+    if isinstance(value, dict):
+        return {
+            key: without_annotations(item)
+            for key, item in value.items()
+            if key not in checker.ANNOTATIONS or isinstance(item, dict)
+        }
+    if isinstance(value, list):
+        return [without_annotations(item) for item in value]
+    return value
+
+
 LOCAL_MODE = "gateway-mode-local-v1"
 LOCAL_HEAD = checker.MODE_PROFILE_ROTATION_CHAINS[LOCAL_MODE][-1]
 NEXT_HEAD = "f" * 64
@@ -593,6 +609,21 @@ class CheckGatewayContractTest(unittest.TestCase):
         rejected(lambda d: d["profiles"][0].update(registration_profile_id="live-local-v1"))
         rejected(lambda d: d["profiles"][1].update(registration_profile_id=None))
         rejected(lambda d: d["profiles"][1].update(startup_predicates=["linux"]))
+        # ADR-135 §7.5: field 9 is required in both modes, and tag 6 is Air-Gapped only.
+        rejected(lambda d: d["profiles"][0].update(registration_profile_id=None))
+        rejected(lambda d: d["profiles"][0].update(
+            startup_predicates=d["profiles"][0]["startup_predicates"][:5]))
+        rejected(lambda d: d["profiles"][1].update(
+            startup_predicates=[*d["profiles"][1]["startup_predicates"], "air-gapped-no-route"]))
+        rejected(lambda d: d["profiles"][0].update(
+            startup_predicates=[*d["profiles"][0]["startup_predicates"],
+                                "bundle-closure-verified"]))
+        rejected(lambda d: d["profiles"][0].update(previous_mode_profile_digest=None),
+                 "gateway-mode-air-gapped-v1 does not name its rotation-chain predecessor")
+        self.assertEqual(
+            declaration["profiles"][0]["previous_mode_profile_digest"],
+            checker.MODE_PROFILE_ROTATION_CHAINS["gateway-mode-air-gapped-v1"][-2],
+        )
         rejected(lambda d: d["profiles"].reverse(), "not sorted")
         rejected(lambda d: d["profiles"][1].update(
             semantic_version="1.1.0", previous_mode_profile_digest="a" * 64),
@@ -1025,6 +1056,19 @@ class CheckGatewayContractTest(unittest.TestCase):
         with self.assertRaisesRegex(checker.ContractError, "does not declare the window"):
             checker.check_compatibility(contract(), baseline=baseline)
 
+    def test_a_fresh_freeze_differs_from_the_baseline_only_in_annotations(self) -> None:
+        fresh = checker.freeze(contract(), None)
+        baseline = checker.load(checker.BASELINE)
+        self.assertEqual(without_annotations(fresh), without_annotations(baseline))
+        # A property named like an annotation is a schema, never dropped.
+        self.assertEqual(
+            without_annotations({"properties": {"description": {"type": "string"}},
+                                 "description": "text", "title": "t"}),
+            {"properties": {"description": {"type": "string"}}},
+        )
+        self.assertNotEqual(without_annotations({"type": "string"}),
+                            without_annotations({"type": "integer"}))
+
     def test_a_new_problem_code_stays_in_v1_and_freezes(self) -> None:
         document, registry = with_problem_code("quota-exhausted")
         current = contract(document=document, registry=registry)
@@ -1038,7 +1082,9 @@ class CheckGatewayContractTest(unittest.TestCase):
         checker.check_appended(baseline, frozen)
         self.assertGreater(checker.check_compatibility(current, baseline=frozen), 0)
         self.assertEqual(checker.freeze(current, frozen), frozen)
-        self.assertEqual(checker.freeze(current, None), frozen)
+        self.assertEqual(
+            without_annotations(checker.freeze(current, None)), without_annotations(frozen)
+        )
         # Once frozen, the new code is as permanent as the others.
         with self.assertRaisesRegex(checker.ContractError, "quota-exhausted was removed"):
             checker.check_compatibility(contract(), baseline=frozen)
@@ -1132,7 +1178,9 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertEqual(frozen["paths"][path], baseline["paths"][path])
         checker.check_appended(baseline, frozen)
         self.assertGreater(checker.check_compatibility(promoted, baseline=frozen), 0)
-        self.assertEqual(checker.freeze(contract(), None), baseline)
+        self.assertEqual(
+            without_annotations(checker.freeze(contract(), None)), without_annotations(baseline)
+        )
         self.assertEqual(checker.freeze(contract(), baseline), baseline)
 
     def test_freezing_merges_optional_additions_into_frozen_entries(self) -> None:
@@ -1289,7 +1337,10 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertEqual(checker.freeze_examples(contract(), checker.EXAMPLES, target), [])
             baseline = Path(directory) / "baseline.json"
             checker.write_baseline(contract(), baseline)
-            self.assertEqual(checker.load(baseline), checker.load(checker.BASELINE))
+            self.assertEqual(
+                without_annotations(checker.load(baseline)),
+                without_annotations(checker.load(checker.BASELINE)),
+            )
 
     def test_the_command_line_takes_freeze_or_append_only(self) -> None:
         self.assertEqual(checker.main(["--write"]), 2)
