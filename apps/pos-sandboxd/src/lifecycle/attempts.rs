@@ -49,7 +49,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pos_reference::sandbox_provider_protocol::{
-    NetworkCaptureStore, SandboxCancelRequest, SandboxCancellationResult, SandboxReconcileRequest,
+    CancelSource, NetworkCaptureStore, SandboxCancelRequest, SandboxCancellationResult,
+    SandboxReconcileRequest,
 };
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -214,7 +215,7 @@ pub type AttemptCleanup = Result<Option<CompletedAttemptCleanup>, AttemptLifecyc
 #[derive(Debug)]
 pub struct EndedAttempt<S> {
     attempt_id: [u8; 16],
-    cancelled: bool,
+    cancel_source: Option<CancelSource>,
     progress: AttemptProgress<S>,
     cleanup: AttemptCleanup,
 }
@@ -226,11 +227,11 @@ impl<S> EndedAttempt<S> {
         self.attempt_id
     }
 
-    /// Whether cancellation was requested before the attempt ended; it
-    /// outranks every other outcome.
+    /// Who first requested cancellation before the attempt ended, if anyone
+    /// did: TME1 `cancel-source`. It outranks every other outcome.
     #[must_use]
-    pub const fn cancelled(&self) -> bool {
-        self.cancelled
+    pub const fn cancel_source(&self) -> Option<CancelSource> {
+        self.cancel_source
     }
 
     /// How far the attempt got.
@@ -599,9 +600,10 @@ struct RunState {
 }
 
 impl RunState {
-    /// Request cancellation, then fence any unit start not yet requested.
-    fn cancel(&self) {
-        self.cancel.cancel();
+    /// Request cancellation from `source`, then fence any unit start not
+    /// yet requested.
+    fn cancel(&self, source: CancelSource) {
+        self.cancel.cancel(source);
         let held = lock(&self.fence);
         if let Some(fence) = held.as_ref() {
             fence.fence_unsubmitted();
@@ -933,14 +935,14 @@ impl<I> AttemptLifecycle<I> {
                 started: true,
                 ..
             }) => {
-                state.cancel();
+                state.cancel(CancelSource::CancelRequest);
                 Signalled::Running(ended.clone())
             }
             Some(Slot::Running { state, .. }) => {
                 // Its owner may still call run: the request it would read
                 // under this lock is already gone with the slot, but the
                 // cancel flag keeps every signal of this attempt consistent.
-                state.cancel();
+                state.cancel(CancelSource::CancelRequest);
                 Signalled::Withdrawn
             }
         };
@@ -1067,7 +1069,7 @@ impl<I> AttemptLifecycle<I> {
                 // A started run must stop; an unstarted one is withdrawn
                 // below, and its cancel flag records why for any signal its
                 // owner still holds.
-                state.cancel();
+                state.cancel(CancelSource::Revocation);
                 if *started {
                     running.push(ended.clone());
                 } else {
@@ -1229,9 +1231,13 @@ impl<I> Claim<'_, I> {
     }
 
     /// Record the attempt as ended, retaining `input` until reconciliation,
-    /// then wake every waiting cancellation. Returns whether cancellation was
-    /// requested, read under the same lock that a cancellation takes.
-    fn end(&mut self, input: Option<I>, cleaned: Option<PlannedAttemptIntent>) -> bool {
+    /// then wake every waiting cancellation. Returns the first cancellation
+    /// request's source, read under the same lock that a cancellation takes.
+    fn end(
+        &mut self,
+        input: Option<I>,
+        cleaned: Option<PlannedAttemptIntent>,
+    ) -> Option<CancelSource> {
         self.finished = true;
         let ended = Slot::Ended {
             grant: self.grant,
@@ -1240,12 +1246,12 @@ impl<I> Claim<'_, I> {
             _input: input,
         };
         let mut attempts = lock(&self.lifecycle.attempts);
-        let cancelled = self.state.cancel.is_requested();
+        let cancel_source = self.state.cancel.source();
         let replaced = attempts.set(self.attempt_id, ended);
         drop(attempts);
         drop(replaced);
         self.ended.send_replace(true);
-        cancelled
+        cancel_source
     }
 
     /// Forget an owner that never started: nothing was committed, and its
@@ -1310,9 +1316,11 @@ impl<I> OwnedAttempt<'_, I> {
         let Self { mut claim } = self;
         let attempt_id = claim.attempt_id;
         let Some(input) = claim.begin() else {
+            // Only a cancellation withdraws an owner, and it recorded its
+            // source first.
             return EndedAttempt {
                 attempt_id,
-                cancelled: true,
+                cancel_source: claim.state.cancel.source(),
                 progress: AttemptProgress::Withdrawn,
                 cleanup: Ok(None),
             };
@@ -1337,10 +1345,10 @@ impl<I> OwnedAttempt<'_, I> {
             run.claim.lifecycle.quarantine();
         }
         let Run { mut claim, input } = run;
-        let cancelled = claim.end(Some(input), cleaned);
+        let cancel_source = claim.end(Some(input), cleaned);
         EndedAttempt {
             attempt_id,
-            cancelled,
+            cancel_source,
             progress,
             cleanup: cleanup.map(Some),
         }

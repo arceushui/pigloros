@@ -41,9 +41,9 @@ use crate::fork_event_authority::{
 };
 use crate::memory::MemoryStore;
 use crate::{
-    counterfactual_port_error, ClassifiedCounterfactualErrorV1,
-    ClassifiedCounterfactualStorePortV1, ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1,
-    ForkAdmissionAuthoritySessionV1, ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1,
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAdmissionAuthoritySessionV1,
+    ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1,
 };
 
 type ClassifiedError = ClassifiedCounterfactualErrorV1;
@@ -101,7 +101,9 @@ impl MemoryStore {
         operation_base: Hash,
     ) -> CheckedBatch {
         crate::ensure_non_geographic_drafts(drafts.drafts(), fork)
-            .map_err(|error| ClassifiedError::Store(counterfactual_port_error(&error)))
+            .map_err(|error| {
+                ClassifiedError::Store(pos_core::CounterfactualStoreErrorV1::from(&error))
+            })
             .and_then(|()| without_wall_time_override(drafts))
             .and_then(|()| self.memory_validate_classified_authority_once(authority, fork))
             .and_then(|table| {

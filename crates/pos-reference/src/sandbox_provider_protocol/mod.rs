@@ -15,6 +15,7 @@ mod operations;
 mod policy;
 mod revocation;
 mod revocation_update;
+mod signing;
 mod termination;
 mod trust;
 
@@ -114,6 +115,7 @@ pub use operations::{
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
     SandboxReconcileResponse,
 };
+pub use signing::{Rls1, RuntimeSigned, SelfDigested, Verified};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,

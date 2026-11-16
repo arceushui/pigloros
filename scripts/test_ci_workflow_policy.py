@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import ast
 import copy
-import fnmatch
 import hashlib
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import tempfile
@@ -18,6 +18,9 @@ import unittest
 import yaml
 
 import test_check_owner_runtime_custody_policy as custody_policy_tests
+import test_merge_owner_bridge_lcov as native_lcov_tests
+import owner_bridge_windows_workflow_policy as native_policy
+from check_owner_runtime_custody_policy import UniqueKeys
 from check_asan_ci_policy import EXPECTED_SDK_HEADROOM_STEP
 
 
@@ -85,13 +88,18 @@ WORKSPACE_RUSTDOC_STEP = {
 }
 RUSTDOC_JOB_IF = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "needs.cargo-crap.result == 'success' && "
+    "needs.core-gate.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
-REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
+REQUIRED_PREFLIGHT_NEEDS = (
+    "ci_change_scope",
+    "pinned-dependencies",
+    "source-policies",
+    "owner-bridge-policies",
+)
 PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
 PINNED_DEPENDENCIES_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
@@ -101,6 +109,208 @@ CI_WORKFLOW_POLICY_TEST_STEP = {
     "name": "Test CI workflow policy",
     "run": "python scripts/test_ci_workflow_policy.py",
 }
+# The preflight policy checks run as parallel jobs so each one finishes well
+# inside its timeout. Every job shares the reachability, setup and result
+# contract of pinned-dependencies, including its runner, checkout, pinned
+# Python and hash-pinned install steps; each check runs exactly once, in the
+# job listed here, in this order, with exactly this step body.
+PREFLIGHT_POLICY_JOB_TIMEOUT = 10
+PREFLIGHT_POLICY_RUNNER = "ubuntu-24.04"
+PREFLIGHT_POLICY_JOB_KEYS = {"name", "needs", "if", "runs-on", "timeout-minutes", "steps"}
+LOST_POLICY_CHECK = (
+    "exactly its policy checks|must run exactly once|run the CI workflow policy test"
+)
+PREFLIGHT_POLICY_SETUP = [
+    {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+    {
+        "uses": "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "with": {"python-version": "3.12.11"},
+    },
+    {
+        "name": "Install pinned dependency checker",
+        "run": "python -m pip install --require-hashes --only-binary=:all: "
+        "--requirement requirements-pinned-dependencies.txt\n",
+    },
+]
+PREFLIGHT_POLICY_SETUP_STEPS = len(PREFLIGHT_POLICY_SETUP)
+PREFLIGHT_POLICY_RESULT_ENV = {
+    "pinned-dependencies": "POLICY_RESULT",
+    "source-policies": "SOURCE_POLICY_RESULT",
+    "owner-bridge-policies": "OWNER_POLICY_RESULT",
+}
+PREFLIGHT_POLICY_STEPS = {
+    "pinned-dependencies": (
+        {
+            "name": "Check immutable Action and Docker references",
+            "run": "bash scripts/check-pinned-dependencies.sh",
+        },
+        {
+            "name": "Test pinned dependency checker",
+            "run": "bash scripts/test-check-pinned-dependencies.sh",
+        },
+        {
+            "name": "Test CI workflow policy",
+            "run": "python scripts/test_ci_workflow_policy.py",
+        },
+        {
+            "name": "Test mutation workflow policy",
+            "run": "python scripts/test_mutation_workflow_policy.py",
+        },
+        {
+            "name": "Test deploy workflow policy",
+            "run": "python scripts/test_deploy_workflow_policy.py",
+        },
+        {
+            "name": "Test ignored-test summary checker",
+            "run": "python scripts/test_assert_no_ignored_in_test_summary.py",
+        },
+        {
+            "name": "Check ASan CI policy",
+            "run": "bash scripts/check-asan-ci-policy.sh",
+        },
+        {
+            "name": "Test ASan CI policy checker",
+            "run": (
+                "python scripts/test_check_asan_ci_policy.py\n"
+                "python scripts/test_check_lsan_suppression_report.py\n"
+            ),
+        },
+        {
+            "name": "Check MemoryStore benchmark CI policy",
+            "run": "python scripts/check_memory_store_benchmark_ci_policy.py",
+        },
+        {
+            "name": "Test MemoryStore benchmark CI policy checker",
+            "run": "python scripts/test_check_memory_store_benchmark_ci_policy.py",
+        },
+        {
+            "name": "Check delegated isolated-test policy",
+            "run": (
+                "python scripts/check_isolated_test_runner_policy.py\n"
+                "python scripts/test_check_isolated_test_runner_policy.py\n"
+            ),
+        },
+        {
+            "name": "Check cargo-crap CI policy",
+            "run": "python scripts/check_cargo_crap_ci_policy.py",
+        },
+        {
+            "name": "Test cargo-crap policy checkers",
+            "run": (
+                "python scripts/test_check_cargo_crap_ci_policy.py\n"
+                "python scripts/test_check_cargo_crap_report.py\n"
+            ),
+        },
+        {
+            "name": "Check test-support feature policy",
+            "run": (
+                "python scripts/check_test_support_features.py\n"
+                "python scripts/test_check_test_support_features.py\n"
+            ),
+        },
+        {
+            "name": "Test rust-test-policy test-code classification",
+            "run": "python scripts/test_rust_test_policy.py",
+        },
+        {
+            "name": "Check the community Plugin handoff READMEs",
+            "run": (
+                "python scripts/check_handoff_readme.py\n"
+                "python scripts/test_check_handoff_readme.py\n"
+            ),
+        },
+        {
+            "name": "Check PMF1 golden vectors match their generator",
+            "run": "python scripts/generate_pmf1_golden_vectors.py --check",
+        },
+        {
+            "name": "Check independent owner-bridge codec vectors",
+            "run": (
+                "python scripts/owner_bridge_vectors.py --check\n"
+                "python scripts/test_owner_bridge_vectors.py\n"
+            ),
+        },
+        {
+            "name": "Check independent owner-bridge WebAuthn fixture",
+            "run": "python scripts/owner_bridge_webauthn_fixtures.py --check",
+        },
+        {
+            "name": "Test Wasmtime pin checker",
+            "run": "python scripts/test_check_wasmtime_feature_pin.py",
+        },
+        {
+            "name": "Check and test the third-party notice generator",
+            "run": (
+                "python scripts/third_party_notices.py check\n"
+                "python scripts/test_third_party_notices.py\n"
+            ),
+        },
+    ),
+    "source-policies": (
+        {
+            "name": "Check counterfactual adapter seal policy",
+            "run": (
+                "python scripts/check_counterfactual_adapter_seal.py\n"
+                "python scripts/test_check_counterfactual_adapter_seal.py\n"
+            ),
+        },
+        {
+            "name": "Check trusted-clock port implementation policy",
+            "run": (
+                "python scripts/check_trusted_clock_port_impls.py\n"
+                "python scripts/test_check_trusted_clock_port_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check Plugin trust registry confinement policy",
+            "run": (
+                "python scripts/check_plugin_trust_registry_impls.py\n"
+                "python scripts/test_check_plugin_trust_registry_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check composition fallback registry confinement policy",
+            "run": (
+                "python scripts/check_composition_fallback_registry_impls.py\n"
+                "python scripts/test_check_composition_fallback_registry_impls.py\n"
+            ),
+        },
+        {
+            "name": "Check fixture evaluation instant and admission host confinement policy",
+            "run": (
+                "python scripts/check_fixture_instant_confinement.py\n"
+                "python scripts/test_check_fixture_instant_confinement.py\n"
+            ),
+        },
+    ),
+    "owner-bridge-policies": (
+        {
+            "name": "Check owner-bridge Windows unsafe policy",
+            "run": (
+                "python scripts/check_owner_bridge_unsafe_policy.py\n"
+                "python scripts/test_check_owner_bridge_unsafe_policy.py\n"
+            ),
+        },
+        {
+            "name": "Check owner-bridge encryptor-lock dependency pin",
+            "run": (
+                "python scripts/check_owner_bridge_lock.py\n"
+                "python scripts/test_check_owner_bridge_lock.py\n"
+            ),
+        },
+        {
+            "name": "Check subject-encryption activation boundary",
+            "run": (
+                "python scripts/check_subject_encryption_activation.py\n"
+                "python scripts/test_check_subject_encryption_activation.py\n"
+            ),
+        },
+        {
+            "name": "Test Windows shim coverage exclusions",
+            "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
+        },
+    ),
+}
 EXPECTED_EXCLUDES = {
     "!**/*.md",
     "!**/*.mdx",
@@ -108,6 +318,67 @@ EXPECTED_EXCLUDES = {
     "!**/*.rst",
     "!.agents/**",
     "!docs/**",
+}
+# Every path the native Windows owner lane builds, lints, tests or executes,
+# plus the gates that consume its evidence. Keep this a subset check: the
+# filter may grow, it must never lose one of these.
+REQUIRED_OWNER_WINDOWS_PATTERNS = (
+    "crates/pos-owner-bridge-windows/**",
+    "crates/pos-owner-bridge/**",
+    "crates/pos-owner-bridge-codec/**",
+    "apps/piglor-owner/**",
+    "crates/pos-crypto/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/**",
+    ".config/**",
+    "clippy.toml",
+    ".clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "covgate.toml",
+    ".gitattributes",
+    "fixtures/owner-bridge/**",
+    ".github/workflows/owner-bridge-windows.yml",
+    ".github/workflows/ci.yml",
+    ".github/rust-scope.yml",
+    "scripts/*owner*",
+    "scripts/*cargo_crap*",
+)
+OWNER_WINDOWS_LANE_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+    "needs.ci_change_scope.outputs.owner_windows == 'true' }}"
+)
+OWNER_WINDOWS_SCOPE_STEP = {
+    "name": "Resolve the Windows-owner scope",
+    "id": "owner_windows",
+    "env": {
+        "DETECTED": "${{ github.event_name == 'pull_request' && "
+        "steps.scope.outcome == 'success' && steps.scope.outputs.owner_windows || '' }}",
+        "CHANGED_FILES": "${{ github.event.pull_request.changed_files }}",
+        "PULL_NUMBER": "${{ github.event.pull_request.number }}",
+        "GH_TOKEN": "${{ github.token }}",
+    },
+    "run": (
+        'scope=true\n'
+        'if [[ "${DETECTED}" = false ]]; then\n'
+        '  if [[ ! "${CHANGED_FILES}" =~ ^[0-9]+$ ]] || (( 10#${CHANGED_FILES} >= 3000 )); then\n'
+        "    echo '::warning::The changed-file list may be truncated; running the Windows owner lane.'\n"
+        '  elif [[ ! "${PULL_NUMBER}" =~ ^[0-9]+$ ]]; then\n'
+        "    echo '::warning::The pull request number is unavailable; running the Windows owner lane.'\n"
+        '  elif ! renamed="$(gh api --method GET --paginate -f per_page=100 \\\n'
+        '    "repos/${GITHUB_REPOSITORY}/pulls/${PULL_NUMBER}/files" \\\n'
+        '    --jq \'.[] | select(.status == "renamed") | .filename\')"; then\n'
+        "    echo '::warning::Renamed files could not be listed; running the Windows owner lane.'\n"
+        '  elif [[ -n "${renamed}" ]]; then\n'
+        "    echo 'A renamed file may move a lane input; running the Windows owner lane.'\n"
+        '  else\n'
+        '    scope=false\n'
+        '  fi\n'
+        'fi\n'
+        'printf \'owner_windows=%s\\n\' "${scope}" >> "$GITHUB_OUTPUT"\n'
+    ),
 }
 CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
 CORE_JOB_IF = (
@@ -137,20 +408,72 @@ def assert_core_sdk_headroom(workflow: dict) -> None:
             )
 
 
-def load_patterns() -> list[str]:
+def load_patterns(key: str = "rust") -> list[str]:
     with FILTER_PATH.open(encoding="utf-8") as stream:
-        filters = yaml.safe_load(stream)
-    if not isinstance(filters, dict) or not isinstance(filters.get("rust"), list):
-        raise AssertionError("rust-scope.yml must define a rust pattern list")
-    patterns = filters["rust"]
+        filters = yaml.load(stream, Loader=UniqueKeys)
+    if not isinstance(filters, dict) or not isinstance(filters.get(key), list):
+        raise AssertionError(f"rust-scope.yml must define a {key} pattern list")
+    patterns = filters[key]
     if not all(isinstance(pattern, str) for pattern in patterns):
         raise AssertionError("rust-scope.yml patterns must be strings")
     return patterns
 
 
+def assert_owner_windows_filter(patterns: list[str]) -> None:
+    """The owner filter is positive-only and keeps every lane input."""
+    if any(pattern.startswith("!") for pattern in patterns):
+        raise AssertionError("owner_windows must not exclude paths")
+    missing = [pattern for pattern in REQUIRED_OWNER_WINDOWS_PATTERNS if pattern not in patterns]
+    if missing:
+        raise AssertionError(f"owner_windows lost required lane inputs: {missing}")
+
+
+def picomatch_regex(pattern: str) -> re.Pattern[str]:
+    """Translate the picomatch subset paths-filter uses (with ``dot: true``).
+
+    ``*`` and ``?`` stay within one path segment; a whole ``**`` segment spans
+    zero or more segments. Brace, extglob and class syntax is rejected so a
+    filter cannot silently rely on a construct this model does not reproduce.
+    """
+    if any(character in pattern for character in "{}[]()+@") or pattern.startswith("!"):
+        raise AssertionError(f"unsupported scope pattern: {pattern}")
+    segments = pattern.split("/")
+    regex = ""
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            regex += ".*" if last else "(?:[^/]+/)*"
+            continue
+        if "**" in segment:
+            raise AssertionError(f"unsupported scope pattern: {pattern}")
+        regex += "".join(
+            "[^/]*" if character == "*" else "[^/]" if character == "?" else re.escape(character)
+            for character in segment
+        )
+        if not last:
+            regex += "/"
+    return re.compile(regex)
+
+
+def picomatch(path: str, pattern: str) -> bool:
+    return picomatch_regex(pattern).fullmatch(path) is not None
+
+
+def scope_matches(path: str, patterns: list[str]) -> bool:
+    """paths-filter's ``some-with-excludes``: any include and no exclude."""
+    includes = [pattern for pattern in patterns if not pattern.startswith("!")]
+    excludes = [pattern[1:] for pattern in patterns if pattern.startswith("!")]
+    return (any(picomatch(path, pattern) for pattern in includes)
+            and not any(picomatch(path, pattern) for pattern in excludes))
+
+
+def owner_windows_lane_required(paths: list[str], patterns: list[str]) -> bool:
+    return any(scope_matches(path, patterns) for path in paths)
+
+
 def load_workflow(workflow_path: pathlib.Path) -> dict:
     with workflow_path.open(encoding="utf-8") as stream:
-        workflow = yaml.safe_load(stream)
+        workflow = yaml.load(stream, Loader=UniqueKeys)
     if not isinstance(workflow, dict):
         raise AssertionError(f"{workflow_path} must contain a mapping")
     return workflow
@@ -192,16 +515,15 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
     if "if" in scope:
         raise AssertionError("ci_change_scope must remain unconditional")
 
-    pinned_dependencies = jobs.get("pinned-dependencies")
-    if not isinstance(pinned_dependencies, dict):
-        raise AssertionError("ci.yml must define pinned-dependencies")
-    if pinned_dependencies.get("needs") != PINNED_DEPENDENCIES_NEEDS:
-        raise AssertionError("pinned-dependencies must wait for ci_change_scope")
-    if pinned_dependencies.get("if") != PINNED_DEPENDENCIES_IF:
-        raise AssertionError(
-            "pinned-dependencies must remain reachable on a main push"
-        )
-    pinned_steps = pinned_dependencies.get("steps")
+    for policy_name in PREFLIGHT_POLICY_STEPS:
+        policy_job = jobs.get(policy_name)
+        if not isinstance(policy_job, dict):
+            raise AssertionError(f"ci.yml must define {policy_name}")
+        if policy_job.get("needs") != PINNED_DEPENDENCIES_NEEDS:
+            raise AssertionError(f"{policy_name} must wait for ci_change_scope")
+        if policy_job.get("if") != PINNED_DEPENDENCIES_IF:
+            raise AssertionError(f"{policy_name} must remain reachable on a main push")
+    pinned_steps = jobs["pinned-dependencies"].get("steps")
     if (
         not isinstance(pinned_steps, list)
         or CI_WORKFLOW_POLICY_TEST_STEP not in pinned_steps
@@ -218,6 +540,54 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
         preflight_needs
     ):
         raise AssertionError("preflight-gate must retain scope and policy dependencies")
+
+
+def assert_preflight_policy_split(workflow: dict) -> None:
+    """Each preflight policy job keeps its checks, setup and gate result."""
+    assert_main_push_prerequisites(workflow)
+    jobs = workflow["jobs"]
+    for policy_name, expected_steps in PREFLIGHT_POLICY_STEPS.items():
+        expected_names = tuple(step["name"] for step in expected_steps)
+        job = jobs[policy_name]
+        if job.get("name") != policy_name:
+            raise AssertionError(f"{policy_name} must keep its check name")
+        if job.get("runs-on") != PREFLIGHT_POLICY_RUNNER:
+            raise AssertionError(f"{policy_name} must keep its pinned runner")
+        if (job.get("timeout-minutes") != PREFLIGHT_POLICY_JOB_TIMEOUT
+                or "continue-on-error" in job):
+            raise AssertionError(f"{policy_name} must keep its blocking 10-minute limit")
+        steps = job.get("steps", [])
+        if steps[:PREFLIGHT_POLICY_SETUP_STEPS] != PREFLIGHT_POLICY_SETUP:
+            raise AssertionError(f"{policy_name} must use the shared pinned Python setup")
+        checks = steps[PREFLIGHT_POLICY_SETUP_STEPS:]
+        if tuple(step.get("name") for step in checks) != expected_names:
+            raise AssertionError(f"{policy_name} must run exactly its policy checks")
+        if any("if" in step or "continue-on-error" in step for step in steps):
+            raise AssertionError(f"{policy_name} steps must remain unconditional and blocking")
+        if tuple(checks) != expected_steps:
+            raise AssertionError(f"{policy_name} must run its pinned policy step bodies")
+        if set(job) != PREFLIGHT_POLICY_JOB_KEYS:
+            raise AssertionError(f"{policy_name} must keep exactly its reviewed job keys")
+        for name in expected_names:
+            owners = [
+                owner
+                for owner, candidate in jobs.items()
+                for step in candidate.get("steps", [])
+                if step.get("name") == name
+            ]
+            if owners != [policy_name]:
+                raise AssertionError(f"{name} must run exactly once, in {policy_name}")
+
+    preflight = jobs["preflight-gate"]
+    if not set(PREFLIGHT_POLICY_STEPS).issubset(job_needs(preflight)):
+        raise AssertionError("preflight-gate must wait for every preflight policy job")
+    step = preflight["steps"][0]
+    for policy_name, variable in PREFLIGHT_POLICY_RESULT_ENV.items():
+        if step["env"].get(variable) != "${{ needs." + policy_name + ".result }}":
+            raise AssertionError(f"preflight-gate must read the actual {policy_name} result")
+        for expected in ("success", "skipped"):
+            if f'test "${{{variable}}}" = {expected}' not in step["run"]:
+                raise AssertionError(f"preflight-gate must enforce the {policy_name} result")
 
 
 def assert_core_rust_cache_contract(workflow: dict) -> None:
@@ -325,8 +695,12 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
 
 
 STANDARD_STAGE_RUNNER_CAP = 8
-# Heavy jobs released by cargo-crap. Browser parity follows WASM packaging on
-# the same budget, and standard-gate is the lightweight fan-in.
+LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-crap"})
+CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
+# Heavy jobs released by core-gate. Browser parity follows WASM packaging on
+# the same budget. cargo-crap starts beside them but compiles nothing (pinned
+# binary, cargo metadata and LCOV parsing in a 10-minute budget), and
+# standard-gate and ci-gate are lightweight fan-ins.
 STANDARD_STAGE_JOBS = frozenset(
     {
         "rustdoc",
@@ -352,8 +726,13 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     started = {
         name
         for name, job in jobs.items()
-        if name != "standard-gate" and "cargo-crap" in job_needs(job)
+        if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
+    crap = jobs.get("cargo-crap", {})
+    if "strategy" in crap or crap.get("timeout-minutes") != 10 or "core-gate" not in job_needs(crap):
+        raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
+    if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
+        raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
     if started != STANDARD_STAGE_JOBS:
         raise AssertionError("standard stage must start exactly the counted jobs")
     if len(started) > STANDARD_STAGE_RUNNER_CAP:
@@ -367,13 +746,75 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
 
 
-def excluded(path: str, patterns: list[str]) -> bool:
-    return any(
-        fnmatch.fnmatchcase(path, pattern[1:])
-        or fnmatch.fnmatchcase(path, pattern[1:].removeprefix("**/"))
-        for pattern in patterns
-        if pattern.startswith("!")
-    )
+# cargo-crap consumes the native LCOV and ci-gate requires both results. The
+# main-only reports keep requiring cargo-crap. Mutation, ASan and every
+# standard-stage job never wait for the lane.
+OWNER_WINDOWS_DOWNSTREAM = sorted((
+    "cargo-crap", "ci-gate", "modules-structure", "depgraph",
+))
+
+
+def transitive_needs(jobs: dict, name: str) -> set[str]:
+    seen: set[str] = set()
+    pending = job_needs(jobs[name])
+    while pending:
+        dependency = pending.pop()
+        if dependency not in seen:
+            seen.add(dependency)
+            pending.extend(job_needs(jobs.get(dependency, {})))
+    return seen
+
+
+def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
+    """The Windows lane runs beside core CI and blocks its direct consumers."""
+    jobs = workflow["jobs"]
+    expected = {
+        "name": "owner-bridge-windows",
+        "needs": ["ci_change_scope", "ledger-windows"],
+        "if": OWNER_WINDOWS_LANE_IF,
+        "uses": "./.github/workflows/owner-bridge-windows.yml",
+        "permissions": {"contents": "read"},
+    }
+    if jobs.get("owner-bridge-windows") != expected:
+        raise AssertionError("owner Windows lane must follow the completed ledger runner")
+    scope = jobs["ci_change_scope"]
+    if scope.get("outputs", {}).get("owner_windows") != (
+        "${{ steps.owner_windows.outputs.owner_windows }}"
+    ):
+        raise AssertionError("owner Windows scope must come only from its resolving step")
+    resolving = [step for step in scope["steps"] if step.get("id") == "owner_windows"]
+    if resolving != [OWNER_WINDOWS_SCOPE_STEP] or scope["steps"][-1] != OWNER_WINDOWS_SCOPE_STEP:
+        raise AssertionError("owner Windows scope must default to the full lane")
+    preflight = jobs["preflight-gate"]
+    if "owner-bridge-windows" in job_needs(preflight) or "owner-bridge-windows" in str(preflight):
+        raise AssertionError("owner Windows lane must not delay the core stage")
+    consumers = sorted(name for name, job in jobs.items()
+                       if "owner-bridge-windows" in job_needs(job))
+    if consumers != ["cargo-crap", "ci-gate"]:
+        raise AssertionError("only cargo-crap and ci-gate may wait for the owner Windows lane")
+    behind_lane = sorted(name for name in jobs
+                         if "owner-bridge-windows" in transitive_needs(jobs, name))
+    if behind_lane != OWNER_WINDOWS_DOWNSTREAM:
+        raise AssertionError(f"a failed owner Windows lane must not hide other findings: {behind_lane}")
+    gate = jobs["ci-gate"]
+    step = gate["steps"][0]
+    if step["env"].get("OWNER_WINDOWS_RESULT") != "${{ needs.owner-bridge-windows.result }}":
+        raise AssertionError("ci-gate must use the actual owner Windows result")
+    if step["env"].get("OWNER_WINDOWS_SCOPE") != "${{ needs.ci_change_scope.outputs.owner_windows }}":
+        raise AssertionError("ci-gate must use the trusted owner Windows scope")
+    for fragment in (
+        "expected_owner_windows=skipped",
+        'if [[ "${EVENT_NAME}" != pull_request \\\n'
+        '  || ( "${RUST_SCOPE_RESULT}" = true && "${OWNER_WINDOWS_SCOPE}" != false ) ]]; then\n'
+        "  expected_owner_windows=success\n",
+        'if [[ "${OWNER_WINDOWS_RESULT}" != "${expected_owner_windows}" ]]; then',
+    ):
+        if fragment not in step["run"]:
+            raise AssertionError("ci-gate must enforce the owner Windows scope result")
+    try:
+        native_policy.check(native)
+    except native_policy.PolicyError as error:
+        raise AssertionError(str(error)) from error
 
 
 def assert_parallel_validation_contract(workflow: dict) -> None:
@@ -399,7 +840,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     rustdoc = jobs["rustdoc"]
-    if (rustdoc.get("needs") != ["ci_change_scope", "cargo-crap"]
+    if (rustdoc.get("needs") != ["ci_change_scope", "core-gate"]
             or rustdoc.get("if") != RUSTDOC_JOB_IF):
         raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
     if any(
@@ -424,7 +865,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
 
 
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
-    return any(not excluded(path, patterns) for path in paths)
+    return any(scope_matches(path, patterns) for path in paths)
 
 
 def assert_codeql_preparation_contract(workflow: dict) -> None:
@@ -458,9 +899,271 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
+    def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
+        source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
+        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
+        lines = [
+            line for line in source.replace("\\\n", "").splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(lines[0], "set -euo pipefail")
+        archive_list = "/etc/apt/pigloros-mirrors.txt"
+        security_list = "/etc/apt/pigloros-security-mirrors.txt"
+        # Every entry is an apt mirror+file failover target, so one
+        # unreachable mirror cannot fail an install.
+        self.assertEqual(shlex.split(lines[1]), [
+            "printf", "%s\\n",
+            "https://mirrors.edge.kernel.org/ubuntu",
+            "http://azure.archive.ubuntu.com/ubuntu",
+            "http://archive.ubuntu.com/ubuntu",
+            "|", "sudo", "tee", archive_list, ">/dev/null",
+        ])
+        self.assertEqual(shlex.split(lines[2]), [
+            "printf", "%s\\n",
+            "https://mirrors.edge.kernel.org/ubuntu",
+            "http://security.ubuntu.com/ubuntu",
+            "|", "sudo", "tee", security_list, ">/dev/null",
+        ])
+        expressions = [
+            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: mirror+file:"
+            + archive_list + "|",
+            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: mirror+file:"
+            + security_list + "|",
+        ]
+        self.assertEqual(shlex.split(lines[3]), [
+            "sudo", "sed", "-i", "-e", expressions[0], "-e", expressions[1],
+            "/etc/apt/sources.list.d/ubuntu.sources",
+        ])
+        self.assertEqual(len(lines), 4)
+        original = (
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "Suites: noble-security\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "URIs: https://packages.microsoft.com/ubuntu/24.04/prod\n"
+            "# URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "X-Notes: mirror+file:/etc/apt/apt-security-mirrors.txt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
+            "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
+        )
+        completed = subprocess.run(
+            ["sed", "-e", expressions[0], "-e", expressions[1]],
+            input=original, text=True, capture_output=True, check=True,
+        )
+        expected = original.replace(
+            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
+            "\nURIs: mirror+file:" + archive_list + "\n",
+        ).replace(
+            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
+            "\nURIs: mirror+file:" + security_list + "\n",
+        )
+        self.assertEqual(completed.stdout, expected)
+
+    def test_ubuntu_dependency_installers_prepare_the_mirror_before_apt(self) -> None:
+        installers = []
+        for path in (CI_WORKFLOW_PATH, CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml")):
+            for job in load_workflow(path)["jobs"].values():
+                for step in job.get("steps", []):
+                    run = step.get("run", "")
+                    if "sudo apt-get" in run:
+                        lines = [line.strip() for line in run.splitlines()]
+                        prepare = "bash scripts/prepare-ubuntu-package-mirror.sh"
+                        self.assertIn(prepare, lines)
+                        self.assertLess(run.index(prepare), run.index("sudo apt-get"))
+                        installers.append(step["name"])
+        self.assertEqual(len(installers), 6)
+        paths = workflow_triggers(load_workflow(
+            CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml"),
+        ))["pull_request"]["paths"]
+        self.assertIn("scripts/prepare-ubuntu-package-mirror.sh", paths)
+
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_owner_windows_filter_keeps_every_lane_input(self) -> None:
+        patterns = load_patterns("owner_windows")
+        assert_owner_windows_filter(patterns)
+        for pattern in REQUIRED_OWNER_WINDOWS_PATTERNS:
+            with self.subTest(removed=pattern), self.assertRaises(AssertionError):
+                assert_owner_windows_filter([p for p in patterns if p != pattern])
+        with self.assertRaises(AssertionError):
+            assert_owner_windows_filter(patterns + ["!crates/pos-owner-bridge-windows/README.md"])
+
+    def test_owner_windows_filter_covers_every_lane_input_path(self) -> None:
+        patterns = load_patterns("owner_windows")
+        native = (ROOT / ".github/workflows/owner-bridge-windows.yml").read_text(encoding="utf-8")
+        scripts = sorted(set(re.findall(r"scripts/[A-Za-z0-9_.-]+\.(?:py|ps1|sh)", native)))
+        self.assertEqual(scripts, [
+            "scripts/check_owner_bridge_unsafe_policy.py",
+            "scripts/observe-owner-desktop.ps1",
+            "scripts/owner_bridge_windows_cov_ignore.py",
+            "scripts/prepare-owner-runtime.ps1",
+        ])
+        for path in (*scripts,
+                     "scripts/owner_bridge_runtime.py",
+                     "scripts/merge_owner_bridge_lcov.py",
+                     "scripts/owner_bridge_windows_workflow_policy.py",
+                     "scripts/check_cargo_crap_report.py",
+                     "scripts/resolve_cargo_crap_baseline.sh",
+                     "crates/pos-owner-bridge-windows/unsafe-inventory.toml",
+                     "crates/pos-owner-bridge-windows/runtime-manifest.v1",
+                     "crates/pos-owner-bridge-windows/covgate.toml",
+                     "crates/pos-owner-bridge-windows/README.md",
+                     "crates/pos-owner-bridge/src/lib.rs",
+                     "crates/pos-owner-bridge-codec/Cargo.toml",
+                     "apps/piglor-owner/src/main.rs",
+                     "crates/pos-crypto/src/lib.rs",
+                     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+                     ".cargo/audit.toml",
+                     ".cargo/config.toml",
+                     ".config/nextest.toml",
+                     "clippy.toml", ".clippy.toml", "rustfmt.toml", ".rustfmt.toml",
+                     "covgate.toml", ".gitattributes",
+                     "fixtures/owner-bridge/webauthn-es256-v1.fixture",
+                     ".github/workflows/ci.yml",
+                     ".github/workflows/owner-bridge-windows.yml",
+                     ".github/rust-scope.yml"):
+            with self.subTest(path=path):
+                self.assertTrue(owner_windows_lane_required([path], patterns))
+        for path in ("crates/pos-core/src/lib.rs", "crates/pos-store/Cargo.toml",
+                     "scripts/check_asan_ci_policy.py", "crates/Cargo.toml",
+                     "scripts/asan/owner.sh", "crates/pos-core/Cargo.toml",
+                     "crates/pos-owner-bridge-windows-extra/src/lib.rs",
+                     "fixtures/other/owner-bridge.fixture", "docs/test-policy.md"):
+            with self.subTest(path=path):
+                self.assertFalse(owner_windows_lane_required([path], patterns))
+
+    def resolve_owner_windows_scope(self, *, detected: str, changed: str = "12",
+                                    number: str = "848", gh_status: int = 0,
+                                    gh_output: str = "") -> tuple[str, list[str]]:
+        step = OWNER_WINDOWS_SCOPE_STEP
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            calls = root / "gh-calls"
+            (tools / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\0\' "$@" >> "${GH_CALLS}"\n'
+                'printf \'%s\' "${GH_FAKE_OUTPUT}"\n'
+                'exit "${GH_FAKE_STATUS}"\n',
+                encoding="utf-8",
+            )
+            (tools / "gh").chmod(0o755)
+            output = root / "output"
+            subprocess.run(
+                ["bash", "-e", "-c", step["run"]], check=True, capture_output=True,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                         DETECTED=detected, CHANGED_FILES=changed, PULL_NUMBER=number,
+                         GITHUB_REPOSITORY="owner/repository", GITHUB_OUTPUT=str(output),
+                         GH_CALLS=str(calls), GH_FAKE_STATUS=str(gh_status),
+                         GH_FAKE_OUTPUT=gh_output),
+            )
+            arguments = calls.read_text(encoding="utf-8").split("\0")[:-1] if calls.exists() else []
+            return output.read_text(encoding="utf-8"), arguments
+
+    def test_owner_windows_scope_resolves_only_explicit_false_to_a_skip(self) -> None:
+        # Absent filter key, failed or skipped detection and non-pull-request
+        # events all reach the step as an empty value.
+        for detected in ("true", "", "False", "0", "unknown"):
+            with self.subTest(detected=detected):
+                output, calls = self.resolve_owner_windows_scope(detected=detected)
+                self.assertEqual(output, "owner_windows=true\n")
+                self.assertEqual(calls, [])
+        output, calls = self.resolve_owner_windows_scope(detected="false")
+        self.assertEqual(output, "owner_windows=false\n")
+        self.assertEqual(calls, [
+            "api", "--method", "GET", "--paginate", "-f", "per_page=100",
+            "repos/owner/repository/pulls/848/files",
+            "--jq", '.[] | select(.status == "renamed") | .filename',
+        ])
+        detected = OWNER_WINDOWS_SCOPE_STEP["env"]["DETECTED"]
+        for guard in ("github.event_name == 'pull_request'", "steps.scope.outcome == 'success'"):
+            self.assertIn(guard, detected)
+
+    def test_owner_windows_scope_runs_the_lane_when_the_file_list_is_uncertain(self) -> None:
+        for label, overrides in (
+            ("api limit", {"changed": "3000"}),
+            ("over api limit", {"changed": "3001"}),
+            ("zero-padded api limit", {"changed": "03000"}),
+            ("unknown count", {"changed": ""}),
+            ("malformed count", {"changed": "12; true"}),
+            ("unknown pull request", {"number": ""}),
+            ("api failure", {"gh_status": 1}),
+            ("api failure with partial output", {"gh_status": 22, "gh_output": ""}),
+            ("renamed file", {"gh_output": "crates/pos-owner-bridge-windows/src/moved.rs\n"}),
+            ("renamed elsewhere", {"gh_output": "docs/moved.md"}),
+        ):
+            with self.subTest(label=label):
+                output, _ = self.resolve_owner_windows_scope(detected="false", **overrides)
+                self.assertEqual(output, "owner_windows=true\n")
+        for changed in ("2999", "0999", "08"):
+            with self.subTest(changed=changed):
+                output, calls = self.resolve_owner_windows_scope(detected="false", changed=changed)
+                self.assertEqual(output, "owner_windows=false\n")
+                self.assertTrue(calls)
+        output, calls = self.resolve_owner_windows_scope(detected="false", changed="3000")
+        self.assertEqual(calls, [])
+
+    def test_scope_matcher_follows_picomatch_segments(self) -> None:
+        for path, pattern, expected in (
+            ("scripts/owner_bridge_runtime.py", "scripts/*owner*", True),
+            ("scripts/asan/owner.sh", "scripts/*owner*", False),
+            ("README.md", "**/*.md", True),
+            ("a/b/c.md", "**/*.md", True),
+            (".agents/x.md", "**/*.md", True),
+            ("docs/a/b.txt", "docs/**", True),
+            ("docs", "docs/**", False),
+            ("crates/pos-owner-bridge-windows/src/a.rs", "crates/pos-owner-bridge-windows/**", True),
+            ("crates/pos-owner-bridge-windows-extra/a.rs", "crates/pos-owner-bridge-windows/**", False),
+            ("x/Cargo.toml", "Cargo.toml", False),
+            ("Cargo.toml", "Cargo.toml", True),
+            ("src/a.rs", "**", True),
+            ("ab", "a?", True),
+            ("a/b", "a?b", False),
+        ):
+            with self.subTest(path=path, pattern=pattern):
+                self.assertEqual(picomatch(path, pattern), expected)
+        for pattern in ("{a,b}", "a/[bc]", "!a", "a**b", "+(a)"):
+            with self.subTest(pattern=pattern), self.assertRaises(AssertionError):
+                picomatch_regex(pattern)
+        self.assertFalse(scope_matches("docs/a.rs", ["**", "!docs/**"]))
+        self.assertTrue(scope_matches("src/a.rs", ["**", "!docs/**"]))
+
+    def test_owner_windows_scope_rejects_weakened_resolution(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+
+        def step(w):
+            return next(s for s in w["jobs"]["ci_change_scope"]["steps"] if s.get("id") == "owner_windows")
+
+        for change in (
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                owner_windows="${{ steps.scope.outputs.owner_windows }}"),
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].update(
+                owner_windows="${{ steps.owner_windows.outputs.owner_windows || 'false' }}"),
+            lambda w: w["jobs"]["ci_change_scope"]["outputs"].pop("owner_windows"),
+            lambda w: step(w).update(run=step(w)["run"].replace(
+                '"${DETECTED}" = false', '"${DETECTED}" != true')),
+            lambda w: step(w)["env"].update(DETECTED="${{ steps.scope.outputs.owner_windows }}"),
+            lambda w: step(w).update(**{"if": "steps.scope.outcome == 'success'"}),
+            lambda w: step(w).update(run=step(w)["run"].replace("10#${CHANGED_FILES} >= 3000", "10#${CHANGED_FILES} > 3000")),
+            lambda w: step(w).update(run=step(w)["run"].replace("10#${CHANGED_FILES}", "CHANGED_FILES")),
+            lambda w: step(w).update(run=step(w)["run"].replace(" -f per_page=100", "")),
+            lambda w: step(w).update(run=step(w)["run"].replace("--method GET ", "")),
+            lambda w: step(w).update(run=step(w)["run"].replace('select(.status == "renamed")', 'select(.status == "moved")')),
+            lambda w: step(w).update(run=step(w)["run"].replace("elif ! renamed=", "elif renamed=")),
+            lambda w: step(w)["env"].pop("GH_TOKEN"),
+            lambda w: step(w).update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["ci_change_scope"]["steps"].remove(step(w)),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(mutated, native)
 
     def test_codeql_prepares_inputs_before_unchanged_analysis(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
@@ -645,8 +1348,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         jobs = workflow["jobs"]
         condition = " ".join(jobs["codeql"]["if"].split())
-        self.assertIn("needs.cargo-crap.result == 'skipped'", condition)
-        self.assertNotIn("outputs.rust == 'true'", condition)
+        self.assertEqual(jobs["codeql"]["needs"], ["ci_change_scope", "core-gate"])
+        self.assertEqual(condition, "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+                         "(needs.core-gate.result == 'success' || "
+                         "needs.ci_change_scope.outputs.rust == 'false') }}")
+        self.assertNotIn("cargo-crap", condition)
         required = jobs["codeql-required"]
         self.assertEqual(required["name"], "CodeQL (Rust)")
         self.assertEqual(required["needs"], ["codeql"])
@@ -706,13 +1412,286 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         assert_core_jobs_run_on_main_push(workflow)
 
+    def test_windows_owner_lane_is_blocking_and_runs_beside_core(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        assert_owner_windows_lane(workflow, native)
+        assert_standard_stage_runner_cap(workflow)
+
+    def test_every_native_evidence_step_is_mandatory_and_ordered(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        assert_owner_windows_lane(workflow, native)
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        for index, _ in enumerate(steps):
+            for action in ("remove", "skip", "ignore", "fabricate", "duplicate"):
+                changed = copy.deepcopy(native)
+                candidates = changed["jobs"]["owner-bridge-windows"]["steps"]
+                if action == "remove": candidates.pop(index)
+                elif action == "skip": candidates[index]["if"] = "false"
+                elif action == "ignore": candidates[index]["continue-on-error"] = True
+                elif action == "fabricate": candidates[index] = {"run": "echo fabricated > coverage.json"}
+                else: candidates.insert(index, copy.deepcopy(candidates[index]))
+                with self.subTest(index=index, action=action), self.assertRaises(AssertionError):
+                    assert_owner_windows_lane(workflow, changed)
+        changed = copy.deepcopy(native)
+        changed["jobs"]["owner-bridge-windows"]["steps"].reverse()
+        with self.assertRaises(AssertionError):
+            assert_owner_windows_lane(workflow, changed)
+
+    def test_native_graph_controls_types_and_producer_indirection_fail_closed(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for mutate in (
+            lambda w: w.update(permissions={"contents": "write"}),
+            lambda w: w.update(env={"FAKE_COVERAGE": "1"}),
+            lambda w: w[True].update(pull_request_target={}),
+            lambda w: w["jobs"].update(fabricate={"runs-on": "ubuntu-latest"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 90.0}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
+            lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
+        ):
+            changed = copy.deepcopy(native); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, changed)
+        native_policy.check_repository()
+        original = native_policy.producer_sources()
+        for name, source in original.items():
+            for changed in ("", source + "\n# unreviewed producer\n", "print('fabricated')\n"):
+                sources = dict(original, **{name: changed})
+                with self.subTest(name=name), self.assertRaises(native_policy.PolicyError):
+                    native_policy.check(native, sources)
+        with self.assertRaises(native_policy.PolicyError):
+            native_policy.check(native, {})
+
+    def test_desktop_observer_cannot_change_native_evidence_or_control_processes(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        coverage = native["jobs"]["owner-bridge-windows"]["steps"][9]
+        for before, after in (
+            ("--include-ignored", "--include-ignored --skip native"),
+            (" --nocapture", ""),
+            ("$nativeResult = $LASTEXITCODE", "$nativeResult = 0"),
+            ("[System.IO.File]::WriteAllText($marker, 'stop')", "Write-Output 'not stopped'"),
+        ):
+            changed = copy.deepcopy(native)
+            run = changed["jobs"]["owner-bridge-windows"]["steps"][9]["run"]
+            self.assertEqual(run.count(before), 1)
+            changed["jobs"]["owner-bridge-windows"]["steps"][9]["run"] = run.replace(before, after)
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        self.assertIn("cargo llvm-cov", coverage["run"])
+        sources = native_policy.producer_sources()
+        name = "scripts/observe-owner-desktop.ps1"
+        for payload in ("Stop-Process -Id 1", "Get-CimInstance Win32_Process | Select-Object CommandLine"):
+            altered = dict(sources, **{name: sources[name] + "\n" + payload})
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(native, altered)
+
+    def test_windows_owner_lane_rejects_missing_or_weakened_gates(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for change in (
+            lambda w: w["jobs"].pop("owner-bridge-windows"),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(needs=["ci_change_scope"]),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.owner_windows == 'true' }}"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+                         "needs.ci_change_scope.outputs.owner_windows != 'false' && false }}"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(
+                **{"if": "${{ needs.ci_change_scope.outputs.rust == 'true' && "
+                         "github.event_name == 'pull_request' && "
+                         "needs.ci_change_scope.outputs.owner_windows == 'true' }}"}),
+            lambda w: w["jobs"]["preflight-gate"]["needs"].append("owner-bridge-windows"),
+            lambda w: w["jobs"]["ci-gate"]["needs"].remove("owner-bridge-windows"),
+            lambda w: w["jobs"]["cargo-crap"]["needs"].remove("owner-bridge-windows"),
+            lambda w: w["jobs"]["standard-gate"]["needs"].append("owner-bridge-windows"),
+            lambda w: w["jobs"]["rustdoc"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["codeql"].update(needs=["ci_change_scope", "cargo-crap"]),
+            lambda w: w["jobs"]["asan-build"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["standard-gate"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["mutation-checks"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["asan"]["needs"].append("cargo-crap"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_SCOPE="false"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0].update(run="true"),
+            lambda w: w["jobs"]["ci-gate"]["steps"][0].update(
+                run=w["jobs"]["ci-gate"]["steps"][0]["run"].replace(
+                    '"${OWNER_WINDOWS_SCOPE}" != false', '"${OWNER_WINDOWS_SCOPE}" = true')),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.assertRaises(AssertionError):
+                assert_owner_windows_lane(mutated, native)
+
+    def test_preflight_no_longer_waits_for_the_windows_owner_lane(self) -> None:
+        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]
+        self.assertNotIn("owner-bridge-windows", gate["needs"])
+        self.assertNotIn("OWNER_WINDOWS", gate["steps"][0]["run"])
+        self.assertNotIn("OWNER_WINDOWS_RESULT", gate["steps"][0]["env"])
+
+    def run_ci_gate(self, **overrides: str) -> bool:
+        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ci-gate"]["steps"][0]
+        env = dict(os.environ, **{name: "success" for name in gate["env"]})
+        env.update(EVENT_NAME="pull_request", RUST_SCOPE_RESULT="true",
+                   OWNER_WINDOWS_SCOPE="true")
+        env.update(overrides)
+        return subprocess.run(["bash", "-c", gate["run"]], env=env,
+                              capture_output=True, check=False).returncode == 0
+
+    def test_ci_gate_requires_the_windows_owner_result_exactly_when_in_scope(self) -> None:
+        cases = (
+            # event, rust scope, owner scope, required owner result
+            ("pull_request", "true", "true", "success"),
+            ("pull_request", "true", "", "success"),
+            ("pull_request", "true", "unknown", "success"),
+            ("pull_request", "true", "false", "skipped"),
+            ("pull_request", "false", "true", "skipped"),
+            ("pull_request", "false", "false", "skipped"),
+            ("push", "true", "true", "success"),
+            ("push", "true", "false", "success"),
+            ("workflow_dispatch", "true", "false", "success"),
+        )
+        for event, rust, owner, expected in cases:
+            mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(event=event, rust=rust, owner=owner, result=result):
+                    self.assertEqual(
+                        self.run_ci_gate(EVENT_NAME=event, RUST_SCOPE_RESULT=rust,
+                                         OWNER_WINDOWS_SCOPE=owner, MUTATION_RESULT=mutation,
+                                         CARGO_CRAP_RESULT="skipped" if rust == "false" else "success",
+                                         OWNER_WINDOWS_RESULT=result),
+                        result == expected,
+                    )
+
+    def test_asan_runs_beside_mutation_and_ci_gate_still_requires_both(self) -> None:
+        jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        asan = jobs["asan"]
+        self.assertEqual(asan["needs"], ["ci_change_scope", "standard-gate", "asan-build"])
+        self.assertNotIn("mutation", asan["if"])
+        self.assertIn("needs.standard-gate.result == 'success'", asan["if"])
+        self.assertIn("needs.asan-build.result == 'success'", asan["if"])
+        self.assertEqual(jobs["mutation-checks"]["needs"], ["ci_change_scope", "standard-gate"])
+        for name in ("mutation-checks", "asan-gate"):
+            self.assertIn(name, jobs["ci-gate"]["needs"])
+        for mutation in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(mutation=mutation):
+                self.assertFalse(self.run_ci_gate(MUTATION_RESULT=mutation))
+        for asan in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(asan=asan):
+                self.assertFalse(self.run_ci_gate(ASAN_RESULT=asan))
+        self.assertTrue(self.run_ci_gate())
+        self.assertFalse(self.run_ci_gate(EVENT_NAME="push", MUTATION_RESULT="success"))
+        self.assertTrue(self.run_ci_gate(EVENT_NAME="push", MUTATION_RESULT="skipped"))
+
+    def test_failed_native_diagnostics_cannot_qualify_or_weaken_measurement(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for name, field, before, after in (
+            ("Export failed native coverage diagnostics", "if", "steps.coverage.outcome == 'failure'", "steps.coverage.outcome == 'success'"),
+            ("Export failed native coverage diagnostics", "run", "cargo llvm-cov report -p", "cargo llvm-cov -p"),
+            ("Export failed native coverage diagnostics", "run", "failed-measurement-diagnostic-only", "qualified"),
+            ("Export failed native coverage diagnostics", "run", "Get-ChildItem -LiteralPath $profileDirectory", "Get-ChildItem -LiteralPath $metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "Join-Path $metadata.target_directory 'llvm-cov-target'", "$metadata.target_directory"),
+            ("Export failed native coverage diagnostics", "run", "CARGO_LLVM_COV_TARGET_DIR", "CARGO_TARGET_DIR"),
+            ("Retain failed native coverage diagnostics", "name", "owner-windows-failed-diagnostic-", "owner-windows-lcov-"),
+            ("Retain failed native coverage diagnostics", "path", "owner-windows-failed-diagnostic/", "owner-windows.lcov"),
+        ):
+            changed = copy.deepcopy(native)
+            step = next(s for s in changed["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            target = step["with"] if field in ("name", "path") else step
+            self.assertIn(before, target[field])
+            target[field] = target[field].replace(before, after)
+            with self.subTest(name=name, field=field), self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        measurement = next(s for s in steps if s.get("id") == "coverage")
+        self.assertNotIn("continue-on-error", measurement)
+        report = next(s for s in steps if s.get("name") == "Export failed native coverage diagnostics")
+        self.assertIn("profile unavailable", report["run"])
+        self.assertIn("failure()", report["if"])
+        self.assertNotIn("--fail-under", report["run"])
+
+    def test_windows_single_native_run_keeps_fixtures_and_documentation_required(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        self.assertFalse(any("--skip" in step.get("run", "") for step in steps))
+        commands = [step.get("run", "") for step in steps]
+        self.assertEqual(sum("cargo llvm-cov -p pos-owner-bridge-windows" in run for run in commands), 1)
+        runtime_at = next(index for index, step in enumerate(steps) if step.get("id") == "runtime")
+        native_tests_at = next(index for index, step in enumerate(steps) if step.get("id") == "coverage")
+        self.assertLess(runtime_at, native_tests_at)
+        for name, before, after in (
+            (
+                "Measure only shim source coverage",
+                "--no-fail-fast",
+                "",
+            ),
+            (
+                "Measure only shim source coverage",
+                "-- --include-ignored",
+                "-- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle",
+            ),
+            (
+                "Measure only shim source coverage",
+                "cargo llvm-cov -p",
+                "cargo llvm-cov report -p",
+            ),
+            (
+                "Test portable bridge, owner executable and native docs",
+                "-p pos-owner-bridge -p piglor-owner",
+                "-p pos-owner-bridge",
+            ),
+            (
+                "Test portable bridge, owner executable and native docs",
+                "--doc -- --include-ignored",
+                "--no-run -- --include-ignored",
+            ),
+        ):
+            mutated = copy.deepcopy(native)
+            step = next(s for s in mutated["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            self.assertIn(before, step["run"])
+            step["run"] = step["run"].replace(before, after)
+            with self.subTest(name=name, before=before), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
+
+    def test_windows_full_file_coverage_rejects_weakened_or_missing_scopes(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        name = "Enforce both full-file Windows coverage floors"
+        for before, after in (
+            ("--fail-under-lines 99", "--fail-under-lines 98"),
+            ("--fail-under-regions 99", "--fail-under-regions 98"),
+            ("--fail-under-lines 95", "--fail-under-lines 94"),
+            ("--fail-under-regions 80", "--fail-under-regions 79"),
+            ("--scope safe", "--scope ffi"),
+            ("--list-report", "--scope all"),
+            ("$ffiResult = $LASTEXITCODE", "$ffiResult = 0"),
+        ):
+            mutated = copy.deepcopy(native)
+            step = next(s for s in mutated["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            step["run"] = step["run"].replace(before, after)
+            with self.subTest(before=before), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
+        for replacement in (None, "${{ success() }}"):
+            mutated = copy.deepcopy(native)
+            steps = mutated["jobs"]["owner-bridge-windows"]["steps"]
+            step = next(s for s in steps if s.get("name") == name)
+            if replacement is None:
+                steps.remove(step)
+            else:
+                step["if"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
+
     def test_parallel_validation_preserves_every_required_command(self) -> None:
         assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
 
     def test_owner_bridge_coverage_scope_runs_with_fixtures_and_real_metadata(self) -> None:
         jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
         expected = (
-            ("pinned-dependencies", {
+            ("owner-bridge-policies", {
                 "name": "Test Windows shim coverage exclusions",
                 "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
             }),
@@ -1005,12 +1984,155 @@ class CiWorkflowPolicyTests(unittest.TestCase):
 
     def test_core_cache_contract_requires_pinned_preflight_dependency(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
-        mutated = copy.deepcopy(workflow)
-        mutated["jobs"]["preflight-gate"]["needs"].remove("pinned-dependencies")
-        with self.assertRaisesRegex(
-            AssertionError, "preflight-gate must retain scope and policy dependencies"
-        ):
-            assert_core_rust_cache_contract(mutated)
+        for policy_name in PREFLIGHT_POLICY_STEPS:
+            with self.subTest(job=policy_name):
+                mutated = copy.deepcopy(workflow)
+                mutated["jobs"]["preflight-gate"]["needs"].remove(policy_name)
+                with self.assertRaisesRegex(
+                    AssertionError, "preflight-gate must retain scope and policy dependencies"
+                ):
+                    assert_core_rust_cache_contract(mutated)
+
+    def test_split_policy_jobs_remain_reachable_preflight_inputs(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for policy_name in ("source-policies", "owner-bridge-policies"):
+            for field, value, message in (
+                ("if", "${{ github.event_name == 'pull_request' }}",
+                 f"{policy_name} must remain reachable on a main push"),
+                ("needs", "trunk-pr", f"{policy_name} must wait for ci_change_scope"),
+                (None, None, f"ci.yml must define {policy_name}"),
+            ):
+                with self.subTest(job=policy_name, field=field):
+                    mutated = copy.deepcopy(workflow)
+                    if field is None:
+                        del mutated["jobs"][policy_name]
+                    else:
+                        mutated["jobs"][policy_name][field] = value
+                    with self.assertRaisesRegex(AssertionError, message):
+                        assert_core_rust_cache_contract(mutated)
+
+    def test_preflight_policy_split_contract(self) -> None:
+        assert_preflight_policy_split(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_preflight_policy_split_keeps_every_check_in_its_job(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for policy_name, expected_steps in PREFLIGHT_POLICY_STEPS.items():
+            for name in (step["name"] for step in expected_steps):
+                with self.subTest(job=policy_name, step=name, change="missing"):
+                    mutated = copy.deepcopy(workflow)
+                    steps = mutated["jobs"][policy_name]["steps"]
+                    steps.remove(next(s for s in steps if s.get("name") == name))
+                    with self.assertRaisesRegex(AssertionError, LOST_POLICY_CHECK):
+                        assert_preflight_policy_split(mutated)
+                for other in (*PREFLIGHT_POLICY_STEPS, "fmt"):
+                    if other == policy_name:
+                        continue
+                    for moved in (False, True):
+                        change = f"{'moved' if moved else 'duplicated'} to {other}"
+                        with self.subTest(job=policy_name, step=name, change=change):
+                            mutated = copy.deepcopy(workflow)
+                            steps = mutated["jobs"][policy_name]["steps"]
+                            step = next(s for s in steps if s.get("name") == name)
+                            if moved:
+                                steps.remove(step)
+                            mutated["jobs"][other]["steps"].append(copy.deepcopy(step))
+                            with self.assertRaisesRegex(AssertionError, LOST_POLICY_CHECK):
+                                assert_preflight_policy_split(mutated)
+
+    def test_preflight_policy_split_rejects_weakened_jobs(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+
+        def drop_one_command(job: dict) -> None:
+            step = next(s for s in job["steps"][PREFLIGHT_POLICY_SETUP_STEPS:]
+                        if len(s["run"].splitlines()) > 1)
+            step["run"] = "".join(step["run"].splitlines(keepends=True)[1:])
+
+        for policy_name in PREFLIGHT_POLICY_STEPS:
+            variable = PREFLIGHT_POLICY_RESULT_ENV[policy_name]
+            for label, change, message in (
+                ("renamed check", lambda job: job.update(name="renamed"), "keep its check name"),
+                ("longer timeout", lambda job: job.update({"timeout-minutes": 30}),
+                 "blocking 10-minute limit"),
+                ("nonblocking", lambda job: job.update({"continue-on-error": True}),
+                 "blocking 10-minute limit"),
+                ("unpinned setup", lambda job: job["steps"][1]["with"].update(
+                    {"python-version": "3.12"}), "shared pinned Python setup"),
+                ("missing install", lambda job: job["steps"].pop(2),
+                 "shared pinned Python setup"),
+                ("reordered checks", lambda job: job["steps"].insert(
+                    PREFLIGHT_POLICY_SETUP_STEPS, job["steps"].pop()),
+                 "exactly its policy checks"),
+                ("changed runner", lambda job: job.update({"runs-on": "self-hosted"}),
+                 "pinned runner"),
+                ("job env", lambda job: job.update(env={"PYTHONPATH": "/tmp"}),
+                 "reviewed job keys"),
+                ("job permissions", lambda job: job.update(permissions="write-all"),
+                 "reviewed job keys"),
+                ("job strategy", lambda job: job.update(
+                    strategy={"matrix": {"python": ["3.11"]}}), "reviewed job keys"),
+                ("job defaults", lambda job: job.update(
+                    defaults={"run": {"shell": "true {0}"}}), "reviewed job keys"),
+                ("no-op step", lambda job: job["steps"][-1].update(run="true"),
+                 "pinned policy step bodies"),
+                ("dropped command", drop_one_command, "pinned policy step bodies"),
+                ("step env", lambda job: job["steps"][-1].update(env={"PYTHONPATH": "/tmp"}),
+                 "pinned policy step bodies"),
+                ("step shell", lambda job: job["steps"][-1].update(shell="true {0}"),
+                 "pinned policy step bodies"),
+                ("conditional step", lambda job: job["steps"][-1].update({"if": "false"}),
+                 "unconditional and blocking"),
+                ("nonblocking step", lambda job: job["steps"][-1].update(
+                    {"continue-on-error": True}), "unconditional and blocking"),
+            ):
+                with self.subTest(job=policy_name, change=label):
+                    mutated = copy.deepcopy(workflow)
+                    change(mutated["jobs"][policy_name])
+                    with self.assertRaisesRegex(AssertionError, message):
+                        assert_preflight_policy_split(mutated)
+            for label, change, message in (
+                ("missing need", lambda gate: gate["needs"].remove(policy_name),
+                 "scope and policy dependencies"),
+                ("forged result", lambda gate: gate["steps"][0]["env"].update(
+                    {variable: "success"}), f"actual {policy_name} result"),
+                ("missing result", lambda gate: gate["steps"][0]["env"].pop(variable),
+                 f"actual {policy_name} result"),
+                ("unchecked result", lambda gate: gate["steps"][0].update(
+                    run=gate["steps"][0]["run"].replace(
+                        f'test "${{{variable}}}" = success', "true")),
+                 f"enforce the {policy_name} result"),
+                ("unchecked skip", lambda gate: gate["steps"][0].update(
+                    run=gate["steps"][0]["run"].replace(
+                        f'test "${{{variable}}}" = skipped', "true")),
+                 f"enforce the {policy_name} result"),
+            ):
+                with self.subTest(job=policy_name, change=label):
+                    mutated = copy.deepcopy(workflow)
+                    change(mutated["jobs"]["preflight-gate"])
+                    with self.assertRaisesRegex(AssertionError, message):
+                        assert_preflight_policy_split(mutated)
+
+    def run_preflight_gate(self, rust_scope: str, **results: str) -> bool:
+        step = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]["steps"][0]
+        in_scope = "success" if rust_scope == "true" else "skipped"
+        env = dict(os.environ, **{name: in_scope for name in step["env"]})
+        env.update(EVENT_NAME="pull_request", RUST_SCOPE=rust_scope, SCOPE_RESULT="success",
+                   TRUNK_RESULT="success", FIXTURES_RESULT="success",
+                   NON_LINUX_RESULT="success")
+        env.update(results)
+        return subprocess.run(["bash", "-c", step["run"]], env=env,
+                              capture_output=True, check=False).returncode == 0
+
+    def test_preflight_gate_requires_each_policy_job_result_exactly_when_in_scope(self) -> None:
+        self.assertTrue(self.run_preflight_gate("true"))
+        self.assertTrue(self.run_preflight_gate("false"))
+        for variable in PREFLIGHT_POLICY_RESULT_ENV.values():
+            for rust_scope, required in (("true", "success"), ("false", "skipped")):
+                for result in ("success", "failure", "cancelled", "skipped", ""):
+                    with self.subTest(variable=variable, rust_scope=rust_scope, result=result):
+                        self.assertEqual(
+                            self.run_preflight_gate(rust_scope, **{variable: result}),
+                            result == required,
+                        )
 
     def test_core_cache_contract_requires_its_pinned_workflow_invocation(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -1086,7 +2208,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "start exactly the counted jobs": lambda w: w["jobs"].update(
                 {
                     "ninth-heavy-job": {
-                        "needs": ["ci_change_scope", "cargo-crap"],
+                        "needs": ["ci_change_scope", "core-gate"],
                         "runs-on": "ubuntu-24.04",
                         "steps": [{"run": "true"}],
                     }
@@ -1098,6 +2220,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "wait for every standard-stage job": lambda w: w["jobs"]["standard-gate"][
                 "needs"
             ].remove("asan-build"),
+            "only ci-gate and the main-only reports may wait for cargo-crap": lambda w: w["jobs"]["audit"][
+                "needs"
+            ].append("cargo-crap"),
+            "one lightweight runner released by core-gate": lambda w: w["jobs"]["cargo-crap"].update(
+                {"timeout-minutes": 90}
+            ),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):
@@ -1141,7 +2269,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             materialization["if"],
             "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
             "needs.conformance-fixtures.result == 'success' && "
-            "needs.cargo-crap.result == 'success' && "
+            "needs.core-gate.result == 'success' && "
             "(needs.ci_change_scope.outputs.rust == 'true' || "
             "github.event_name != 'pull_request') }}",
         )
@@ -1175,6 +2303,7 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
                      'save-if': "${{ github.ref == 'refs/heads/main' }}"}},
            {'name': 'Install the musl and aarch64 cross toolchains',
             'run': 'set -euo pipefail\n'
+                   'bash scripts/prepare-ubuntu-package-mirror.sh\n'
                    'sudo apt-get update\n'
                    'sudo apt-get install --yes --no-install-recommends musl-tools '
                    'gcc-aarch64-linux-gnu libc6-dev-arm64-cross\n'},
@@ -1227,7 +2356,6 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
  'if': '${{ always() }}',
  'needs': ['ci_change_scope',
            'core-gate',
-           'cargo-crap',
            'rustdoc',
            'reference-evaluator-release',
            'materialize-conformance-bundles',
@@ -1244,7 +2372,6 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
  'steps': [{'name': 'Require normal blocking checks',
             'env': {'RUST_SCOPE': '${{ needs.ci_change_scope.outputs.rust }}',
                     'CORE_RESULT': '${{ needs.core-gate.result }}',
-                    'CARGO_CRAP_RESULT': '${{ needs.cargo-crap.result }}',
                     'RUSTDOC_RESULT': '${{ needs.rustdoc.result }}',
                     'REFERENCE_RESULT': '${{ needs.reference-evaluator-release.result '
                                         '}}',
@@ -1267,8 +2394,7 @@ STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
                    '  expected=skipped\n'
                    'fi\n'
                    'for result in \\\n'
-                   '  "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" '
-                   '\\\n'
+                   '  "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \\\n'
                    '  "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \\\n'
                    '  "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \\\n'
                    '  "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}" \\\n'
@@ -1299,11 +2425,14 @@ STATIC_LAUNCHER_JOB_SET = ['asan',
  'modules-structure',
  'mutation-checks',
  'mutation-required',
+ 'owner-bridge-policies',
+ 'owner-bridge-windows',
  'pinned-dependencies',
  'plugin-component-fixtures',
  'preflight-gate',
  'reference-evaluator-release',
  'rustdoc',
+ 'source-policies',
  'standard-gate',
  'static-launcher',
  'test',
@@ -1398,6 +2527,7 @@ def load_tests(loader, tests, pattern):
     # The required central CI policy step also exercises the separately
     # triggered custody workflow, including its producer indirection.
     tests.addTests(loader.loadTestsFromModule(custody_policy_tests))
+    tests.addTests(loader.loadTestsFromModule(native_lcov_tests))
     return tests
 
 

@@ -1,6 +1,7 @@
 //! The `OwnerWebSurface` seam (ADR-110 §10): everything a platform adapter supplies.
 
 use std::fmt;
+use std::task::Poll;
 
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, ImagePathSha256, CREATE_REPLY_BUFFER_CAPACITY,
@@ -209,19 +210,24 @@ impl Drop for ReplyImage {
 /// The Windows shim implements this over `WebView2`; `FakeSurface` implements it for tests.
 /// The portable bridge only ever calls these methods, in the order the ceremony driver fixes.
 pub trait OwnerWebSurface {
-    /// Create a fresh folder, environment and controller, with settings readback.
+    /// Start or poll one fresh folder, environment and controller with settings readback.
+    ///
+    /// Returns `Pending` without waiting for native completion. The host schedules
+    /// another step from its outer event loop; repeated polls never restart opening.
     ///
     /// # Errors
     ///
     /// Returns the classified failure when the surface cannot open.
-    fn open(&mut self, spec: &SurfaceSpec) -> Result<ProcessIdentity, SurfaceError>;
+    fn open(&mut self, spec: &SurfaceSpec) -> Poll<Result<ProcessIdentity, SurfaceError>>;
 
-    /// Navigate to the owner document and return the recorded navigation ID.
+    /// Start or poll one navigation and return its observed navigation ID.
+    ///
+    /// Returns `Pending` without waiting; repeated polls never issue another navigation.
     ///
     /// # Errors
     ///
     /// Returns the classified failure when navigation cannot start.
-    fn navigate(&mut self) -> Result<NavigationId, SurfaceError>;
+    fn navigate(&mut self) -> Poll<Result<NavigationId, SurfaceError>>;
 
     /// Create both shared buffers and write the request image and reply header.
     ///

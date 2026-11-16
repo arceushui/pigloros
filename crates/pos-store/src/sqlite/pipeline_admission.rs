@@ -37,14 +37,15 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, read_authority_state,
-    sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
+    begin_immediate_scope, finish_immediate_scope, gateway_mode_binding::commit_epoch_at,
+    normalize_schema_sql, read_authority_state, sqlite_schema_ddl, SqliteSchemaColumn,
+    SqliteSchemaTable, SqliteStore,
 };
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission,
     factual_tick_plan::{FactualInstallV1, PlannedTickV1},
-    install_or_reject, recovered_pipeline_receipt, retained_pipeline_receipt,
-    PipelinePersistedStateV1,
+    install_or_reject, pipeline_mode_binding_stale_outcome, recovered_pipeline_receipt,
+    retained_pipeline_receipt, PipelinePersistedStateV1,
 };
 
 /// `SQLite` treats a negative `LIMIT` as having no upper bound.
@@ -292,13 +293,15 @@ impl SqliteStore {
         basis: &PipelineAdmissionBasisV1,
         now: WallTime,
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        begin_immediate_scope(&self.conn).and_then(|scope| {
-            let result = self
-                .validate_erasure_inventory_data_version()
-                .and_then(|()| self.ensure_generic_fork_append_is_rejected(timeline))
-                .and_then(|()| self.admit_locked_pipeline_batch(timeline, basis, now));
-            finish_immediate_scope(&self.conn, scope, result)
-        })
+        begin_immediate_scope(&self.conn)
+            .and_then(|scope| {
+                let result = self
+                    .validate_erasure_inventory_data_version()
+                    .and_then(|()| self.ensure_generic_fork_append_is_rejected(timeline))
+                    .and_then(|()| self.admit_locked_pipeline_batch(timeline, basis, now));
+                finish_immediate_scope(&self.conn, scope, result)
+            })
+            .or_else(pipeline_mode_binding_stale_outcome)
     }
 
     fn admit_locked_pipeline_batch(
@@ -337,16 +340,17 @@ impl SqliteStore {
             return Ok(PipelineOutcomeV1::AdmissionConflict);
         }
         self.retained_pipeline_events(timeline, prefix, record)
-            .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
+            .and_then(|(events, epoch)| recovered_pipeline_receipt(basis, timeline, &events, epoch))
     }
 
-    /// The committed logical Events a retained receipt row names.
+    /// The committed logical Events a retained receipt row names, with the
+    /// Gateway mode-binding epoch recorded for their commit.
     fn retained_pipeline_events(
         &self,
         timeline: TimelineId,
         prefix: u64,
         record: &RetainedPipelineReceiptV1,
-    ) -> Result<Vec<pos_core::Event>, CoreError> {
+    ) -> Result<(Vec<pos_core::Event>, Option<std::num::NonZeroU64>), CoreError> {
         Self::read_own_events_limited_on(
             &self.conn,
             timeline,
@@ -361,6 +365,10 @@ impl SqliteStore {
                 .into_iter()
                 .map(|event| Self::logical_event(prefix, event))
                 .collect::<Result<Vec<_>, _>>()
+        })
+        .and_then(|events| {
+            commit_epoch_at(&self.conn, timeline, record.first_local_seq)
+                .map(|epoch| (events, epoch))
         })
     }
 
@@ -401,12 +409,13 @@ impl SqliteStore {
             return Ok(PipelineReceiptLookupV1::Conflict);
         }
         self.retained_pipeline_events(timeline, prefix, record)
-            .and_then(|events| {
+            .and_then(|(events, epoch)| {
                 retained_pipeline_receipt(
                     attempt_id,
                     timeline,
                     Hash::from_bytes(record.draft_batch_digest),
                     &events,
+                    epoch,
                 )
             })
     }
@@ -479,13 +488,17 @@ impl SqliteStore {
                 Self::append_one_in_transaction(
                     &self.conn,
                     self.hasher.as_ref(),
+                    self.mode_binding_epoch,
                     timeline,
                     draft.clone(),
                 )
                 .and_then(|event| Self::logical_event(position.prefix, event))
             })
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|events| committed_pipeline_receipt(basis, timeline, &events))
+            .and_then(|events| {
+                commit_epoch_at(&self.conn, timeline, position.owned_head.saturating_add(1))
+                    .and_then(|epoch| committed_pipeline_receipt(basis, timeline, &events, epoch))
+            })
             .and_then(|receipt| {
                 checked_append_identity_expires_at(now).map(|expires_at| (receipt, expires_at))
             })
@@ -1044,6 +1057,34 @@ mod tests {
             last_seq: Seq::from_u64(2),
         };
         assert_eq!(ok(reopened.last_committed_factual_tick(timeline)), one_tick);
+    }
+
+    /// ADR-134 §8: an admitting adapter attached to a stale Gateway
+    /// mode-binding epoch commits no Event, fence or receipt.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_stale_mode_binding_epoch_commits_no_admitted_batch() {
+        let mut store = open_with_gate(":memory:");
+        let timeline = ok(store.create_timeline("admission-stale")).id();
+        let basis = basis(timeline, Declares::Plain, &[]);
+        let [fence, _] = fences(&basis);
+        ok(store.set_pipeline_admission_fence(timeline, fence));
+        store.mode_binding_epoch = std::num::NonZeroU64::new(9);
+
+        let outcome = commit_in_transaction(&store, timeline, &basis, 0);
+
+        assert!(
+            matches!(outcome, Err(CoreError::ModeBindingStale)),
+            "{outcome:?}"
+        );
+        assert!(ok(store.read(timeline, SeqRange::all())).is_empty());
+        assert_eq!(ok(store.pipeline_admission_fence(timeline)), Some(fence));
+        let receipts = store.conn.query_row(
+            "SELECT COUNT(*) FROM pipeline_admission_receipts",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        assert_eq!(ok(receipts), 0);
     }
 
     /// A failing read of the store while a Tick is planned is an error that

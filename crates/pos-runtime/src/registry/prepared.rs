@@ -104,6 +104,7 @@ impl PreparedRegistrationV1 {
             name: self.name,
             version: self.version,
             owned_event_types: self.owned_event_types,
+            from_plugin: true,
             driver,
             approver,
             last_tick: None,

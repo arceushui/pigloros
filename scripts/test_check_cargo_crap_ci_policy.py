@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import importlib.util
+import json
 import os
 import pathlib
 import shlex
@@ -43,6 +44,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/provider_lifecycle/tests.rs",
 )
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -188,6 +190,225 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
 
+    def test_native_coverage_download_and_toolchain_pins_cannot_be_substituted(self) -> None:
+        for index, action in (
+            (1, "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de"),
+            (4, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+        ):
+            with self.subTest(step=index):
+                self.assert_rejected(
+                    lambda workflow: workflow["jobs"]["cargo-crap"]["steps"][index].update(
+                        {"uses": action}
+                    )
+                )
+
+    def test_native_coverage_steps_cannot_skip_ignore_or_substitute_evidence(self) -> None:
+        for name in (
+            "Download hosted native LCOV",
+            "Bind native and Linux coverage to this checkout",
+        ):
+            for key, value in (
+                ("if", "${{ false }}"),
+                ("continue-on-error", True),
+                ("run", "echo fabricated coverage"),
+                ("env", {"PYTHONPATH": "/tmp/substituted-program"}),
+                ("with", {"name": "owner-windows-lcov-another-checkout"}),
+            ):
+                with self.subTest(step=name, control=key):
+                    self.assert_rejected(
+                        lambda workflow: self.cargo_crap_step(workflow, name).update(
+                            {key: value}
+                        )
+                    )
+
+    def test_native_coverage_steps_cannot_be_removed_duplicated_or_reordered(self) -> None:
+        for name in (
+            "Download hosted native LCOV",
+            "Bind native and Linux coverage to this checkout",
+        ):
+            def remove(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                steps.remove(self.cargo_crap_step(workflow, name))
+
+            def duplicate(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                steps.append(copy.deepcopy(self.cargo_crap_step(workflow, name)))
+
+            def reorder(workflow: dict) -> None:
+                steps = workflow["jobs"]["cargo-crap"]["steps"]
+                step = self.cargo_crap_step(workflow, name)
+                steps.remove(step)
+                steps.append(step)
+
+            for mutation in (remove, duplicate, reorder):
+                with self.subTest(step=name, mutation=mutation.__name__):
+                    self.assert_rejected(mutation)
+
+    def test_both_scoring_paths_require_the_joined_coverage(self) -> None:
+        for name in ("Generate trusted current baseline", "Analyze CRAP score changes"):
+            with self.subTest(step=name):
+                def replace_input(workflow: dict) -> None:
+                    step = self.cargo_crap_step(workflow, name)
+                    step["run"] = step["run"].replace(
+                        "/cargo-crap-coverage.lcov", "/coverage.lcov"
+                    )
+
+                self.assert_rejected(replace_input)
+
+    def test_native_steps_run_unless_the_scope_explicitly_skipped_the_lane(self) -> None:
+        for name in (
+            "Download hosted native LCOV",
+            "Bind native and Linux coverage to this checkout",
+        ):
+            for condition in (
+                "${{ needs.ci_change_scope.outputs.owner_windows == 'true' }}",
+                "${{ needs.ci_change_scope.outputs.rust == 'true' }}",
+                CHECKER.NATIVE_SKIPPED,
+            ):
+                with self.subTest(step=name, condition=condition):
+                    self.assert_rejected(
+                        lambda workflow: self.cargo_crap_step(workflow, name).update(
+                            {"if": condition}
+                        )
+                    )
+            with self.subTest(step=name, condition="removed"):
+                self.assert_rejected(
+                    lambda workflow: self.cargo_crap_step(workflow, name).pop("if")
+                )
+
+    def test_linux_only_scoring_requires_an_explicitly_skipped_lane(self) -> None:
+        for name in (
+            "Use Linux coverage without the unmeasured native shim",
+            "Drop the unmeasured native shim from the trusted baseline",
+        ):
+            for key, value in (
+                ("if", CHECKER.NATIVE_MEASURED),
+                ("if", "${{ needs.ci_change_scope.outputs.owner_windows != 'true' }}"),
+                ("if", "${{ true }}"),
+                ("continue-on-error", True),
+                ("run", "true"),
+            ):
+                with self.subTest(step=name, control=key, value=value):
+                    self.assert_rejected(
+                        lambda workflow: self.cargo_crap_step(workflow, name).update(
+                            {key: value}
+                        )
+                    )
+            with self.subTest(step=name, control="unconditional"):
+                self.assert_rejected(
+                    lambda workflow: self.cargo_crap_step(workflow, name).pop("if")
+                )
+
+    def test_shim_is_hidden_from_scoring_only_when_the_lane_is_skipped(self) -> None:
+        for name in ("Generate trusted current baseline", "Analyze CRAP score changes"):
+            for env in (
+                {"NATIVE_SHIM_ALLOW": "crates/pos-owner-bridge-windows/**"},
+                {"NATIVE_SHIM_ALLOW": (
+                    "${{ needs.ci_change_scope.outputs.owner_windows != 'true' && "
+                    "'crates/pos-owner-bridge-windows/**' || '' }}")},
+                {"NATIVE_SHIM_ALLOW": (
+                    "${{ needs.ci_change_scope.outputs.owner_windows == 'false' && "
+                    "'crates/**' || '' }}")},
+                {},
+            ):
+                with self.subTest(step=name, env=env):
+                    self.assert_rejected(
+                        lambda workflow: self.cargo_crap_step(workflow, name).update(
+                            {"env": env}
+                        )
+                    )
+            with self.subTest(step=name, change="unconditional allow"):
+                def allow_always(workflow: dict) -> None:
+                    step = self.cargo_crap_step(workflow, name)
+                    step["run"] = step["run"].replace(
+                        CHECKER.SHIM_ALLOW_ARG,
+                        "--allow 'crates/pos-owner-bridge-windows/**' ",
+                    )
+
+                self.assert_rejected(allow_always)
+
+    def test_shim_allow_expands_only_for_a_skipped_lane(self) -> None:
+        for value, expected in (
+            ("crates/pos-owner-bridge-windows/**",
+             ["--allow", "crates/pos-owner-bridge-windows/**"]),
+            ("", []),
+        ):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["bash", "-c", "printf '%s\\n' " + CHECKER.SHIM_ALLOW_ARG],
+                    env=dict(os.environ, NATIVE_SHIM_ALLOW=value),
+                    capture_output=True, text=True, check=True, cwd=ROOT,
+                )
+                self.assertEqual([line for line in result.stdout.split("\n") if line], expected)
+
+    def test_baseline_shim_filter_keeps_every_other_entry_and_fails_closed(self) -> None:
+        entries = [
+            {"file": "/w/crates/pos-owner-bridge-windows/src/ffi/a.rs", "function": "a"},
+            {"file": "C:\\w\\crates\\pos-owner-bridge-windows\\src\\b.rs", "function": "b"},
+            {"file": "crates/pos-owner-bridge-windows/src/c.rs", "function": "c"},
+            {"file": "/w/crates/pos-owner-bridge/src/d.rs", "function": "d"},
+            {"file": "/w/crates/pos-owner-bridge-windows-extra/src/e.rs", "function": "e"},
+            {"file": "/w/apps/piglor-owner/src/f.rs", "function": "f"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "cargo-crap-baseline.json"
+            baseline.write_text(json.dumps({"version": "0.2.2", "entries": entries}), encoding="utf-8")
+            subprocess.run(["bash", "-c", CHECKER.DROP_SHIM_BASELINE_COMMAND],
+                           env=dict(os.environ, RUNNER_TEMP=directory), check=True)
+            kept = json.loads(baseline.read_text(encoding="utf-8"))
+            self.assertEqual(kept["version"], "0.2.2")
+            self.assertEqual([entry["function"] for entry in kept["entries"]], ["d", "e", "f"])
+            baseline.write_text("not json", encoding="utf-8")
+            result = subprocess.run(["bash", "-c", CHECKER.DROP_SHIM_BASELINE_COMMAND],
+                                    env=dict(os.environ, RUNNER_TEMP=directory),
+                                    capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            baseline.unlink()
+            result = subprocess.run(["bash", "-c", CHECKER.DROP_SHIM_BASELINE_COMMAND],
+                                    env=dict(os.environ, RUNNER_TEMP=directory),
+                                    capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_cargo_crap_requires_the_native_lane_whenever_it_is_in_scope(self) -> None:
+        condition = self.workflow["jobs"]["cargo-crap"]["if"]
+        for before, after in (
+            ("needs.owner-bridge-windows.result == 'success' || ", ""),
+            ("needs.ci_change_scope.outputs.owner_windows == 'false' && ", ""),
+            ("outputs.owner_windows == 'false'", "outputs.owner_windows != 'true'"),
+            ("needs.owner-bridge-windows.result == 'skipped'",
+             "needs.owner-bridge-windows.result != 'failure'"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, condition)
+                self.assert_rejected(
+                    lambda workflow: workflow["jobs"]["cargo-crap"].update(
+                        {"if": condition.replace(before, after)}
+                    )
+                )
+        with self.subTest(change="dependency removed"):
+            self.assert_rejected(
+                lambda workflow: workflow["jobs"]["cargo-crap"]["needs"].remove(
+                    "owner-bridge-windows"
+                )
+            )
+
+    def test_coverage_merger_is_pinned_as_a_complete_program(self) -> None:
+        source = (ROOT / CHECKER.COVERAGE_MERGER).read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "merge_owner_bridge_lcov.py"
+            path.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+            CHECKER.check_workflow(
+                ROOT / ".github/workflows/ci.yml", coverage_merger_path=path
+            )
+            path.write_text(source + "\nraise SystemExit(0)\n", encoding="utf-8")
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_workflow(
+                    ROOT / ".github/workflows/ci.yml", coverage_merger_path=path
+                )
+            path.unlink()
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_coverage_merger(path)
+
     def test_exclusions_are_the_literal_test_owned_allowlist(self) -> None:
         for step_name in (
             "Generate trusted current baseline",
@@ -223,6 +444,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/execute/tests/ownership/production.rs",
             "src/provider_barrier.rs",
             "src/provider_barrier/production.rs",
+            "src/provider_lifecycle.rs",
+            "src/provider_lifecycle/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
@@ -519,6 +742,22 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_codeql_waits_for_core_gate_except_on_documentation_only_prs(self) -> None:
+        condition = self.workflow["jobs"]["codeql"]["if"]
+        for before, after in (
+            (" || needs.ci_change_scope.outputs.rust == 'false'", ""),
+            ("needs.ci_change_scope.outputs.rust == 'false'", "needs.ci_change_scope.outputs.rust != 'true'"),
+            ("needs.core-gate.result == 'success' ||", "needs.core-gate.result != 'failure' ||"),
+            ("needs.ci_change_scope.result == 'success' && ", ""),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, condition)
+                self.assert_rejected(
+                    lambda workflow, before=before, after=after: workflow["jobs"]["codeql"].update(
+                        {"if": condition.replace(before, after)}
+                    )
+                )
+
     def test_requires_scoped_cargo_crap(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update(
@@ -623,17 +862,60 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_requires_cargo_crap_in_aggregate_gate(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["standard-gate"]["needs"].remove(
+            lambda workflow: workflow["jobs"]["ci-gate"]["needs"].remove(
                 "cargo-crap"
             )
         )
 
     def test_requires_aggregate_verdict_to_read_cargo_crap(self) -> None:
         def remove_result(workflow: dict) -> None:
-            step = workflow["jobs"]["standard-gate"]["steps"][0]
+            step = workflow["jobs"]["ci-gate"]["steps"][0]
             step["env"].pop("CARGO_CRAP_RESULT")
 
         self.assert_rejected(remove_result)
+
+    def test_ci_gate_cargo_crap_verdict_cannot_be_weakened(self) -> None:
+        for before, after in (
+            ('[[ "${RUST_SCOPE_RESULT}" = false ]]', '[[ "${RUST_SCOPE_RESULT}" != true ]]'),
+            ("expected_cargo_crap=success\n", "expected_cargo_crap=skipped\n"),
+            ("  failed=1\n", "  :\n"),
+        ):
+            with self.subTest(before=before):
+                def weaken(workflow: dict, before=before, after=after) -> None:
+                    step = workflow["jobs"]["ci-gate"]["steps"][0]
+                    step["run"] = step["run"].replace(CHECKER.CI_GATE_CARGO_CRAP_CHECK,
+                                                      CHECKER.CI_GATE_CARGO_CRAP_CHECK.replace(before, after), 1)
+
+                self.assert_rejected(weaken)
+        self.assert_rejected(lambda workflow: workflow["jobs"]["ci-gate"].update({"if": "${{ success() }}"}))
+        self.assert_rejected(lambda workflow: workflow["jobs"]["ci-gate"]["steps"][0]["env"].update(
+            RUST_SCOPE_RESULT="false"))
+
+    def test_ci_gate_rejects_missing_failed_or_skipped_in_scope_cargo_crap(self) -> None:
+        step = self.workflow["jobs"]["ci-gate"]["steps"][0]
+        for rust, event, expected in (("true", "pull_request", "success"),
+                                      ("true", "push", "success"),
+                                      ("", "pull_request", "success"),
+                                      ("false", "pull_request", "skipped")):
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(rust=rust, event=event, result=result):
+                    env = dict(os.environ, **{name: "success" for name in step["env"]})
+                    mutation = "success" if event == "pull_request" and rust == "true" else "skipped"
+                    owner = "success" if event != "pull_request" or rust == "true" else "skipped"
+                    env.update(EVENT_NAME=event, RUST_SCOPE_RESULT=rust, OWNER_WINDOWS_SCOPE="true",
+                               MUTATION_RESULT=mutation, OWNER_WINDOWS_RESULT=owner,
+                               CARGO_CRAP_RESULT=result)
+                    completed = subprocess.run(["bash", "-c", step["run"]], env=env,
+                                               capture_output=True, check=False)
+                    self.assertEqual(completed.returncode == 0, result == expected, completed.stderr)
+
+    def test_standard_gate_and_reports_keep_their_cargo_crap_contract(self) -> None:
+        self.assert_rejected(lambda workflow: workflow["jobs"]["standard-gate"]["needs"].append("cargo-crap"))
+        for name in CHECKER.MAIN_REPORT_JOBS:
+            with self.subTest(job=name):
+                self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(needs="standard-gate"))
+                self.assert_rejected(lambda workflow, name=name: workflow["jobs"][name].update(
+                    {"if": "${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}"}))
 
 
 if __name__ == "__main__":

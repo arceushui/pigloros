@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import hashlib
 import sys
 
 import yaml
@@ -14,14 +15,43 @@ INSTALL_ACTION = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea3
 UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 DOWNLOAD_ACTION = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
+COVERAGE_MERGER = "scripts/merge_owner_bridge_lcov.py"
+COVERAGE_MERGER_SHA256 = '5aded2c2efd208194ac002c902ea86773e95b75dddbd2323c8f5e4303768a99d'
+MERGE_COVERAGE_COMMAND = 'python scripts/merge_owner_bridge_lcov.py --linux "${{ runner.temp }}/coverage.lcov" --native "${{ runner.temp }}/owner-windows-lcov/owner-windows.lcov" --receipt "${{ runner.temp }}/owner-windows-lcov/owner-windows-lcov-receipt.json" --workspace "${{ github.workspace }}" --checkout "${{ github.sha }}" --output "${{ runner.temp }}/cargo-crap-coverage.lcov"\n'
 SCOPED_JOB_IF = (
     "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && "
+    "(needs.owner-bridge-windows.result == 'success' || "
+    "(needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
+)
+# The native lane ran unless the trusted scope explicitly said 'false'. Every
+# native-only step uses NATIVE_MEASURED and every Linux-only step uses
+# NATIVE_SKIPPED, so an empty or unknown scope fails closed to the merge.
+NATIVE_MEASURED = "${{ needs.ci_change_scope.outputs.owner_windows != 'false' }}"
+NATIVE_SKIPPED = "${{ needs.ci_change_scope.outputs.owner_windows == 'false' }}"
+SHIM_ALLOW_ENV = {
+    "NATIVE_SHIM_ALLOW": (
+        "${{ needs.ci_change_scope.outputs.owner_windows == 'false' && "
+        "'crates/pos-owner-bridge-windows/**' || '' }}"
+    ),
+}
+SHIM_ALLOW_ARG = '${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"} '
+LINUX_ONLY_COVERAGE_COMMAND = (
+    'cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"'
+)
+DROP_SHIM_BASELINE_COMMAND = (
+    "set -euo pipefail\n"
+    'baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"\n'
+    "jq -e '.entries |= map(select(.file | gsub(\"\\\\\\\\\"; \"/\") | "
+    "test(\"(^|/)crates/pos-owner-bridge-windows/\") | not))' \\\n"
+    '  "${baseline}" > "${baseline}.scoped"\n'
+    'mv "${baseline}.scoped" "${baseline}"\n'
 )
 TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -57,41 +87,58 @@ TEST_ONLY_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/provider_lifecycle/tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
-    '--lcov "${{ runner.temp }}/coverage.lcov" '
+    '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
-    +
-    "--format json "
+    + SHIM_ALLOW_ARG
+    + "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
 ANALYZE_COMMAND = (
     "cargo crap --workspace "
-    '--lcov "${{ runner.temp }}/coverage.lcov" '
+    '--lcov "${{ runner.temp }}/cargo-crap-coverage.lcov" '
     "--missing pessimistic --jobs 2 "
     + EXCLUSION_ARGS
-    +
-    '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
+    + SHIM_ALLOW_ARG
+    + '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
+# Standard-stage jobs start from core-gate, beside cargo-crap: none consumes
+# cargo-crap output, so the native Windows lane that cargo-crap waits for never
+# delays or hides their findings. ci-gate requires cargo-crap directly.
 STAGED_MAIN_JOBS = {
-    "rustdoc": ["ci_change_scope", "cargo-crap"],
-    "reference-evaluator-release": ["ci_change_scope", "cargo-crap"],
+    "rustdoc": ["ci_change_scope", "core-gate"],
+    "reference-evaluator-release": ["ci_change_scope", "core-gate"],
     "materialize-conformance-bundles": [
         "ci_change_scope",
         "conformance-fixtures",
-        "cargo-crap",
+        "core-gate",
     ],
-    "audit": ["ci_change_scope", "cargo-crap"],
-    "docker-build": ["ci_change_scope", "cargo-crap", "third-party-notices"],
-    "world-client-wasm": ["ci_change_scope", "cargo-crap"],
+    "audit": ["ci_change_scope", "core-gate"],
+    "docker-build": ["ci_change_scope", "core-gate", "third-party-notices"],
+    "world-client-wasm": ["ci_change_scope", "core-gate"],
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
-    "asan-build": ["ci_change_scope", "cargo-crap"],
+    "asan-build": ["ci_change_scope", "core-gate"],
 }
+
+
+CI_GATE_CARGO_CRAP_CHECK = (
+    "expected_cargo_crap=success\n"
+    'if [[ "${RUST_SCOPE_RESULT}" = false ]]; then\n'
+    "  expected_cargo_crap=skipped\n"
+    "fi\n"
+    'if [[ "${CARGO_CRAP_RESULT}" != "${expected_cargo_crap}" ]]; then\n'
+    '  echo "CARGO_CRAP_RESULT=${CARGO_CRAP_RESULT}" >&2\n'
+    "  failed=1\n"
+    "fi\n"
+)
+MAIN_REPORT_JOBS = ("modules-structure", "depgraph")
 
 
 class PolicyError(RuntimeError):
@@ -137,14 +184,13 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
 # edit to that condition must be made in both places.
 CODEQL_CONDITION = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-    "(needs.cargo-crap.result == 'success' || "
-    "(needs.ci_change_scope.outputs.rust == 'false' && "
-    "needs.cargo-crap.result == 'skipped')) }}"
+    "(needs.core-gate.result == 'success' || "
+    "needs.ci_change_scope.outputs.rust == 'false') }}"
 )
 
 
 def check_codeql_job(jobs: dict) -> None:
-    """CodeQL waits for cargo-crap but must still run for docs-only PRs.
+    """CodeQL waits for core-gate on Rust PRs but always runs for docs-only PRs.
 
     The main ruleset's code_scanning rule needs an uploaded analysis for every
     pull-request head, so a Rust-scope skip would make documentation-only pull
@@ -153,14 +199,14 @@ def check_codeql_job(jobs: dict) -> None:
     job = jobs.get("codeql")
     require(isinstance(job, dict), "missing codeql job")
     require(
-        job.get("needs") == ["ci_change_scope", "cargo-crap"],
+        job.get("needs") == ["ci_change_scope", "core-gate"],
         "codeql direct dependencies changed",
     )
     condition = job.get("if")
     require(isinstance(condition, str), "codeql must have a job condition")
     require(
         " ".join(condition.split()) == CODEQL_CONDITION,
-        "codeql must run for every pull request once cargo-crap succeeds or is skipped by a non-Rust scope",
+        "codeql must run once core-gate succeeds, and always for documentation-only pull requests",
     )
 
 
@@ -237,11 +283,22 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     )
 
 
+def check_coverage_merger(path: pathlib.Path | None = None) -> None:
+    path = path or pathlib.Path(__file__).with_name("merge_owner_bridge_lcov.py")
+    try:
+        digest = hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    except (OSError, UnicodeError) as error:
+        raise PolicyError(f"native coverage merger is unavailable: {error}") from error
+    require(digest == COVERAGE_MERGER_SHA256, "native coverage merger differs from its reviewed program")
+
+
 def check_workflow(
     workflow_path: pathlib.Path,
     baseline_resolver_path: pathlib.Path | None = None,
+    coverage_merger_path: pathlib.Path | None = None,
 ) -> None:
     check_baseline_resolver(baseline_resolver_path)
+    check_coverage_merger(coverage_merger_path)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
@@ -297,8 +354,8 @@ def check_workflow(
     )
     require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
     require(
-        job.get("needs") == ["ci_change_scope", "coverage", "core-gate"],
-        "cargo-crap must wait for every core gate and hosted coverage",
+        job.get("needs") == ["ci_change_scope", "coverage", "core-gate", "owner-bridge-windows"],
+        "cargo-crap must wait for every core gate, hosted coverage and the native lane",
     )
     require(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
@@ -308,7 +365,19 @@ def check_workflow(
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
-    require(len(steps) == 12, "cargo-crap must contain the exact trusted step sequence")
+    require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
+    require([step.get("name") for step in steps] == [
+        None, None, "Install cargo-crap", "Download hosted LCOV", "Download hosted native LCOV",
+        "Bind native and Linux coverage to this checkout",
+        "Use Linux coverage without the unmeasured native shim",
+        "Reject repository cargo-crap configuration",
+        "Resolve trusted cargo-crap baseline", "Download trusted base baseline",
+        "Drop the unmeasured native shim from the trusted baseline",
+        "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
+        "Upload cargo-crap report", "Publish trusted main baseline",
+    ], "cargo-crap evidence steps must retain their reviewed order")
+    require(steps[1] == {"uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
+                         "with": {"toolchain": "1.97.1"}}, "cargo-crap toolchain changed")
 
     require(
         steps[0] == {"uses": CHECKOUT_ACTION, "with": {"fetch-depth": 0}},
@@ -336,6 +405,24 @@ def check_workflow(
         },
         "cargo-crap must download the exact hosted LCOV artifact",
     )
+    require(named_step(steps, "Download hosted native LCOV") == {
+        "name": "Download hosted native LCOV", "if": NATIVE_MEASURED, "uses": DOWNLOAD_ACTION,
+        "with": {"name": "owner-windows-lcov-${{ github.sha }}", "path": "${{ runner.temp }}/owner-windows-lcov"},
+    }, "cargo-crap must download native LCOV for this checkout")
+    require(named_step(steps, "Bind native and Linux coverage to this checkout") == {
+        "name": "Bind native and Linux coverage to this checkout", "if": NATIVE_MEASURED,
+        "run": MERGE_COVERAGE_COMMAND,
+    }, "cargo-crap must bind actual hosted counters before scoring")
+    require(named_step(steps, "Use Linux coverage without the unmeasured native shim") == {
+        "name": "Use Linux coverage without the unmeasured native shim", "if": NATIVE_SKIPPED,
+        "run": LINUX_ONLY_COVERAGE_COMMAND,
+    }, "cargo-crap may score Linux LCOV alone only when the native lane is out of scope")
+    require(named_step(steps, "Drop the unmeasured native shim from the trusted baseline") == {
+        "name": "Drop the unmeasured native shim from the trusted baseline",
+        "if": "${{ steps.baseline.outputs.run-id != '' && "
+              "needs.ci_change_scope.outputs.owner_windows == 'false' }}",
+        "run": DROP_SHIM_BASELINE_COMMAND,
+    }, "only an out-of-scope native lane may drop shim entries from the trusted baseline")
     require(
         named_step(steps, "Reject repository cargo-crap configuration")
         == {
@@ -380,13 +467,14 @@ def check_workflow(
         == {
             "name": "Generate trusted current baseline",
             "if": "${{ steps.baseline.outputs.bootstrap == 'true' }}",
+            "env": SHIM_ALLOW_ENV,
             "run": GENERATE_BASELINE_COMMAND,
         },
         "trusted current baseline generation changed",
     )
     require(
         named_step(steps, "Analyze CRAP score changes")
-        == {"name": "Analyze CRAP score changes", "run": ANALYZE_COMMAND},
+        == {"name": "Analyze CRAP score changes", "env": SHIM_ALLOW_ENV, "run": ANALYZE_COMMAND},
         "cargo-crap analysis command changed",
     )
     require(
@@ -427,21 +515,43 @@ def check_workflow(
         "green main must publish the next trusted baseline",
     )
 
-    aggregate = jobs.get("standard-gate")
-    require(isinstance(aggregate, dict), "missing aggregate standard-gate")
-    require("cargo-crap" in aggregate.get("needs", []), "standard-gate must need cargo-crap")
+    # cargo-crap waits for the native Windows lane. ci-gate requires it, so
+    # standard-gate (which mutation and ASan follow) must not wait for it.
+    standard = jobs.get("standard-gate")
+    require(isinstance(standard, dict), "missing aggregate standard-gate")
+    require("cargo-crap" not in standard.get("needs", []),
+            "standard-gate must not delay mutation and ASan behind cargo-crap")
+    aggregate = jobs.get("ci-gate")
+    require(isinstance(aggregate, dict), "missing aggregate ci-gate")
+    require(aggregate.get("if") == "${{ always() }}", "ci-gate must always evaluate cargo-crap")
+    require("cargo-crap" in aggregate.get("needs", []), "ci-gate must need cargo-crap")
     aggregate_steps = aggregate.get("steps")
-    require(isinstance(aggregate_steps, list), "standard-gate steps must be an array")
-    verdict = named_step(aggregate_steps, "Require normal blocking checks")
+    require(isinstance(aggregate_steps, list), "ci-gate steps must be an array")
+    verdict = named_step(aggregate_steps, "Require every blocking CI job to pass")
     require(
         verdict.get("env", {}).get("CARGO_CRAP_RESULT")
         == "${{ needs.cargo-crap.result }}",
-        "standard-gate must read the cargo-crap result",
+        "ci-gate must read the cargo-crap result",
     )
     require(
-        "CARGO_CRAP_RESULT" in verdict.get("run", ""),
-        "standard-gate must reject a non-success cargo-crap result",
+        verdict.get("env", {}).get("RUST_SCOPE_RESULT")
+        == "${{ needs.ci_change_scope.outputs.rust }}",
+        "ci-gate must read the trusted Rust scope",
     )
+    require(
+        CI_GATE_CARGO_CRAP_CHECK in verdict.get("run", ""),
+        "ci-gate must reject a non-success cargo-crap result in Rust scope",
+    )
+    for name in MAIN_REPORT_JOBS:
+        report = jobs.get(name)
+        require(isinstance(report, dict), f"missing main report job {name!r}")
+        require(report.get("needs") == ["standard-gate", "cargo-crap"],
+                f"{name} must wait for standard-gate and cargo-crap")
+        require(
+            report.get("if") == "${{ github.event_name != 'pull_request' && "
+            "needs.standard-gate.result == 'success' && needs.cargo-crap.result == 'success' }}",
+            f"{name} must run only after successful standard checks and cargo-crap",
+        )
 
     for name, needs in STAGED_MAIN_JOBS.items():
         check_staged_main_job(jobs, name, needs)

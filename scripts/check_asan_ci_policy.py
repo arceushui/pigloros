@@ -126,10 +126,10 @@ df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 }
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
-    "needs": ["ci_change_scope", "cargo-crap"],
+    "needs": ["ci_change_scope", "core-gate"],
     "if": (
         "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
-        "needs.cargo-crap.result == 'success' && "
+        "needs.core-gate.result == 'success' && "
         "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
     ),
     "runs-on": "ubuntu-24.04",
@@ -188,12 +188,11 @@ EXPECTED_STEP_ENV = {
 EXPECTED_SCOPE_JOB = [
     "ci_change_scope",
     "standard-gate",
-    "mutation-checks",
     "asan-build",
 ]
+# The shards run beside diff mutation testing; ci-gate requires both results.
 EXPECTED_SCOPE_IF = (
     "${{ !cancelled() && needs.standard-gate.result == 'success' && "
-    "(needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && "
     "needs.asan-build.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
 )
