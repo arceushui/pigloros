@@ -348,7 +348,12 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
             expected,
             "{max_timelines} {max_events}"
         );
-        // Nothing was claimed: an unlimited host creates under the same key.
+        // Nothing was claimed: the host has no Timeline yet, and an
+        // unlimited host creates under the same key.
+        assert!(
+            ok(host_timelines(&mut host))?.is_empty(),
+            "{max_timelines} {max_events}"
+        );
         assert!(shape(&ok(create(&mut host, 1, 1, 1, &admission()?)?)?).0);
     }
     // A room at its Event ceiling refuses a derive before the claim, and
@@ -364,6 +369,21 @@ fn every_ceiling_refuses_before_the_claim() -> TestResult {
         "EventCeiling"
     );
     assert_eq!(refusal(create(&mut host, 3, 3, 3, &one)?), "EventCeiling");
+    // A derive needs room for its claim and its revision: a room of one
+    // revision under a two-Event ceiling refuses it before the claim.
+    let mut host = self::host(true)?;
+    let two_events = RoomAdmissionV1 {
+        max_events: 2,
+        ..admission()?
+    };
+    let created = ok(create(&mut host, 5, 5, 5, &two_events)?)?;
+    let (_, stored) = stored_of(&created);
+    let (room, timeline) = (stored.descriptor.room_id(), stored.timeline);
+    assert_eq!(
+        refusal(derive_with(&mut host, 6, room, 1, input(6)?, &two_events)),
+        "EventCeiling"
+    );
+    assert_eq!(ok(read_all(&mut host, timeline))?.len(), 1);
     // The host's root ceiling also refuses a room's own Timeline.
     let mut host = self::host(true)?;
     let two = RoomAdmissionV1 {
