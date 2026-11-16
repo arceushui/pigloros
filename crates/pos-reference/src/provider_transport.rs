@@ -91,6 +91,16 @@ struct ConnectedProviderStream {
     process: ProviderProcessIdentity,
 }
 
+/// One durably completed live update.
+pub(crate) struct CompletedLiveUpdate {
+    /// The successor bootstrap, now the installed authority.
+    pub(crate) successor: AuthenticatedSelectorBootstrap,
+    /// The exact RCA1 bytes for the administrator.
+    pub(crate) acknowledgement: Vec<u8>,
+    /// The cancelled-attempt set the authenticated RCA1 echoes.
+    pub(crate) cancelled_attempt_ids: Vec<[u8; 16]>,
+}
+
 struct ConnectedInstallationUpdate {
     committed: CommittedInstallationUpdate,
     context_bytes: Vec<u8>,
@@ -694,7 +704,7 @@ impl ProviderTransport {
         &self,
         committed: CommittedInstallationUpdate,
         timeout: Duration,
-    ) -> Result<(AuthenticatedSelectorBootstrap, Vec<u8>), SelectorBoundaryError> {
+    ) -> Result<CompletedLiveUpdate, SelectorBoundaryError> {
         self.connect_committed_update(committed, timeout)
             .and_then(|connected| Self::exchange_committed_update(connected, timeout))
     }
@@ -731,7 +741,7 @@ impl ProviderTransport {
     fn exchange_committed_update(
         connected: ConnectedInstallationUpdate,
         timeout: Duration,
-    ) -> Result<(AuthenticatedSelectorBootstrap, Vec<u8>), SelectorBoundaryError> {
+    ) -> Result<CompletedLiveUpdate, SelectorBoundaryError> {
         Deadline::new(timeout)
             .map(|deadline| (connected, deadline))
             .and_then(|(mut connected, deadline)| {
@@ -779,7 +789,11 @@ impl ProviderTransport {
             .and_then(|(committed, response, acknowledgement)| {
                 committed
                     .complete_live_update(&acknowledgement)
-                    .map(|bootstrap| (bootstrap, response))
+                    .map(|successor| CompletedLiveUpdate {
+                        successor,
+                        acknowledgement: response,
+                        cancelled_attempt_ids: acknowledgement.cancelled_attempt_ids().to_vec(),
+                    })
             })
     }
 
@@ -1738,11 +1752,12 @@ mod tests {
     #[test]
     fn committed_update_transport_publishes_only_an_exact_terminal_reply() -> TestResult {
         let valid = committed_update_control_reply(Vec::new())?;
-        let (successor, acknowledgement) = valid
+        let completed = valid
             .transport
             .complete_committed_update(valid.committed, Duration::from_secs(1))?;
-        assert!(!acknowledgement.is_empty());
-        assert_ne!(successor.installed().manifest().digest(), [0; 32]);
+        assert!(!completed.acknowledgement.is_empty());
+        assert_ne!(completed.successor.installed().manifest().digest(), [0; 32]);
+        assert_eq!(completed.cancelled_attempt_ids, vec![[42; 16]]);
         valid
             .provider
             .join()
@@ -1767,10 +1782,10 @@ mod tests {
             .transport
             .connect_committed_update(valid.committed, Duration::from_secs(1))?;
         std::thread::sleep(Duration::from_millis(150));
-        let (successor, acknowledgement) =
+        let completed =
             ProviderTransport::exchange_committed_update(connected, Duration::from_millis(100))?;
-        assert!(!acknowledgement.is_empty());
-        assert_ne!(successor.installed().manifest().digest(), [0; 32]);
+        assert!(!completed.acknowledgement.is_empty());
+        assert_ne!(completed.successor.installed().manifest().digest(), [0; 32]);
         valid
             .provider
             .join()

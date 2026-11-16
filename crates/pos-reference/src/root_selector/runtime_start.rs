@@ -135,7 +135,7 @@ fn start_and_admit(
 
 /// Stop a started but unadmitted runtime within a fresh 10 s bound (R11 §8.6
 /// "within 10 s"); its own failure changes nothing.
-fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort) {
+pub(super) fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort) {
     deadline_after(STALE_TERMINATION_BOUND)
         .and_then(|deadline| terminate_stale_runtimes(port, deadline))
         .ok();

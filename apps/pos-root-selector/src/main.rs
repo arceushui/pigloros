@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     SystemdProviderLifecycle::connect()
         .map_err(Into::into)
         .and_then(|port| {
-            RootSelectorRuntime::activate(&port)
+            RootSelectorRuntime::activate(port)
                 .and_then(RootSelectorRuntime::serve)
                 .map_err(Into::into)
         })
