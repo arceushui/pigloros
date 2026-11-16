@@ -4157,6 +4157,42 @@ enum EarlyRendererPhase {
     AwaitingLoad,
 }
 
+const EARLY_SNAPSHOT_REFUSED: &str = "renderer snapshot unavailable or ambiguous";
+
+/// `WebView2` starts the main renderer asynchronously after navigation
+/// commits, so a load-phase snapshot can precede it. Only that transient
+/// absence is resampled; a navigating snapshot is classified as taken.
+fn renderer_start_pending(phase: EarlyRendererPhase, presence: crate::RendererPresence) -> bool {
+    matches!(
+        (phase, presence),
+        (
+            EarlyRendererPhase::AwaitingLoad,
+            crate::RendererPresence::Absent
+        )
+    )
+}
+
+#[test]
+fn only_a_load_phase_absence_waits_for_the_renderer() {
+    use crate::RendererPresence::{Absent, Unique};
+    assert!(renderer_start_pending(
+        EarlyRendererPhase::AwaitingLoad,
+        Absent
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::AwaitingLoad,
+        Unique
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::Navigating,
+        Absent
+    ));
+    assert!(!renderer_start_pending(
+        EarlyRendererPhase::Navigating,
+        Unique
+    ));
+}
+
 #[test]
 fn native_early_renderer_classification_and_faults() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
@@ -4221,11 +4257,7 @@ impl Fixture {
             ));
             if reached.is_none() && step_pending(&step) {
                 if let Some(mark) = self.early_renderer_state(driver, phase) {
-                    let presence = pass(
-                        self.surface
-                            .early_renderer_presence()
-                            .map_err(|()| "renderer snapshot unavailable or ambiguous"),
-                    );
+                    let presence = pass(self.settled_early_presence(phase, &SystemClock));
                     // Recheck the phase after the complete pair of snapshots.
                     assert_eq!(
                         self.early_renderer_state(driver, phase),
@@ -4253,28 +4285,14 @@ impl Fixture {
                     } else {
                         self.evidence_complete = true;
                     }
-                    let owners = match phase {
-                        EarlyRendererPhase::Navigating => {
-                            self.surface.navigating_fault_owners_retained()
-                        }
-                        EarlyRendererPhase::AwaitingLoad => {
-                            self.surface.awaiting_load_fault_owners_retained()
-                        }
-                    };
+                    let owners = self.early_fault_owners_retained(phase);
                     assert!(
                         self.evidence_complete
                             && owners
                             && admission_blocked(&mut self.surface, &competing_spec()),
                         "early renderer owners or blocked admission missing"
                     );
-                    let owners_after = match phase {
-                        EarlyRendererPhase::Navigating => {
-                            self.surface.navigating_fault_owners_retained()
-                        }
-                        EarlyRendererPhase::AwaitingLoad => {
-                            self.surface.awaiting_load_fault_owners_retained()
-                        }
-                    };
+                    let owners_after = self.early_fault_owners_retained(phase);
                     assert!(
                         owners_after,
                         "early renderer owners changed during blocked admission"
@@ -4295,6 +4313,34 @@ impl Fixture {
                 Step::Done => return Err("early renderer driver ended without result".into()),
                 Step::Pending => pass(readiness::pump(&self.surface)),
             }
+        }
+    }
+
+    fn early_fault_owners_retained(&mut self, phase: EarlyRendererPhase) -> bool {
+        match phase {
+            EarlyRendererPhase::Navigating => self.surface.navigating_fault_owners_retained(),
+            EarlyRendererPhase::AwaitingLoad => self.surface.awaiting_load_fault_owners_retained(),
+        }
+    }
+
+    /// Snapshot renderer presence, resampling a transient load-phase absence
+    /// until the renderer appears or the fixture deadline passes (see
+    /// `renderer_start_pending`). The caller rechecks the phase afterwards, so
+    /// a mark that advanced while pumping still fails the case.
+    fn settled_early_presence(
+        &self,
+        phase: EarlyRendererPhase,
+        clock: &dyn pos_owner_bridge::MonotonicClock,
+    ) -> Result<crate::RendererPresence, Box<dyn std::error::Error>> {
+        loop {
+            let presence = self
+                .surface
+                .early_renderer_presence()
+                .map_err(|()| EARLY_SNAPSHOT_REFUSED)?;
+            if !renderer_start_pending(phase, presence) || clock.now() >= self.deadline {
+                return Ok(presence);
+            }
+            pass(readiness::pump(&self.surface));
         }
     }
 
