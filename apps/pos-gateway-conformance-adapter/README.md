@@ -23,11 +23,13 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
   Its exchanges are raw HTTP requests through the Gateway's public `router` (loopback) and
   `spectator_router` (the non-loopback public listener), with no socket, so Local and Air-Gapped
   are the same execution.
-- The `authorized` composition is the production serve composition (#1361): a fixture Local
-  Principal document, which lets one actor create Timelines and read their Events and grants no
-  action or signal, is provisioned into a fresh SQLite store and served by the production
-  `local_gateway` composition, which requires it for every protected operation. No production
-  authority is sourced from the fixture document (ADR-108).
+- The `authorized` and `authorized-air-gapped` compositions are the production serve
+  composition (#1361): a fresh SQLite store is bound to the Local or the Air-Gapped execution
+  mode (ADR-134), a fixture Local Principal document, which lets one actor create Timelines, read
+  their Events and read its own Session (#1362) and grants no action, signal or network
+  capability, is provisioned into it, and the production `local_gateway` composition serves it
+  and requires it for every protected operation. No production authority is sourced from the
+  fixture document (ADR-108).
 - Observations are normalized as the profile text states: ULID `id` members, cursors and error
   messages become placeholders.
 - Usage: one execution step per sent exchange, the response bytes as output bytes, one Event per

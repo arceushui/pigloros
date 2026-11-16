@@ -1,8 +1,10 @@
 {
-  "name": "draft-session-air-gapped",
+  "name": "session-air-gapped",
   "operation_id": "getSession",
   "request": {
-    "headers": {}
+    "headers": {
+      "x-piglor-actor-entity": "01JC0GATEWAYF1XTVREACT0R00"
+    }
   },
   "request_valid": true,
   "response": {
@@ -10,9 +12,9 @@
     "body": {
       "schema_id": "urn:pigloros:gateway:v1:schema:session",
       "id": "01JC0GATEWAYW90PR1NC1PA1A1",
-      "generation": 3,
+      "generation": 1,
       "provenance": {
-        "digest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "digest": "efa3d28d4fdf63f313238437173f6d11db25895696c70ee3e4ab69e4bc3d9f01",
         "origin": "host-derived"
       },
       "mode_profile": {
@@ -40,7 +42,9 @@
         ]
       },
       "grants": [
-        "decision-preview.create"
+        "session.read",
+        "timeline.create",
+        "timeline.events.read"
       ],
       "consents": [],
       "contract": {
