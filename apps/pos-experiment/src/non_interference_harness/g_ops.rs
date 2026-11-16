@@ -895,6 +895,7 @@ impl DecisionV1 {
                     .ok()
                     .and_then(|binding| {
                         AuthorityRegistrySnapshotV1::try_new(
+                            &crate::AUTHORITY_TRUST_ROOT,
                             Hash::from_bytes(REGISTRY_DIGEST),
                             vec![request.authenticated().registry_binding_digest()],
                             vec![binding],
@@ -978,14 +979,17 @@ fn authorization_request(
     assurance: AssuranceLevelV1,
     authority_timeline: TimelineId,
 ) -> Option<AuthorizationRequestV1> {
-    AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
-        principal,
-        adapter_id: "ni-g-ops-adapter".to_owned(),
-        assurance,
-        issued_at: WallTime::from_micros(1),
-        expires_at: WallTime::from_micros(100),
-        binding_digest: Hash::from_bytes([3; 32]),
-    })
+    AuthenticatedPrincipalResultV1::try_from_draft(
+        &crate::AUTHORITY_TRUST_ROOT,
+        AuthenticatedPrincipalDraftV1 {
+            principal,
+            adapter_id: "ni-g-ops-adapter".to_owned(),
+            assurance,
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(100),
+            binding_digest: Hash::from_bytes([3; 32]),
+        },
+    )
     .ok()
     .and_then(|authenticated| {
         AuthorizationRequestV1::try_from_draft(AuthorizationRequestDraftV1 {
