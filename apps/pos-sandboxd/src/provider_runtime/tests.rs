@@ -21,8 +21,8 @@ use pos_reference::selector::installation::{
 
 use super::reconcile::{Reconcile, ReconcileError};
 use super::{
-    bind, reconcile_in_background, required_slots, AdmissionState, ProviderStartupError,
-    RuntimeAuthority,
+    bind, reconcile_in_background, required_slots, start_reconciliation, AdmissionState,
+    ProviderStartupError, RuntimeAuthority,
 };
 use crate::{
     sign_verified, AdmittedRuntimeKey, AttemptLifecycle, ProviderInstallation,
@@ -336,4 +336,15 @@ fn background_reconciliation_opens_or_closes_admission() -> TestResult {
     assert!(matches!(settled(&failed)?, AdmissionState::ReconcileFailed));
     drop(runtime);
     Ok(())
+}
+
+#[test]
+fn a_reconciliation_that_cannot_start_stays_starting() {
+    // The job is dropped unrun, so the state is never set: `Starting` for
+    // good, which answers as `ReconcileFailed` does.
+    let admission = Arc::new(OnceLock::new());
+    start_reconciliation(Scripted(mpsc::channel().1), Arc::clone(&admission), |_| {
+        Err(std::io::Error::other("injected spawn failure"))
+    });
+    assert!(admission.get().is_none());
 }

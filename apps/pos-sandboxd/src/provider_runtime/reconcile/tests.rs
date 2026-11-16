@@ -3,15 +3,18 @@
 //! manager and fake network ports, as root in the isolated container
 //! (invariants 4 and 14).
 
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::future::Future;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT;
+use tokio::time::Instant;
 use zbus::OwnedObjectPath;
 
 use super::{
@@ -24,8 +27,9 @@ use crate::provider_runtime::tests::{
 use crate::provider_runtime::ProviderRuntimeError;
 use crate::test_fixtures::peer_connections;
 use crate::{
-    ControlFloor, EgressPropertyProbe, OrphanNetworkCleanup, RestartReconciliationError,
-    StagingLimits, SystemdAttemptRegistry, SystemdTransientUnitTransport,
+    ControlFloor, EgressProbe, EgressPropertyProbe, NetworkRange, OrphanNetworkCleanup,
+    RestartReconciliationError, StagingLimits, SystemdAttemptRegistry,
+    SystemdTransientUnitTransport,
 };
 
 /// A staged input's name: 32 lowercase hexadecimal characters.
@@ -218,6 +222,11 @@ impl EgressPropertyProbe for Egress {
     }
 }
 
+/// An orphan sweep and egress probe that both succeed.
+const fn clean_network(_: NetworkRange, _: EgressProbe) -> (Network, Egress) {
+    (Network { fails: false }, Egress)
+}
+
 /// Create `path` as a root directory of `mode`.
 fn directory(path: &str, mode: u32) -> TestResult {
     fs::create_dir_all(path)?;
@@ -254,12 +263,37 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     // A failed orphan sweep keeps admission closed; the staging directory
     // step 7 created is not swept.
-    let host = prepare_with(
-        &authority,
-        fake_bus(&servers, &calls),
-        (Network { fails: true }, Egress),
-    )?;
     let (admitted, installation, _) = &authority;
+    let built = Cell::new(None);
+    let host = prepare_with(&authority, fake_bus(&servers, &calls), |range, probe| {
+        built.set(Some((range, probe)));
+        (Network { fails: true }, Egress)
+    })?;
+    // The ports are built for the SPI1 attempt range and egress probe.
+    assert_eq!(
+        built.get(),
+        Some((installation.attempt_range(), installation.egress_probe()))
+    );
+    // The SPI1 cleanup phases (500, 1000, 1500, 3000 and 5000 ms) start
+    // when reconciliation does, within the fixed 10 s bound.
+    let now = Instant::now();
+    let (cleanup, deadline) = host.restart_bounds(now);
+    assert_eq!(
+        (
+            cleanup.shutdown().grace(),
+            cleanup.shutdown().overall(),
+            cleanup.unit_absent(),
+            cleanup.released(),
+            deadline
+        ),
+        (
+            now + Duration::from_millis(500),
+            now + Duration::from_millis(1500),
+            now + Duration::from_secs(3),
+            now + Duration::from_secs(5),
+            now + Duration::from_secs(10)
+        )
+    );
     assert_eq!(host.limits, installation.staging_limits());
     assert_eq!(host.floor, retained_floor(admitted));
     assert_eq!(
@@ -282,20 +316,12 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
     assert!(staging.join(STAGED).is_file());
     // An entry that is no staged input fails reconciliation closed.
     fs::create_dir(staging.join("directory"))?;
-    let host = prepare_with(
-        &authority,
-        fake_bus(&servers, &calls),
-        (Network { fails: false }, Egress),
-    )?;
+    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     assert!(matches!(host.reconcile(), Err(ReconcileError::Staging)));
     fs::remove_dir(staging.join("directory"))?;
     // A clean host: the staging directory is emptied and the lifecycle
     // holds the registry for the life of the process.
-    let host = prepare_with(
-        &authority,
-        fake_bus(&servers, &calls),
-        (Network { fails: false }, Egress),
-    )?;
+    let host = prepare_with(&authority, fake_bus(&servers, &calls), clean_network)?;
     let lifecycle = host.reconcile()?;
     // Each step 7 subscribed, and each reconciliation listed the units.
     assert_eq!(

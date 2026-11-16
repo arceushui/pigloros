@@ -360,39 +360,66 @@ fn never_reconciled() -> impl FnOnce(&RuntimeAuthority) -> Result<Scripted, Prov
     |_| Ok(Scripted(mpsc::channel().1))
 }
 
+/// Assert that `manager` received no datagram: nothing sent `READY=1`.
+fn assert_not_notified(manager: &UnixDatagram) -> TestResult {
+    manager.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let mut datagram = [0; 16];
+    assert!(manager.recv(&mut datagram).is_err(), "READY=1 was sent");
+    manager.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    Ok(())
+}
+
+/// Assert that neither endpoint has a node.
+fn assert_unbound() {
+    assert!(!Path::new(EXECUTE).exists() && !Path::new(CONTROL).exists());
+}
+
 /// A startup refusal, a step 7 refusal and a pre-existing node at an
 /// endpoint each bind nothing and send no READY=1.
-fn binds_nothing_on_a_refusal() -> TestResult {
+fn binds_nothing_on_a_refusal(manager: &UnixDatagram) -> TestResult {
     assert_eq!(
         serve_with(
             || Err(ProviderStartupError::SlotCount),
-            never_reconciled(),
+            // Were step 7 to run first, its refusal would be returned.
+            |_| Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable),
             Some(OsStr::new(NOTIFY))
         ),
         ProviderRuntimeError::Startup(ProviderStartupError::SlotCount)
     );
+    assert_unbound();
+    assert_not_notified(manager)?;
+    // Step 7 runs before any socket exists.
     let authority = bind_as_provider()??;
     assert_eq!(
         serve_with(
             move || Ok(authority),
-            |_| Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable),
+            |_| {
+                assert_unbound();
+                Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable)
+            },
             Some(OsStr::new(NOTIFY))
         ),
         ProviderRuntimeError::HostUnavailable
     );
-    assert!(!Path::new(EXECUTE).exists());
+    assert_unbound();
+    assert_not_notified(manager)?;
     fs::write(EXECUTE, b"")?;
     let authority = bind_as_provider()??;
     assert_eq!(
         serve_with(
             move || Ok(authority),
-            never_reconciled(),
+            |authority| {
+                assert!(!Path::new(CONTROL).exists());
+                never_reconciled()(authority)
+            },
             Some(OsStr::new(NOTIFY))
         ),
         ProviderRuntimeError::UnsafeEndpoint
     );
-    fs::remove_file(EXECUTE)?;
+    assert!(fs::symlink_metadata(EXECUTE)?.is_file());
     assert!(!Path::new(CONTROL).exists());
+    assert_not_notified(manager)?;
+    fs::remove_file(EXECUTE)?;
     Ok(())
 }
 
@@ -519,7 +546,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     let staged = stage()?;
     let manager = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(&NOTIFY[1..])?)?;
     manager.set_read_timeout(Some(CLIENT_TIMEOUT))?;
-    binds_nothing_on_a_refusal()?;
+    binds_nothing_on_a_refusal(&manager)?;
     let authority = bind_as_provider()??;
     let (admitted, _, _) = &authority;
     let key = *admitted.provider().runtime_attestation_key();
@@ -666,6 +693,21 @@ fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     std::thread::scope(|scope| -> TestResult {
         let serving = scope.spawn(|| responder.serve(&execute, &control, 4));
         answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
+        let bytes = describe([6; 16], retained)?;
+        SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+            .verify_signature(&key)?;
+        let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        assert_refused(
+            &exchange(&[staged.evaluation(), staged.request()])?,
+            &key,
+            (
+                1,
+                execute.request.request_id,
+                execute.request_digest,
+                Some(execute.attempt_id),
+            ),
+            SandboxProviderErrorCode::SandboxUnavailable,
+        )?;
         let replacement = replace_execute_leaf()?;
         assert_eq!(
             serving.join().map_err(|_| "the runtime panicked")?,

@@ -40,11 +40,11 @@ use tokio::time::Instant;
 use super::endpoint::{open_parent, DIRECTORY_OPEN, RESOLVE, SANDBOX_STATE};
 use super::{ProviderRuntimeError, RuntimeAuthority};
 use crate::{
-    reconcile_restart, AttemptLifecycle, CleanupBudget, ControlFloor, EgressPropertyProbe,
-    HostEgress, LocalEgressProbe, NamespacedLocalNetwork, NetlinkNamespaceControl,
-    NetworkNamespaces, OrphanNetworkCleanup, RestartReconciliationError, StagingLedger,
-    StagingLimits, SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    SystemdTransientUnitTransport,
+    reconcile_restart, AttemptCleanupDeadlines, AttemptLifecycle, CleanupBudget, ControlFloor,
+    EgressProbe, EgressPropertyProbe, HostEgress, LocalEgressProbe, NamespacedLocalNetwork,
+    NetlinkNamespaceControl, NetworkNamespaces, NetworkRange, OrphanNetworkCleanup,
+    RestartReconciliationError, StagingLedger, StagingLimits, SystemdAttemptRecovery,
+    SystemdAttemptRegistry, SystemdAttemptRegistryError, SystemdTransientUnitTransport,
 };
 
 /// The staging directory's name beneath `/run/pigloros/sandbox`.
@@ -112,32 +112,42 @@ pub(super) type NetlinkReconciliation =
 pub(super) fn prepare_host(
     authority: &RuntimeAuthority,
 ) -> Result<NetlinkReconciliation, ProviderRuntimeError> {
-    let (_, installation, _) = authority;
+    prepare_with(
+        authority,
+        SystemdTransientUnitTransport::connect_system(),
+        netlink_network,
+    )
+}
+
+/// The netlink orphan sweep, and the `probe` through the Local network port
+/// of the attempt `range`, the port attempts use.
+fn netlink_network(
+    range: NetworkRange,
+    probe: EgressProbe,
+) -> (
+    NetlinkNamespaceControl,
+    LocalEgressProbe<NetlinkNamespaceControl>,
+) {
     let control = NetlinkNamespaceControl::new(NetworkNamespaces::system());
     let port = NamespacedLocalNetwork::new(
         control.clone(),
         HostEgress::new(),
         NetworkNamespaces::system(),
-        installation.attempt_range(),
+        range,
     );
-    prepare_with(
-        authority,
-        SystemdTransientUnitTransport::connect_system(),
-        (
-            control,
-            LocalEgressProbe::new(Arc::new(port), installation.egress_probe()),
-        ),
-    )
+    (control, LocalEgressProbe::new(Arc::new(port), probe))
 }
 
-/// Step 7 with the bus `connect` yields, and the `network` ports. The bus
-/// is connected, then the recovery owner opened, then the staging directory
-/// opened or created; any failure refuses the whole step.
+/// Step 7 with the bus `connect` yields, and the orphan sweep and egress
+/// probe that `network` builds for the SPI1 attempt range and egress probe.
+/// The bus is connected, then the recovery owner opened, then the staging
+/// directory opened or created; any failure refuses the whole step.
 pub(super) fn prepare_with<N, P, E>(
     (admitted, installation, _): &RuntimeAuthority,
     connect: impl Future<Output = Result<SystemdTransientUnitTransport, E>>,
-    (network, egress): (N, P),
+    network: impl FnOnce(NetworkRange, EgressProbe) -> (N, P),
 ) -> Result<HostReconciliation<N, P>, ProviderRuntimeError> {
+    let (network, egress) = network(installation.attempt_range(), installation.egress_probe());
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -176,14 +186,14 @@ where
     P: EgressPropertyProbe + Send + Sync + 'static,
 {
     fn reconcile(self) -> Result<AttemptLifecycle, ReconcileError> {
-        let now = Instant::now();
+        let (cleanup, deadline) = self.restart_bounds(Instant::now());
         self.runtime
             .block_on(reconcile_restart(
                 &self.transport,
                 self.recovery,
                 (&self.network, &self.egress),
-                self.cleanup.deadlines(now),
-                now + RESTART_BOUND,
+                cleanup,
+                deadline,
             ))
             .map_err(ReconcileError::from)
             .and_then(|reconciled| sweep_staging(&self.staging).map(|()| reconciled))
@@ -198,6 +208,14 @@ where
                         )
                     })
             })
+    }
+}
+
+impl<N, P> HostReconciliation<N, P> {
+    /// The SPI1 cleanup phases of a reconciliation that starts at `now`,
+    /// and its fixed 10 s bound.
+    fn restart_bounds(&self, now: Instant) -> (AttemptCleanupDeadlines, Instant) {
+        (self.cleanup.deadlines(now), now + RESTART_BOUND)
     }
 }
 

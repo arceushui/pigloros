@@ -175,35 +175,54 @@ fn serve_with<R: Reconcile>(
 }
 
 /// Run restart reconciliation on its own thread and record the admission
-/// state it ends in (R11 §5.1 steps 9 to 11). A failure is reported in one
-/// line on standard error.
-///
-/// If the thread cannot be spawned, `admission` is never set: the runtime
-/// stays `Starting` for the life of the process, which answers exactly as
-/// `ReconcileFailed` does, and admission never opens.
+/// state it ends in (R11 §5.1 steps 9 to 11).
 fn reconcile_in_background(
     reconciliation: impl Reconcile,
     admission: Arc<OnceLock<AdmissionState>>,
 ) {
-    std::thread::Builder::new()
-        .name("reconcile".to_owned())
-        .spawn(move || {
-            let state = reconciliation.reconcile().map_or_else(
-                |error| {
-                    writeln!(
-                        std::io::stderr(),
-                        "pos-sandboxd: restart reconciliation failed: {error}"
-                    )
-                    .ok();
-                    AdmissionState::ReconcileFailed
-                },
-                |lifecycle| AdmissionState::Open {
-                    _lifecycle: lifecycle,
-                },
-            );
-            admission.set(state).ok();
-        })
+    start_reconciliation(reconciliation, admission, |job| {
+        std::thread::Builder::new()
+            .name("reconcile".to_owned())
+            .spawn(job)
+            .map(drop)
+    });
+}
+
+/// Start `reconciliation` through `spawn`, recording the state it ends in.
+/// A failure is reported in one line on standard error.
+///
+/// If `spawn` fails, `admission` is never set: the runtime stays
+/// `Starting` for the life of the process, which answers exactly as
+/// `ReconcileFailed` does, and admission never opens. That is reported in
+/// one line on standard error too.
+fn start_reconciliation(
+    reconciliation: impl Reconcile,
+    admission: Arc<OnceLock<AdmissionState>>,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    spawn(Box::new(move || {
+        let state = reconciliation.reconcile().map_or_else(
+            |error| {
+                writeln!(
+                    std::io::stderr(),
+                    "pos-sandboxd: restart reconciliation failed: {error}"
+                )
+                .ok();
+                AdmissionState::ReconcileFailed
+            },
+            |lifecycle| AdmissionState::Open {
+                _lifecycle: lifecycle,
+            },
+        );
+        admission.set(state).ok();
+    }))
+    .unwrap_or_else(|error| {
+        writeln!(
+            std::io::stderr(),
+            "pos-sandboxd: restart reconciliation could not start: {error}"
+        )
         .ok();
+    });
 }
 
 /// The admitted provider, its SPI1 values and its runtime-attestation
