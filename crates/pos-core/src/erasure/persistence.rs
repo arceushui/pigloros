@@ -3460,6 +3460,7 @@ mod tests {
         resolution_count_error: Option<ErasureErrorV1>,
         resolution_references: Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>,
         objects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+        manifest: Option<StoredErasureManifestV1>,
     }
 
     impl TestPersistencePort {
@@ -3471,6 +3472,7 @@ mod tests {
                 resolution_count_error: None,
                 resolution_references: Vec::new(),
                 objects: BTreeMap::new(),
+                manifest: None,
             }
         }
     }
@@ -3489,7 +3491,7 @@ mod tests {
             &self,
             _request: ErasureReferenceV1,
         ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
-            Ok(None)
+            Ok(self.manifest.clone())
         }
 
         fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -3577,6 +3579,59 @@ mod tests {
         ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
             Err(ErasureErrorV1::PolicyConflict)
         }
+    }
+
+    /// A port whose manifest records `admission` as its active attempt.
+    fn active_attempt_port(
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let manifest = encode_limited(
+            &manifest_value(Value::Array(vec![
+                uint(0),
+                digest(admission.reference()),
+                Value::Array(Vec::new()),
+            ])),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )?;
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.manifest = Some(StoredErasureManifestV1::new(
+            ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &manifest)),
+            manifest,
+        )?);
+        port.objects
+            .insert(admission.reference(), admission.to_canonical_cbor()?);
+        Ok(port)
+    }
+
+    #[test]
+    fn a_recorded_active_attempt_must_belong_to_its_request() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let admission_of = |owner| {
+            ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+                request: owner,
+                attempt_ordinal: 0,
+                source_receipt: None,
+                unresolved_obligations: Vec::new(),
+                command_identities: Vec::new(),
+                policy: reference(4),
+                trust: reference(5),
+                admitted_position: 2,
+                deadline_position: 3,
+                authorization_provenance: reference(6),
+            })
+        };
+        let own = admission_of(request)?;
+        assert_eq!(
+            recorded_active_attempt(&active_attempt_port(&own)?, request),
+            Ok(Some(own))
+        );
+        // A forged manifest naming another request's admission is refused.
+        let foreign = admission_of(reference(9))?;
+        assert_eq!(
+            recorded_active_attempt(&active_attempt_port(&foreign)?, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
     }
 
     fn resolution_fixture(

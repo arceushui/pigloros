@@ -109,13 +109,14 @@ impl LocalErasureAuthorityV1 {
         state: &ErasureVerifiedStateV1,
     ) -> bool {
         let lifecycle = state.lifecycle();
+        let pre_terminal = is_pre_terminal(lifecycle);
         !matches!(
             lifecycle,
             ErasureLifecycleV1::Complete | ErasureLifecycleV1::Rejected
         ) && view
             .active_attempt(state.request().reference())
             .map_or(true, |active| {
-                active.map_or(is_pre_terminal(lifecycle), |attempt| {
+                active.map_or(pre_terminal, |attempt| {
                     !self
                         .pinned_bundle(view, attempt.trust())
                         .is_some_and(|bundle| self.revoked(&bundle))
@@ -166,7 +167,9 @@ impl LocalErasureAuthorityV1 {
     /// the lifetime attempt quota, under the request's own ERAZ1 and the
     /// ELP1 ERQ1 pins, at the §6 positions, pinning the bundle current at
     /// admission. That bundle's ELB1 must already be retained under the
-    /// pinned `CA(ELB1)`, so recovery can resolve it after a rotation.
+    /// pinned `CA(ELB1)`, so recovery can resolve it after a rotation. The
+    /// erasure object store is content-addressed, so a retained object
+    /// equal to this bundle also proves the pinned digest is `CA(ELB1)`.
     fn binds_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -217,8 +220,8 @@ impl LocalErasureAuthorityV1 {
     }
 
     /// The ELO1 a purpose-1 ELS1 `evidence` signs, verified with `bundle`'s
-    /// signer key. The ELO1 must recompute to the signed digest, in defence
-    /// in depth over the content-addressed read.
+    /// signer key. The erasure object store is content-addressed, so the
+    /// object read under the signed digest is that ELO1.
     fn owner_result(
         view: &dyn ErasureAuthorityReadViewV1,
         bundle: &LocalErasureBundleV1,
@@ -235,11 +238,8 @@ impl LocalErasureAuthorityV1 {
                     evidence,
                 )
             })
-            .and_then(|digest| {
-                view.retained_object(digest)
-                    .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes).ok())
-                    .filter(|result| result.reference().ok() == Some(digest))
-            })
+            .and_then(|digest| view.retained_object(digest))
+            .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes).ok())
     }
 
     /// Admit one owner acknowledgement (ADR-136 §5): its owner must be an

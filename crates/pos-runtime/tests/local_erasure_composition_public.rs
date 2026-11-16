@@ -4138,6 +4138,14 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
     drop(host);
     let mut host = attempted.host()?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
+    // A complete request no longer holds its subject.
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?
+            .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
     Ok(())
 }
 
