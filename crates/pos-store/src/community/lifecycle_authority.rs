@@ -45,10 +45,12 @@ use pos_crypto::fork_authentication::{
 };
 
 use super::attestation::{authenticated_result, evaluation_snapshot};
+use super::initializer::CommunityInitializerOwnerV1;
 use super::memory_domain::MemoryCommunityDomainV1;
 
 const LIFECYCLE_CATEGORY: &str = "community.lifecycle-control";
 const EXECUTION_CATEGORY: &str = "community.execution-state";
+const INITIALIZER_CATEGORY: &str = "community.initial-state";
 const PURPOSE: &str = "lifecycle-administration";
 
 /// The five closed administrative actions (ADR-129 §1, A5.1).
@@ -492,6 +494,53 @@ impl CommunityLifecycleAuthorityV1 {
                 resource,
                 data_category: EXECUTION_CATEGORY,
                 action: action.as_str(),
+                audience: &self.member_recipient,
+            },
+        )
+    }
+
+    /// Evaluate one R6.1 initializer `read` request on
+    /// `community-initializer:<D64>`, where `<D64>` is `initializer`, the
+    /// `H(CSC1)` digest of an installed roster State, as lower-case hex. The
+    /// audience is the installed member recipient, the recipient of the new
+    /// generation's selected cells (R6.1(4)).
+    ///
+    /// The planner asks for one decision per distinct initializer digest of
+    /// a code-0 operation (R6.1(5)).
+    ///
+    /// # Errors
+    /// Returns `EvidenceUnavailable` for a Fork, retire or reset call, which
+    /// starts from no initializer; for an owner installed for another
+    /// authority catalogue or a digest it does not hold; and for every
+    /// failure `authorize_administrative` refuses.
+    pub fn authorize_initializer(
+        &self,
+        call: &CommunityAuthorityCallV1,
+        owner: &CommunityInitializerOwnerV1,
+        initializer: Hash,
+        domain: &MemoryCommunityDomainV1,
+        leaf_grant_id: Hash,
+    ) -> Result<CommunityAuthorityAdmissionV1, Error> {
+        if !matches!(
+            call.request.action,
+            CommunityAdministrativeActionV1::Initialize
+                | CommunityAdministrativeActionV1::Transition
+        ) || owner.catalogue_digest() != self.catalogue_digest
+            || !owner.holds(initializer)
+        {
+            return Err(Error::EvidenceUnavailable);
+        }
+        let mut resource = String::with_capacity(86);
+        resource.push_str("community-initializer:");
+        push_hex(&mut resource, initializer.as_bytes());
+        self.evaluate(
+            call,
+            domain,
+            leaf_grant_id,
+            RequestShapeV1 {
+                resource,
+                data_category: INITIALIZER_CATEGORY,
+                action: "read",
                 audience: &self.member_recipient,
             },
         )
