@@ -132,8 +132,9 @@ publish_ancestor_baseline() {
   done <<< "${ancestors}"
 }
 
-# Sets CRAP_JOB to "<status> <conclusion>" for the cargo-crap job of main run
-# $1's latest attempt; CRAP_JOB stays empty until that job is listed.
+# Sets CRAP_JOB to the "<status> <conclusion>" lines for the cargo-crap job of
+# main run $1's latest attempt (the caller reads the first); CRAP_JOB stays
+# empty until that job is listed.
 read_crap_job() {
   gh_api --method GET --paginate \
     "repos/${GITHUB_REPOSITORY}/actions/runs/$1/jobs" \
@@ -141,7 +142,7 @@ read_crap_job() {
     --jq ".jobs[] |
       select(.name == \"cargo-crap\") |
       \"\(.status) \(.conclusion // \"none\")\""
-  CRAP_JOB="$(head -n 1 <<< "${GH_API_OUTPUT}")"
+  CRAP_JOB="${GH_API_OUTPUT}"
 }
 
 for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do

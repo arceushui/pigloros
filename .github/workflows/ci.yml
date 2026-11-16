@@ -992,9 +992,11 @@ jobs:
     # out of this pull request.
     if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
-    # 10 minutes of scoring plus the resolver step's bounded wait for main's
-    # trusted baseline (see that step).
-    timeout-minutes: 140
+    # Budget: the pre-steps (full-history checkout, install-action, LCOV
+    # downloads), the resolver step's 130-minute bound on waiting for main's
+    # trusted baseline (see that step), then scoring and uploads, all within
+    # 150 minutes.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

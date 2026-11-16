@@ -984,6 +984,31 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertIn("run-id=4242\n", logs["output"])
         self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "jobs", "artifacts"])
 
+    def test_resolver_reports_the_newest_of_several_completed_main_runs(self) -> None:
+        # GitHub lists the newest run first; it decides the reason.
+        result, _ = self.run_resolver("", "902 completed cancelled\n901 completed failure\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            f"main ci.yml run 902 for trusted base {EXAMPLE_BASE_SHA} completed with "
+            "conclusion cancelled without publishing",
+            result.stdout,
+        )
+        self.assertNotIn("run 901", result.stdout)
+
+    def test_resolver_uses_the_first_listed_cargo_crap_job(self) -> None:
+        result, logs = self.run_resolver(
+            "", "777 in_progress none\n", "completed failure\nin_progress none\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "jobs", "artifacts"])
+        self.assertIn(
+            "the cargo-crap job of main ci.yml run 777 for trusted base "
+            f"{EXAMPLE_BASE_SHA} completed with conclusion failure",
+            result.stdout,
+        )
+
     def test_resolver_job_query_selects_only_the_cargo_crap_job(self) -> None:
         _, logs = self.run_resolver("", "777 in_progress none\n", "completed failure\n")
         query = self.gh_invocations(logs)[31][-1]
@@ -1402,6 +1427,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_cargo_crap_timeouts_cover_the_bounded_wait(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 135})
+        )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 140})
         )
         self.assert_rejected(
             lambda workflow: self.cargo_crap_step(
