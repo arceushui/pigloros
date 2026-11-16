@@ -18,7 +18,13 @@ test-support = ["sqlite", "pos-core/test-support"]
 # The Memory and SQLite counterfactual adapters mint ADR-064 commit evidence;
 # scripts/check_counterfactual_adapter_seal.py allows only this crate to enable
 # `counterfactual-adapter`.
-pos-core = { path = "../pos-core", features = ["counterfactual-adapter"] }
+# The community owner mints its own `authority-trust-root` seal for each
+# per-request evaluation snapshot and verified authentication result (ADR-129
+# R6.2(5)); scripts/check_authority_trust_root_seal.py allows this crate.
+pos-core = { path = "../pos-core", features = [
+  "authority-trust-root",
+  "counterfactual-adapter",
+] }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
@@ -42,7 +48,10 @@ pos-plugin-content = { path = "../pos-plugin-content" }
 ed25519-dalek = { workspace = true }
 pos-plugin-release = { path = "../pos-plugin-release" }
 sha2 = { workspace = true }
-pos-core = { path = "../pos-core", features = ["test-support"] }
+pos-core = { path = "../pos-core", features = [
+  "authority-trust-root",
+  "test-support",
+] }
 # Test-only PMF1 projection fixtures for the Plugin trust registry vectors.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 # Test-only SQLite limit control injects query binding failures.
