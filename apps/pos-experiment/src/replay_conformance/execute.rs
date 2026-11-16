@@ -55,8 +55,9 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// for `RecordedReplay` or `LiveUnverified`, so `replay-v1` and
 /// `live-local-v1` are `deterministic-local-v1` restricted to that one class,
 /// and `live-air-gapped-v1` (ADR-135) is `deterministic-air-gapped-v1`
-/// restricted to `LiveUnverified`, each under its own id and digest. The TPS1 is the bundled Draft snapshot, so
-/// its root, revocation and continuity evidence is the host's own. Its
+/// restricted to `LiveUnverified`, each under its own id and digest. The
+/// TPS1 is the bundled Draft snapshot, so its root, revocation and
+/// continuity evidence is the host's own. Its
 /// signature evidence is not: the host authenticates the TPS1 operator
 /// signature under its own pin of the Draft authority's deployment-operator
 /// key, never a key the snapshot carries, and reports that result.
