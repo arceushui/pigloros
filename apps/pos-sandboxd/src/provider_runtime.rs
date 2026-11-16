@@ -70,7 +70,7 @@ pub enum ProviderStartupError {
 /// The admitted provider, its SPI1 values and its runtime-attestation
 /// signer, bound once at startup. Each part can only be built by its own
 /// checked constructor.
-pub type RuntimeAuthority = (
+type RuntimeAuthority = (
     AdmittedSelectorProvider,
     ProviderInstallation,
     KeyFileRuntimeSigner,

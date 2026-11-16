@@ -363,7 +363,7 @@ pub use provider_installation::{ProviderInstallation, ProviderInstallationError,
 #[cfg(target_os = "linux")]
 pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]
-pub use provider_runtime::{start_runtime_authority, ProviderStartupError, RuntimeAuthority};
+pub use provider_runtime::{start_runtime_authority, ProviderStartupError};
 #[cfg(target_os = "linux")]
 pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
