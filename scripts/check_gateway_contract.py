@@ -53,10 +53,13 @@ fixtures disagree:
 
 10. the Gateway execution-mode profile declaration `execution-mode-profiles.json` (ADR-134
     §3) is valid for its closed schema `execution-mode-profiles.schema.json`, its `profiles`
-    are sorted by identifier bytes, and every `mode_profile` or `produced_under_mode_profiles`
-    entry of a golden example names the golden digest of its profile
-    (`GOLDEN_MODE_PROFILE_DIGESTS`, recomputed from the declaration by the `piglor-gateway`
-    build and its golden tests).
+    are sorted by identifier bytes, each names as `previous_mode_profile_digest` the
+    predecessor in its rotation chain (`MODE_PROFILE_ROTATION_CHAINS`, ADR-135 §7.6, whose
+    head is recomputed from the declaration by the `piglor-gateway` build and its golden
+    tests), and every `mode_profile` or `produced_under_mode_profiles` entry names a digest of
+    that chain: the head in a golden example and in the gateway-client-conformance inputs and
+    oracles, any revision of the chain in a frozen example under `compatibility/examples/`,
+    which pins v1 wire validity rather than what the current release serves.
 
 `--append-only <git-ref>` also requires `compatibility/` to have only gained entries since the
 merge base of HEAD with `<git-ref>` (CI passes `origin/main`), so a change cannot loosen the
@@ -103,18 +106,25 @@ OPENAPI = CONTRACT / "openapi.json"
 PROBLEM_TYPES = CONTRACT / "problem-types.json"
 EXAMPLES = CONTRACT / "examples"
 FIXTURE_INPUTS = ROOT / "fixtures/conformance/inputs/gateway-client-conformance"
+FIXTURE_ORACLES = ROOT / "fixtures/conformance/oracles/gateway-client-conformance"
 COMPATIBILITY = CONTRACT / "compatibility"
 APPEND = "--append-only"
 BASELINE = COMPATIBILITY / "baseline.json"
 FROZEN_EXAMPLES = COMPATIBILITY / "examples"
 MODE_PROFILES = CONTRACT / "execution-mode-profiles.json"
 MODE_PROFILES_SCHEMA = CONTRACT / "execution-mode-profiles.schema.json"
-# The ADR-134 §2 BLAKE3 digest of each declared profile's canonical record, under its own
-# domain; a reviewed change re-pins it together with the `piglor-gateway` golden tests.
-GOLDEN_MODE_PROFILE_DIGESTS = {
-    "gateway-mode-air-gapped-v1":
+# The rotation chain of each declared profile (ADR-135 §7.6): the ADR-134 §2 BLAKE3 digest of
+# every revision's canonical record, under its own domain, oldest first. Each revision names
+# its predecessor as `previous_mode_profile_digest`, and the last entry is the current head. A
+# reviewed revision appends its digest together with the `piglor-gateway` golden tests; no
+# entry is ever removed.
+MODE_PROFILE_ROTATION_CHAINS = {
+    "gateway-mode-air-gapped-v1": (
         "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
-    "gateway-mode-local-v1": "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+    ),
+    "gateway-mode-local-v1": (
+        "26d6c7e75b11df673a1ef2d3210733b4ca431648eab0b9ae93bf4a6f6e69da3f",
+    ),
 }
 
 SCHEMA_ID_PREFIX = "urn:pigloros:gateway:v1:schema:"
@@ -658,9 +668,16 @@ def operations_by_id(contract: Contract) -> dict[str, tuple[str, dict]]:
 
 
 def check_example(
-    contract: Contract, operations: dict[str, tuple[str, dict]], name: str, example: dict
+    contract: Contract,
+    operations: dict[str, tuple[str, dict]],
+    name: str,
+    example: dict,
+    frozen: bool = False,
 ) -> None:
-    """One golden example: an exchange of a named operation, or an unrouted request."""
+    """One golden example: an exchange of a named operation, or an unrouted request.
+
+    A `frozen` example may name any revision of a mode profile's rotation chain.
+    """
     if example["operation_id"] is None:
         check_unrouted_example(contract, name, example)
         return
@@ -680,7 +697,7 @@ def check_example(
     response = example["response"]
     errors = contract.response_errors(operation, response["status"], response["body"], template)
     errors += fork_ordinal_errors(response["body"])
-    errors += mode_profile_errors(response["body"])
+    errors += mode_profile_errors(response["body"], frozen=frozen)
     if errors:
         raise ContractError(f"{name}: response invalid: {errors[:3]}")
 
@@ -1052,7 +1069,7 @@ def check_compatibility(
     for name, example in frozen:
         if example["operation_id"] not in served | {None}:
             raise ContractError(f"{name}: a frozen example exercises no served operation")
-        check_example(contract, operations, name, example)
+        check_example(contract, operations, name, example, frozen=True)
     if not frozen:
         raise ContractError("no frozen compatibility examples")
     return len(frozen)
@@ -1247,7 +1264,8 @@ def check_appended(old: object, new: object, where: str = "baseline", key: str =
 
 
 def check_mode_profiles(declaration: object, schema: dict) -> int:
-    """The execution-mode profile declaration is valid, sorted and holds the golden profiles."""
+    """The declaration is valid and sorted, holds the profiles of the rotation chains, and each
+    profile names its chain predecessor as `previous_mode_profile_digest`."""
     errors = [
         f"{'/'.join(map(str, error.absolute_path)) or '$'}: {error.message}"
         for error in Draft202012Validator(schema).iter_errors(declaration)
@@ -1260,25 +1278,44 @@ def check_mode_profiles(declaration: object, schema: dict) -> int:
         identifier.encode() for identifier in identifiers
     ):
         raise ContractError("execution-mode profile declaration: profiles are not sorted")
-    if set(identifiers) != set(GOLDEN_MODE_PROFILE_DIGESTS):
-        raise ContractError("execution-mode profile declaration: profiles are not the golden set")
+    if set(identifiers) != set(MODE_PROFILE_ROTATION_CHAINS):
+        raise ContractError(
+            "execution-mode profile declaration: profiles are not the rotation-chain set"
+        )
+    for identifier, chain in MODE_PROFILE_ROTATION_CHAINS.items():
+        if not chain or len(set(chain)) != len(chain) or not all(
+            re.fullmatch(r"[0-9a-f]{64}", digest) for digest in chain
+        ):
+            raise ContractError(
+                f"{identifier}: the rotation chain is not unique lower-case 64-hex digests"
+            )
+    for profile in profiles:
+        chain = MODE_PROFILE_ROTATION_CHAINS[profile["mode_profile_id"]]
+        predecessor = chain[-2] if len(chain) > 1 else None
+        if profile["previous_mode_profile_digest"] != predecessor:
+            raise ContractError(
+                f"execution-mode profile declaration: {profile['mode_profile_id']} does not "
+                "name its rotation-chain predecessor"
+            )
     return len(identifiers)
 
 
-def mode_profile_errors(value: object, where: str = "$") -> list[str]:
-    """Every disclosed execution-mode profile of a body names its golden digest."""
+def mode_profile_errors(value: object, where: str = "$", frozen: bool = False) -> list[str]:
+    """Every disclosed execution-mode profile of a body names the head of its rotation chain,
+    or, in a `frozen` body, any revision of the chain."""
     errors = []
     if isinstance(value, list):
         for index, item in enumerate(value):
-            errors += mode_profile_errors(item, f"{where}/{index}")
+            errors += mode_profile_errors(item, f"{where}/{index}", frozen)
     elif isinstance(value, dict):
         identifier = value.get("mode_profile_id")
-        if identifier is not None and value.get("mode_profile_digest") != (
-            GOLDEN_MODE_PROFILE_DIGESTS.get(identifier)
-        ):
-            errors.append(f"{where}: mode_profile_digest is not the golden {identifier} digest")
+        if identifier is not None:
+            chain = MODE_PROFILE_ROTATION_CHAINS.get(identifier, ())
+            if value.get("mode_profile_digest") not in (chain if frozen else chain[-1:]):
+                expected = "a rotation-chain" if frozen else "the head"
+                errors.append(f"{where}: mode_profile_digest is not {expected} {identifier} digest")
         for key, item in value.items():
-            errors += mode_profile_errors(item, f"{where}/{key}")
+            errors += mode_profile_errors(item, f"{where}/{key}", frozen)
     return errors
 
 
@@ -1343,10 +1380,23 @@ def restore(value: object, key: str | None = None) -> object:
     return value
 
 
-def check_fixtures(contract: Contract, inputs: Path = FIXTURE_INPUTS) -> int:
+def check_fixtures(
+    contract: Contract, inputs: Path = FIXTURE_INPUTS, oracles: Path = FIXTURE_ORACLES
+) -> int:
+    """Validate every expected exchange; every input and oracle names the mode-profile heads."""
+    oracle_paths = sorted(oracles.glob("*.json"))
+    if not oracle_paths:
+        raise ContractError("no gateway-client-conformance oracles")
+    for path in oracle_paths:
+        errors = mode_profile_errors(load(path))
+        if errors:
+            raise ContractError(f"oracle {path.name}: {errors[:3]}")
     count = 0
     for path in sorted(inputs.glob("*.json")):
         payload = load(path)
+        errors = mode_profile_errors(payload)
+        if errors:
+            raise ContractError(f"{path.name}: {errors[:3]}")
         for subcase in payload["subcases"]:
             for index, exchange in enumerate(subcase["exchanges"], start=1):
                 where = f"{path.name} {subcase['id']} exchange {index}"
