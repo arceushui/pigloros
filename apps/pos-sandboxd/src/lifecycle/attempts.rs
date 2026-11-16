@@ -422,7 +422,7 @@ impl FailedAdmission for FailedInput {
 /// The current `CLOCK_MONOTONIC` time in nanoseconds, if the clock could
 /// report it; TME1 records an unreadable time as missing evidence.
 fn finished_at() -> Option<u64> {
-    crate::monotonic_ns().ok()
+    crate::launcher::clock::monotonic_ns().ok()
 }
 
 /// The recheck an execution runs immediately before its unit starts.
