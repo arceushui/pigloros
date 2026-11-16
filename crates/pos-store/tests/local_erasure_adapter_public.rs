@@ -272,45 +272,9 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
     Ok(())
 }
 
-fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
-    seed_pending_destruction(store)?;
-    record_effects_commit_with_their_owner_result(store)?;
-    refused_effects_commit_nothing(store)?;
-    tombstone_effect_contract(store)
-}
-
-fn record_effects_commit_with_their_owner_result(store: &mut impl LocalErasureStore) -> TestResult {
-    for (effect, tag, seed) in [
-        (
-            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
-            "ELAD1",
-            10,
-        ),
-        (
-            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)?),
-            "ELCG1",
-            11,
-        ),
-        (
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
-            "ELNEG1",
-            12,
-        ),
-    ] {
-        let elo1 = record("ELO1", seed)?;
-        assert_eq!(
-            store.commit_local_owner_effect(effect, &elo1)?,
-            address(&elo1)?
-        );
-        assert_eq!(store.read_object(address(&elo1)?)?, elo1);
-        assert_eq!(
-            store.read_object(address(&record(tag, 1)?)?)?,
-            record(tag, 1)?
-        );
-    }
-
-    // Each owner record has its own ADR-136 size bound: exactly the bound is
-    // admitted and one byte over is refused.
+/// Each owner record has its own ADR-136 size bound: exactly the bound is
+/// admitted and one byte over is refused.
+fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     for (tag, bound, seed) in [
         ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
         ("ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 31),
@@ -355,9 +319,41 @@ fn record_effects_commit_with_their_owner_result(store: &mut impl LocalErasureSt
     Ok(())
 }
 
-/// A record effect under the wrong tag, or a non-ELO1 owner result, commits
-/// nothing.
-fn refused_effects_commit_nothing(store: &mut impl LocalErasureStore) -> TestResult {
+fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
+    seed_pending_destruction(store)?;
+    for (effect, tag, seed) in [
+        (
+            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
+            "ELAD1",
+            10,
+        ),
+        (
+            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)?),
+            "ELCG1",
+            11,
+        ),
+        (
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
+            "ELNEG1",
+            12,
+        ),
+    ] {
+        let elo1 = record("ELO1", seed)?;
+        assert_eq!(
+            store.commit_local_owner_effect(effect, &elo1)?,
+            address(&elo1)?
+        );
+        assert_eq!(store.read_object(address(&elo1)?)?, elo1);
+        assert_eq!(
+            store.read_object(address(&record(tag, 1)?)?)?,
+            record(tag, 1)?
+        );
+    }
+
+    owner_effect_bounds(store)?;
+
+    // A record effect under the wrong tag, or a non-ELO1 owner result,
+    // commits nothing.
     let refused = record("ELO1", 100)?;
     assert_eq!(
         store.commit_local_owner_effect(
@@ -377,11 +373,8 @@ fn refused_effects_commit_nothing(store: &mut impl LocalErasureStore) -> TestRes
         store.read_object(address(&refused)?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    Ok(())
-}
 
-/// The tombstone and its ELO1 commit together.
-fn tombstone_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
+    // The tombstone and its ELO1 commit together.
     let tombstone = LocalOwnerEffectV1::KeyTombstone {
         request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),
