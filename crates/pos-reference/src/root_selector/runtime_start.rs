@@ -62,16 +62,13 @@ pub(super) fn start_provider_runtime(
     admitted: &AdmittedSelectorProvider,
     executable_digest: ExecutableDigest,
 ) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
-    terminate_stale_runtimes(port)
+    deadline_after(STALE_TERMINATION_BOUND)
+        .and_then(|deadline| terminate_stale_runtimes(port, deadline))
         .and_then(|()| remove_stale_endpoints(admitted))
         .and_then(|()| ProviderRuntimeSlot::allocate(admitted))
         .and_then(|slot| admitted_provider_binary(admitted).map(|binary| (slot, binary)))
         .and_then(|(slot, binary)| {
-            start_slot(port, &slot, &binary)
-                .and_then(|observed| {
-                    verify_started_process(&observed, &binary, executable_digest).map(|()| observed)
-                })
-                .and_then(|observed| admit_started_runtime(admitted, slot, &observed))
+            start_and_admit(port, admitted, slot, &binary, executable_digest)
         })
 }
 
@@ -89,38 +86,55 @@ const fn require(condition: bool) -> Result<(), SelectorBoundaryError> {
     }
 }
 
-fn terminate_stale_runtimes(port: &dyn ProviderLifecyclePort) -> Result<(), SelectorBoundaryError> {
-    ObservationChallenge::fresh()
-        .and_then(|challenge| {
-            deadline_after(STALE_TERMINATION_BOUND).map(|deadline| (challenge, deadline))
-        })
-        .and_then(|(challenge, deadline)| {
-            port.terminate_stale_runtimes(challenge, deadline)
-                .map_err(selector_unavailable)
-                .and_then(|observed| require(observed.challenge() == challenge))
-        })
+fn terminate_stale_runtimes(
+    port: &dyn ProviderLifecyclePort,
+    deadline: Instant,
+) -> Result<(), SelectorBoundaryError> {
+    ObservationChallenge::fresh().and_then(|challenge| {
+        port.terminate_stale_runtimes(challenge, deadline)
+            .map_err(selector_unavailable)
+            .and_then(|observed| require(observed.challenge() == challenge))
+    })
 }
 
-fn start_slot(
+/// R11 §5.0 steps 5 to 8 for one allocated slot.
+///
+/// Once the port reports the unit started, every later failure (a wrong
+/// echo, a kernel check, the connection or `describe`) stops it again
+/// through `terminate_stale_runtimes`, the only stop operation (R11 §8.6),
+/// within what remains of the start deadline. The original failure is
+/// returned whatever that stop reports.
+fn start_and_admit(
     port: &dyn ProviderLifecyclePort,
-    slot: &ProviderRuntimeSlot,
+    admitted: &AdmittedSelectorProvider,
+    slot: ProviderRuntimeSlot,
     binary: &AdmittedProviderBinary,
-) -> Result<StartedRuntimeObservation, SelectorBoundaryError> {
+    executable_digest: ExecutableDigest,
+) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
     ObservationChallenge::fresh()
         .and_then(|challenge| {
             deadline_after(RUNTIME_START_BOUND).map(|deadline| (challenge, deadline))
         })
         .and_then(|(challenge, deadline)| {
-            port.start_provider_runtime(&RuntimeSlotTarget::new(challenge, slot, binary), deadline)
-                .map_err(selector_unavailable)
-                .and_then(|observed| {
-                    require(
-                        observed.challenge() == challenge
-                            && observed.lifecycle_scope_id() == slot.lifecycle_scope_id(),
-                    )
-                    .map(|()| observed)
-                })
+            let started = port.start_provider_runtime(
+                &RuntimeSlotTarget::new(challenge, &slot, binary),
+                deadline,
+            );
+            started.map_err(selector_unavailable).and_then(|observed| {
+                require(
+                    observed.challenge() == challenge
+                        && observed.lifecycle_scope_id() == slot.lifecycle_scope_id(),
+                )
+                .and_then(|()| verify_started_process(&observed, binary, executable_digest))
+                .and_then(|()| admit_started_runtime(admitted, slot, &observed))
+                .inspect_err(|_| stop_unadmitted_runtime(port, deadline))
+            })
         })
+}
+
+/// Stop a started but unadmitted runtime; its own failure changes nothing.
+fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort, deadline: Instant) {
+    terminate_stale_runtimes(port, deadline).ok();
 }
 
 /// R11 §5.0 step 7: the observed main process, as the kernel reports it.
@@ -384,66 +398,98 @@ mod tests {
         deadline >= before + bound && deadline <= Instant::now() + bound
     }
 
+    fn deadlines(recorded: &Mutex<Vec<Instant>>) -> TestResult<Vec<Instant>> {
+        Ok(recorded.lock().map_err(|_| "poisoned")?.clone())
+    }
+
     #[test]
-    fn stale_termination_is_bounded_and_must_echo_its_challenge() -> TestResult {
-        let before = Instant::now();
+    fn stale_termination_must_echo_its_challenge() -> TestResult {
+        let deadline = Instant::now() + Duration::from_secs(1);
         let echo = ScriptedPort::new(Reply::Echo, Reply::Echo);
-        assert_eq!(terminate_stale_runtimes(&echo), Ok(()));
-        let deadlines = echo.stale_deadlines.lock().map_err(|_| "poisoned")?;
-        assert_eq!(deadlines.len(), 1);
-        assert!(within(deadlines[0], Duration::from_secs(10), before));
-        drop(deadlines);
+        assert_eq!(terminate_stale_runtimes(&echo, deadline), Ok(()));
+        assert_eq!(deadlines(&echo.stale_deadlines)?, vec![deadline]);
         assert_eq!(
-            terminate_stale_runtimes(&ScriptedPort::new(Reply::WrongChallenge, Reply::Echo)),
+            terminate_stale_runtimes(
+                &ScriptedPort::new(Reply::WrongChallenge, Reply::Echo),
+                deadline
+            ),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         assert_eq!(
-            terminate_stale_runtimes(&ScriptedPort::new(Reply::Refuse, Reply::Echo)),
+            terminate_stale_runtimes(&ScriptedPort::new(Reply::Refuse, Reply::Echo), deadline),
             Err(SelectorBoundaryError::SelectorUnavailable)
         );
         Ok(())
     }
 
     #[test]
-    fn a_started_slot_must_echo_its_challenge_and_scope() -> TestResult {
-        let (_, slot, binary) = fixture()?;
-        let before = Instant::now();
-        let echo = ScriptedPort::new(Reply::Echo, Reply::Echo);
-        let observed = start_slot(&echo, &slot, &binary)?;
-        assert_eq!(observed.lifecycle_scope_id(), slot.lifecycle_scope_id());
-        let deadlines = echo.start_deadlines.lock().map_err(|_| "poisoned")?;
-        assert_eq!(deadlines.len(), 1);
-        assert!(within(deadlines[0], Duration::from_secs(32), before));
-        drop(deadlines);
-        for (reply, expected) in [
-            (
-                Reply::WrongChallenge,
-                SelectorBoundaryError::ArtifactInvalid,
-            ),
-            (Reply::WrongScope, SelectorBoundaryError::ArtifactInvalid),
-            (Reply::Refuse, SelectorBoundaryError::SelectorUnavailable),
-        ] {
-            assert_eq!(
-                start_slot(&ScriptedPort::new(Reply::Echo, reply), &slot, &binary).err(),
-                Some(expected)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn a_failed_stale_termination_starts_nothing() -> TestResult {
+    fn a_failed_stale_termination_is_bounded_and_starts_nothing() -> TestResult {
         let (admitted, _, _) = fixture()?;
+        let before = Instant::now();
         let port = ScriptedPort::new(Reply::Refuse, Reply::Echo);
         assert_eq!(
             start_provider_runtime(&port, &admitted, proc_executable_digest).err(),
             Some(SelectorBoundaryError::SelectorUnavailable)
         );
-        assert!(port
-            .start_deadlines
-            .lock()
-            .map_err(|_| "poisoned")?
-            .is_empty());
+        let stale = deadlines(&port.stale_deadlines)?;
+        assert_eq!(stale.len(), 1);
+        assert!(within(stale[0], Duration::from_secs(10), before));
+        assert!(deadlines(&port.start_deadlines)?.is_empty());
+        Ok(())
+    }
+
+    /// Every failure after the port reported a started unit stops it again
+    /// within the start deadline; a refused start stops nothing.
+    #[test]
+    fn a_started_but_unadmitted_runtime_is_stopped_again() -> TestResult {
+        let (admitted, _, binary) = fixture()?;
+        for (stale, start, digest, expected) in [
+            (
+                Reply::Echo,
+                Reply::WrongChallenge,
+                BINARY_DIGEST,
+                SelectorBoundaryError::ArtifactInvalid,
+            ),
+            (
+                Reply::Echo,
+                Reply::WrongScope,
+                BINARY_DIGEST,
+                SelectorBoundaryError::ArtifactInvalid,
+            ),
+            (
+                Reply::Echo,
+                Reply::Echo,
+                OTHER_DIGEST,
+                SelectorBoundaryError::ArtifactInvalid,
+            ),
+            // Every kernel check passes, but the endpoints are absent, so
+            // the transport is refused; a failing stop keeps that error.
+            (
+                Reply::Refuse,
+                Reply::Echo,
+                BINARY_DIGEST,
+                SelectorBoundaryError::ArtifactInvalid,
+            ),
+        ] {
+            let before = Instant::now();
+            let port = ScriptedPort::new(stale, start);
+            let slot = ProviderRuntimeSlot::allocate(&admitted)?;
+            assert_eq!(
+                start_and_admit(&port, &admitted, slot, &binary, digest).err(),
+                Some(expected)
+            );
+            let started = deadlines(&port.start_deadlines)?;
+            assert_eq!(started.len(), 1);
+            assert!(within(started[0], Duration::from_secs(32), before));
+            assert_eq!(deadlines(&port.stale_deadlines)?, started);
+        }
+        let refused = ScriptedPort::new(Reply::Echo, Reply::Refuse);
+        let slot = ProviderRuntimeSlot::allocate(&admitted)?;
+        assert_eq!(
+            start_and_admit(&refused, &admitted, slot, &binary, BINARY_DIGEST).err(),
+            Some(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert!(deadlines(&refused.stale_deadlines)?.is_empty());
         Ok(())
     }
 
@@ -462,7 +508,11 @@ mod tests {
     fn the_main_process_must_match_the_kernel_and_the_admitted_binary() -> TestResult {
         let (_, slot, binary) = fixture()?;
         assert_eq!(binary.digest(), BINARY_DIGEST(NonZeroU64::MIN, 0)?);
-        let observed = start_slot(&ScriptedPort::new(Reply::Echo, Reply::Echo), &slot, &binary)?;
+        let observed = own_runtime_observation(&RuntimeSlotTarget::new(
+            ObservationChallenge::for_test([1; 16]),
+            &slot,
+            &binary,
+        ))?;
         verify_started_process(&observed, &binary, BINARY_DIGEST)?;
         assert_eq!(
             verify_started_process(&observed, &binary, OTHER_DIGEST),

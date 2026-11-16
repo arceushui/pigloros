@@ -14,8 +14,9 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1,
     AuthorizationDenialEvidenceV1, AuthorizationDenialRecordV1, AuthorizationDenialScopeV1,
     AuthorizationDenialSuppressionV1, AuthorizationExpiryV1, AuthorizationOutcomeV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
-    Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityScopeV1, ConsentEvidenceV1,
+    EntityId, EventId, Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId,
+    WallTime,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -24,6 +25,8 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
+
+mod session;
 
 const MAX_AUTHORIZATION_AUDITS: usize = 1_024;
 /// Denial records one Principal may cause per window before further denials
@@ -234,10 +237,14 @@ pub enum GatewayAuthorizationTarget {
 /// `action` a Principal's grant must cover, and the `purpose` it is
 /// evaluated for (#1361).
 ///
-/// The named constants are the closed set this Gateway serves; the Local
-/// Principal is provisioned with grants named by [`Self::name`]. Later
-/// operations (#303, #304, #309) add a constant with a fresh resource and
-/// action pair and authorize through [`crate::Gateway::authorize_operation`].
+/// The named constants are the closed set this Gateway serves, plus the
+/// Principal network capability [`Self::NETWORK`], which no route
+/// authorizes; the Local Principal is provisioned with grants named by
+/// [`Self::name`], and `Session` discloses the ones its grant covers. Each
+/// constant has its own resource, so a grant covers exactly the constants it
+/// names. Later operations (#303, #304, #309) add a constant with a fresh
+/// resource and action pair and authorize through
+/// [`crate::Gateway::authorize_operation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayOperationV1 {
     name: &'static str,
@@ -247,6 +254,17 @@ pub struct GatewayOperationV1 {
 }
 
 impl GatewayOperationV1 {
+    /// The Principal network capability `gateway.network.v1` (ADR-134 §4):
+    /// it authorizes no operation in v1 and only decides the Session
+    /// `network` disclosure.
+    pub const NETWORK: Self = Self::new(
+        crate::mode_profile::GATEWAY_NETWORK_CAPABILITY_V1,
+        "gateway.network",
+        "use",
+        "network",
+    );
+    /// `GET /v1/session`: read the Principal's own session (#1362).
+    pub const READ_SESSION: Self = Self::new("session.read", "session", "read", "read");
     /// `POST /v1/timelines`: create a root Timeline.
     pub const CREATE_TIMELINE: Self =
         Self::new("timeline.create", "timeline", "create", "operation");
@@ -275,9 +293,12 @@ impl GatewayOperationV1 {
         "world.action.v1.submit",
         "action",
     );
-    /// Every operation this Gateway serves, in name order.
-    pub const ALL: [Self; 5] = [
+    /// Every operation this Gateway serves and the network capability, in
+    /// name order.
+    pub const ALL: [Self; 7] = [
+        Self::NETWORK,
         Self::CREATE_PREDICTION,
+        Self::READ_SESSION,
         Self::CREATE_TIMELINE,
         Self::READ_EVENTS,
         Self::APPEND_SIGNAL,
@@ -331,6 +352,15 @@ impl GatewayOperationV1 {
             .into_iter()
             .find(|operation| operation.name == name)
     }
+}
+
+/// Whether `scope` names `operation`: each [`GatewayOperationV1`] constant
+/// has its own resource, so naming that resource names the operation.
+pub(crate) fn scope_names(scope: &CapabilityScopeV1, operation: GatewayOperationV1) -> bool {
+    scope
+        .resources()
+        .iter()
+        .any(|resource| resource == operation.resource())
 }
 
 /// Public operation inputs resolved by the Gateway before authority evaluation.
@@ -670,6 +700,8 @@ pub struct GatewayAuthorization {
     /// The bound Gateway execution mode of the composition (ADR-134 §6); an
     /// unbound composition admits no action.
     execution_mode: Option<crate::mode_profile::GatewayExecutionModeRevisionV1>,
+    /// The current execution mode `Session` discloses, from the same binding.
+    session_mode: Option<crate::mode_profile::GatewaySessionModeV1>,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
     denial_budget: Arc<Mutex<DenialRecordBudget>>,
@@ -715,6 +747,7 @@ impl GatewayAuthorization {
             source: None,
             revocation_state_current,
             execution_mode: None,
+            session_mode: None,
             commit_lock: Arc::new(AsyncRwLock::new(())),
             audits: Arc::new(Mutex::new(VecDeque::new())),
             denial_budget: Arc::new(Mutex::new(DenialRecordBudget::default())),
@@ -1167,7 +1200,10 @@ impl GatewayAuthorization {
     ///
     /// # Errors
     /// Returns [`crate::mode_profile::GatewayModeErrorV1::RefusedInMode`] for
-    /// an Air-Gapped binding of an authorizer without a store source.
+    /// an Air-Gapped binding of an authorizer without a store source, and
+    /// [`crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused`]
+    /// for a binding to a mode without network of an authority whose grant
+    /// names [`GatewayOperationV1::NETWORK`].
     pub fn with_mode_binding(
         mut self,
         mode: &crate::mode_profile::GatewayModeBindingV1,
@@ -1179,7 +1215,31 @@ impl GatewayAuthorization {
         }
         self.revocation_state_current |= current;
         self.execution_mode = Some(revision);
-        Ok(self)
+        self.session_mode = Some(mode.session_mode());
+        self.refuse_network_without_mode_network()
+    }
+
+    /// ADR-134 §4 and D6: a mode without network refuses an authority whose
+    /// grant names the Principal network capability, so an Air-Gapped
+    /// Session never lists it.
+    fn refuse_network_without_mode_network(
+        self,
+    ) -> Result<Self, crate::mode_profile::GatewayModeErrorV1> {
+        let refused = self
+            .session_mode
+            .as_ref()
+            .is_some_and(|mode| !mode.network_allowed())
+            && self
+                .pinned()
+                .view
+                .authority()
+                .chain()
+                .grants()
+                .iter()
+                .any(|grant| scope_names(grant.scope(), GatewayOperationV1::NETWORK));
+        (!refused)
+            .then_some(self)
+            .ok_or(crate::mode_profile::GatewayModeErrorV1::PrincipalNetworkRefused)
     }
 
     /// The pinned authority registry digest, revocation-freshness claim and
@@ -2261,6 +2321,14 @@ mod tests {
         let mut sorted = names;
         sorted.sort_unstable();
         assert_eq!(names, sorted);
+        // Strictly sorted: no two entries share a name, nor a resource.
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]), "{names:?}");
+        let mut resources = GatewayOperationV1::ALL.map(GatewayOperationV1::resource);
+        resources.sort_unstable();
+        assert!(
+            resources.windows(2).all(|pair| pair[0] < pair[1]),
+            "{resources:?}"
+        );
         for operation in GatewayOperationV1::ALL {
             assert_eq!(GatewayOperationV1::named(operation.name()), Some(operation));
         }

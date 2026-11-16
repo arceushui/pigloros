@@ -30,7 +30,9 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
+use super::payload::{
+    CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, TIMELINE_SLOT,
+};
 use super::ACTOR_ENTITY_ID;
 use crate::observation_v1;
 
@@ -153,29 +155,36 @@ fn host() -> Option<ErasureExecutionHostV1> {
 /// The Gateway of a composition (requirements section 3), with the store file it serves when
 /// it has one.
 ///
-/// `open` is the unprotected in-process harness Gateway. `authorized` is the production serve
-/// composition (#1361, #1360): the first `serve` binds a fresh `SQLite` store to the Local
-/// execution mode, a fixture Local Principal document is provisioned into it with the production
+/// `open` is the unprotected in-process harness Gateway. `authorized` and
+/// `authorized-air-gapped` are the production serve composition (#1361, #1360): the first
+/// `serve` binds a fresh `SQLite` store to the Local or the Air-Gapped execution mode, a fixture
+/// Local Principal document is provisioned into it with the production
 /// `provision_local_principal`, and the Gateway is composed over that store by `local_gateway`
 /// under that binding, which requires the recorded Principal for every protected operation.
 fn compose(composition: CompositionV2) -> Option<(Gateway, Option<ScratchStore>)> {
-    match composition {
-        CompositionV2::Open => host()
-            .and_then(|host| Gateway::unprotected_for_harness(host).ok())
-            .map(|gateway| (gateway, None)),
-        CompositionV2::Authorized => {
-            let store = ScratchStore::new();
-            store_host(&store)
-                .and_then(|mut host| bind_local_mode(&mut host))
-                .and_then(|_| provision_store(&store))
-                .and_then(|()| store_host(&store))
-                .and_then(|mut host| {
-                    bind_local_mode(&mut host)
-                        .and_then(|mode| local_gateway(host, None, &mode).ok())
-                })
-                .map(|gateway| (gateway, Some(store)))
-        }
-    }
+    composition
+        .mode()
+        .map_or_else(open_gateway, authorized_gateway)
+}
+
+/// The unprotected in-process harness Gateway of the `open` composition.
+fn open_gateway() -> Option<(Gateway, Option<ScratchStore>)> {
+    host()
+        .and_then(|host| Gateway::unprotected_for_harness(host).ok())
+        .map(|gateway| (gateway, None))
+}
+
+/// The production serve composition over a fresh store bound to the execution mode `id`.
+fn authorized_gateway(id: GatewayModeProfileIdV1) -> Option<(Gateway, Option<ScratchStore>)> {
+    let store = ScratchStore::new();
+    store_host(&store)
+        .and_then(|mut host| bind_mode(&mut host, id))
+        .and_then(|_| provision_store(&store))
+        .and_then(|()| store_host(&store))
+        .and_then(|mut host| {
+            bind_mode(&mut host, id).and_then(|mode| local_gateway(host, None, &mode).ok())
+        })
+        .map(|gateway| (gateway, Some(store)))
 }
 
 /// The recovered production host of `store`.
@@ -190,11 +199,14 @@ fn store_host(store: &ScratchStore) -> Option<ErasureExecutionHostV1> {
     .ok()
 }
 
-/// Bind the store of `host` to the Local execution mode over a loopback composition, as every
+/// Bind the store of `host` to the execution mode `id` over a loopback composition, as every
 /// `serve` does: the first binds the empty store, a later one attaches to that binding.
-fn bind_local_mode(host: &mut ErasureExecutionHostV1) -> Option<GatewayModeBindingV1> {
+fn bind_mode(
+    host: &mut ErasureExecutionHostV1,
+    id: GatewayModeProfileIdV1,
+) -> Option<GatewayModeBindingV1> {
     bind_gateway_mode_v1(
-        GatewayModeProfileIdV1::Local,
+        id,
         GatewayServeCompositionV1 {
             tcp_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             owntracks_owner_key: None,
@@ -207,9 +219,9 @@ fn bind_local_mode(host: &mut ErasureExecutionHostV1) -> Option<GatewayModeBindi
     .ok()
 }
 
-/// Provision the fixture Local Principal of the `authorized` composition into `store`: it may
-/// create Timelines and read their Events as the fixture actor, and holds no action or signal
-/// grant. Only its document is fixture data.
+/// Provision the fixture Local Principal of the authorized compositions into `store`: it may
+/// create Timelines, read their Events and read its own Session as the fixture actor, and holds
+/// no action, signal or network grant. Only its document is fixture data.
 fn provision_store(store: &ScratchStore) -> Option<()> {
     PrincipalRefV1::try_new([1; 16], "gateway.fixture")
         .ok()
@@ -221,6 +233,7 @@ fn provision_store(store: &ScratchStore) -> Option<()> {
                 [
                     GatewayOperationV1::CREATE_TIMELINE,
                     GatewayOperationV1::READ_EVENTS,
+                    GatewayOperationV1::READ_SESSION,
                 ],
             )
             .ok()
@@ -341,7 +354,9 @@ async fn exchange_all(
     let mut present = false;
     for exchange in &subcase.exchanges {
         let route = exchange.route();
-        let observation = if capabilities.iter().any(|held| held == route.capability()) {
+        let held =
+            route.is_some_and(|route| capabilities.iter().any(|held| held == route.capability()));
+        let observation = if held {
             let service = match exchange.router {
                 RouterV2::Loopback => loopback.clone(),
                 RouterV2::Spectator => spectator.clone(),
@@ -355,7 +370,7 @@ async fn exchange_all(
                 .unwrap_or_default();
             run.steps += 1;
             run.output_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            run.events += u64::from(status == 201 && route.commits());
+            run.events += u64::from(status == 201 && route.is_some_and(RouteV2::commits));
             if exchange.router == RouterV2::Spectator {
                 present |= subcase
                     .canary
