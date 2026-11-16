@@ -85,7 +85,7 @@ devices() {
       backing="$(cat "${block}/loop/backing_file")"
       resolved="$(readlink -e -- "${backing}" || printf -- '-')"
       printf 'loop\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${backing}" "${resolved}" "$(cat "${block}/dev")" \
-        "$(find "${block}" -mindepth 1 -maxdepth 1 -name "${name}p*" -printf '%f\n' | sort | paste -sd, -)"
+        "$(find -H "${block}" -mindepth 1 -maxdepth 1 -name "${name}p*" -printf '%f\n' | sort | paste -sd, -)"
     else
       printf 'dm\t%s\t%s\t%s\t%s\t%s\n' "${name}" "$(cat "${block}/dm/name")" "$(cat "${block}/dm/uuid")" \
         "$(cat "${block}/dev")" "$(find "${block}/slaves" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd, -)"
@@ -139,13 +139,14 @@ provision_runtime() {
 # it when its standard input closes. Afterwards the runtime tree is recorded
 # and removed: restart reconciliation is part (c).
 driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
-  local dir="cases/$1" fifo=/run/piglor-evidence-control control line root pid status=0
+  local dir="cases/$1" fifo=/run/piglor-evidence-control control line root pid status=0 start
   mkdir -p "${dir}"
   printf '%s\n' "$2" "$3" "$4" >"${dir}/arguments"
   provision_runtime
   devices >"${dir}/devices-before"
   # The control FIFO lives on the guest's tmpfs, not on the 9p evidence share.
   mkfifo -m 0600 "${fifo}"
+  start="$(cut -d ' ' -f 1 /proc/uptime)"
   pos-sandboxd-conformance "$2" "$3" "$4" <"${fifo}" >"${dir}/report" 2>"${dir}/driver-stderr" &
   pid=$!
   exec {control}>"${fifo}"
@@ -155,6 +156,9 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
     fi
     sleep 0.5
   done
+  # Seconds from the driver's start to its activation report, for reading
+  # the TCG run against the provider's 60 s MountImage bounds.
+  awk -v start="${start}" '{ printf "activation-seconds\t%.2f\n", $1 - start }' /proc/uptime >"${dir}/timing"
   line="$(head -n 1 "${dir}/report")"
   if [[ ${line} == activation$'\t'mounted$'\t'* ]]; then
     root="${line##*$'\t'}"
@@ -296,6 +300,9 @@ namespaces 1 >pid1-namespaces
 # certificate in /run/verity.d, which only userspace verification would read.
 images="${PIGLOR_EVIDENCE_IMAGES:?}"
 mkdir cases
+# The raw call runs first. Its first MountImage also loads what mountfsd's
+# probing needs, which under TCG can take much of the provider's 60 s bound.
+mountfsd_reply_case "${images}/positive.raw"
 for case in positive tampered wrong-key; do
   driver_case "${case}" "${images}/${case}.raw" "${images}/${case}.der" "$(cat "${images}/${case}.description")"
 done
@@ -304,7 +311,8 @@ cp -- "${images}/wrong-key.crt" /run/verity.d/piglor-untrusted.crt
 find /run/verity.d -mindepth 1 -printf '%p\t%y\n' >cases/verity-d-planted
 driver_case verity-d "${images}/wrong-key.raw" "${images}/wrong-key.der" "$(cat "${images}/wrong-key.description")"
 rm -r -- /run/verity.d
-mountfsd_reply_case "${images}/positive.raw"
 journalctl --dmesg --boot --no-pager --output=cat >cases/kernel-log
+# mountfsd's own log, with monotonic times, for reading each case's refusal.
+journalctl --boot --no-pager --output=short-monotonic --unit=systemd-mountfsd.service >cases/mountfsd-log
 
 printf 'complete\n' >status

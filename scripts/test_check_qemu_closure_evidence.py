@@ -239,7 +239,7 @@ REPLY = json.dumps({
     "partitions": [{"designator": "root", "writable": False, "growFileSystem": False,
                     "partitionNumber": 1, "architecture": "x86-64", "fileSystemType": "erofs",
                     "size": 581632, "offset": 20480, "mountFileDescriptor": 0, "mountPoint": ["/"]}],
-    "singleFileSystem": False, "imagePolicy": "root=signed+erofs:=absent",
+    "singleFileSystem": False, "imagePolicy": "root=signed:=absent",
     "imageSize": 4096, "sectorSize": 512, "imageName": "piglor-evidence-image",
 }, indent=4) + "\n"
 
@@ -289,6 +289,7 @@ def case_files() -> dict[str, bytes | str]:
         "host/images/root-hash.txt": ROOT_HASH,
         "guest/cases/verity-d-planted": "/run/verity.d/piglor-untrusted.crt\tf\n",
         "guest/cases/kernel-log": "device-mapper: verity: 7:1: data block 7 is corrupted\n",
+        "guest/cases/mountfsd-log": "[   12.000000] piglor-qemu-evidence systemd-mountwork[311]: Mounted image.\n",
         "guest/cases/mountfsd-reply/devices-before": "",
         "guest/cases/mountfsd-reply/reply": REPLY,
         "guest/cases/mountfsd-reply/stderr": "",
@@ -306,6 +307,7 @@ def case_files() -> dict[str, bytes | str]:
             f"{base}/arguments": f"{IMAGES}/{image}.raw\n{IMAGES}/{signer}.der\n{description}\n",
             f"{base}/driver-stderr": "",
             f"{base}/driver-status": "0\n",
+            f"{base}/timing": "activation-seconds\t12.50\n",
             f"{base}/devices-before": "",
             f"{base}/devices-after": "",
             f"{base}/runtime-after": RUNTIME_AFTER,
@@ -317,7 +319,7 @@ def case_files() -> dict[str, bytes | str]:
                 f"{base}/report": f"activation\tmounted\t1234\t{ATTEMPT}\nrelease\tdetached\nremoval\tremoved\n",
                 f"{base}/devices-held": HELD_DEVICES,
                 f"{base}/mountinfo-held": MOUNTINFO + (
-                    f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/mapper/{MAPPER} ro\n"),
+                    f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /proc/self/fd/20 ro\n"),
                 f"{base}/dm-table-held": TABLE,
                 f"{base}/readback": (f"file\t{whole}\n"
                                      f"block-0\t0\t{hashlib.sha256(READBACK[:4096]).hexdigest()}\n"),
@@ -1070,7 +1072,7 @@ class EvidenceTests(unittest.TestCase):
         leftover = f"loop\tloop1\t{BACKING}\t{BACKING}\t7:32\tloop1p1,loop1p2,loop1p3\n"
         def without(key):
             return json.dumps({name: value for name, value in json.loads(REPLY).items() if name != key})
-        held_mount = f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/mapper/{MAPPER} ro\n"
+        held_mount = f"90 22 253:0 / {ATTEMPT} ro,relatime shared:50 - erofs /proc/self/fd/20 ro\n"
         other_mount = f"90 22 0:44 / {ATTEMPT} ro,relatime shared:50 - erofs /dev/loop0p1 ro\n"
         changes = [
             # Inventory: a missing case, file, or extra case.
@@ -1130,7 +1132,11 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO}),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + other_mount}),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace(
-                f"/dev/mapper/{MAPPER}", "/dev/loop0p1")}),
+                "/proc/self/fd/20", "/dev/loop0p1")}),
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace(
+                "/proc/self/fd/20", "/proc/self/fd/x")}),
+            lambda f: f.update({f"{positive}/timing": "activation-seconds\tlong\n"}),
+            lambda f: f.pop(f"{positive}/timing"),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace("253:0", "253:1")}),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount + held_mount}),
             lambda f: f.update({f"{positive}/devices-held": HELD_DEVICES.replace("253:0", "dm-0")}),
@@ -1152,7 +1158,8 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"imageSize": 4096', '"imageSize": 4097')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": 4096')}),
-            lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed+erofs:=absent", "root=verity:=absent")}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=verity:=absent")}),
+            lambda f: f.update({f"{reply}/reply": REPLY.replace("root=signed:=absent", "root=signed+erofs:=absent")}),
             lambda f: f.update({f"{reply}/reply": without("imagePolicy")}),
             lambda f: f.update({f"{reply}/reply": "[]\n"}),
             lambda f: f.update({f"{reply}/devices-after": "loop\tloop2\t/run/piglor-evidence-image.raw\t-\t7:64\t\n"}),
@@ -1163,8 +1170,6 @@ class EvidenceTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change):
                 self.refuses(change)
-        # Either effective policy the provider accepts from systemd v260.2 holds.
-        self.verdict(change=lambda f: f.update({f"{reply}/reply": REPLY.replace("signed+erofs", "signed")}))
 
     def test_cli_writes_one_verdict_and_refuses_bad_input(self):
         root = self.evidence()

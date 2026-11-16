@@ -25,7 +25,8 @@ Part (b) runs the production admission, registry and activation path
 - the images: wrong-key carries the positive image's root hash and salt,
   and tampered differs from positive in exactly one root data byte;
 - positive: an image signed by the trusted key mounts as read-only EROFS
-  from /dev/mapper/<name> of a dm-verity device (same major:minor) whose
+  from a dm-verity device (same major:minor; mountfsd's source is the
+  /proc/self/fd path of the node it opened) whose
   live table carries the image's root hash and
   salt and a non-empty root_hash_sig_key_desc, over the three loopNpK
   partitions of one loop device whose backing file resolves in the
@@ -36,8 +37,9 @@ Part (b) runs the production admission, registry and activation path
 - wrong-key, alone and with its certificate in /run/verity.d: mountfsd
   refuses, and no device remains;
 - one raw MountImage reply carries the image's size, 512-byte sectors and
-  the requested image policy, and its devices go away once its descriptors
-  close.
+  the effective image policy root=signed:=absent, and its devices go away
+  once its descriptors close. It runs first, so that its first MountImage
+  also loads what mountfsd's probing needs before the timed driver cases.
 
 scripts/qemu-closure-evidence.sh only records. This checker owns every
 judgement and derives the expected key description from the certificate
@@ -154,16 +156,20 @@ GUEST_FILES = {
 }
 DRIVER_CASES = ("positive", "tampered", "wrong-key", "verity-d")
 MOUNTED_CASES = ("positive", "tampered")
-DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "devices-before",
+DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "timing", "devices-before",
                 "devices-after", "runtime-after"}
 HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
 REPLY_FILES = {"devices-before", "reply", "stderr", "status", "devices-after"}
-CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log"}
+CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
 PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
-# The effective policies the provider accepts from systemd v260.2: the request,
-# or the request without its filesystem flags (ADR-087 Part A.1).
-REPLY_POLICIES = {"root=signed+erofs:=absent", "root=signed:=absent"}
+# The effective policy packaged systemd v260.5 returned on both architectures
+# (run 43854451008): the request without its filesystem flags, which the
+# provider accepts (ADR-087 Part A.1).
+REPLY_POLICY = "root=signed:=absent"
+# mountfsd mounts the dm-verity node it opened through a descriptor, so the
+# mount's source is that descriptor's /proc path, as recorded in that run.
+MOUNT_SOURCE = re.compile(r"/proc/self/fd/\d+")
 READBACK_BLOCKS = 16
 PROCESS_FILES = {"exe", "environ", "namespaces"}
 OID_COMMON_NAME = "2.5.4.3"
@@ -963,7 +969,7 @@ def check_held(evidence: Evidence, case: str, root: str, verity: tuple[str, str]
             mounts.append((fields[2], fields[5].split(","), tail[:1],
                            unescape_mount_field(tail[1]) if len(tail) > 1 else None))
     if len(mounts) != 1 or mounts[0][0] != device or "ro" not in mounts[0][1] \
-            or mounts[0][2] != ["erofs"] or mounts[0][3] != f"/dev/mapper/{dm_name}":
+            or mounts[0][2] != ["erofs"] or not MOUNT_SOURCE.fullmatch(mounts[0][3] or ""):
         raise EvidenceError(f"the {case} root is not mounted once as read-only EROFS from its "
                             f"dm-verity device {device}: {mounts}")
     return {"loop": loop, "backing_file": backing, "partitions": partitions, "dm": mapper,
@@ -979,6 +985,14 @@ def readback_records(evidence: Evidence, case: str) -> dict[str, tuple[str, str]
     if sorted(records) != ["block-0", "file"]:
         raise EvidenceError(f"the {case} readback does not cover the file and its first block")
     return records
+
+
+def activation_seconds(evidence: Evidence, case: str) -> float:
+    """Seconds from the driver's start to its activation report (recorded, not judged)."""
+    match = re.fullmatch(r"activation-seconds\t(\d+\.\d{2})", evidence.line(f"guest/cases/{case}/timing"))
+    if not match:
+        raise EvidenceError(f"malformed {case} timing")
+    return float(match.group(1))
 
 
 def check_mounted_case(evidence: Evidence, case: str, root_verity: tuple[str, str]) -> dict:
@@ -1001,7 +1015,8 @@ def check_mounted_case(evidence: Evidence, case: str, root_verity: tuple[str, st
     for name in ("devices-before", "devices-after"):
         require_no_devices(evidence, f"{base}/{name}")
     check_runtime_after(evidence, case)
-    return {"report": report, "held": held, "readback": records}
+    return {"report": report, "held": held, "readback": records,
+            "activation_seconds": activation_seconds(evidence, case)}
 
 
 def check_refused_case(evidence: Evidence, case: str) -> dict:
@@ -1012,7 +1027,7 @@ def check_refused_case(evidence: Evidence, case: str) -> dict:
     for name in ("devices-before", "devices-after"):
         require_no_devices(evidence, f"{base}/{name}")
     check_runtime_after(evidence, case)
-    return {"report": report}
+    return {"report": report, "activation_seconds": activation_seconds(evidence, case)}
 
 
 def check_runtime_after(evidence: Evidence, case: str) -> None:
@@ -1033,9 +1048,9 @@ def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
     for key, expected in (("imageSize", image_size), ("sectorSize", 512)):
         if not isinstance(reply.get(key), int) or isinstance(reply.get(key), bool) or reply[key] != expected:
             raise EvidenceError(f"the raw MountImage reply's {key} is not {expected}")
-    if reply.get("imagePolicy") not in REPLY_POLICIES:
+    if reply.get("imagePolicy") != REPLY_POLICY:
         raise EvidenceError(f"the raw MountImage reply's imagePolicy {reply.get('imagePolicy')!r} is not "
-                            "the requested one")
+                            f"{REPLY_POLICY}")
     partitions = reply.get("partitions")
     if not isinstance(partitions, list) or [
         (partition.get("designator"), partition.get("fileSystemType"))
