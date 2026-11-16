@@ -167,6 +167,8 @@ pub use pos_core::store::{
     AppendIntent, AppendOrDuplicateOutcome, EventStore, PurgeOutcome, SeqRange, TimelineExport,
     APPEND_IDENTITY_RETENTION_MICROS,
 };
+use std::collections::BTreeSet;
+
 use pos_core::{
     is_consent_event_type, is_geographic_event_type, pipeline_authority_revision_v1,
     pipeline_delegation_revision_v1, pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1,
@@ -201,37 +203,53 @@ pub use pos_core::{
 const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
     pos_core::CounterfactualAdapterSealV1::for_adapter();
 
-/// Check fresh Persona appends against the adapter's current validated registry,
-/// never a cached subject classification. Records include every lifecycle state
-/// and are retained permanently; validation also requires a record for each
-/// epoch high-water entry.
-/// Validate every row bound to one Timeline in a single pass (ADR-136 §2.6).
+/// Validate every row bound to one Timeline, each closure once (ADR-136 §2.6).
 ///
-/// Each bound MRM1 root is validated as its own root first, so each gets its
-/// operation-index and recorder checks. Every other bound row is then
-/// validated as a root unless an earlier walk already visited it, so every
-/// row is validated and each closure is walked once.
+/// `validate` walks one row's closure as its root and returns every address
+/// it visited. The pass runs in an order-independent sequence:
+///
+/// 1. every bound MRM1 row is validated as its own root, so each gets its
+///    operation-index and recorder checks;
+/// 2. every other bound row that no bound row names as a child, and that no
+///    earlier walk visited, is validated as its own root.
+///
+/// Every remaining row is named as a child by a bound row, so following
+/// parents (finitely, since ARD1 addresses hash the child edges and rule out
+/// cycles) reaches a row walked in step 1 or 2, whose closure contains it.
+///
+/// A committed batch binds its complete MRM1 closure, so in a consistent
+/// catalog every non-MRM1 row is visited in step 1 and step 2 walks nothing.
+/// Step 2 walks a row as a root only when its parents are unbound; such a row
+/// must then be `Required`, as any walked root must be, so an unbound parent
+/// of an `Optional` row fails closed whatever the address order.
 fn validate_bound_closures_once(
     rows: &[&pos_core::ArtifactRegistrationCatalogRowV1],
-    mut validate: impl FnMut(
-        pos_core::Hash,
-    ) -> Result<
-        std::collections::BTreeSet<pos_core::Hash>,
-        pos_core::ArtifactRegistrationPersistenceErrorV1,
-    >,
-) -> Result<(), pos_core::ArtifactRegistrationPersistenceErrorV1> {
-    let mut visited = std::collections::BTreeSet::new();
+    mut validate: impl FnMut(pos_core::Hash) -> Result<BTreeSet<pos_core::Hash>, BoundClosureError>,
+) -> Result<(), BoundClosureError> {
+    let mut visited = BTreeSet::new();
     for row in rows.iter().filter(|row| row.is_repro_manifest_root()) {
         visited.extend(validate(row.registration_address())?);
     }
+    let named: BTreeSet<pos_core::Hash> = rows
+        .iter()
+        .flat_map(|row| row.registration().fields().child_artifacts.iter())
+        .map(|edge| edge.registration_address)
+        .collect();
     for row in rows.iter().filter(|row| !row.is_repro_manifest_root()) {
-        if !visited.contains(&row.registration_address()) {
-            visited.extend(validate(row.registration_address())?);
+        let address = row.registration_address();
+        if !named.contains(&address) && !visited.contains(&address) {
+            visited.extend(validate(address)?);
         }
     }
     Ok(())
 }
 
+type BoundClosureError = pos_core::ArtifactRegistrationPersistenceErrorV1;
+
+/// Check fresh Persona appends against the adapter's current validated registry,
+/// never a cached subject classification. Records include every lifecycle state
+/// and are retained permanently; validation also requires a record for each
+/// epoch high-water entry.
 fn ensure_plaintext_preference_allowed(
     registry: Option<&pos_core::KeyRegistryStateV1>,
     entity: EntityId,
@@ -2839,5 +2857,115 @@ mod coverage_entrypoints {
             resolve_timeline_import_public_keys_v1(&store, &export, &[]),
             Err(CoreError::Storage(message)) if message == "registry load failed"
         ));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod bound_closure_tests {
+    use super::*;
+    use pos_core::{
+        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRegistrationCatalogRowV1,
+        ArtifactRegistrationFieldsV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
+        ErasureArtifactClassV1, Hash, OwnerIdV1,
+    };
+    use std::collections::BTreeMap;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn row(
+        artifact_class: ErasureArtifactClassV1,
+        bytes: &[u8],
+        children: &[&ArtifactRegistrationCatalogRowV1],
+    ) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+        let owner_id = OwnerIdV1::from_static("bound-closure-owner");
+        let mut child_artifacts: Vec<_> = children
+            .iter()
+            .map(|child| pos_core::ArtifactChildEdgeV1 {
+                artifact_class: child.artifact_class(),
+                artifact_digest: child.artifact_digest(),
+                registration_address: child.registration_address(),
+                required: true,
+            })
+            .collect();
+        child_artifacts.sort_by_key(|edge| edge.registration_address);
+        let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(artifact_class, bytes),
+            owner_reference: ArtifactRegistrationV1::owner_reference(&owner_id),
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: Vec::new(),
+            key_dependencies: Vec::new(),
+            child_artifacts,
+        })?;
+        Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            artifact_class,
+            registration.fields().artifact_digest,
+            registration.address(),
+            bytes.to_vec(),
+            registration.canonical_cbor(),
+        )?)
+    }
+
+    /// Each bound closure is walked once: MRM1 roots first, then only
+    /// unnamed rows that no earlier walk visited.
+    #[test]
+    fn each_bound_closure_is_walked_exactly_once() -> TestResult {
+        let leaf = row(ErasureArtifactClassV1::TimelineReplay, b"leaf", &[])?;
+        // `orphan` is named by no bound row but lies in the root's closure.
+        let orphan = row(ErasureArtifactClassV1::TimelineReplay, b"orphan", &[])?;
+        let root = row(
+            ErasureArtifactClassV1::ReproManifest,
+            b"\x00\x00MRM1-root",
+            &[&leaf],
+        )?;
+        let child = row(ErasureArtifactClassV1::TimelineReplay, b"child", &[])?;
+        let parent = row(ErasureArtifactClassV1::TimelineReplay, b"parent", &[&child])?;
+        assert!(root.is_repro_manifest_root());
+        let closures: BTreeMap<Hash, BTreeSet<Hash>> = [
+            (
+                root.registration_address(),
+                [&root, &leaf, &orphan]
+                    .iter()
+                    .map(|row| row.registration_address())
+                    .collect(),
+            ),
+            (
+                parent.registration_address(),
+                [&parent, &child]
+                    .iter()
+                    .map(|row| row.registration_address())
+                    .collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut rows = vec![&leaf, &orphan, &root, &child, &parent];
+        rows.sort_by_key(|row| row.registration_address());
+        let mut walks: BTreeMap<Hash, usize> = BTreeMap::new();
+        validate_bound_closures_once(&rows, |address| {
+            *walks.entry(address).or_default() += 1;
+            Ok(closures
+                .get(&address)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([address])))
+        })?;
+        let expected: BTreeMap<Hash, usize> = [
+            (root.registration_address(), 1),
+            (parent.registration_address(), 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(walks, expected);
+
+        // A failed walk fails the pass.
+        assert_eq!(
+            validate_bound_closures_once(&rows, |_| Err(BoundClosureError::CorruptCatalog)),
+            Err(BoundClosureError::CorruptCatalog)
+        );
+        Ok(())
     }
 }

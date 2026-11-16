@@ -1534,6 +1534,50 @@ fn graph_errors_take_precedence_over_a_missing_source_timeline(
     Ok(())
 }
 
+/// Derives like the private-data owner but rejects every committed artifact.
+struct RejectingPrivateOwner;
+
+impl ArtifactRegistrationOwnerVerifierV1 for RejectingPrivateOwner {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        PRIVATE_OWNER.derive_native_registration(owner_id, artifact_class, artifact_bytes)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+}
+
+#[test]
+fn owner_rejection_takes_precedence_over_the_source_timeline(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root_address, inputs) =
+        prepare_repro_manifest_inputs(0x51, timeline(2), &PRIVATE_OWNER)?;
+    for source_timeline in [None, Some(timeline(9))] {
+        assert_eq!(
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs.clone(),
+                &RejectingPrivateOwner,
+            )
+            .err(),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+        );
+    }
+    Ok(())
+}
+
 /// Commit two closures from Timeline 2 and one from Timeline 3, then read
 /// each Timeline at, and one below, its exact row count.
 fn timeline_binding_contract<S>(
