@@ -900,13 +900,24 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
-    APT_UPDATE = "timeout --kill-after=15 180 apt-get update --error-on=any"
     EDGE_ENTRY = "https://mirrors.edge.kernel.org/ubuntu\tpriority:1\n"
     SIMPLE_SOURCES = "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n"
+    THIRD_PARTY_SOURCE = "deb [arch=amd64] https://packages.microsoft.com/ubuntu/24.04/prod noble main\n"
+
+    @staticmethod
+    def apt_command(apt_dir: pathlib.Path, arguments: str, *, bounded: bool = True) -> str:
+        """The recorded apt-get call, scoped to the rewritten Ubuntu sources."""
+        scope = (
+            "-o Dir::Etc::sourcelist=/dev/null "
+            f"-o Dir::Etc::sourceparts={apt_dir}/pigloros-sources.d"
+        )
+        bound = "timeout --kill-after=10 120 " if bounded else ""
+        return f"{bound}apt-get {scope} {arguments}"
 
     def run_ubuntu_mirror_preparation(
         self, sources: str, runner_lists: dict[str, str],
         packages: tuple[str, ...] = ("b3sum", "jq"), apt_results: tuple[int, ...] = (),
+        extra_sources: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, dict[str, str], list[tuple[str, str]]]:
         """Run the installer against a sandboxed apt directory.
 
@@ -920,6 +931,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             (apt_dir / "sources.list.d").mkdir(parents=True)
             (apt_dir / "apt.conf.d").mkdir()
             (apt_dir / "sources.list.d/ubuntu.sources").write_text(sources)
+            for name, contents in (extra_sources or {}).items():
+                (apt_dir / "sources.list.d" / name).write_text(contents)
             for name, contents in runner_lists.items():
                 (apt_dir / name).write_text(contents)
             tools = fixture / "bin"
@@ -987,12 +1000,21 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
             "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
         )
-        completed, apt_dir, written, apt_calls = self.run_ubuntu_mirror_preparation(original, {
-            "apt-mirrors.txt": runner_list,
-            "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
-        })
+        completed, apt_dir, written, apt_calls = self.run_ubuntu_mirror_preparation(
+            original,
+            {
+                "apt-mirrors.txt": runner_list,
+                "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
+            },
+            extra_sources={"microsoft-prod.list": self.THIRD_PARTY_SOURCE},
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         redirected = f"\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\n"
+        rewritten = original.replace(
+            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n", redirected,
+        ).replace(
+            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n", redirected,
+        )
         mirror_list = (
             self.EDGE_ENTRY
             + "http://azure.archive.ubuntu.com/ubuntu\tpriority:2\n"
@@ -1012,18 +1034,18 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 'Acquire::http::Timeout "10";\n'
                 'Acquire::https::Timeout "10";\n'
             ),
-            "sources.list.d/ubuntu.sources": original.replace(
-                "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n", redirected,
-            ).replace(
-                "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n", redirected,
-            ),
+            "sources.list.d/ubuntu.sources": rewritten,
+            # The third-party source stays as it was and outside every apt call:
+            # the scoped parts directory holds only the Ubuntu sources.
+            "sources.list.d/microsoft-prod.list": self.THIRD_PARTY_SOURCE,
+            "pigloros-sources.d/ubuntu.sources": rewritten,
         })
         # Both network phases are bounded; installation reads only the
-        # downloaded packages.
+        # downloaded packages from the same Ubuntu-only indices.
         self.assertEqual(apt_calls, [
-            (self.APT_UPDATE, mirror_list),
-            ("timeout --kill-after=15 180 apt-get install --yes --download-only b3sum jq", mirror_list),
-            ("apt-get install --yes --no-download b3sum jq", mirror_list),
+            (self.apt_command(apt_dir, "update --error-on=any"), mirror_list),
+            (self.apt_command(apt_dir, "install --yes --download-only b3sum jq"), mirror_list),
+            (self.apt_command(apt_dir, "install --yes --no-download b3sum jq", bounded=False), mirror_list),
         ])
 
     def test_ubuntu_mirror_keeps_the_ubuntu_fallbacks_without_a_runner_list(self) -> None:
@@ -1038,6 +1060,22 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             written["sources.list.d/ubuntu.sources"],
             f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n",
         )
+
+    def test_ubuntu_mirror_leaves_a_direct_host_security_stanza_untouched(self) -> None:
+        # The EC2-hosted image points its security stanza straight at the host.
+        security = (
+            "Types: deb\nURIs: http://security.ubuntu.com/ubuntu\nSuites: noble-security\n"
+        )
+        completed, apt_dir, written, _ = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES + "\n" + security, {},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rewritten = (
+            f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n"
+            "\n" + security
+        )
+        self.assertEqual(written["sources.list.d/ubuntu.sources"], rewritten)
+        self.assertEqual(written["pigloros-sources.d/ubuntu.sources"], rewritten)
 
     def test_ubuntu_mirror_keeps_a_runner_entry_without_a_trailing_newline(self) -> None:
         completed, _, written, _ = self.run_ubuntu_mirror_preparation(self.SIMPLE_SOURCES, {
@@ -1067,15 +1105,17 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertIn("::error::usage:", completed.stdout)
         self.assertEqual(apt_calls, [])
 
-    def assert_edge_free_retry(self, apt_results: tuple[int, ...], failed_calls: int) -> None:
-        completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+    def assert_edge_free_retry(
+        self, apt_results: tuple[int, ...], failed_calls: int, failure: str,
+    ) -> None:
+        completed, apt_dir, _, apt_calls = self.run_ubuntu_mirror_preparation(
             self.SIMPLE_SOURCES, {}, packages=("--no-install-recommends", "valgrind"),
             apt_results=apt_results,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn(
-            "::warning::apt could not refresh indices and download packages within 180s per "
-            "phase; retrying without https://mirrors.edge.kernel.org/ubuntu\n",
+            f"::warning::apt {failure} on the Ubuntu sources; retrying once with a mirror "
+            "list without https://mirrors.edge.kernel.org/ubuntu\n",
             completed.stdout,
         )
         with_edge = self.EDGE_ENTRY + (
@@ -1086,39 +1126,66 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
             "http://security.ubuntu.com/ubuntu\tpriority:2\n"
         )
-        download = (
-            "timeout --kill-after=15 180 apt-get install --yes --download-only "
-            "--no-install-recommends valgrind"
+        update = self.apt_command(apt_dir, "update --error-on=any")
+        download = self.apt_command(
+            apt_dir, "install --yes --download-only --no-install-recommends valgrind",
         )
-        first_attempt = [(self.APT_UPDATE, with_edge), (download, with_edge)][:failed_calls]
+        install = self.apt_command(
+            apt_dir, "install --yes --no-download --no-install-recommends valgrind", bounded=False,
+        )
+        first_attempt = [(update, with_edge), (download, with_edge)][:failed_calls]
         self.assertEqual(apt_calls, first_attempt + [
-            (self.APT_UPDATE, without_edge),
-            (download, without_edge),
-            ("apt-get install --yes --no-download --no-install-recommends valgrind", without_edge),
+            (update, without_edge), (download, without_edge), (install, without_edge),
         ])
 
-    def test_ubuntu_mirror_retries_without_edge_when_the_refresh_stalls(self) -> None:
-        # 124 is timeout's exit status once the 180 s bound expires.
-        self.assert_edge_free_retry((124,), failed_calls=1)
+    def test_ubuntu_mirror_retries_without_edge_when_the_refresh_times_out(self) -> None:
+        # 124 is timeout's status once the 120 s bound expires; 137 is the
+        # SIGKILL it sends when apt ignores SIGTERM for the 10 s grace.
+        for status in (124, 137):
+            with self.subTest(status=status):
+                self.assert_edge_free_retry(
+                    (status,), failed_calls=1,
+                    failure=f"index refresh timed out after 120s (status {status})",
+                )
 
     def test_ubuntu_mirror_retries_without_edge_when_a_package_download_fails(self) -> None:
         # apt-get exits 100 when edge is unreachable (IPv6 "Network unreachable").
-        self.assert_edge_free_retry((0, 100), failed_calls=2)
+        self.assert_edge_free_retry(
+            (0, 100), failed_calls=2, failure="package download failed with status 100",
+        )
 
     def test_ubuntu_mirror_fails_closed_when_the_edge_free_retry_fails(self) -> None:
-        for apt_results in ((124, 124), (0, 100, 0, 100), (100, 0, 124)):
+        cases = {
+            (124, 124): "index refresh timed out after 120s (status 124)",
+            (0, 100, 0, 100): "package download failed with status 100",
+            (100, 0, 137): "package download timed out after 120s (status 137)",
+        }
+        for apt_results, failure in cases.items():
             with self.subTest(apt_results=apt_results):
                 completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
                     self.SIMPLE_SOURCES, {}, apt_results=apt_results,
                 )
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn(
-                    "::error::apt could not refresh indices and download packages without "
-                    "https://mirrors.edge.kernel.org/ubuntu either; failing closed\n",
+                    f"::error::apt {failure} on the Ubuntu sources again without "
+                    "https://mirrors.edge.kernel.org/ubuntu; failing closed\n",
                     completed.stdout,
                 )
                 self.assertEqual(len(apt_calls), len(apt_results))
                 self.assertNotIn("--no-download", apt_calls[-1][0])
+
+    def test_ubuntu_mirror_fails_closed_when_the_offline_install_fails(self) -> None:
+        completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, {}, apt_results=(0, 0, 100),
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "::error::apt could not install the downloaded packages; failing closed\n",
+            completed.stdout,
+        )
+        self.assertEqual(len(apt_calls), 3)
+        self.assertIn("--no-download", apt_calls[-1][0])
+        self.assertNotIn("::warning::", completed.stdout)
 
     def test_ubuntu_dependency_installers_use_only_the_bounded_installer(self) -> None:
         installers = {}
