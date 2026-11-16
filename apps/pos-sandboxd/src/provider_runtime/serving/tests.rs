@@ -1,6 +1,6 @@
-//! ADR-069 R11 §5.1 step 8 and §7 in state `Starting`, against the signed
-//! test installation staged as root in the isolated container (invariants
-//! 9 to 12, 16 and 17).
+//! ADR-069 R11 §5.1 steps 7 and 8 and §7 in the states `Starting`, `Open`
+//! and `ReconcileFailed`, against the signed test installation staged as
+//! root in the isolated container (invariants 9 to 13, 15 to 17).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -9,7 +9,8 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{mpsc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
@@ -21,10 +22,15 @@ use pos_reference::sandbox_provider_protocol::{
 
 use super::{root_peer, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
+use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
-    bind_as_provider, encode, in_isolated_root, install_spi1, spi1, TestResult, RUNTIME_SEED,
+    bind_as_provider, encode, in_isolated_root, install_spi1, spi1, test_lifecycle, Scripted,
+    TestResult, RUNTIME_SEED,
 };
-use crate::provider_runtime::{serve_with, ProviderRuntimeError, ProviderStartupError};
+use crate::provider_runtime::{
+    serve_with, AdmissionState, ProviderRuntimeError, ProviderStartupError, RuntimeAuthority,
+};
+use crate::AttemptLifecycle;
 
 const RUNTIME: &str = "/run/pigloros";
 const EXECUTE: &str = "/run/pigloros/provider-execute.sock";
@@ -309,10 +315,13 @@ fn refuses_by_precedence(key: &VerifyingKey, authority: Authority) -> TestResult
     Ok(())
 }
 
-/// Cancel and reconcile pass step 6 and get SPE1 11 (invariant 12).
-fn refuses_attempt_operations_while_starting(
+/// Cancel and reconcile pass step 6 and get SPE1 `code`: 11 while the
+/// runtime is `Starting` or `ReconcileFailed` (invariants 12 and 13), 15 once
+/// it is `Open` with no execute port (invariant 15).
+fn answers_attempt_operations(
     key: &VerifyingKey,
     authority: Authority,
+    code: SandboxProviderErrorCode,
 ) -> TestResult {
     let cancel = attempt_request("SCQ1", authority)?;
     let decoded = SandboxCancelRequest::from_canonical_cbor(&cancel)?;
@@ -320,7 +329,7 @@ fn refuses_attempt_operations_while_starting(
         &exchange(&[&cancel])?,
         key,
         (2, [8; 16], decoded.request_digest, Some([9; 16])),
-        SandboxProviderErrorCode::SandboxUnavailable,
+        code,
     )?;
     let reconcile = attempt_request("SRQ1", authority)?;
     let decoded = SandboxReconcileRequest::from_canonical_cbor(&reconcile)?;
@@ -328,8 +337,95 @@ fn refuses_attempt_operations_while_starting(
         &exchange(&[&reconcile])?,
         key,
         (3, [8; 16], decoded.request_digest, Some([9; 16])),
-        SandboxProviderErrorCode::SandboxUnavailable,
+        code,
     )
+}
+
+/// Send cancel requests until one gets SPE1 `15`: restart reconciliation
+/// opened admission.
+fn await_open(key: &VerifyingKey, authority: Authority) -> TestResult {
+    let deadline = Instant::now() + CLIENT_TIMEOUT;
+    let cancel = attempt_request("SCQ1", authority)?;
+    while refusal(&exchange(&[&cancel])?, key)?.code != SandboxProviderErrorCode::UnknownAttempt {
+        if Instant::now() > deadline {
+            return Err("admission never opened".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// Step 7 with a restart reconciliation that fails as soon as it runs.
+fn never_reconciled() -> impl FnOnce(&RuntimeAuthority) -> Result<Scripted, ProviderRuntimeError> {
+    |_| Ok(Scripted(mpsc::channel().1))
+}
+
+/// A startup refusal, a step 7 refusal and a pre-existing node at an
+/// endpoint each bind nothing and send no READY=1.
+fn binds_nothing_on_a_refusal() -> TestResult {
+    assert_eq!(
+        serve_with(
+            || Err(ProviderStartupError::SlotCount),
+            never_reconciled(),
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::Startup(ProviderStartupError::SlotCount)
+    );
+    let authority = bind_as_provider()??;
+    assert_eq!(
+        serve_with(
+            move || Ok(authority),
+            |_| Err::<Scripted, _>(ProviderRuntimeError::HostUnavailable),
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::HostUnavailable
+    );
+    assert!(!Path::new(EXECUTE).exists());
+    fs::write(EXECUTE, b"")?;
+    let authority = bind_as_provider()??;
+    assert_eq!(
+        serve_with(
+            move || Ok(authority),
+            never_reconciled(),
+            Some(OsStr::new(NOTIFY))
+        ),
+        ProviderRuntimeError::UnsafeEndpoint
+    );
+    fs::remove_file(EXECUTE)?;
+    assert!(!Path::new(CONTROL).exists());
+    Ok(())
+}
+
+/// Reconciliation opens admission. With no execute port, execute is still
+/// refused with 11, cancel and reconcile name an unknown attempt
+/// (invariant 15), and describe still answers. The returned runtime tree
+/// must outlive the lifecycle.
+fn serves_open_without_an_execute_port(
+    key: &VerifyingKey,
+    retained: Authority,
+    staged: &StagedInstallation,
+    reconciled: &mpsc::Sender<Result<AttemptLifecycle, ReconcileError>>,
+) -> TestResult<tempfile::TempDir> {
+    let (runtime, lifecycle) = test_lifecycle()?;
+    reconciled.send(Ok(lifecycle))?;
+    await_open(key, retained)?;
+    answers_attempt_operations(key, retained, SandboxProviderErrorCode::UnknownAttempt)?;
+    let execute = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+    assert_refused(
+        &exchange(&[staged.evaluation(), staged.request()])?,
+        key,
+        (
+            1,
+            execute.request.request_id,
+            execute.request_digest,
+            Some(execute.attempt_id),
+        ),
+        SandboxProviderErrorCode::SandboxUnavailable,
+    )?;
+    let bytes = describe([4; 16], retained)?;
+    SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+        .verify_signature(key)?;
+    Ok(runtime)
 }
 
 /// EVR1 then SPX1: the precedence of each, step 6, then SPE1 11.
@@ -423,23 +519,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     let staged = stage()?;
     let manager = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(&NOTIFY[1..])?)?;
     manager.set_read_timeout(Some(CLIENT_TIMEOUT))?;
-    // A startup refusal binds nothing.
-    assert_eq!(
-        serve_with(
-            || Err(ProviderStartupError::SlotCount),
-            Some(OsStr::new(NOTIFY))
-        ),
-        ProviderRuntimeError::Startup(ProviderStartupError::SlotCount)
-    );
-    // A pre-existing node at an endpoint: no bind and no READY=1.
-    fs::write(EXECUTE, b"")?;
-    let authority = bind_as_provider()??;
-    assert_eq!(
-        serve_with(move || Ok(authority), Some(OsStr::new(NOTIFY))),
-        ProviderRuntimeError::UnsafeEndpoint
-    );
-    fs::remove_file(EXECUTE)?;
-    assert!(!Path::new(CONTROL).exists());
+    binds_nothing_on_a_refusal()?;
     let authority = bind_as_provider()??;
     let (admitted, _, _) = &authority;
     let key = *admitted.provider().runtime_attestation_key();
@@ -449,8 +529,15 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
-    let served =
-        std::thread::spawn(move || serve_with(move || Ok(authority), Some(OsStr::new(NOTIFY))));
+    // Restart reconciliation runs until the test sends its outcome.
+    let (reconciled, reconciling) = mpsc::channel();
+    let served = std::thread::spawn(move || {
+        serve_with(
+            move || Ok(authority),
+            move |_| Ok(Scripted(reconciling)),
+            Some(OsStr::new(NOTIFY)),
+        )
+    });
     // The first datagram is READY=1, sent after both leaves are owner-only
     // (invariant 9).
     let mut ready = [0; 16];
@@ -483,7 +570,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
         )
     );
     refuses_by_precedence(&key, retained)?;
-    refuses_attempt_operations_while_starting(&key, retained)?;
+    answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
     refuses_execute_while_starting(&key, &staged)?;
     // A root control connection is closed with zero bytes.
     assert!(exchange_at(CONTROL, b"\0\0\0\x01x")?.is_empty());
@@ -505,6 +592,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     // gets the SDY1 and a clean EOF.
     let trailing = exchange(&[&describe([3; 16], retained)?, b"trailing"])?;
     SandboxDescribeResponse::from_canonical_cbor(unframe(&trailing)?)?.verify_signature(&key)?;
+    let runtime = serves_open_without_an_execute_port(&key, retained, &staged, &reconciled)?;
     let replacement = replace_execute_leaf()?;
     let replaced = fs::symlink_metadata(EXECUTE)?.ino();
     assert_eq!(
@@ -515,6 +603,7 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     assert_eq!(fs::symlink_metadata(EXECUTE)?.ino(), replaced);
     assert!(!Path::new(CONTROL).exists());
     drop(replacement);
+    drop(runtime);
     drop(staged);
     Ok(())
 }
@@ -556,9 +645,9 @@ fn assert_expired(stream: &mut UnixStream, key: &VerifyingKey) -> TestResult {
 }
 
 #[test]
-fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
+fn full_pools_and_a_failed_reconcile_refuse() -> TestResult {
     if !in_isolated_root(
-        "provider_runtime::serving::tests::connections_beyond_the_pool_are_refused_as_busy",
+        "provider_runtime::serving::tests::full_pools_and_a_failed_reconcile_refuse",
     )? {
         return Ok(());
     }
@@ -569,7 +658,24 @@ fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
-    let responder = Responder::new(&admitted, &signer);
+    // A failed reconciliation keeps cancel and reconcile refused with 11
+    // for the life of the process (invariant 13).
+    let failed = OnceLock::from(AdmissionState::ReconcileFailed);
+    let responder = Responder::new(&admitted, &signer, &failed);
+    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
+    std::thread::scope(|scope| -> TestResult {
+        let serving = scope.spawn(|| responder.serve(&execute, &control, 4));
+        answers_attempt_operations(&key, retained, SandboxProviderErrorCode::SandboxUnavailable)?;
+        let replacement = replace_execute_leaf()?;
+        assert_eq!(
+            serving.join().map_err(|_| "the runtime panicked")?,
+            ProviderRuntimeError::UnsafeEndpoint
+        );
+        drop(replacement);
+        Ok(())
+    })?;
+    drop((execute, control));
+    fs::remove_file(EXECUTE)?;
     // A full pool of one: the next connection is accepted and refused with
     // SPE1 12 at once (journal 22582).
     let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;

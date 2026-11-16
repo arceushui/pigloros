@@ -1,5 +1,5 @@
-//! Serving both bound endpoints while the runtime is `Starting` (ADR-069 R11
-//! §6 steps 5 to 7, §7.1, §7.2 and §7.4).
+//! Serving both bound endpoints while the runtime is `Starting`, `Open` or
+//! `ReconcileFailed` (ADR-069 R11 §6 steps 5 to 7, §7.1, §7.2 and §7.4).
 //!
 //! One acceptor polls both listeners. Before every accept it checks both
 //! endpoints, and after it the accepted one; a failed check closes both
@@ -19,8 +19,12 @@
 //! steps 1 to 6 under the initial control deadline (BHC1 limit 16), each
 //! failure with that step's SPE1 code. An expired deadline is a step 1
 //! failure (journal 22582). Then `describe` gets the SDY1 of the startup
-//! authority, and every other operation SPE1 `11 SandboxUnavailable`:
-//! restart reconciliation has not opened admission. Whatever the request
+//! authority in every state. Execute gets SPE1 `11 SandboxUnavailable` in
+//! every state: no execute port is composed yet (R11 §7.3, #443). Cancel and
+//! reconcile get SPE1 `11` while the runtime is `Starting` or
+//! `ReconcileFailed`, and SPE1 `15 UnknownAttempt` once it is `Open`:
+//! without an execute port no attempt can enter this runtime, so every
+//! attempt is unknown (R11 §10 invariant 15). Whatever the request
 //! left unread is read first, so the peer sees the answer and a clean EOF.
 //! Each record is signed by the runtime key, verified before emission,
 //! written under its own short deadline and followed by server write EOF.
@@ -36,6 +40,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::OnceLock;
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,7 +56,7 @@ use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
-use super::{unavailable, ProviderRuntimeError};
+use super::{unavailable, AdmissionState, ProviderRuntimeError};
 use crate::{sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner, RuntimeSignerError};
 
 /// The framing bound of every provider record (ADR-069 §4).
@@ -175,18 +180,25 @@ struct Workers<'scope> {
     refusing: Vec<ScopedJoinHandle<'scope, ()>>,
 }
 
-/// The startup authority that answers requests, and its one signer.
+/// The startup authority that answers requests, its one signer, and the
+/// admission state restart reconciliation sets (unset while `Starting`).
 pub(super) struct Responder<'a> {
     admitted: &'a AdmittedSelectorProvider,
     signer: &'a KeyFileRuntimeSigner,
+    admission: &'a OnceLock<AdmissionState>,
 }
 
 impl<'a> Responder<'a> {
     pub(super) const fn new(
         admitted: &'a AdmittedSelectorProvider,
         signer: &'a KeyFileRuntimeSigner,
+        admission: &'a OnceLock<AdmissionState>,
     ) -> Self {
-        Self { admitted, signer }
+        Self {
+            admitted,
+            signer,
+            admission,
+        }
     }
 
     /// Serve `execute` and `control` until a listener invariant fails,
@@ -315,7 +327,7 @@ impl<'a> Responder<'a> {
             }
             (Ok(identity), Admission::Answered) => self.refuse(Refusal::Authenticated {
                 identity,
-                code: SandboxProviderErrorCode::SandboxUnavailable,
+                code: self.closed(identity.operation),
             }),
             (Err(refusal), _) => self.refuse(refusal),
         };
@@ -460,6 +472,17 @@ impl<'a> Responder<'a> {
                 identity,
                 code: SandboxProviderErrorCode::AuthorityMismatch,
             })
+        }
+    }
+
+    /// The SPE1 code of an authenticated execute, cancel or reconcile
+    /// request (module docs, R11 §7.1).
+    fn closed(&self, operation: u8) -> SandboxProviderErrorCode {
+        match (self.admission.get(), operation) {
+            (Some(AdmissionState::Open { .. }), CANCEL | RECONCILE) => {
+                SandboxProviderErrorCode::UnknownAttempt
+            }
+            _ => SandboxProviderErrorCode::SandboxUnavailable,
         }
     }
 
