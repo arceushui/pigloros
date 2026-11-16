@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use super::{ProviderExecutionPolicy, StagingError};
+use super::{OutputReservationRefused, ProviderExecutionPolicy, StagingError};
 use crate::provider_admission::AdmittedAuthority;
 
 /// Provider-owned configuration; per-attempt limits never come from configuration.
@@ -287,35 +287,38 @@ impl AttemptSlot {
     pub(super) fn output(
         self: &Arc<Self>,
         policy: &ProviderExecutionPolicy,
-        bytes: u64,
-    ) -> Result<StagingCharge, StagingError> {
-        self.output_with_limit(policy.limit(8), bytes)
+    ) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.output_with_limit(policy.limit(8))
     }
 
+    /// Reserve exactly `ceiling` output bytes once; `None` once reserved.
     fn output_with_limit(
         self: &Arc<Self>,
         ceiling: u64,
-        bytes: u64,
-    ) -> Result<StagingCharge, StagingError> {
-        if bytes > ceiling {
-            return Err(StagingError::OutputTooLarge);
-        }
+    ) -> Option<Result<StagingCharge, OutputReservationRefused>> {
         let mut state = self.shared.state();
         let mut claimed = self
             .output_claimed
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if *claimed {
-            return Err(StagingError::OutputAlreadyReserved);
+            return None;
         }
-        let total = self.shared.total(&state, bytes)?;
+        // `total` refuses only a closed ledger or an aggregate overflow.
+        let total = match self.shared.total(&state, ceiling) {
+            Ok(total) => total,
+            Err(StagingError::CleanupFailed) => {
+                return Some(Err(OutputReservationRefused::AdmissionClosed))
+            }
+            Err(_) => return Some(Err(OutputReservationRefused::AggregateExceeded)),
+        };
         *claimed = true;
         state.usage.reserved_bytes = total;
         drop((state, claimed));
-        Ok(StagingLedger {
+        Some(Ok(StagingLedger {
             shared: Arc::clone(&self.shared),
         }
-        .charge(bytes, None, Some(Arc::clone(self))))
+        .charge(ceiling, None, Some(Arc::clone(self)))))
     }
 }
 
@@ -539,20 +542,17 @@ mod tests {
         assert_eq!(ledger.usage().reserved_bytes, 100);
         let before = ledger.usage();
         assert!(matches!(
-            slot.output_with_limit(2, 3),
-            Err(StagingError::OutputTooLarge)
-        ));
-        assert!(matches!(
-            slot.output_with_limit(u64::MAX, u64::MAX),
-            Err(StagingError::AggregateExceeded)
+            slot.output_with_limit(u64::MAX),
+            Some(Err(OutputReservationRefused::AggregateExceeded))
         ));
         assert_eq!(ledger.usage(), before);
         input.finish_input();
-        let output = slot.output_with_limit(2, 2)?;
-        assert!(matches!(
-            slot.output_with_limit(2, 0),
-            Err(StagingError::OutputAlreadyReserved)
-        ));
+        let output = slot
+            .output_with_limit(2)
+            .ok_or("the first output reservation was refused")??;
+        // The attempt's one reservation is made; a second is not expressible.
+        assert!(slot.output_with_limit(2).is_none());
+        assert_eq!(ledger.usage().reserved_bytes, 102);
         assert_eq!(ledger.usage().attempts, 1);
         drop((slot, input));
         assert_eq!(ledger.usage().attempts, 1);
@@ -696,8 +696,8 @@ mod tests {
             Err(StagingError::CleanupFailed)
         ));
         assert!(matches!(
-            slot.output_with_limit(1, 1),
-            Err(StagingError::CleanupFailed)
+            slot.output_with_limit(1),
+            Some(Err(OutputReservationRefused::AdmissionClosed))
         ));
         assert!(matches!(input.recheck(), Err(StagingError::CleanupFailed)));
         drop((slot, input, storage));
@@ -739,7 +739,9 @@ mod tests {
         .join()
         .is_err());
         input.finish_input();
-        let output = slot.output_with_limit(0, 0)?;
+        let output = slot
+            .output_with_limit(0)
+            .ok_or("the output reservation was refused")??;
         input.record_leak();
         drop((slot, input, output));
         assert_eq!(ledger.usage().reserved_bytes, 0);

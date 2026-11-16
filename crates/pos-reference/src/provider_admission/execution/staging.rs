@@ -2,8 +2,8 @@
 
 use super::super::HeldImageAdmission;
 use super::{
-    AdmittedProviderExecution, PreparedProviderExecution, ProviderExecutionPolicy, StagingCharge,
-    StagingError,
+    AdmittedProviderExecution, OutputReservationRefused, PreparedProviderExecution,
+    ProviderExecutionPolicy, StagingCharge, StagingError,
 };
 #[cfg(test)]
 use super::{StagingLedger, StagingLimits, StagingUsage};
@@ -242,12 +242,13 @@ impl VerifiedStagedInput {
         self.execution.read_exact_at(buffer, offset)
     }
 
-    /// Reserve this attempt's bounded output, retaining its attempt slot.
+    /// Reserve this attempt's one output of exactly ELM1[8] bytes, retaining
+    /// its attempt slot (ADR-069 R10 §4.7).
     ///
-    /// # Errors
-    /// Refuses duplicate output, ID-8 excess or aggregate overflow.
-    pub fn reserve_output(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
-        self.execution.reserve_output(bytes)
+    /// `None` once the reservation was made: an attempt has one output.
+    #[must_use = "a dropped reservation releases its bytes at once"]
+    pub fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.execution.reserve_output()
     }
 }
 

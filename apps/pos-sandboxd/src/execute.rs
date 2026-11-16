@@ -7,14 +7,19 @@
 //!    every captured exchange first, and Local creates the FD 3 socket pair
 //!    and establishes its namespace;
 //! 2. the verified root is rechecked and becomes the only `RootDirectory`;
-//! 3. the typed transient unit is started and its requested state verified,
-//!    including the exact `/work` mount and the descriptor layout;
+//! 3. the attempt's one output reservation of ELM1[8] bytes is made and the
+//!    adapter's standard channels are created (ADR-069 R10 §4.7 and §4.1);
+//!    then the typed transient unit is started and its requested state
+//!    verified, including the exact `/work` mount, the descriptor layout and
+//!    the standard streams;
 //! 4. the unit's cgroup is bound, its activation time and the cgroup's
 //!    pre-release evidence are read, the attempt is recorded as active, and a
 //!    Local admission is bound to it;
 //! 5. the launcher barrier releases the adapter, exactly once, before the
 //!    watchdog deadline `D`: the unit's `ActiveEnterTimestampMonotonic` plus
-//!    the watchdog (ADR-069 R9 §4.6.5);
+//!    the watchdog (ADR-069 R9 §4.6.5); from then on the verified input is fed
+//!    to the adapter's stdin and its stdout captured (R10 §4.5 and §4.6),
+//!    until the attempt's ending stops both;
 //! 6. a Local proxy serves FD 3 until the channel ends or the attempt
 //!    watchdog closes it, and the cgroup is observed until it is empty or the
 //!    broker's escalation deadline `D + G` passes, which kills the unit;
@@ -44,7 +49,7 @@ use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::future::{select, Either};
+use futures_util::future::{join, select, Either};
 use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
     CancelSource, LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore,
@@ -56,10 +61,12 @@ use rustix::time::{clock_gettime, ClockId};
 use tokio::sync::watch;
 use zbus::OwnedFd;
 
+use crate::adapter_stdio::{open_channels, AdapterChannels};
 use crate::{
-    ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal, CheckedRoot,
-    HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort,
-    LocalProxyBindError, RequestedConfiguration, ServeError, ServedProxy, TransientServiceUnitName,
+    ActiveAttempt, AdapterIo, AdmittedAttempt, BoundLocalProxy, CgroupView, CheckedLocal,
+    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
+    LocalNetworkPort, LocalProxyBindError, OutputReservationRefused, RequestedConfiguration,
+    ServeError, ServedProxy, StdioChannelError, TransientServiceUnitName,
     TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
@@ -337,9 +344,19 @@ pub struct ExecuteJob {
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
     /// This prepared directory's execution ownership was already consumed,
-    /// or terminal cleanup fenced it before the unit start was requested.
+    /// or terminal cleanup fenced it before the unit start was requested, or
+    /// another execution already made the admitted attempt's one output
+    /// reservation.
     #[error("the attempt already has an execution owner")]
     AttemptAlreadyClaimed,
+    /// The staging ledger refused the attempt's output reservation, so the
+    /// unit was not started (TME1 `launch-failure` 3 or 5, R10 §4.7).
+    #[error("the attempt's output reservation was refused")]
+    OutputReservation(#[source] OutputReservationRefused),
+    /// The adapter's standard channels could not be created, so the unit
+    /// was not started (TME1 `launch-failure` 4, R10 §4.1).
+    #[error("the adapter's standard channels could not be created")]
+    StdioChannel(#[source] StdioChannelError),
     /// The authenticated limits cannot be enforced exactly on systemd.
     #[error(transparent)]
     Limits(#[from] crate::SystemdServiceLimitsError),
@@ -533,6 +550,8 @@ pub struct AttemptExecution<S, C, E = ()> {
     pub network: NetworkEvidence,
     /// The pre-release resource evidence.
     pub evidence: E,
+    /// The adapter's stdin feed and its fenced stdout capture.
+    pub adapter: AdapterIo,
 }
 
 /// The network behaviour prepared before the unit starts.
@@ -556,6 +575,7 @@ struct Prepared<C> {
     watchdog: Duration,
     store: Arc<NetworkCaptureStore>,
     cancel: CancelSignal,
+    channels: AdapterChannels,
 }
 
 /// Run one reserved, admitted attempt from its rechecked root to its end.
@@ -682,6 +702,7 @@ where
         watchdog,
         store,
         cancel,
+        channels,
     } = prepared;
     let unit = attempt.unit_name().clone();
     let bounds = Bounds {
@@ -713,7 +734,15 @@ where
         );
         return Err(reached(aborted.await, started, Some(evidence)));
     }
-    let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
+    // The feed and the capture run from the release to the attempt's ending.
+    let (ended, on_end) = watch::channel(None);
+    let supervision = async {
+        let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
+        let empty = matches!(supervised, Ok((_, Supervised::Finished(Finish::Empty))));
+        ended.send_replace(Some(empty));
+        supervised
+    };
+    let (supervised, adapter) = join(supervision, channels.run(on_end)).await;
     let (network, finish) = match supervised {
         Ok(supervised) => supervised,
         Err(error) => {
@@ -736,6 +765,7 @@ where
         ending,
         network,
         evidence,
+        adapter,
     })
 }
 
@@ -1054,18 +1084,37 @@ where
     let (invocation, release) = barrier
         .prepare(&attempt)
         .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
-    // The recheck comes last, so nothing but compilation separates it from
-    // the start of the unit.
+    // The recheck comes last but for the output reservation and the
+    // standard channels (R10 §4.9 step 2), so nothing else separates it
+    // from the start of the unit.
     let checked = recheck().map_err(ExecuteError::Recheck)?;
     if !checked.matches_attempt(&attempt) {
         return Err(ExecuteError::RootIdentity);
     }
+    let payload = attempt.payload();
+    let (charge, (stdio, provider)) = payload
+        .reserve_output()
+        .ok_or(ExecuteError::AttemptAlreadyClaimed)
+        .and_then(|reserved| reserved.map_err(ExecuteError::OutputReservation))
+        .and_then(|charge| {
+            open_channels()
+                .map(|channels| (charge, channels))
+                .map_err(ExecuteError::StdioChannel)
+        })?;
+    let channels = AdapterChannels::new(
+        provider,
+        payload,
+        attempt.output_limit(),
+        attempt.input_window_ms(),
+        charge,
+    );
     let inputs = TransientUnitLaunchInputs::new(
         checked,
         attempt.launcher_source(),
         launch_mode,
         release,
         invocation,
+        stdio,
     );
     Ok(Prepared {
         request: TransientUnitRequest::compile(
@@ -1078,6 +1127,7 @@ where
         planned,
         store: capture_store,
         cancel,
+        channels,
     })
 }
 

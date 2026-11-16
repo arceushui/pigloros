@@ -324,6 +324,13 @@ mod cases {
                     }
                     Behaviour::Completes | Behaviour::Substitutes => AttemptEnding::CgroupEmpty,
                 };
+                let adapter = crate::test_fixtures::adapter_io().ok_or_else(|| ExecuteFailure {
+                    error: ExecuteError::HostTimeout,
+                    unit: UnitState::Unknown,
+                    cgroup: None,
+                    evidence: None,
+                    started: None,
+                })?;
                 Ok(AttemptExecution {
                     attempt_id,
                     started: (),
@@ -334,6 +341,7 @@ mod cases {
                         None,
                         crate::ReleaseOutcome::new(None, None, None),
                     ),
+                    adapter,
                 })
             }
         }
@@ -1661,6 +1669,7 @@ mod cases {
                 ending: AttemptEnding::CgroupEmpty,
                 network: NetworkEvidence::None,
                 evidence: resources,
+                adapter: crate::test_fixtures::adapter_io().ok_or("no empty charge")?,
             });
             let joined = with_release(executed, ReleaseOutcome::new(None, None, None))
                 .map_err(|failure| failure.error)?;
@@ -1682,6 +1691,7 @@ mod cases {
                 ending: AttemptEnding::CgroupEmpty,
                 network: NetworkEvidence::None,
                 evidence: unreleased(),
+                adapter: crate::test_fixtures::adapter_io().ok_or("no empty charge")?,
             };
             let unit = TransientServiceUnitName::from_attempt_id([1; 16])?;
             let settle_by = Instant::now() + Duration::from_millis(100);

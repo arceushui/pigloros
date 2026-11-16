@@ -489,8 +489,10 @@ impl SystemdTransientUnitTransport {
     pub async fn start(
         &self,
         unit_name: TransientServiceUnitName,
-        request: TransientUnitRequest,
+        mut request: TransientUnitRequest,
     ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
+        // The standard descriptors move into the submission, which the
+        // manager call consumes: no unit end is held after it returns.
         let properties = request.requested_properties_for_submission();
         self.start_with_prepared(unit_name, request, properties)
             .await
@@ -1032,6 +1034,19 @@ async fn read_tail_property(
         SystemdDynamicPropertyKind::ExecStart => service.exec_start().await.map(|commands| {
             SystemdTransientUnitReadbackValue::ExecStart(exec_start_commands(commands))
         }),
+        // Recorded under the descriptor's own name (ADR-069 R10 §4.3).
+        SystemdDynamicPropertyKind::StandardInputFileDescriptor => service
+            .standard_input_file_descriptor_name()
+            .await
+            .map(SystemdTransientUnitReadbackValue::String),
+        SystemdDynamicPropertyKind::StandardOutputFileDescriptor => service
+            .standard_output_file_descriptor_name()
+            .await
+            .map(SystemdTransientUnitReadbackValue::String),
+        SystemdDynamicPropertyKind::StandardErrorFileDescriptor => service
+            .standard_error_file_descriptor_name()
+            .await
+            .map(SystemdTransientUnitReadbackValue::String),
         _ => service
             .temporary_file_system()
             .await
@@ -1128,6 +1143,15 @@ async fn read_hardening(
         SystemdHardeningProperty::UMask => service.u_mask().await.map(u32_readback),
         SystemdHardeningProperty::KillMode => service.kill_mode().await.map(string_readback),
         SystemdHardeningProperty::SendSigKill => service.send_sigkill().await.map(bool_readback),
+        SystemdHardeningProperty::StandardInput => {
+            service.standard_input().await.map(string_readback)
+        }
+        SystemdHardeningProperty::StandardOutput => {
+            service.standard_output().await.map(string_readback)
+        }
+        SystemdHardeningProperty::StandardError => {
+            service.standard_error().await.map(string_readback)
+        }
     }
 }
 
@@ -1162,7 +1186,9 @@ fn encode_property_with<O>(
 where
     O: FnOnce(Variant<'static>) -> Result<OwnedVariant, zbus::Error>,
 {
-    owned_value(value.into_dbus_value())
+    value
+        .into_dbus_value()
+        .and_then(owned_value)
         .map(|value| (name.to_owned(), value))
         .map_err(SystemdTransientUnitTransportError::Serialization)
 }
@@ -1186,8 +1212,9 @@ const fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTranspor
 }
 
 impl SystemdTransientUnitValue {
-    fn into_dbus_value(self) -> Variant<'static> {
-        match self {
+    /// The D-Bus value; a standard descriptor already submitted has none.
+    fn into_dbus_value(self) -> Result<Variant<'static>, zbus::Error> {
+        Ok(match self {
             Self::Static(value) => static_dbus_value(value),
             Self::RootDirectory(value) => Variant::from(value),
             Self::BindReadOnlyPaths(value) => Variant::from(value),
@@ -1198,7 +1225,12 @@ impl SystemdTransientUnitValue {
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
             Self::TemporaryFileSystem(value) => Variant::from(value),
             Self::ExecStart(value) => Variant::from(value),
-        }
+            Self::StandardDescriptor(value) => {
+                return value
+                    .map(|descriptor| Variant::from(Fd::from(descriptor)))
+                    .ok_or(zbus::Error::IncorrectType)
+            }
+        })
     }
 }
 

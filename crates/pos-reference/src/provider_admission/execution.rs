@@ -13,7 +13,9 @@ use std::{fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
 
 use crate::{
     evaluator::CaseAttempt,
-    sandbox_provider_protocol::{PayloadDescriptor, SandboxLimit, SelectorGrantCommitment},
+    sandbox_provider_protocol::{
+        LaunchFailure, PayloadDescriptor, SandboxLimit, SelectorGrantCommitment,
+    },
     selector::SelectorBoundaryError,
 };
 
@@ -74,12 +76,6 @@ pub enum StagingError {
     /// The independently derived input ceiling forbids the declared input.
     #[error("input exceeds ELM1 InputBytes")]
     InputTooLarge,
-    /// The independently derived output ceiling forbids the declared output.
-    #[error("output exceeds ELM1 OutputBytes")]
-    OutputTooLarge,
-    /// One attempt cannot open a second output transfer.
-    #[error("output transfer is single use")]
-    OutputAlreadyReserved,
     /// A staging directory is not private and provider-owned.
     #[error("staging directory is unsafe")]
     UnsafeDirectory,
@@ -95,6 +91,33 @@ pub enum StagingError {
     /// A stream or descriptor operation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Why the attempt's one output reservation of exactly ELM1[8] bytes was
+/// refused (ADR-069 R10 §4.7).
+///
+/// The request is the policy's own ID 8 limit and the attempt's only one, so
+/// an oversized or a second reservation cannot be expressed here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum OutputReservationRefused {
+    /// The aggregate staging ledger is full (TME1 `launch-failure` 3).
+    #[error("staging aggregate cap would be exceeded")]
+    AggregateExceeded,
+    /// The ledger was closed after a cleanup failure (TME1 `launch-failure`
+    /// 5, quarantine).
+    #[error("staging admission is closed after a cleanup failure")]
+    AdmissionClosed,
+}
+
+/// TME1 `launch-failure` of a refused output reservation (ADR-069 R10 §4.7):
+/// a full aggregate ledger is 3, a ledger closed after a cleanup failure 5.
+impl From<OutputReservationRefused> for LaunchFailure {
+    fn from(refused: OutputReservationRefused) -> Self {
+        match refused {
+            OutputReservationRefused::AggregateExceeded => Self::OutputReservationRefused,
+            OutputReservationRefused::AdmissionClosed => Self::AdmissionClosed,
+        }
+    }
 }
 
 /// Immutable policy derived only from the independently reconstructed case.

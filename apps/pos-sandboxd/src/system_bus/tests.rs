@@ -33,7 +33,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 50] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -67,6 +67,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("UMask", "u"),
     ("KillMode", "s"),
     ("SendSIGKILL", "b"),
+    ("StandardInput", "s"),
+    ("StandardOutput", "s"),
+    ("StandardError", "s"),
     ("MemoryMax", "t"),
     ("MemorySwapMax", "t"),
     ("TasksMax", "t"),
@@ -78,6 +81,9 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("ExtraFileDescriptors", "a(hs)"),
     ("TemporaryFileSystem", "a(ss)"),
     ("ExecStart", "a(sasb)"),
+    ("StandardInputFileDescriptor", "h"),
+    ("StandardOutputFileDescriptor", "h"),
+    ("StandardErrorFileDescriptor", "h"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -713,6 +719,36 @@ impl RecordingService {
         self.fixed(true)
     }
 
+    #[zbus(property, name = "StandardInput")]
+    fn standard_input(&self) -> &'static str {
+        self.fixed("null")
+    }
+
+    #[zbus(property, name = "StandardOutput")]
+    fn standard_output(&self) -> &'static str {
+        self.fixed("null")
+    }
+
+    #[zbus(property, name = "StandardError")]
+    fn standard_error(&self) -> &'static str {
+        self.fixed("null")
+    }
+
+    #[zbus(property, name = "StandardInputFileDescriptorName")]
+    fn standard_input_file_descriptor_name(&self) -> &'static str {
+        self.fixed("")
+    }
+
+    #[zbus(property, name = "StandardOutputFileDescriptorName")]
+    fn standard_output_file_descriptor_name(&self) -> &'static str {
+        self.fixed("")
+    }
+
+    #[zbus(property, name = "StandardErrorFileDescriptorName")]
+    fn standard_error_file_descriptor_name(&self) -> &'static str {
+        self.fixed("")
+    }
+
     #[zbus(property, name = "MemoryMax")]
     fn memory_max(&self) -> fdo::Result<u64> {
         self.record_read();
@@ -874,12 +910,24 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 44);
+    assert_eq!(verified.requested_readback().len(), 50);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
-        verified.requested_readback()[41].name(),
+        verified.requested_readback()[44].name(),
         "ExtraFileDescriptors"
     );
+    // The descriptor names are read back under the descriptors' own names.
+    for (index, name) in [
+        (47, "StandardInputFileDescriptor"),
+        (48, "StandardOutputFileDescriptor"),
+        (49, "StandardErrorFileDescriptor"),
+    ] {
+        assert_eq!(verified.requested_readback()[index].name(), name);
+        assert_eq!(
+            verified.requested_readback()[index].value(),
+            &crate::SystemdTransientUnitReadbackValue::String(String::new())
+        );
+    }
     assert_eq!(
         verified.manager_readback().property(),
         SystemdManagerReadbackOnlyProperty::RootImagePolicy
@@ -1814,6 +1862,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         mode,
         descriptor()?,
         crate::test_fixtures::invocation()?,
+        crate::UnitStdio::for_test()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
     Ok(TransientUnitRequest::compile(inputs, filter, &limits))
@@ -1845,6 +1894,31 @@ fn value() -> SystemdTransientUnitValue {
     SystemdTransientUnitValue::Numeric(
         crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(1),
     )
+}
+
+/// A standard descriptor is sent once: a property whose descriptor was
+/// already moved into a submission cannot be encoded again.
+#[test]
+fn a_standard_descriptor_is_encoded_once() -> Result<(), Box<dyn Error>> {
+    let encoded = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(Some(descriptor()?)),
+        OwnedVariant::try_from,
+    )?;
+    assert_eq!(encoded.0, "StandardInputFileDescriptor");
+    assert_eq!(encoded.1.value_signature().to_string(), "h");
+    let error = encode_property_with(
+        "StandardInputFileDescriptor",
+        SystemdTransientUnitValue::StandardDescriptor(None),
+        OwnedVariant::try_from,
+    );
+    assert!(matches!(
+        error,
+        Err(SystemdTransientUnitTransportError::Serialization(
+            zbus::Error::IncorrectType
+        ))
+    ));
+    Ok(())
 }
 
 #[test]

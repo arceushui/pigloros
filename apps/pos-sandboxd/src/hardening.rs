@@ -61,6 +61,13 @@ pub enum SystemdHardeningProperty {
     KillMode,
     /// `SendSIGKILL: b = true`.
     SendSigKill,
+    /// `StandardInput: s = null` (ADR-069 R10 §4.2): fd 0 is the provider's
+    /// stdin pipe, and no enum routes the stream elsewhere.
+    StandardInput,
+    /// `StandardOutput: s = null`: fd 1 is the provider's stdout pipe.
+    StandardOutput,
+    /// `StandardError: s = null`: fd 2 is the provider's checked `/dev/null`.
+    StandardError,
 }
 
 /// A systemd D-Bus value with one of the exact signatures this bundle permits.
@@ -200,6 +207,9 @@ impl SystemdHardeningProperty {
             Self::UMask => "UMask",
             Self::KillMode => "KillMode",
             Self::SendSigKill => "SendSIGKILL",
+            Self::StandardInput => "StandardInput",
+            Self::StandardOutput => "StandardOutput",
+            Self::StandardError => "StandardError",
         }
     }
 
@@ -237,6 +247,9 @@ impl SystemdHardeningProperty {
             Self::SystemCallArchitectures => SystemdHardeningValue::StringArray(&["native"]),
             Self::UMask => SystemdHardeningValue::U32(0o077),
             Self::KillMode => SystemdHardeningValue::String("control-group"),
+            Self::StandardInput | Self::StandardOutput | Self::StandardError => {
+                SystemdHardeningValue::String("null")
+            }
         }
     }
 }
@@ -253,7 +266,7 @@ pub enum TransientUnitHardeningError {
 pub struct TransientUnitHardening;
 
 impl TransientUnitHardening {
-    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 29] = [
+    const REQUESTED_PROPERTIES: [SystemdHardeningProperty; 32] = [
         SystemdHardeningProperty::TypeExec,
         SystemdHardeningProperty::DynamicUser,
         SystemdHardeningProperty::NoNewPrivileges,
@@ -283,6 +296,9 @@ impl TransientUnitHardening {
         SystemdHardeningProperty::UMask,
         SystemdHardeningProperty::KillMode,
         SystemdHardeningProperty::SendSigKill,
+        SystemdHardeningProperty::StandardInput,
+        SystemdHardeningProperty::StandardOutput,
+        SystemdHardeningProperty::StandardError,
     ];
 
     /// Return the complete ordered static requested-state bundle.

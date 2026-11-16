@@ -28,8 +28,8 @@ use crate::{
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
     AdmittedProviderExecution, ConnectionIdentity, ExecutionSource, GrantState,
-    PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError,
-    StagingLedger,
+    OutputReservationRefused, PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase,
+    StagingCharge, StagingError, StagingLedger,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -591,12 +591,14 @@ impl AdmittedProviderExecution {
         self.verified_input.read_exact_at(bytes, offset)
     }
 
-    /// Keep this attempt counted while staging one bounded terminal output.
+    /// Reserve this attempt's one output of exactly ELM1[8] bytes, keeping
+    /// the attempt counted while the charge lives (ADR-069 R10 §4.7).
     ///
-    /// # Errors
-    /// Refuses a second output, ID-8 violation or aggregate byte overflow.
-    pub fn reserve_output(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
-        self.slot.output(self.policy(), bytes)
+    /// `None` once the reservation was made: an attempt has one output.
+    /// Otherwise the reservation, or why the ledger refused it.
+    #[must_use = "a dropped reservation releases its bytes at once"]
+    pub fn reserve_output(&self) -> Option<Result<StagingCharge, OutputReservationRefused>> {
+        self.slot.output(self.policy())
     }
 }
 

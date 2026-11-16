@@ -253,10 +253,58 @@ pub enum LaunchMode {
     Fork,
 }
 
+/// The unit ends of the adapter's three standard descriptors (ADR-069 R10
+/// §4.1): the stdin pipe's read end, the stdout pipe's write end and the
+/// provider's checked write-only `/dev/null`.
+///
+/// Only the provider's channel creation makes one; the provider keeps the
+/// other pipe ends. The request moves these into its one submission, so the
+/// provider holds no unit end once `StartTransientUnit` returns.
+#[derive(Debug)]
+pub struct UnitStdio {
+    input: OwnedFd,
+    output: OwnedFd,
+    error: OwnedFd,
+}
+
+impl UnitStdio {
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn new(input: OwnedFd, output: OwnedFd, error: OwnedFd) -> Self {
+        Self {
+            input,
+            output,
+            error,
+        }
+    }
+
+    /// The stdin read end, the stdout write end and the stderr target.
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (OwnedFd, OwnedFd, OwnedFd) {
+        (self.input, self.output, self.error)
+    }
+
+    /// Three `/dev/null` descriptors, for requests no adapter runs under.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> std::io::Result<Self> {
+        let null = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .map(|file| OwnedFd::from(std::os::fd::OwnedFd::from(file)))
+        };
+        Ok(Self {
+            input: null()?,
+            output: null()?,
+            error: null()?,
+        })
+    }
+}
+
 /// All per-attempt inputs that the dynamic property compiler is allowed to use.
 ///
-/// The release descriptor is supplied by the existing release-barrier owner.
-/// This type neither acquires descriptors nor starts a transient unit.
+/// The release descriptor is supplied by the existing release-barrier owner,
+/// and the standard descriptors by the provider's channel creation. This
+/// type neither acquires descriptors nor starts a transient unit.
 #[derive(Debug)]
 pub struct TransientUnitLaunchInputs {
     root_directory: ActivatedRootDirectory,
@@ -264,6 +312,7 @@ pub struct TransientUnitLaunchInputs {
     mode: LaunchMode,
     release: OwnedFd,
     invocation: LauncherInvocation,
+    stdio: UnitStdio,
 }
 
 /// The launcher-mode command the unit runs: `<launcher> launch-barrier
@@ -398,6 +447,7 @@ impl TransientUnitLaunchInputs {
         mode: LaunchMode,
         release: OwnedFd,
         invocation: LauncherInvocation,
+        stdio: UnitStdio,
     ) -> Self {
         Self {
             root_directory: root.root_directory,
@@ -405,6 +455,7 @@ impl TransientUnitLaunchInputs {
             mode,
             release,
             invocation,
+            stdio,
         }
     }
 }
@@ -448,6 +499,12 @@ pub enum SystemdTransientUnitValue {
     TemporaryFileSystem(Vec<(String, String)>),
     /// A D-Bus `a(sasb)` command list: path, argument vector, ignore-failure.
     ExecStart(Vec<(String, Vec<String>, bool)>),
+    /// A D-Bus `h` standard descriptor of the unit (ADR-069 R10 §4.2).
+    ///
+    /// The one submission moves it out, so it is `None` afterwards: the
+    /// request keeps no unit end once `StartTransientUnit` was called. A
+    /// `None` descriptor cannot be submitted.
+    StandardDescriptor(Option<OwnedFd>),
 }
 
 impl SystemdTransientUnitValue {
@@ -474,6 +531,7 @@ impl SystemdTransientUnitValue {
                     descriptors.iter().map(|(_, name)| name.clone()).collect(),
                 )
             }
+            Self::StandardDescriptor(_) => return RequestedConfigurationValue::Descriptor,
             Self::TemporaryFileSystem(mounts) => {
                 SystemdTransientUnitReadbackValue::TemporaryFileSystem(mounts.clone())
             }
@@ -553,17 +611,26 @@ impl SystemdTransientUnitValue {
             | Self::SystemCallFilter(_)
             | Self::RestrictAddressFamilies(_)
             | Self::Numeric(_)
-            | Self::ExtraFileDescriptors(_) => Err(zbus::Error::IncorrectType),
+            | Self::ExtraFileDescriptors(_)
+            | Self::StandardDescriptor(_) => Err(zbus::Error::IncorrectType),
         }
     }
 }
 
-/// The last dynamic properties: descriptors, the `/work` mount and the command.
+/// The last dynamic properties: descriptors, the `/work` mount, the command
+/// and the three standard descriptors.
 fn tail_properties(
     descriptors: Vec<(OwnedFd, String)>,
     service_limits: &SystemdServiceLimits,
     invocation: &LauncherInvocation,
-) -> [SystemdTransientUnitProperty; 3] {
+    stdio: UnitStdio,
+) -> [SystemdTransientUnitProperty; 6] {
+    let standard = |kind, descriptor| {
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(kind),
+            SystemdTransientUnitValue::StandardDescriptor(Some(descriptor)),
+        )
+    };
     [
         SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(
@@ -580,6 +647,18 @@ fn tail_properties(
         SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
             SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardInputFileDescriptor,
+            stdio.input,
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardOutputFileDescriptor,
+            stdio.output,
+        ),
+        standard(
+            SystemdDynamicPropertyKind::StandardErrorFileDescriptor,
+            stdio.error,
         ),
     ]
 }
@@ -630,6 +709,7 @@ impl SystemdTransientUnitProperty {
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
+            SystemdTransientUnitValue::StandardDescriptor(_) => "h",
             collection => collection.collection_signature(),
         }
     }
@@ -669,12 +749,25 @@ impl SystemdTransientUnitProperty {
                     ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
+                // The name reads back empty unless an enum is `fd` (R10 §4.3).
+                (
+                    SystemdTransientUnitValue::StandardDescriptor(_),
+                    SystemdTransientUnitReadbackValue::String(name),
+                ) => name.is_empty(),
                 (expected, actual) => expected.collection_matches(actual),
             }
     }
 
-    fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
-        Self::from_cloned_value(self.kind, self.value.try_clone_for_submission())
+    /// The value to submit: a standard descriptor is moved out, every other
+    /// value is duplicated.
+    fn take_for_submission(&mut self) -> Result<Self, zbus::Error> {
+        let value = match &mut self.value {
+            SystemdTransientUnitValue::StandardDescriptor(descriptor) => Ok(
+                SystemdTransientUnitValue::StandardDescriptor(descriptor.take()),
+            ),
+            value => value.try_clone_for_submission(),
+        };
+        Self::from_cloned_value(self.kind, value)
     }
 
     fn from_cloned_value(
@@ -728,6 +821,8 @@ pub enum RequestedConfigurationValue {
     /// The `ExtraFileDescriptors` (`a(hs)`) names, in submission order.
     /// Descriptor numbers are process-local and never recorded.
     DescriptorNames(Vec<String>),
+    /// One standard descriptor (`h`, RQE1 code 10): nothing is recorded.
+    Descriptor,
 }
 
 /// A typed observed transient-unit property used by the request verifier.
@@ -877,6 +972,7 @@ impl TransientUnitRequest {
             mode,
             release,
             invocation,
+            stdio,
         } = inputs;
         let (address_families, descriptors) = match mode {
             LaunchMode::Local { host_service } => (
@@ -892,7 +988,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 15);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 18);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -952,7 +1048,12 @@ impl TransientUnitRequest {
                 SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
             ),
         ));
-        properties.extend(tail_properties(descriptors, service_limits, &invocation));
+        properties.extend(tail_properties(
+            descriptors,
+            service_limits,
+            &invocation,
+            stdio,
+        ));
         Self {
             properties,
             system_call_filter,
@@ -977,12 +1078,14 @@ impl TransientUnitRequest {
             .collect()
     }
 
+    /// The properties to submit, once: the standard descriptors are moved
+    /// into them and every other descriptor is duplicated.
     pub(crate) fn requested_properties_for_submission(
-        &self,
+        &mut self,
     ) -> Result<Vec<SystemdTransientUnitProperty>, zbus::Error> {
         self.properties
-            .iter()
-            .map(SystemdTransientUnitProperty::try_clone_for_submission)
+            .iter_mut()
+            .map(SystemdTransientUnitProperty::take_for_submission)
             .collect()
     }
 

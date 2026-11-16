@@ -15,13 +15,15 @@ futures-util = { version = "0.3", default-features = false }
 nix = { version = "=0.31.3", default-features = false, features = ["process"] }
 pos-reference = { path = "../../crates/pos-reference" }
 # `event` is for the pidfd liveness `poll` of the kernel observation
-# (ADR-069 R9 §4.4); it creates no process.
+# (ADR-069 R9 §4.4); it creates no process. `pipe` is for the adapter's
+# stdin and stdout channels (`pipe2`, ADR-069 R10 §4.1).
 rustix = { version = "1.1.4", default-features = false, features = [
   "event",
   "fs",
   "mount",
   "net",
   "param",
+  "pipe",
   "process",
   "std",
   "thread",

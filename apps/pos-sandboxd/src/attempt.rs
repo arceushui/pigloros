@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Instant};
 
 use pos_reference::{
-    provider_admission::{execution::AdmittedProviderExecution, AdmittedAuthority},
+    provider_admission::AdmittedAuthority,
     sandbox_provider_protocol::{
         AdmissionAuthority, ExecuteAuthority, NetworkCapability, PayloadDescriptor,
         SandboxExecuteRequest, SandboxExecutionMode, SandboxLimit, SandboxSyscallSet,
@@ -16,8 +16,8 @@ use pos_reference::{
 };
 
 use crate::{
-    AdmittedEntry, ExecuteError, ExecutionOwnership, LauncherFacts, PreparedAttemptDirectory,
-    TransientServiceUnitName,
+    adapter_stdio::AttemptPayload, AdmittedEntry, ExecuteError, ExecutionOwnership, LauncherFacts,
+    PreparedAttemptDirectory, TransientServiceUnitName,
 };
 
 /// The launch-policy view of an admitted attempt: everything a Local grant
@@ -68,10 +68,10 @@ const fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority
 // A clone retains the exact live admission; a separately admitted exchange is
 // never interchangeable merely because its public IDs happen to match.
 #[derive(Clone, Debug)]
-struct ExecutionLease(Arc<AdmittedProviderExecution>);
+struct ExecutionLease(Arc<dyn AttemptPayload>);
 impl PartialEq for ExecutionLease {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        std::ptr::addr_eq(Arc::as_ptr(&self.0), Arc::as_ptr(&other.0))
     }
 }
 impl Eq for ExecutionLease {}
@@ -107,7 +107,7 @@ pub struct AdmittedAttempt {
     runtime_key: ed25519_dalek::VerifyingKey,
     syscall_set: Arc<SandboxSyscallSet>,
     policy: Arc<ExecutionPolicyFacts>,
-    lease: Option<ExecutionLease>,
+    lease: ExecutionLease,
     execution: ExecutionOwnership,
 }
 
@@ -162,7 +162,7 @@ impl AdmittedAttempt {
                 request_digest: entry.policy().request_digest(),
                 input: entry.policy().input_descriptor().clone(),
             }),
-            lease: Some(ExecutionLease(entry.retain())),
+            lease: ExecutionLease(entry.retain()),
             execution: directory.execution_ownership(),
         })
     }
@@ -200,6 +200,27 @@ impl AdmittedAttempt {
 
     pub(crate) fn expected_readback_digest(&self) -> [u8; 32] {
         self.policy.readback_digest
+    }
+
+    /// The admitted input and the attempt's one output reservation.
+    pub(crate) fn payload(&self) -> Arc<dyn AttemptPayload> {
+        Arc::clone(&self.lease.0)
+    }
+
+    /// ELM1 limit `id` of the admitted policy; zero when it is absent, which
+    /// [`Self::service_limits`] refuses before any launch.
+    fn limit(&self, id: usize) -> u64 {
+        self.policy.limits.get(id).map_or(0, |limit| limit.value)
+    }
+
+    /// ELM1[8]: the most output bytes the capture accepts.
+    pub(crate) fn output_limit(&self) -> u64 {
+        self.limit(8)
+    }
+
+    /// ELM1[16] in milliseconds: the stdin feed's window.
+    pub(crate) fn input_window_ms(&self) -> u64 {
+        self.limit(16)
     }
 
     /// The attempt identity.
@@ -340,7 +361,9 @@ impl AdmittedAttempt {
                                 digest: [8; 32],
                             },
                         }),
-                        lease: None,
+                        lease: ExecutionLease(Arc::new(
+                            crate::test_fixtures::TestPayload::default(),
+                        )),
                         execution: ExecutionOwnership::default(),
                     })
                 })
@@ -384,6 +407,13 @@ impl AdmittedAttempt {
     #[cfg(all(test, unix))]
     pub(crate) fn allowing(mut self, capabilities: Vec<NetworkCapability>) -> Self {
         self.launch.network_capabilities = capabilities;
+        self
+    }
+
+    /// The same attempt over `payload`: its input and output reservation.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_payload(mut self, payload: Arc<dyn AttemptPayload>) -> Self {
+        self.lease = ExecutionLease(payload);
         self
     }
 

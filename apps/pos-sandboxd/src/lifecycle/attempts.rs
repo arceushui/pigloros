@@ -57,15 +57,16 @@ use tokio::time::Instant;
 
 use super::{finish_with, RootRelease};
 use crate::{
-    AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError, AttemptEnding,
-    AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError, BoundAttemptCgroup,
-    CancelSignal, CheckedRoot, CommittedPlannedAttempt, CompletedAttemptCleanup, ExecuteError,
-    ExecuteFailure, ExecuteJob, ExecutionOwnership, ImageActivationError, LaunchBarrier,
-    LocalNetworkPort, ModePlan, NetworkEvidence, PlannedAttemptIntent, PreparedAttemptDirectory,
-    ReconciledRestart, RecordedRoot, RecoveredAttemptIntent, ReleaseOutcome, ReleaseResources,
-    ResourceEvidence, StagingLedger, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    SystemdTransientUnitTransport, SystemdVerifiedStart, TransientServiceUnitName, UnitState,
-    VerifiedRootMount, VerifiedStagedInput,
+    AdapterIo, AdmittedAttempt, AttemptCancel, AttemptCleanupDeadlines, AttemptCleanupError,
+    AttemptEnding, AttemptExecution, AttemptShutdownDeadlines, AttemptShutdownError,
+    BoundAttemptCgroup, CancelSignal, CheckedRoot, CommittedPlannedAttempt,
+    CompletedAttemptCleanup, ExecuteError, ExecuteFailure, ExecuteJob, ExecutionOwnership,
+    ImageActivationError, LaunchBarrier, LocalNetworkPort, ModePlan, NetworkEvidence,
+    PlannedAttemptIntent, PreparedAttemptDirectory, ReconciledRestart, RecordedRoot,
+    RecoveredAttemptIntent, ReleaseOutcome, ReleaseResources, ResourceEvidence, StagingLedger,
+    SystemdAttemptRegistry, SystemdAttemptRegistryError, SystemdTransientUnitTransport,
+    SystemdVerifiedStart, TransientServiceUnitName, UnitState, VerifiedRootMount,
+    VerifiedStagedInput,
 };
 
 /// The most live attempts one snapshot carries (ADR-069 §4.1, RCC1).
@@ -181,6 +182,9 @@ pub enum AttemptProgress<S> {
         network: NetworkEvidence,
         /// The pre-release, release and terminal resource evidence.
         evidence: ResourceEvidence,
+        /// The adapter's stdin feed and its stdout capture, which stays
+        /// fenced until the terminal evidence.
+        adapter: AdapterIo,
     },
 }
 
@@ -535,6 +539,7 @@ fn with_release<S, C>(
             ending: execution.ending,
             network: execution.network,
             evidence: ResourceEvidence::new(Some(execution.evidence), release),
+            adapter: execution.adapter,
         }),
         Err(failure) => Err(ExecuteFailure {
             error: failure.error,
@@ -1400,6 +1405,7 @@ async fn activate_and_execute<I: AdmittedInput, S: AttemptSteps<I>>(
                 ending: execution.ending,
                 network: execution.network,
                 evidence: execution.evidence,
+                adapter: execution.adapter,
             },
             Some(execution.cgroup),
         ),

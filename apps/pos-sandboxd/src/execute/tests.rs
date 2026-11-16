@@ -31,6 +31,7 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod adapter;
 mod cancellation;
 mod ownership;
 
@@ -111,6 +112,16 @@ struct FakeHost {
     /// The `ActiveEnterTimestampMonotonic` reported, in nanoseconds; `None`
     /// reports the time of the read.
     activated: Option<u64>,
+    /// The adapter's use of its standard streams; `None` closes them at once.
+    stdio: Option<adapter::StdioScript>,
+    /// Set once the stdio adapter finished; until then the cgroup is busy.
+    adapter_done: Arc<AtomicBool>,
+    /// What the stdio adapter observed.
+    stdio_report: Arc<Mutex<adapter::StdioReport>>,
+    /// The releases the barrier made, seen by the stdio adapter.
+    released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// Descriptors held as systemd holds its duplicates of the unit ends.
+    systemd_held: Arc<Mutex<Vec<StdOwnedFd>>>,
 }
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
@@ -137,6 +148,11 @@ impl FakeHost {
             cgroup_kills: Arc::default(),
             killed: Arc::default(),
             activated: None,
+            stdio: None,
+            adapter_done: Arc::default(),
+            stdio_report: Arc::default(),
+            released: Arc::default(),
+            systemd_held: Arc::default(),
         }
     }
 
@@ -261,6 +277,8 @@ struct FakeCgroup {
     empty_after: usize,
     fail_read: bool,
     fail_kill: bool,
+    /// No unit task remains once the stdio adapter finished.
+    adapter_done: Arc<AtomicBool>,
 }
 
 impl UnitCgroup for FakeCgroup {
@@ -271,7 +289,7 @@ impl UnitCgroup for FakeCgroup {
         if self.fail_read {
             Err(Injected)
         } else {
-            Ok(polls > self.empty_after)
+            Ok(polls > self.empty_after && self.adapter_done.load(Ordering::SeqCst))
         }
     }
 
@@ -365,6 +383,7 @@ impl UnitHost for FakeHost {
         request: TransientUnitRequest,
     ) -> impl Future<Output = Result<String, Injected>> + Send {
         record(&self.log, "start");
+        self.run_stdio(&request);
         let adapter_end = self.observe(&request);
         let outcome = if self.faulty(Fault::Start) {
             Err(Injected)
@@ -399,6 +418,7 @@ impl UnitHost for FakeHost {
                     empty_after: self.empty_after,
                     fail_read: self.faulty(Fault::ReadCgroup),
                     fail_kill: self.faulty(Fault::KillCgroup),
+                    adapter_done: Arc::clone(&self.adapter_done),
                 })
         };
         let hang = self.faulty(Fault::HangBind);

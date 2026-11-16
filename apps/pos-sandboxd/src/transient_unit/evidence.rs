@@ -85,6 +85,7 @@ fn requested_value(value: &RequestedConfigurationValue) -> DbusValue {
         RequestedConfigurationValue::DescriptorNames(names) => {
             DbusValue::DescriptorNames(names.clone())
         }
+        RequestedConfigurationValue::Descriptor => DbusValue::Descriptor,
     }
 }
 
