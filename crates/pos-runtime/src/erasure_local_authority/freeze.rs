@@ -159,6 +159,19 @@ const fn artifact_ack_class(class: ErasureArtifactClassV1) -> &'static str {
     }
 }
 
+/// Everything one freeze admission commits, before its ELS1 exists.
+pub(super) struct FreezeDraftV1 {
+    targets: Vec<ErasureRequiredTargetV1>,
+    scope: ErasureScopeCommitmentInputV1,
+    obligations: Vec<ErasureObligationV1>,
+    obligation_set: ErasureObligationSetV1,
+    admission: ErasureFreezeAdmissionEvidenceInputV1,
+    /// `CA(ERFA1-AUTH)`, the digest a purpose-0 ELS1 signs.
+    pub(super) body_digest: ErasureReferenceV1,
+    /// ELB1 and ELLR1, retained before the freeze commits.
+    pub(super) retained: Vec<Vec<u8>>,
+}
+
 impl LocalErasureAuthorityV1 {
     /// Every Timeline the actor owns in this snapshot, minus the bundle's
     /// host Timelines, plus every Fork descendant by `fork_point` lineage

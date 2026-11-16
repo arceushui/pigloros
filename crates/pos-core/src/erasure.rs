@@ -3933,10 +3933,10 @@ pub use local_records::{
     LOCAL_ERASURE_MAX_REQUEST_RESERVE_V1,
 };
 /// The committed ERSC1 and ERSE1 chain of one request, read through its
-/// current manifest and scope index without validating the record
-/// (ADR-136 companion §2.6, `scope_commitment` and `scope_extensions`).
+/// current manifest and scope index without validating the record.
 ///
-/// The trait is sealed and implemented for every persistence port, so no
+/// It serves ADR-136 companion §2.6 `scope_commitment` and
+/// `scope_extensions`. The trait is sealed and implemented for every persistence port, so no
 /// adapter can override it. The result is evidence, not authority: core
 /// recovery verifies the record itself and checks every topology
 /// observation an authority builds from it.
