@@ -634,7 +634,7 @@ impl ErasureCoordinatorAuthorityV1 for SubmitOnlyAuthority {
     }
 }
 
-fn reference(byte: u8) -> ErasureReferenceV1 {
+const fn reference(byte: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([byte; 32])
 }
 
