@@ -140,6 +140,25 @@ fn a_refused_record_burns_no_credit() -> TestResult {
     ];
     let reversed = [ordered[1], ordered[0]];
     let oversized = vec![0; 3 * 1024 * 1024 + 1];
+    let zero_digest = [ArtifactChildEdgeV1 {
+        artifact_digest: Hash::zero(),
+        ..ordered[0]
+    }];
+    let zero_address = [ArtifactChildEdgeV1 {
+        registration_address: Hash::zero(),
+        ..ordered[0]
+    }];
+    let too_many = (0..2049_u64)
+        .map(|index| {
+            let mut digest = [1; 32];
+            digest[24..].copy_from_slice(&index.to_be_bytes());
+            ArtifactChildEdgeV1 {
+                artifact_digest: Hash::from_bytes(digest),
+                registration_address: Hash::from_bytes(digest),
+                ..ordered[0]
+            }
+        })
+        .collect::<Vec<_>>();
     for (plaintext, evidence) in [
         (
             &b"record"[..],
@@ -158,6 +177,9 @@ fn a_refused_record_burns_no_credit() -> TestResult {
         (&b"record"[..], evidence(&ordered)),
         (&b"record"[..], evidence(&reversed)),
         (&oversized[..], evidence(&[])),
+        (&b"record"[..], evidence(&zero_digest)),
+        (&b"record"[..], evidence(&zero_address)),
+        (&b"record"[..], evidence(&too_many)),
     ] {
         assert!(protector
             .protect(CommunityArtifactKindV1::StateContent, plaintext, evidence)

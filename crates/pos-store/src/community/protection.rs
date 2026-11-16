@@ -281,26 +281,26 @@ impl CommunityArtifactProtectorV1 {
         identity: KeyIdentityV1,
     ) -> Result<ArtifactRegistrationV1, Error> {
         let class = artifact_class(self.cohort.purpose);
-        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
-            artifact_class: class,
-            artifact_digest: ArtifactRegistrationV1::artifact_digest(class, object),
-            owner_reference: community_catalogue_owner_reference_v1(
-                self.cohort.timeline,
-                self.cohort.generation,
-            ),
-            data_class: ArtifactDataClassV1::PrivateSubjectData,
-            optionality: optionality(self.cohort.purpose),
-            transition_rule: ArtifactTransitionRuleV1::Remove,
-            required_key_roles: vec![KeyRoleV1::CommunityArtifactEncryption],
-            key_dependencies: vec![ArtifactKeyDependencyV1 {
-                identity,
-                material_digest: self.key.intent().as_input().material_fingerprint,
-                private_material_required: true,
-            }],
-            child_artifacts: children.to_vec(),
-        })
-        .ok()
-        .ok_or(Error::InvalidBinding)
+        community_catalogue_owner_reference_v1(self.cohort.timeline, self.cohort.generation)
+            .and_then(|owner_reference| {
+                ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+                    artifact_class: class,
+                    artifact_digest: ArtifactRegistrationV1::artifact_digest(class, object),
+                    owner_reference,
+                    data_class: ArtifactDataClassV1::PrivateSubjectData,
+                    optionality: optionality(self.cohort.purpose),
+                    transition_rule: ArtifactTransitionRuleV1::Remove,
+                    required_key_roles: vec![KeyRoleV1::CommunityArtifactEncryption],
+                    key_dependencies: vec![ArtifactKeyDependencyV1 {
+                        identity,
+                        material_digest: self.key.intent().as_input().material_fingerprint,
+                        private_material_required: true,
+                    }],
+                    child_artifacts: children.to_vec(),
+                })
+                .ok()
+                .ok_or(Error::InvalidBinding)
+            })
     }
 }
 

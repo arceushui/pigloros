@@ -387,13 +387,14 @@ fn protection_refuses_records_it_cannot_protect() -> TestResult {
             .err(),
         Some(Error::BoundsExceeded)
     );
-    assert!(protector
-        .protect(
-            Kind::StateContent,
-            &vec![0; 3 * 1024 * 1024],
-            evidence(&none)
-        )
-        .is_ok());
+    // Exactly 3 MiB is accepted, and its COW1 stays within the 4 MiB cap.
+    let largest = protector.protect(
+        Kind::StateContent,
+        &vec![0; 3 * 1024 * 1024],
+        evidence(&none),
+    )?;
+    assert!(largest.object().len() <= 4 * 1024 * 1024);
+    CommunityProtectedObjectV1::from_canonical_cbor(largest.object())?;
 
     Ok(())
 }

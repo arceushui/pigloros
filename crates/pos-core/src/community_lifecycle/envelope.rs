@@ -397,7 +397,7 @@ pub(super) fn append_hex(out: &mut String, bytes: &[u8]) {
     }
 }
 
-const fn owner_error(_: KeyRegistryErrorV1) -> Error {
+pub(super) const fn owner_error(_: KeyRegistryErrorV1) -> Error {
     Error::InvalidBinding
 }
 
