@@ -1073,11 +1073,10 @@ fn validate_error_fields(
             return Err(SandboxProviderProtocolError::InconsistentFields);
         }
     }
+    // An authenticated request already binds its ID, digest and, for every
+    // operation but describe, its attempt; a timeout names only execute.
     if fields.code == SandboxProviderErrorCode::PayloadTransferTimeout
-        && (fields.operation != Some(1)
-            || fields.request_id.is_none()
-            || fields.request_digest.is_none()
-            || fields.attempt_id.is_none())
+        && fields.operation != Some(1)
     {
         return Err(SandboxProviderProtocolError::InconsistentFields);
     }
