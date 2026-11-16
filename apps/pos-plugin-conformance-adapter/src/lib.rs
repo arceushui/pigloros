@@ -157,14 +157,21 @@ pub fn exit_code(result: Result<(), AdapterRunErrorV1>) -> ExitCode {
 /// and no environment variable names it, so `cargo build -p pos-plugin-conformance-adapter`
 /// does not build it and the worker binary must be built into the same directory first.
 ///
+/// `seal` is the composition root's [`pos_core::AuthorityTrustRootSealV1`] (ADR-129 A5.9,
+/// #1374), which `main` mints once; every evaluation world is opened with it.
+///
 /// # Errors
 /// Returns the reason no observation was written: [`AdapterRunErrorV1::Worker`] when the
 /// program cannot be located, then the errors of [`run_with()`].
-pub fn run(reader: impl Read, writer: impl Write) -> Result<(), AdapterRunErrorV1> {
+pub fn run(
+    seal: &'static pos_core::AuthorityTrustRootSealV1,
+    reader: impl Read,
+    writer: impl Write,
+) -> Result<(), AdapterRunErrorV1> {
     let runner = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(WORKER_PROGRAM)))
-        .and_then(SupervisorRunnerV1::with_program)
+        .and_then(|program| SupervisorRunnerV1::with_program(program, seal))
         .ok_or(AdapterRunErrorV1::Worker);
     runner.and_then(|runner| run_with(&runner, reader, writer))
 }

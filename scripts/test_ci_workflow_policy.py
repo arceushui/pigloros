@@ -255,6 +255,13 @@ PREFLIGHT_POLICY_STEPS = {
             ),
         },
         {
+            "name": "Check authority trust-root seal policy",
+            "run": (
+                "python scripts/check_authority_trust_root_seal.py\n"
+                "python scripts/test_check_authority_trust_root_seal.py\n"
+            ),
+        },
+        {
             "name": "Check trusted-clock port implementation policy",
             "run": (
                 "python scripts/check_trusted_clock_port_impls.py\n"
@@ -1773,6 +1780,24 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             with self.assertRaises(native_policy.PolicyError):
                 native_policy.check(changed)
         self.assertIn("cargo llvm-cov", coverage["run"])
+        # A hang must fail this step (so failure-only diagnostics run) and the
+        # observer must stream live rather than only after the step returns.
+        self.assertEqual(coverage["timeout-minutes"], 65)
+        self.assertIn("-NoNewWindow -PassThru", coverage["run"])
+        self.assertNotIn("Receive-Job", coverage["run"])
+        for change in (
+            lambda step: step.pop("timeout-minutes"),
+            lambda step: step.update(**{"timeout-minutes": 90}),
+            lambda step: step.update(run=step["run"].replace(
+                "-NoNewWindow -PassThru", "-NoNewWindow -PassThru -RedirectStandardOutput observer.log")),
+        ):
+            changed = copy.deepcopy(native)
+            change(changed["jobs"]["owner-bridge-windows"]["steps"][9])
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        for name in ("Export failed native coverage diagnostics", "Retain failed native coverage diagnostics"):
+            step = next(s for s in native["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            self.assertEqual(step["if"], "${{ failure() && !cancelled() && steps.coverage.outcome == 'failure' }}")
         sources = native_policy.producer_sources()
         name = "scripts/observe-owner-desktop.ps1"
         for payload in ("Stop-Process -Id 1", "Get-CimInstance Win32_Process | Select-Object CommandLine"):
