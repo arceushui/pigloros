@@ -102,8 +102,9 @@ fn terminate_stale_runtimes(
 /// Once the port reports the unit started, every later failure (a wrong
 /// echo, a kernel check, the connection or `describe`) stops it again
 /// through `terminate_stale_runtimes`, the only stop operation (R11 §8.6),
-/// within what remains of the start deadline. The original failure is
-/// returned whatever that stop reports.
+/// under a fresh 10 s bound: what remains of the start deadline may already
+/// be spent (a `describe` that hangs for its whole I/O timeout). The original
+/// failure is returned whatever that stop reports.
 fn start_and_admit(
     port: &dyn ProviderLifecyclePort,
     admitted: &AdmittedSelectorProvider,
@@ -127,14 +128,17 @@ fn start_and_admit(
                 )
                 .and_then(|()| verify_started_process(&observed, binary, executable_digest))
                 .and_then(|()| admit_started_runtime(admitted, slot, &observed))
-                .inspect_err(|_| stop_unadmitted_runtime(port, deadline))
+                .inspect_err(|_| stop_unadmitted_runtime(port))
             })
         })
 }
 
-/// Stop a started but unadmitted runtime; its own failure changes nothing.
-fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort, deadline: Instant) {
-    terminate_stale_runtimes(port, deadline).ok();
+/// Stop a started but unadmitted runtime within a fresh 10 s bound (R11 §8.6
+/// "within 10 s"); its own failure changes nothing.
+fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort) {
+    deadline_after(STALE_TERMINATION_BOUND)
+        .and_then(|deadline| terminate_stale_runtimes(port, deadline))
+        .ok();
 }
 
 /// R11 §5.0 step 7: the observed main process, as the kernel reports it.
@@ -439,7 +443,8 @@ mod tests {
     }
 
     /// Every failure after the port reported a started unit stops it again
-    /// within the start deadline; a refused start stops nothing.
+    /// under a fresh 10 s bound, never the 32 s start deadline; a refused
+    /// start stops nothing.
     #[test]
     fn a_started_but_unadmitted_runtime_is_stopped_again() -> TestResult {
         let (admitted, _, binary) = fixture()?;
@@ -483,7 +488,9 @@ mod tests {
             let started = deadlines(&port.start_deadlines)?;
             assert_eq!(started.len(), 1);
             assert!(within(started[0], Duration::from_secs(32), before));
-            assert_eq!(deadlines(&port.stale_deadlines)?, started);
+            let stopped = deadlines(&port.stale_deadlines)?;
+            assert_eq!(stopped.len(), 1);
+            assert!(within(stopped[0], Duration::from_secs(10), before));
         }
         let refused = ScriptedPort::new(Reply::Echo, Reply::Refuse);
         let slot = ProviderRuntimeSlot::allocate(&admitted)?;
