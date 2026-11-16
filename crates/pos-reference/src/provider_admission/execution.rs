@@ -13,7 +13,9 @@ use std::{fs::File, io, os::unix::net::UnixStream, sync::Arc, time::Instant};
 
 use crate::{
     evaluator::CaseAttempt,
-    sandbox_provider_protocol::{PayloadDescriptor, SandboxLimit, SelectorGrantCommitment},
+    sandbox_provider_protocol::{
+        AdmissionLedger, PayloadDescriptor, SandboxLimit, SelectorGrantCommitment, TransferRecord,
+    },
     selector::SelectorBoundaryError,
 };
 
@@ -97,6 +99,125 @@ pub enum StagingError {
     Io(#[from] io::Error),
 }
 
+/// The AGR1 one exchange completely wrote, and the admission facts of that
+/// moment (ADR-069 R9 §4.6.3).
+///
+/// Only a completed grant write creates one. Its bytes are the exact
+/// canonical AGR1 the selector received, retained for the stored response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuedGrant {
+    bytes: Arc<[u8]>,
+    digest: [u8; 32],
+    admission: AdmissionLedger,
+    issued_at: u64,
+}
+
+impl IssuedGrant {
+    /// The exact canonical AGR1 bytes that were sent.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The AGR1 self-digest, which every later cancel and reconcile request
+    /// must name.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// TME1 `admission`: the live attempts (ELM1 ID 13), including this one,
+    /// and the incomplete inputs (ID 14) when AGR1 was issued.
+    #[must_use]
+    pub const fn admission(&self) -> AdmissionLedger {
+        self.admission
+    }
+
+    /// When AGR1 was completely written, in `CLOCK_MONOTONIC` nanoseconds.
+    #[must_use]
+    pub const fn issued_at(&self) -> u64 {
+        self.issued_at
+    }
+}
+
+/// An input that failed after its AGR1 was completely sent (ADR-069 §4).
+///
+/// Its staged bytes and reservations are already released. The grant, its
+/// attempt and the incomplete transfer remain: the attempt is admitted, so
+/// it ends in a stored `UnavailableAfterAdmission`, never in SPE1.
+#[derive(Debug)]
+pub struct FailedInput {
+    error: StagingError,
+    attempt_id: [u8; 16],
+    grant: IssuedGrant,
+    transfer: TransferRecord,
+}
+
+impl FailedInput {
+    /// Why the input was refused.
+    #[must_use]
+    pub const fn error(&self) -> &StagingError {
+        &self.error
+    }
+
+    /// The admitted `AttemptId`.
+    #[must_use]
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
+    /// The AGR1 the attempt was admitted under.
+    #[must_use]
+    pub const fn grant(&self) -> &IssuedGrant {
+        &self.grant
+    }
+
+    /// TME1 `input`: the transfer as far as it got.
+    #[must_use]
+    pub const fn transfer(&self) -> TransferRecord {
+        self.transfer
+    }
+}
+
+/// Why staged input was not admitted.
+#[derive(Debug, thiserror::Error)]
+pub enum InputRefusal {
+    /// No AGR1 was completely sent: the exchange fails before admission.
+    #[error(transparent)]
+    NotGranted(StagingError),
+    /// AGR1 was sent: the admitted attempt's input failed.
+    #[error("admitted input failed: {}", .0.error)]
+    Failed(Box<FailedInput>),
+}
+
+impl InputRefusal {
+    /// Why the input was refused.
+    #[must_use]
+    pub fn error(&self) -> &StagingError {
+        match self {
+            Self::NotGranted(error) => error,
+            Self::Failed(failed) => &failed.error,
+        }
+    }
+}
+
+/// The input-transfer window: its start once the complete SPX1 frame was
+/// read and its ELM1 ID 16 deadline, in `CLOCK_MONOTONIC` nanoseconds.
+#[derive(Clone, Copy, Debug)]
+struct TransferWindow {
+    start: u64,
+    deadline: u64,
+}
+
+/// The current `CLOCK_MONOTONIC` time in nanoseconds.
+fn monotonic_ns() -> u64 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    u64::try_from(now.tv_sec)
+        .unwrap_or_default()
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or_default())
+}
+
 /// Immutable policy derived only from the independently reconstructed case.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderExecutionPolicy {
@@ -163,12 +284,12 @@ struct ConnectionIdentity {
     inode: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum GrantState {
     Prepared,
     Writing,
-    /// AGR1 was written completely; this is its self-digest.
-    Granted([u8; 32]),
+    /// AGR1 was written completely.
+    Granted(IssuedGrant),
 }
 
 /// Derived policy and atomic reservations, before any adapter input is admitted.
@@ -181,6 +302,7 @@ pub struct PreparedProviderExecution {
     connection: ConnectionIdentity,
     initial_deadline: Instant,
     input_deadline: Instant,
+    window: TransferWindow,
     grant: GrantState,
 }
 
@@ -192,7 +314,8 @@ pub struct AdmittedProviderExecution {
     root_image: File,
     proof: Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
-    grant_digest: [u8; 32],
+    grant: IssuedGrant,
+    transfer: TransferRecord,
     // The descriptor pins staged storage even after its private name is unlinked.
     // Close owned resources before releasing bytes, then the counted attempt.
     _input: StagingCharge,

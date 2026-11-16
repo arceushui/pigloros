@@ -100,11 +100,11 @@ pub use evidence::{
     RootMount, TerminationEvidence, TerminationEvidenceFields, TransferRecord,
 };
 pub use execution::{
-    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
-    PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
-    SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode, SandboxProviderReceipt,
-    SandboxProviderReceiptFields, SandboxProviderResult, SandboxProviderResultFields,
-    SandboxTerminalOutcome,
+    AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, ExecuteAuthority,
+    NetworkExchangePlan, PayloadDescriptor, PayloadDirection, PayloadStreamValidator,
+    ReceiptAuthority, SandboxExecuteRequest, SandboxPayloadChunk, SandboxProviderError,
+    SandboxProviderErrorCode, SandboxProviderReceipt, SandboxProviderReceiptFields,
+    SandboxProviderResult, SandboxProviderResultFields, SandboxTerminalOutcome,
 };
 pub use launch::{
     blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
@@ -116,7 +116,7 @@ pub use operations::{
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
     SandboxReconcileResponse,
 };
-pub use signing::{Rls1, RuntimeSigned, Sau1, SelfDigested, Spr1, Spy1, Verified};
+pub use signing::{Agr1, Rls1, RuntimeSigned, Sau1, SelfDigested, Spr1, Spy1, Verified};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,

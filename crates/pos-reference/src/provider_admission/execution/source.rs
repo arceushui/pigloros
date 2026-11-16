@@ -15,8 +15,9 @@ use crate::{
     adapter_transport::{read_attempt, write_attempt},
     evaluator_protocol::EvaluationRequest,
     sandbox_provider_protocol::{
-        AdmissionAuthority, AdmissionGrant, PayloadDescriptor, PayloadDirection,
-        PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
+        AdmissionAuthority, AdmissionGrant, AdmissionGrantFields, AdmissionLedger, Agr1,
+        PayloadDescriptor, PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest,
+        SandboxPayloadChunk, SelfDigested, TransferRecord, Verified,
     },
     selector::installation::{
         authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap},
@@ -27,9 +28,9 @@ use crate::{
 
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
-    AdmittedProviderExecution, ConnectionIdentity, ExecutionSource, GrantState,
-    PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError,
-    StagingLedger,
+    monotonic_ns, AdmittedProviderExecution, ConnectionIdentity, ExecutionSource, FailedInput,
+    GrantState, InputRefusal, IssuedGrant, PreparedProviderExecution, ProviderExecutionPolicy,
+    RetainedCase, StagingCharge, StagingError, StagingLedger, TransferWindow,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -222,6 +223,9 @@ pub(super) fn receive(
         EvaluationRequest::from_canonical_cbor(&evaluation_record.bytes).map_err(invalid)?;
     let request_record = frame(&mut reader, ledger)?;
     let spx_completed = Instant::now();
+    // Sampled after the instant, so the recorded deadline is never earlier
+    // than the enforced one.
+    let input_start = monotonic_ns();
     let request =
         SandboxExecuteRequest::from_canonical_cbor(&request_record.bytes).map_err(invalid)?;
     require_grant_turn(reader.stream)?;
@@ -278,6 +282,10 @@ pub(super) fn receive(
     require_grant_turn(reader.stream)?;
     let (slot, input) = ledger.prepare(authority, &policy)?;
     drop(control);
+    let window = TransferWindow {
+        start: input_start,
+        deadline: input_start.saturating_add(policy.limit(16).saturating_mul(1_000_000)),
+    };
     Ok(PreparedProviderExecution {
         source: Arc::new(ExecutionSource {
             snapshot,
@@ -291,6 +299,7 @@ pub(super) fn receive(
         connection: identity,
         initial_deadline,
         input_deadline,
+        window,
         grant: GrantState::Prepared,
     })
 }
@@ -381,15 +390,21 @@ impl PreparedProviderExecution {
 
     /// Sign and send AGR1 solely from this policy on its original connection.
     ///
+    /// `sign` receives the sealed AGR1 record and returns it signed under the
+    /// runtime-attestation key, verified before emission (ADR-069 R9 §5).
+    /// Once the grant is completely written, the live attempts and incomplete
+    /// inputs of the ledger and the write's completion time are retained
+    /// with its exact bytes.
+    ///
     /// # Errors
     /// Refuses reuse, expiry, authority changes, a foreign connection or key.
     /// A partially written grant consumes this exchange; it cannot be retried.
-    pub fn send_grant(
+    pub fn send_grant<E>(
         &mut self,
         stream: &mut UnixStream,
-        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], io::Error>,
+        sign: impl FnOnce(SelfDigested<Agr1>) -> Result<Verified<Agr1>, E>,
     ) -> Result<(), StagingError> {
-        if self.grant != GrantState::Prepared {
+        if !matches!(self.grant, GrantState::Prepared) {
             return Err(StagingError::GrantAlreadyIssued);
         }
         self.check_connection(stream)?;
@@ -399,7 +414,8 @@ impl PreparedProviderExecution {
         self.slot.recheck(authority)?;
         let request = snapshot.request();
         let a = &request.authority;
-        let (grant, grant_digest) = AdmissionGrant {
+        let admitted = snapshot.admitted.provider();
+        let (grant, grant_digest) = AdmissionGrant::self_digested(AdmissionGrantFields {
             request_id: request.request.request_id,
             attempt_id: request.attempt_id,
             authority: AdmissionAuthority {
@@ -426,14 +442,20 @@ impl PreparedProviderExecution {
             expected_launch_policy_digest: a.lps1_digest,
             expected_readback_set_digest: self.policy().expected_readback_digest(),
             runtime_attestation_key_id: snapshot.runtime_attestation_key_id().to_owned(),
-            grant_digest: [0; 32],
-            signature: [0; 64],
-        }
-        .sign_and_encode(sign)
-        .map_err(|_| StagingError::InvalidSignature)?;
-        snapshot
-            .admitted
-            .provider()
+        })
+        .ok()
+        .and_then(|record| sign(record).ok())
+        .and_then(|verified| {
+            AdmissionGrant::new(verified, admitted.runtime_attestation_key())
+                .and_then(|grant| {
+                    grant
+                        .to_canonical_cbor()
+                        .map(|bytes| (bytes, grant.grant_digest))
+                })
+                .ok()
+        })
+        .ok_or(StagingError::InvalidSignature)?;
+        admitted
             .authenticate_grant(
                 &grant,
                 request,
@@ -454,6 +476,7 @@ impl PreparedProviderExecution {
             .and_then(|()| {
                 // Grant output starts here. Later peer bytes can only be input;
                 // they cannot reopen the independently validated source records.
+                let usage = self.ledger.usage();
                 self.grant = GrantState::Writing;
                 let mut writer = TimedStream {
                     stream,
@@ -464,23 +487,94 @@ impl PreparedProviderExecution {
                     .and_then(|()| writer.write_all(&grant))
                     .map_err(StagingError::from)
                     .and_then(|()| remaining(self.initial_deadline.min(self.input_deadline)))
-                    .map(|_| self.grant = GrantState::Granted(grant_digest))
+                    .map(|_| {
+                        self.grant = GrantState::Granted(IssuedGrant {
+                            bytes: grant.into(),
+                            digest: grant_digest,
+                            admission: AdmissionLedger {
+                                active_attempts: usage.attempts,
+                                incomplete_inputs: usage.queued_inputs,
+                            },
+                            issued_at: monotonic_ns(),
+                        });
+                    })
             })
     }
 
     /// Receive and verify complete SBC1/EAI1 into the retained private file.
     ///
+    /// The input transfer is recorded as TME1 `input`: it started when the
+    /// complete SPX1 frame was read, its deadline is the ELM1 ID 16 window
+    /// from then, and it finished when the final chunk and the whole-payload
+    /// digest verified, or when the input failed. A failed input's final
+    /// chunk is not counted, so it is never complete.
+    ///
     /// # Errors
-    /// Refuses a missing grant, foreign connection, timeout, invalid framing,
-    /// descriptor/case mismatch, extra input or a changed installed authority.
+    /// [`InputRefusal::NotGranted`] when no AGR1 was completely sent.
+    /// Otherwise [`InputRefusal::Failed`] refuses a foreign connection,
+    /// timeout, invalid framing, descriptor/case mismatch, extra input or a
+    /// changed installed authority, retaining the grant and the transfer.
     pub(super) fn receive_input(
         self,
         stream: &mut UnixStream,
         file: &File,
-    ) -> Result<AdmittedProviderExecution, StagingError> {
-        let GrantState::Granted(grant_digest) = self.grant else {
-            return Err(StagingError::GrantRequired);
+    ) -> Result<AdmittedProviderExecution, InputRefusal> {
+        let GrantState::Granted(grant) = self.grant.clone() else {
+            return Err(InputRefusal::NotGranted(StagingError::GrantRequired));
         };
+        let mut received = Received {
+            accepted: 0,
+            finished: None,
+        };
+        let verified = self.verify_input(stream, file, &mut received);
+        let transfer = self.transfer(
+            received.accepted,
+            received.finished.unwrap_or_else(monotonic_ns),
+        );
+        match verified {
+            Ok((verified_input, root_image, proof, authority)) => {
+                self.input.finish_input();
+                Ok(AdmittedProviderExecution {
+                    source: self.source,
+                    verified_input,
+                    root_image,
+                    proof,
+                    authority,
+                    grant,
+                    transfer,
+                    _input: self.input,
+                    slot: self.slot,
+                })
+            }
+            Err(error) => Err(InputRefusal::Failed(Box::new(FailedInput {
+                error,
+                attempt_id: self.request().attempt_id,
+                grant,
+                transfer,
+            }))),
+        }
+    }
+
+    /// The input transfer as far as it got: `accepted` bytes, finished at
+    /// `finish` (R9 §6 rule 9).
+    fn transfer(&self, accepted: u64, finish: u64) -> TransferRecord {
+        let expected = self.policy().input.byte_length;
+        TransferRecord {
+            start: self.window.start,
+            deadline: self.window.deadline,
+            finish,
+            expected_bytes: expected,
+            accepted_bytes: accepted,
+            complete: accepted == expected && finish <= self.window.deadline,
+        }
+    }
+
+    fn verify_input(
+        &self,
+        stream: &mut UnixStream,
+        file: &File,
+        received: &mut Received,
+    ) -> Result<VerifiedParts, StagingError> {
         self.check_connection(stream)?;
         let request = self.request();
         let mut validator = PayloadStreamValidator::new(
@@ -497,6 +591,7 @@ impl PreparedProviderExecution {
         };
         let mut offset = 0;
         while offset < self.policy().input.byte_length {
+            received.accepted = offset;
             let record = frame(&mut reader, &self.ledger)?;
             let chunk =
                 SandboxPayloadChunk::from_canonical_cbor(&record.bytes).map_err(invalid_input)?;
@@ -506,6 +601,7 @@ impl PreparedProviderExecution {
             drop(record);
         }
         validator.finish().map_err(invalid_input)?;
+        received.finished = Some(monotonic_ns());
         if reader.read(&mut [0; 1])? != 0 || file.metadata()?.len() != offset {
             return Err(StagingError::InvalidInput);
         }
@@ -527,19 +623,32 @@ impl PreparedProviderExecution {
             )
         };
         let verified_input = file.try_clone()?;
-        self.input.finish_input();
-        Ok(AdmittedProviderExecution {
-            source: self.source,
-            verified_input,
-            root_image,
-            proof,
-            authority,
-            grant_digest,
-            _input: self.input,
-            slot: self.slot,
-        })
+        received.accepted = offset;
+        Ok((verified_input, root_image, proof, authority))
     }
 }
+
+/// How far an input transfer got.
+///
+/// Every chunk before the one being received was accepted. The final
+/// chunk's bytes count only once the whole input was admitted, so a failed
+/// input is never complete (owner decision, 2026-11-16: a post-AGR1 input
+/// failure has `input.complete = false`, code 10).
+struct Received {
+    /// The accepted bytes.
+    accepted: u64,
+    /// When the final chunk and the payload digest verified.
+    finished: Option<u64>,
+}
+
+/// The verified input descriptor, the held root image, its proof and the
+/// authority it was rechecked under.
+type VerifiedParts = (
+    File,
+    File,
+    Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
+    super::super::AdmittedAuthority,
+);
 
 impl AdmittedProviderExecution {
     /// Exact independently reconstructed policy bound to these input bytes.
@@ -559,11 +668,16 @@ impl AdmittedProviderExecution {
         }
     }
 
-    /// The self-digest of the AGR1 this input was admitted under, which every
-    /// later cancel and reconcile request must name.
+    /// The AGR1 this input was admitted under.
     #[must_use]
-    pub const fn grant_digest(&self) -> [u8; 32] {
-        self.grant_digest
+    pub const fn grant(&self) -> &IssuedGrant {
+        &self.grant
+    }
+
+    /// TME1 `input`: the complete input transfer.
+    #[must_use]
+    pub const fn transfer(&self) -> TransferRecord {
+        self.transfer
     }
 
     /// Recheck current installation and the live provider control floor.
@@ -822,10 +936,19 @@ mod tests {
         Ok((prepared, provider, selector))
     }
 
+    /// The failed input of an input refused after its AGR1 was sent.
+    fn failed_input(
+        result: Result<AdmittedProviderExecution, InputRefusal>,
+    ) -> TestResult<Box<FailedInput>> {
+        match result {
+            Err(InputRefusal::Failed(failed)) => Ok(failed),
+            Err(InputRefusal::NotGranted(error)) => Err(format!("not granted: {error}").into()),
+            Ok(_) => Err("the input was admitted".into()),
+        }
+    }
+
     fn send_grant(prepared: &mut PreparedProviderExecution, stream: &mut UnixStream) -> TestResult {
-        prepared.send_grant(stream, |message| {
-            Ok(StagedInstallation::sign_grant(message))
-        })?;
+        prepared.send_grant(stream, StagedInstallation::sign_grant)?;
         Ok(())
     }
 
@@ -878,9 +1001,7 @@ mod tests {
         let (mut prepared, mut provider, selector) = prepared_pair(&staged, &ledger)?;
         let (mut foreign, foreign_peer) = UnixStream::pair()?;
         assert!(matches!(
-            prepared.send_grant(&mut foreign, |message| Ok(StagedInstallation::sign_grant(
-                message
-            ))),
+            prepared.send_grant(&mut foreign, StagedInstallation::sign_grant),
             Err(StagingError::ConnectionChanged)
         ));
         drop((foreign, foreign_peer));
@@ -888,7 +1009,7 @@ mod tests {
         let result = prepared.send_grant(&mut provider, |message| {
             outgoing.write_all(b"unread")?;
             drop(selector);
-            Ok(StagedInstallation::sign_grant(message))
+            StagedInstallation::sign_grant(message)
         });
         assert!(
             matches!(result, Err(StagingError::Io(error)) if error.kind() == io::ErrorKind::ConnectionReset)
@@ -902,9 +1023,7 @@ mod tests {
             matches!(send_grant(&mut prepared, &mut provider), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::Io(_))))
         );
         assert!(matches!(
-            prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
-                message
-            ))),
+            prepared.send_grant(&mut provider, StagedInstallation::sign_grant),
             Err(StagingError::GrantAlreadyIssued)
         ));
         drop((prepared, provider, selector));
@@ -968,21 +1087,37 @@ mod tests {
             } else {
                 None
             };
-            let result = prepared.receive_input(&mut provider, &file);
+            let expected = prepared.policy().input.byte_length;
+            let window = prepared.window;
+            let result = failed_input(prepared.receive_input(&mut provider, &file));
             if let Some(bytes) = saved {
                 use std::os::unix::fs::PermissionsExt as _;
                 std::fs::write(&manifest, bytes)?;
                 std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
             }
+            let failed = result?;
+            let error = failed.error();
             assert!(
                 match fault {
-                    "read-only" => matches!(result, Err(StagingError::Io(_))),
-                    "floor" => matches!(result, Err(StagingError::BelowControlFloor)),
-                    "installation" => matches!(result, Err(StagingError::Source(_))),
-                    _ => matches!(result, Err(StagingError::InvalidInput)),
+                    "read-only" => matches!(error, StagingError::Io(_)),
+                    "floor" => matches!(error, StagingError::BelowControlFloor),
+                    "installation" => matches!(error, StagingError::Source(_)),
+                    _ => matches!(error, StagingError::InvalidInput),
                 },
-                "{fault}: {result:?}"
+                "{fault}: {error:?}"
             );
+            // The one chunk is the final chunk: a failed input never counts
+            // it, so the transfer is incomplete however far it got.
+            let transfer = failed.transfer();
+            assert_eq!(
+                (transfer.start, transfer.deadline, transfer.expected_bytes),
+                (window.start, window.deadline, expected),
+                "{fault}"
+            );
+            assert_eq!(transfer.accepted_bytes, 0, "{fault}");
+            assert!(!transfer.complete, "{fault}");
+            assert!(transfer.start <= transfer.finish, "{fault}");
+            assert_ne!(failed.grant().bytes(), &[] as &[u8]);
             assert_eq!(ledger.usage().attempts, 0);
             assert_eq!(ledger.usage().reserved_bytes, 0);
         }
@@ -1021,14 +1156,17 @@ mod tests {
             }
             write_chunk(&staged, &mut selector, &payload, parent, b"")?;
             let file = tempfile::tempfile()?;
-            let result = prepared.receive_input(&mut provider, &file);
+            let failed = failed_input(prepared.receive_input(&mut provider, &file))?;
+            let error = failed.error();
             assert!(
                 match fault {
-                    "decoded-budget" => matches!(result, Err(StagingError::AggregateExceeded)),
-                    _ => matches!(result, Err(StagingError::InvalidInput)),
+                    "decoded-budget" => matches!(error, StagingError::AggregateExceeded),
+                    _ => matches!(error, StagingError::InvalidInput),
                 },
-                "{fault}: {result:?}"
+                "{fault}: {error:?}"
             );
+            // Every byte arrived in time, but the input was not admitted.
+            assert!(!failed.transfer().complete, "{fault}");
             assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         }
         Ok(())
@@ -1073,9 +1211,7 @@ mod tests {
             if fault == "input" {
                 prepared.input_deadline = expired;
             }
-            let result = prepared.send_grant(&mut provider, |message| {
-                Ok(StagedInstallation::sign_grant(message))
-            });
+            let result = prepared.send_grant(&mut provider, StagedInstallation::sign_grant);
             if let Some(bytes) = saved {
                 use std::os::unix::fs::PermissionsExt as _;
                 std::fs::write(&manifest, bytes)?;
@@ -1209,7 +1345,7 @@ mod tests {
             let result = if during_signing {
                 prepared.send_grant(&mut provider, |message| {
                     fail_cleanup()?;
-                    Ok(StagedInstallation::sign_grant(message))
+                    StagedInstallation::sign_grant(message)
                 })
             } else {
                 fail_cleanup()?;
@@ -1255,6 +1391,7 @@ mod tests {
         let grant = frame(&mut selector, &ledger)?;
         let sent_grant =
             crate::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(&grant.bytes)?;
+        let sent_bytes = grant.bytes.clone();
         drop(grant);
         let temporary = tempfile::tempdir()?;
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -1271,6 +1408,26 @@ mod tests {
         // Cancel and reconcile requests must name exactly the AGR1 sent.
         assert_eq!(verified.entry().grant_digest(), sent_grant.grant_digest);
         assert_ne!(sent_grant.grant_digest, [0; 32]);
+        // The exact AGR1 bytes are retained, with the ledger when it was
+        // issued: this attempt live and its input still incomplete.
+        let issued = verified.entry().grant();
+        assert_eq!(issued.bytes(), sent_bytes.as_slice());
+        assert_eq!(issued.digest(), sent_grant.grant_digest);
+        assert_eq!(
+            issued.admission(),
+            AdmissionLedger {
+                active_attempts: 1,
+                incomplete_inputs: 1,
+            }
+        );
+        let transfer = verified.entry().transfer();
+        assert!(transfer.complete);
+        assert_eq!(
+            (transfer.expected_bytes, transfer.accepted_bytes),
+            (verified.len(), verified.len())
+        );
+        assert!(transfer.start <= issued.issued_at() && issued.issued_at() <= transfer.finish);
+        assert!(transfer.finish <= transfer.deadline);
         assert_eq!(
             verified.entry().policy().request_digest(),
             expected_request.request_digest

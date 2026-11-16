@@ -51,13 +51,13 @@ pub(crate) fn verified_input(
                 .shutdown(std::net::Shutdown::Write)
                 .map_err(|error| error.to_string())
         });
-        let result = (|| {
+        let result = (|| -> Result<VerifiedStagedInput, Box<dyn std::error::Error>> {
             let mut prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
             let name = prepared.request().attempt_id;
-            prepared.send_grant(&mut provider, |message| {
-                Ok(StagedInstallation::sign_grant(message))
-            })?;
-            staging.create_input(name, prepared)?.receive(&mut provider)
+            prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
+            Ok(staging
+                .create_input(name, prepared)?
+                .receive(&mut provider)?)
         })();
         drop(provider);
         let peer = client

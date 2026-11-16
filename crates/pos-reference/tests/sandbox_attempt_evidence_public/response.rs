@@ -9,10 +9,11 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    AttemptEvidence, AttemptProgressCode, AttemptResponse, RuntimeSigned, SandboxAuditRecord,
-    SandboxAuditRecordFields, SandboxProviderProtocolError as ProtocolError,
-    SandboxProviderReceipt, SandboxProviderReceiptFields, SandboxProviderResult,
-    SandboxProviderResultFields, SandboxTerminalOutcome, SelfDigested, Verified,
+    AdmissionGrant, AdmissionGrantFields, AttemptEvidence, AttemptProgressCode, AttemptResponse,
+    RuntimeSigned, SandboxAuditRecord, SandboxAuditRecordFields,
+    SandboxProviderProtocolError as ProtocolError, SandboxProviderReceipt,
+    SandboxProviderReceiptFields, SandboxProviderResult, SandboxProviderResultFields,
+    SandboxTerminalOutcome, SelfDigested, Verified,
 };
 
 use super::bundle::{elm1_digest, Fixture, APT1, LPS1, RUNTIME_KEY};
@@ -842,6 +843,86 @@ fn a_changed_record_is_never_encoded_under_its_old_signature() -> TestResult {
     assert_eq!(
         result.to_canonical_cbor().err(),
         Some(ProtocolError::DigestMismatch)
+    );
+    Ok(())
+}
+
+fn grant_record_fields(grant: &AdmissionGrant) -> AdmissionGrantFields {
+    AdmissionGrantFields {
+        request_id: grant.request_id,
+        attempt_id: grant.attempt_id,
+        authority: grant.authority.clone(),
+        trust_epoch: grant.trust_epoch,
+        revocation_epoch: grant.revocation_epoch,
+        policy_epoch: grant.policy_epoch,
+        elm1_digest: grant.elm1_digest,
+        input_digest: grant.input_digest,
+        exchange_plan_digests: grant.exchange_plan_digests.clone(),
+        expected_launch_policy_digest: grant.expected_launch_policy_digest,
+        expected_readback_set_digest: grant.expected_readback_set_digest,
+        runtime_attestation_key_id: grant.runtime_attestation_key_id.clone(),
+    }
+}
+
+#[test]
+fn the_grant_encoder_reproduces_the_oracle_agr1_and_signs_only_under_the_admitted_key() -> TestResult
+{
+    let key = runtime_key();
+    let public = key.verifying_key();
+    let built = completed(&COMPLETED)?;
+    let decoded = AdmissionGrant::from_canonical_cbor(&built.grant)?;
+    let fields = grant_record_fields(&decoded);
+    let record = AdmissionGrant::self_digested(fields.clone())?;
+    assert_eq!(record.digest(), decoded.grant_digest);
+    // R9 §5: the AGR1 message is its domain followed by the self-digest.
+    let mut message = b"PiglorOS.AGR1.Signature.v1\0".to_vec();
+    message.extend(record.digest());
+    assert_eq!(record.signature_message(), message);
+    assert_eq!(record.key_id(), RUNTIME_KEY);
+    let encoded = AdmissionGrant::new(sign(record.clone(), &key)?, &public)?;
+    assert_eq!(encoded, decoded);
+    assert_eq!(encoded.to_canonical_cbor()?, built.grant);
+    // A signature that verified under another key is not the admitted one.
+    assert_eq!(
+        AdmissionGrant::new(sign(record, &foreign_key())?, &public).err(),
+        Some(ProtocolError::SignatureInvalid)
+    );
+    // The encoder validates as the decoder does.
+    for invalid in [
+        AdmissionGrantFields {
+            attempt_id: [0; 16],
+            ..fields.clone()
+        },
+        AdmissionGrantFields {
+            elm1_digest: [0; 32],
+            ..fields.clone()
+        },
+        AdmissionGrantFields {
+            exchange_plan_digests: vec![[0; 32]],
+            ..fields.clone()
+        },
+        AdmissionGrantFields {
+            runtime_attestation_key_id: String::new(),
+            ..fields
+        },
+    ] {
+        assert_eq!(
+            AdmissionGrant::self_digested(invalid).err(),
+            Some(ProtocolError::FieldOutOfBounds)
+        );
+    }
+    // A changed grant is never encoded under its old signature.
+    let mut changed = encoded;
+    changed.policy_epoch += 1;
+    assert_eq!(
+        changed.to_canonical_cbor().err(),
+        Some(ProtocolError::DigestMismatch)
+    );
+    changed.policy_epoch -= 1;
+    changed.signature = [0; 64];
+    assert_eq!(
+        changed.to_canonical_cbor().err(),
+        Some(ProtocolError::SignatureInvalid)
     );
     Ok(())
 }

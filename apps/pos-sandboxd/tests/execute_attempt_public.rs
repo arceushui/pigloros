@@ -30,7 +30,7 @@ use pos_sandboxd::{
 };
 
 use pos_reference::provider_admission::execution::{
-    PreparedProviderExecution, StagingError, StagingUsage,
+    InputRefusal, PreparedProviderExecution, StagingError, StagingUsage,
 };
 use std::{
     io::{Read as _, Write as _},
@@ -209,13 +209,14 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
     let (mut prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
     let (mut foreign, _peer) = UnixStream::pair()?;
     assert!(matches!(
-        prepared.send_grant(&mut foreign, |message| Ok(StagedInstallation::sign_grant(
-            message
-        ))),
+        prepared.send_grant(&mut foreign, StagedInstallation::sign_grant),
         Err(StagingError::ConnectionChanged)
     ));
+    // A signature that verified under another key than the admitted one.
     assert!(matches!(
-        prepared.send_grant(&mut provider, |_| Ok([1; 64])),
+        prepared.send_grant(&mut provider, |record| {
+            StagedInstallation::sign_grant_with(&[5; 32], record)
+        }),
         Err(StagingError::InvalidSignature)
     ));
     assert!(matches!(
@@ -224,17 +225,9 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
         ))),
         Err(StagingError::InvalidSignature)
     ));
+    prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
     assert!(matches!(
-        prepared.send_grant(&mut provider, |_| Ok([0; 64])),
-        Err(StagingError::InvalidSignature)
-    ));
-    prepared.send_grant(&mut provider, |message| {
-        Ok(StagedInstallation::sign_grant(message))
-    })?;
-    assert!(matches!(
-        prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
-            message
-        ))),
+        prepared.send_grant(&mut provider, StagedInstallation::sign_grant),
         Err(StagingError::GrantAlreadyIssued)
     ));
     let directory = tempfile::tempdir()?;
@@ -244,19 +237,39 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
         held.try_clone()?,
         held.metadata()?.uid(),
     )?;
-    assert!(matches!(
-        staging
-            .create_input([1; 16], prepared)?
-            .receive(&mut foreign),
-        Err(StagingError::ConnectionChanged)
-    ));
+    let attempt_id = prepared.request().attempt_id;
+    // AGR1 was sent: a foreign input connection fails the admitted attempt,
+    // which keeps its grant, but no reservation.
+    let refused = staging
+        .create_input([1; 16], prepared)?
+        .receive(&mut foreign)
+        .err()
+        .ok_or("a foreign connection was admitted")?;
+    assert!(refused.to_string().contains("admitted input failed"));
+    let InputRefusal::Failed(failed) = refused else {
+        return Err("the grant was not retained".into());
+    };
+    assert!(matches!(failed.error(), StagingError::ConnectionChanged));
+    assert_eq!(failed.attempt_id(), attempt_id);
+    let grant = pos_reference::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(
+        failed.grant().bytes(),
+    )?;
+    assert_eq!(grant.grant_digest, failed.grant().digest());
+    assert_eq!(grant.attempt_id, attempt_id);
+    let transfer = failed.transfer();
+    assert_eq!(transfer.accepted_bytes, 0);
+    assert!(!transfer.complete);
     assert_eq!(ledger.usage(), StagingUsage::default());
     let (prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
+    let refused = staging
+        .create_input([2; 16], prepared)?
+        .receive(&mut provider)
+        .err()
+        .ok_or("an ungranted input was admitted")?;
+    assert_eq!(refused.to_string(), StagingError::GrantRequired.to_string());
     assert!(matches!(
-        staging
-            .create_input([2; 16], prepared)?
-            .receive(&mut provider),
-        Err(StagingError::GrantRequired)
+        refused,
+        InputRefusal::NotGranted(StagingError::GrantRequired)
     ));
     assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
@@ -286,9 +299,7 @@ fn incomplete_foreign_corrupt_or_duplicate_input_never_mints_an_entry() -> TestR
     frame(&mut foreign, staged.request())?;
     for bytes in [Vec::new(), foreign, corrupt, duplicate] {
         let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
-        prepared.send_grant(&mut provider, |message| {
-            Ok(StagedInstallation::sign_grant(message))
-        })?;
+        prepared.send_grant(&mut provider, StagedInstallation::sign_grant)?;
         selector.write_all(&bytes)?;
         selector.shutdown(std::net::Shutdown::Write)?;
         let directory = tempfile::tempdir()?;
@@ -364,7 +375,7 @@ fn a_floor_raised_by_a_slow_signer_is_rechecked_before_any_grant_bytes() -> Test
             revocation_epoch: u64::MAX,
             policy_epoch: u64::MAX,
         });
-        Ok(StagedInstallation::sign_grant(message))
+        StagedInstallation::sign_grant(message)
     });
     assert!(matches!(error, Err(StagingError::BelowControlFloor)));
     drop((prepared, provider));
@@ -386,9 +397,7 @@ fn extra_source_after_preparation_is_refused_before_any_grant_bytes() -> TestRes
     let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
     frame(&mut selector, staged.request())?;
     assert!(matches!(
-        prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
-            message
-        ))),
+        prepared.send_grant(&mut provider, StagedInstallation::sign_grant),
         Err(StagingError::InvalidSource)
     ));
     drop((prepared, provider));
@@ -416,7 +425,7 @@ fn a_pending_installation_update_is_rechecked_after_signing_before_grant_output(
         .join("installation-update.cbor");
     let result = prepared.send_grant(&mut provider, |message| {
         fs::write(&recovery, b"pending installation transaction")?;
-        Ok(StagedInstallation::sign_grant(message))
+        StagedInstallation::sign_grant(message)
     });
     assert!(matches!(result, Err(StagingError::Source(_))));
     drop((prepared, provider));
