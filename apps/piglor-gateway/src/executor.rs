@@ -4877,6 +4877,33 @@ mod tests {
     }
 
     #[test]
+    fn expired_produced_under_lookup_replies() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::Action(Box::new(super::ProducedUnderCommand {
+                commit: Some((TimelineId::new(), pos_core::Seq::from_u64(1))),
+                reply,
+            })),
+            receiver,
+        );
+    }
+
+    /// A store that is not the erasure host records no execution-mode
+    /// binding: neither the next commit nor a recorded one was produced
+    /// under any.
+    #[tokio::test]
+    async fn a_store_without_a_mode_binding_produces_under_none(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let executor = super::StoreExecutor::new(Box::new(MemoryStore::new()));
+        for commit in [None, Some((TimelineId::new(), pos_core::Seq::from_u64(1)))] {
+            assert!(executor.produced_under(commit).await.test_ok()?.is_none());
+        }
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
+    }
+
+    #[test]
     fn expired_action_receipt_purge_replies() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
