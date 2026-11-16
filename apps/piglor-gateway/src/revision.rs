@@ -25,10 +25,10 @@
 //! `PiglorOS.GatewayOptionSpecRevision.v1\0`) followed by the revision's
 //! canonical bytes: the RFC 8949 §4.2.1 deterministic CBOR array
 //! `[schema_id, schema_version, id, revision, parent_revision, subject_entity_id, entries]`
-//! (see [`ContentV1`]). `provenance.digest` is BLAKE3 of
+//! (see `ContentV1`). `provenance.digest` is BLAKE3 of
 //! `PiglorOS.GatewayRevisionProvenance.v1\0` followed by the deterministic
 //! CBOR array `[origin, principal_id, subject_entity_id, mode_profile_id,
-//! mode_profile_digest, binding_epoch, digest]` (see [`ProvenanceV1`]).
+//! mode_profile_digest, binding_epoch, digest]` (see `ProvenanceV1`).
 //! Both are what the contract README states.
 
 use std::{num::NonZeroU64, ops::RangeInclusive};
