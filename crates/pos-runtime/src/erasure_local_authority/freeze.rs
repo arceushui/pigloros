@@ -35,7 +35,7 @@ use super::{
     LocalErasureClassificationRowV1, LOCAL_ERASURE_CLASSIFICATION_V1,
     LOCAL_ERASURE_POLICY_REFERENCE_V1,
 };
-use crate::ErasureAuthorityReadViewV1;
+use crate::{ErasureAuthorityReadViewV1, ErasureViewListErrorV1};
 
 use ErasureArtifactClassV1::{CalibrationReport, ConformanceReport, Export, TimelineReplay};
 use ErasureInventoryCategoryV1::{Artifact, Backup, Key, Replica};
@@ -77,6 +77,16 @@ impl From<ErasureErrorV1> for ShortfallV1 {
     }
 }
 
+/// A view list over its bound is a refusal; a failed read is a failure.
+impl From<ErasureViewListErrorV1> for ShortfallV1 {
+    fn from(error: ErasureViewListErrorV1) -> Self {
+        match error {
+            ErasureViewListErrorV1::OverBound => Self::Refused,
+            ErasureViewListErrorV1::Read(error) => Self::Failed(error),
+        }
+    }
+}
+
 impl From<ShortfallV1> for ErasureErrorV1 {
     fn from(shortfall: ShortfallV1) -> Self {
         match shortfall {
@@ -87,16 +97,6 @@ impl From<ShortfallV1> for ErasureErrorV1 {
 }
 
 impl ShortfallV1 {
-    /// A failed view list read: its `ScopeInvalid` is the list's bound
-    /// overflow, every other error a read failure.
-    pub(super) fn from_list(error: ErasureErrorV1) -> Self {
-        if error == ErasureErrorV1::ScopeInvalid {
-            Self::Refused
-        } else {
-            Self::Failed(error)
-        }
-    }
-
     /// A refusal resolves to `None`; a failure stays an error.
     pub(super) fn resolved<T>(self) -> Result<Option<T>, ErasureErrorV1> {
         match self {
@@ -273,7 +273,7 @@ impl LocalErasureAuthorityV1 {
                 })
                 .and_then(|()| {
                     Self::subject_keys(view, actor, private)
-                        .map_err(ShortfallV1::from_list)
+                        .map_err(ShortfallV1::from)
                         .and_then(|keys| {
                             keys.iter()
                                 .map(|identity| {
@@ -290,7 +290,7 @@ impl LocalErasureAuthorityV1 {
                 .and_then(|()| {
                     affected.iter().try_for_each(|timeline| {
                         view.artifact_registrations(*timeline)
-                            .map_err(ShortfallV1::from_list)
+                            .map_err(ShortfallV1::from)
                             .and_then(|rows| {
                                 let rows = rows
                                     .into_iter()
@@ -303,7 +303,6 @@ impl LocalErasureAuthorityV1 {
                 })
                 .and_then(|()| {
                     Self::exports(view, private, affected, target)
-                        .map_err(ShortfallV1::from_list)
                         .and_then(|cells| extend_bounded(&mut closure, cells))
                 })
             })
@@ -316,7 +315,7 @@ impl LocalErasureAuthorityV1 {
         view: &dyn ErasureAuthorityReadViewV1,
         actor: EntityId,
         private: bool,
-    ) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
+    ) -> Result<Vec<KeyIdentityV1>, ErasureViewListErrorV1> {
         pos_crypto::subject_key::subject_owner_id(actor)
             .ok()
             .and_then(|owner| OwnerIdV1::new(owner).ok())
@@ -345,9 +344,10 @@ impl LocalErasureAuthorityV1 {
             ErasureReferenceV1,
             ErasureReferenceV1,
         ) -> ErasureRequiredTargetV1,
-    ) -> Result<Vec<ClosureCellV1>, ErasureErrorV1> {
+    ) -> Result<Vec<ClosureCellV1>, ShortfallV1> {
         let timelines = if private { &[][..] } else { affected };
         view.recipient_export_publications(timelines)
+            .map_err(ShortfallV1::from)
             .and_then(|publications| {
                 publications
                     .iter()
@@ -364,7 +364,8 @@ impl LocalErasureAuthorityV1 {
                             )
                         })
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ShortfallV1::from)
             })
     }
 
@@ -913,7 +914,17 @@ mod tests {
         class: ErasureArtifactClassV1,
         dependencies: Vec<ArtifactKeyDependencyV1>,
     ) -> TestResult<ArtifactRegistrationCatalogRowV1> {
-        let owner = OwnerIdV1::from_static("community-owner");
+        owned_row("community-owner", class, dependencies)
+    }
+
+    /// As [`row`], registered by `owner`: the same bytes under another owner
+    /// are another registration of the same artifact.
+    fn owned_row(
+        owner: &'static str,
+        class: ErasureArtifactClassV1,
+        dependencies: Vec<ArtifactKeyDependencyV1>,
+    ) -> TestResult<ArtifactRegistrationCatalogRowV1> {
+        let owner = OwnerIdV1::from_static(owner);
         let bytes = format!("{class:?}").into_bytes();
         let digest = ArtifactRegistrationV1::artifact_digest(class, &bytes);
         let registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
@@ -1082,12 +1093,13 @@ mod tests {
     #[test]
     fn only_a_refusal_is_committed() {
         assert_eq!(
-            ShortfallV1::from_list(ErasureErrorV1::ScopeInvalid),
+            ShortfallV1::from(ErasureViewListErrorV1::OverBound),
             ShortfallV1::Refused
         );
+        // A store's own ScopeInvalid is a read failure, never a refusal.
         assert_eq!(
-            ShortfallV1::from_list(ErasureErrorV1::ProvenanceMissing),
-            ShortfallV1::Failed(ErasureErrorV1::ProvenanceMissing)
+            ShortfallV1::from(ErasureViewListErrorV1::Read(ErasureErrorV1::ScopeInvalid)),
+            ShortfallV1::Failed(ErasureErrorV1::ScopeInvalid)
         );
         assert_eq!(ShortfallV1::Refused.resolved::<()>(), Ok(None));
         assert_eq!(
@@ -1102,5 +1114,21 @@ mod tests {
             ErasureErrorV1::from(ShortfallV1::Failed(ErasureErrorV1::Unauthorized)),
             ErasureErrorV1::Unauthorized
         );
+    }
+
+    #[test]
+    fn two_registrations_of_one_artifact_are_one_cell() -> TestResult {
+        let first = owned_row("owner-a", TimelineReplay, Vec::new())?;
+        let second = owned_row("owner-b", TimelineReplay, Vec::new())?;
+        assert_ne!(first.registration_address(), second.registration_address());
+        assert_eq!(first.artifact_digest(), second.artifact_digest());
+        let mut closure = ClosureV1::new();
+        assert_eq!(
+            extend_bounded(&mut closure, registration_cells(&[first, second], target)?),
+            Ok(())
+        );
+        assert_eq!(closure.len(), 1);
+        assert_eq!(closure.values().map(BTreeSet::len).sum::<usize>(), 1);
+        Ok(())
     }
 }

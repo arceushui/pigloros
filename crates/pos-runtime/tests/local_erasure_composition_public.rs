@@ -1722,14 +1722,22 @@ fn the_local_authority_refuses_an_unbound_freeze() -> TestResult {
         missing
     );
     assert_eq!(view.recorded_scope(request).map(drop), missing);
-    assert_eq!(view.artifact_registrations(authority_timeline()), missing);
+    let unread = Err(ErasureViewListErrorV1::Read(
+        ErasureErrorV1::ProvenanceMissing,
+    ));
     assert_eq!(
-        view.recipient_export_publications(&[authority_timeline()]),
-        missing
+        view.artifact_registrations(authority_timeline()).map(drop),
+        unread
     );
     assert_eq!(
-        view.key_identities(&pos_core::OwnerIdV1::from_static("subject:owner")),
-        missing
+        view.recipient_export_publications(&[authority_timeline()])
+            .map(drop),
+        unread
+    );
+    assert_eq!(
+        view.key_identities(&pos_core::OwnerIdV1::from_static("subject:owner"))
+            .map(drop),
+        unread
     );
     Ok(())
 }
@@ -2014,6 +2022,7 @@ use pos_core::{
     LocalErasureLineageRuleV1, LocalErasureSignaturePurposeV1, LocalErasureSignatureV1, OwnerIdV1,
 };
 use pos_crypto::key_roles::sign_for_registered_role;
+use pos_runtime::ErasureViewListErrorV1;
 
 /// The signer key of a rotated bundle.
 fn rotated_signer() -> SigningKey {
@@ -2946,18 +2955,12 @@ fn ard1_cells(
         .filter(|row| row.registration().fields().data_class == class)
     {
         let digest = ErasureReferenceV1::from_digest(*row.artifact_digest().as_bytes());
-        let ack_class = if matches!(
-            row.artifact_class(),
-            ErasureArtifactClassV1::CalibrationReport | ErasureArtifactClassV1::ConformanceReport
-        ) {
-            "managed-report"
-        } else {
-            "artifact-store"
-        };
+        // No MRM1 closure record is a report class, so each is an
+        // `artifact-store` cell (D5).
         cells.push((
             local_target(row.artifact_class(), digest, reference(0))?,
             ErasureInventoryCategoryV1::Artifact,
-            ack_class,
+            "artifact-store",
         ));
         for dependency in &row.registration().fields().key_dependencies {
             if dependency.identity.role == KeyRoleV1::CommunityArtifactEncryption {
@@ -2972,8 +2975,9 @@ fn ard1_cells(
     Ok(cells)
 }
 
-/// An owned store with one private closure, whose recording depends on a
-/// role-7 key, and one consented closure, both bound to the owned Timeline.
+/// An owned store with two private closures, one whose recording depends
+/// on a role-7 key, and one consented closure, all bound to the owned
+/// Timeline.
 fn ard1_store() -> TestResult<OwnedStore> {
     let owned = OwnedStore::new()?;
     let community = pos_core::ArtifactKeyDependencyV1 {
@@ -2988,6 +2992,15 @@ fn ard1_store() -> TestResult<OwnedStore> {
         &TestOnlyStructuralOwnerVerifier {
             recording_data_class: ArtifactDataClassV1::PrivateSubjectData,
             recording_keys: vec![community],
+        },
+    )?;
+    commit_bound_closure(
+        &owned.store,
+        0x71,
+        owned.owned,
+        &TestOnlyStructuralOwnerVerifier {
+            recording_data_class: ArtifactDataClassV1::PrivateSubjectData,
+            recording_keys: Vec::new(),
         },
     )?;
     commit_bound_closure(
@@ -3013,9 +3026,10 @@ fn bound_ard1_rows_of_the_private_class_and_their_role_7_keys_are_targets() -> T
         owned.owned,
         ArtifactDataClassV1::PrivateSubjectData,
     )?;
-    // The private recording and its role-7 key: one Artifact, one Key and
-    // one Backup cell; the consented recording is filtered out.
-    assert_eq!(ard1.len(), 3);
+    // Two private recordings, one with a role-7 key: two Artifact cells and
+    // that key's Key and Backup cells; the consented recording is filtered
+    // out.
+    assert_eq!(ard1.len(), 4);
     cells.extend(ard1);
     let (host, signed) = signed_freeze(
         &owned.store,
@@ -3060,4 +3074,63 @@ fn bound_ard1_rows_of_the_consented_class_are_targets() -> TestResult {
         &cells,
         &signed,
     )
+}
+
+impl LocalStore {
+    /// Register the actor's role-0 subject keys of epochs `epochs`.
+    fn register_subject_keys(&self, epochs: std::ops::RangeInclusive<u64>) -> TestResult {
+        let mut sqlite = self.sqlite()?;
+        let mut registry = sqlite.load_key_registry()?.ok_or("no key registry")?;
+        for epoch in epochs {
+            let mut material = [0x80; 32];
+            material[..8].copy_from_slice(&epoch.to_be_bytes());
+            registry
+                .register_key(KeyRegistrationV1::new(
+                    subject_key(epoch)?,
+                    Hash::from_bytes(material),
+                    None,
+                ))
+                .map_err(fail)?;
+        }
+        sqlite.save_key_registry(&registry)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn the_key_and_backup_bound_is_exact_at_submit() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1])?;
+    // No owned Timeline: the store target and one key target per role-0
+    // key, each with a Key and a Backup cell. 4,095 keys fill the 4,096
+    // targets.
+    store.register_subject_keys(1..=4_095)?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender
+                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+                .map_err(fail)?
+                .lifecycle(),
+            ErasureLifecycleV1::Submitted
+        );
+        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+    }
+    // A 4,096th key is a 4,097th target.
+    store.register_subject_keys(4_096..=4_096)?;
+    let over = |store: &LocalStore, key| -> TestResult {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        assert_eq!(
+            host.command_sender()?
+                .submit_local_erasure(&submission(key, ErasureScopeV1::PrivateSubjectData)?)
+                .map(drop),
+            Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+        );
+        Ok(())
+    };
+    over(&store, 2)?;
+    // 4,097 identities are over the key list's own bound.
+    store.register_subject_keys(4_097..=4_097)?;
+    over(&store, 3)
 }

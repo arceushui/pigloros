@@ -78,33 +78,34 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
     /// order (companion §2.6 `artifact_registrations`).
     ///
     /// # Errors
-    /// [`ErasureErrorV1::ScopeInvalid`] above the per-category closure bound
-    /// of 4,096 rows, otherwise [`ErasureErrorV1::ProvenanceMissing`] when
-    /// the rows cannot be read.
+    /// [`ErasureViewListErrorV1::OverBound`] above the per-category closure
+    /// bound of 4,096 rows, otherwise a read failure.
     fn artifact_registrations(
         &self,
         timeline: TimelineId,
-    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1>;
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1>;
 
     /// Every visible recipient-export publication of `timelines`, sorted by
     /// `(timeline, export_id)`.
     ///
     /// # Errors
-    /// [`ErasureErrorV1::ScopeInvalid`] above 4,096 publications, or the
-    /// closed read error.
+    /// [`ErasureViewListErrorV1::OverBound`] above 4,096 publications,
+    /// otherwise a read failure.
     fn recipient_export_publications(
         &self,
         timelines: &[TimelineId],
-    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureViewListErrorV1>;
 
     /// Every key-registry identity of `owner`, in every role and epoch,
     /// including destroyed ones (companion §2.6 `key_identities`).
     ///
     /// # Errors
-    /// [`ErasureErrorV1::ScopeInvalid`] above 4,096 identities, otherwise
-    /// [`ErasureErrorV1::ProvenanceMissing`] when the registry cannot be
-    /// read.
-    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1>;
+    /// [`ErasureViewListErrorV1::OverBound`] above 4,096 identities,
+    /// otherwise a read failure.
+    fn key_identities(
+        &self,
+        owner: &OwnerIdV1,
+    ) -> Result<Vec<KeyIdentityV1>, ErasureViewListErrorV1>;
 }
 
 /// The most rows one bounded view list returns: the ADR-060 V1
@@ -116,12 +117,31 @@ pub(crate) const VIEW_LIST_MAX: usize = pos_core::ERASURE_MAX_OBLIGATIONS_PER_CA
 /// store.
 pub(crate) fn registration_read_error(
     error: pos_core::ArtifactRegistrationPersistenceErrorV1,
-) -> ErasureErrorV1 {
+) -> ErasureViewListErrorV1 {
     if error == pos_core::ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds {
-        ErasureErrorV1::ScopeInvalid
+        ErasureViewListErrorV1::OverBound
     } else {
-        ErasureErrorV1::ProvenanceMissing
+        ErasureViewListErrorV1::Read(ErasureErrorV1::ProvenanceMissing)
     }
+}
+
+/// The view error of a failed recipient-export read: the adapter documents
+/// `ScopeInvalid` as its only over-`max` answer, mapped here once.
+pub(crate) fn export_read_error(error: ErasureErrorV1) -> ErasureViewListErrorV1 {
+    if error == ErasureErrorV1::ScopeInvalid {
+        ErasureViewListErrorV1::OverBound
+    } else {
+        ErasureViewListErrorV1::Read(error)
+    }
+}
+
+/// Why a bounded view list was not returned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureViewListErrorV1 {
+    /// More rows than the list's bound of 4,096.
+    OverBound,
+    /// The rows could not be read.
+    Read(ErasureErrorV1),
 }
 
 mod view_sealed {
@@ -147,14 +167,14 @@ pub(crate) trait ErasureAuthorityStoreReadsV1 {
     fn artifact_registrations(
         &self,
         timeline: TimelineId,
-    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1>;
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1>;
 
     /// The recipient-export publications of `timelines`, at most
     /// [`VIEW_LIST_MAX`].
     fn recipient_export_publications(
         &self,
         timelines: &[TimelineId],
-    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureViewListErrorV1>;
 
     /// The whole key registry, read once per view.
     fn key_registry(&self) -> Result<Option<KeyRegistryStateV1>, ErasureErrorV1>;
@@ -182,15 +202,19 @@ impl ErasureAuthorityStoreReadsV1 for DetachedStoreReadsV1 {
     fn artifact_registrations(
         &self,
         _timeline: TimelineId,
-    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1> {
+        Err(ErasureViewListErrorV1::Read(
+            ErasureErrorV1::ProvenanceMissing,
+        ))
     }
 
     fn recipient_export_publications(
         &self,
         _timelines: &[TimelineId],
-    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureViewListErrorV1> {
+        Err(ErasureViewListErrorV1::Read(
+            ErasureErrorV1::ProvenanceMissing,
+        ))
     }
 
     fn key_registry(&self) -> Result<Option<KeyRegistryStateV1>, ErasureErrorV1> {
@@ -318,22 +342,25 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
     fn artifact_registrations(
         &self,
         timeline: TimelineId,
-    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1> {
         self.reads.artifact_registrations(timeline)
     }
 
     fn recipient_export_publications(
         &self,
         timelines: &[TimelineId],
-    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureViewListErrorV1> {
         self.reads.recipient_export_publications(timelines)
     }
 
-    fn key_identities(&self, owner: &OwnerIdV1) -> Result<Vec<KeyIdentityV1>, ErasureErrorV1> {
+    fn key_identities(
+        &self,
+        owner: &OwnerIdV1,
+    ) -> Result<Vec<KeyIdentityV1>, ErasureViewListErrorV1> {
         self.key_registry
             .get_or_init(|| self.reads.key_registry())
             .as_ref()
-            .map_err(ErasureErrorV1::clone)
+            .map_err(|error| ErasureViewListErrorV1::Read(*error))
             .map(|registry| {
                 registry
                     .iter()
@@ -345,7 +372,7 @@ impl ErasureAuthorityReadViewV1 for HostAuthorityViewV1<'_> {
             .and_then(|identities| {
                 (identities.len() <= VIEW_LIST_MAX)
                     .then_some(identities)
-                    .ok_or(ErasureErrorV1::ScopeInvalid)
+                    .ok_or(ErasureViewListErrorV1::OverBound)
             })
     }
 }
@@ -357,10 +384,10 @@ mod tests {
     use pos_core::ArtifactRegistrationPersistenceErrorV1;
 
     #[test]
-    fn only_an_over_bound_ard1_read_is_scope_invalid() {
+    fn only_an_over_bound_list_read_is_over_bound() {
         assert_eq!(
             registration_read_error(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds),
-            ErasureErrorV1::ScopeInvalid
+            ErasureViewListErrorV1::OverBound
         );
         for error in [
             ArtifactRegistrationPersistenceErrorV1::StorageFailure,
@@ -368,8 +395,16 @@ mod tests {
         ] {
             assert_eq!(
                 registration_read_error(error),
-                ErasureErrorV1::ProvenanceMissing
+                ErasureViewListErrorV1::Read(ErasureErrorV1::ProvenanceMissing)
             );
         }
+        assert_eq!(
+            export_read_error(ErasureErrorV1::ScopeInvalid),
+            ErasureViewListErrorV1::OverBound
+        );
+        assert_eq!(
+            export_read_error(ErasureErrorV1::ProvenanceMissing),
+            ErasureViewListErrorV1::Read(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 }

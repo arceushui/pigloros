@@ -6,8 +6,9 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
 use crate::erasure_authority_view::{
-    registration_read_error, ErasureAuthorityReadViewV1, ErasureAuthoritySnapshotViewV1,
-    ErasureAuthorityStoreReadsV1, ErasureRecordedScopeV1, HostAuthorityViewV1, VIEW_LIST_MAX,
+    export_read_error, registration_read_error, ErasureAuthorityReadViewV1,
+    ErasureAuthoritySnapshotViewV1, ErasureAuthorityStoreReadsV1, ErasureRecordedScopeV1,
+    ErasureViewListErrorV1, HostAuthorityViewV1, VIEW_LIST_MAX,
 };
 
 use pos_core::{
@@ -1018,16 +1019,20 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
         self.try_borrow()
             .ok()
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|store| pos_core::local_erasure_recorded_scope_v1(&**store, request))
+            .and_then(|store| {
+                pos_core::ErasureRecordedScopeReadV1::recorded_scope(&**store, request)
+            })
     }
 
     fn artifact_registrations(
         &self,
         timeline: TimelineId,
-    ) -> Result<Vec<pos_core::ArtifactRegistrationCatalogRowV1>, ErasureErrorV1> {
+    ) -> Result<Vec<pos_core::ArtifactRegistrationCatalogRowV1>, ErasureViewListErrorV1> {
         self.try_borrow()
             .ok()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .ok_or(ErasureViewListErrorV1::Read(
+                ErasureErrorV1::ProvenanceMissing,
+            ))
             .and_then(|store| {
                 pos_core::EventStore::artifact_registrations_for_timeline(
                     &**store,
@@ -1041,11 +1046,17 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
     fn recipient_export_publications(
         &self,
         timelines: &[TimelineId],
-    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureViewListErrorV1> {
         self.try_borrow_mut()
             .ok()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|mut store| store.recipient_export_publications(timelines, VIEW_LIST_MAX))
+            .ok_or(ErasureViewListErrorV1::Read(
+                ErasureErrorV1::ProvenanceMissing,
+            ))
+            .and_then(|mut store| {
+                store
+                    .recipient_export_publications(timelines, VIEW_LIST_MAX)
+                    .map_err(export_read_error)
+            })
     }
 
     fn key_registry(&self) -> Result<Option<pos_core::KeyRegistryStateV1>, ErasureErrorV1> {
