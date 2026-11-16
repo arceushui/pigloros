@@ -106,7 +106,7 @@ impl KeyFileRuntimeSigner {
     /// it, with the key it loaded and checked through `RuntimeKey` (#1066);
     /// tests build signers from a fixed key.
     #[must_use]
-    pub const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
+    pub(crate) const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
         Self { key, key_id }
     }
 }

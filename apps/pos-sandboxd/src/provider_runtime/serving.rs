@@ -3,24 +3,36 @@
 //!
 //! One acceptor polls both listeners. Before every accept it checks both
 //! endpoints, and after it the accepted one; a failed check closes both
-//! listeners for the life of the process. Each execute-socket connection
-//! gets one worker thread; at most `min(BHC1 limit 13, 256)` unfinished
-//! connections are open at once, and further connections wait in the
-//! listen backlog. Every connection is dropped with zero bytes read and
-//! written unless its `SO_PEERCRED` UID is 0.
+//! listeners for the life of the process. Every connection is dropped with
+//! zero bytes read and written unless its `SO_PEERCRED` UID is 0.
+//!
+//! Each execute-socket connection gets one worker thread. At most
+//! `min(BHC1 limit 13, 256)` are answered at once. A connection that
+//! arrives while all of them are busy, or every connection when that bound
+//! is 0, is accepted and refused with SPE1 `12 AdmissionBusy` (owner
+//! decision, Redmine #1358 journal 22582). An SPE1 `12` binds the
+//! authenticated request, so the refusing worker first reads it under the
+//! same rules; at most `max(bound, 1)` such refusals run at once, and the
+//! execute listener is not polled while they are all busy.
 //!
 //! On the execute socket the request first passes validation precedence
 //! steps 1 to 6 under the initial control deadline (BHC1 limit 16), each
-//! failure with that step's SPE1 code. Then `describe` gets the SDY1 of the
-//! startup authority, and every other operation SPE1 `11
-//! SandboxUnavailable`: restart reconciliation has not opened admission.
-//! Each record is signed by the runtime key, verified before emission, and
-//! followed by server write EOF.
+//! failure with that step's SPE1 code. An expired deadline is a step 1
+//! failure (journal 22582). Then `describe` gets the SDY1 of the startup
+//! authority, and every other operation SPE1 `11 SandboxUnavailable`:
+//! restart reconciliation has not opened admission. Whatever the request
+//! left unread is read first, so the peer sees the answer and a clean EOF.
+//! Each record is signed by the runtime key, verified before emission,
+//! written under its own short deadline and followed by server write EOF.
 //!
 //! The control socket's RCC1/RCU1 responder is not composed yet (R11 §15
 //! slice 5): a root control connection is closed with zero bytes read and
 //! written, which is the responder's own answer to every exchange it does
 //! not acknowledge (R11 §8.4).
+//!
+//! There is no SIGTERM handler (journal 22582): the leaves of a killed
+//! runtime are removed by the selector (R11 §5.0 step 3), and the endpoints
+//! remove their own leaves when serving ends on a listener-invariant failure.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -36,7 +48,7 @@ use pos_reference::sandbox_provider_protocol::{
     SandboxReconcileRequest,
 };
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 
 use super::endpoint::ProviderEndpoint;
 use super::{unavailable, ProviderRuntimeError};
@@ -46,6 +58,17 @@ use crate::{sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner, RuntimeSign
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 /// The BHC1 limit that bounds the initial control deadline, in ms.
 const CONTROL_DEADLINE_LIMIT_ID: usize = 16;
+/// The response's own write deadline, which starts when the answer is
+/// ready, so a request that used up its deadline is still answered.
+const RESPONSE_DEADLINE: Duration = Duration::from_secs(1);
+/// How long the acceptor waits before it accepts again after an accept
+/// that produced no connection (such as `EMFILE`), and before it rechecks a
+/// full refusal pool.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
+const RECHECK: Timespec = Timespec {
+    tv_sec: 0,
+    tv_nsec: 10_000_000,
+};
 
 /// The SPE1 operation codes.
 const DESCRIBE: u8 = 0;
@@ -53,73 +76,44 @@ const EXECUTE: u8 = 1;
 const CANCEL: u8 = 2;
 const RECONCILE: u8 = 3;
 
-/// Validation precedence steps 1 to 5 (R11 §7.2) for SPE1-family records.
-const PROVIDER_RECORD_STEPS: [(SandboxProviderProtocolError, SandboxProviderErrorCode); 7] = [
-    (
-        SandboxProviderProtocolError::InvalidEncoding,
-        SandboxProviderErrorCode::InvalidEncoding,
-    ),
-    (
-        SandboxProviderProtocolError::UnsupportedVersion,
-        SandboxProviderErrorCode::UnsupportedVersion,
-    ),
-    (
-        SandboxProviderProtocolError::FieldOutOfBounds,
-        SandboxProviderErrorCode::FieldOutOfBounds,
-    ),
-    // Fields that must agree are bounded fields of one record.
-    (
-        SandboxProviderProtocolError::InconsistentFields,
-        SandboxProviderErrorCode::FieldOutOfBounds,
-    ),
-    (
-        SandboxProviderProtocolError::NonCanonicalOrder,
-        SandboxProviderErrorCode::NonCanonicalOrder,
-    ),
-    (
-        SandboxProviderProtocolError::DigestMismatch,
-        SandboxProviderErrorCode::DigestMismatch,
-    ),
-    // A request carries no signature, so this cannot occur (R11 §7.2).
-    (
-        SandboxProviderProtocolError::SignatureInvalid,
-        SandboxProviderErrorCode::SignatureInvalid,
-    ),
-];
+/// The SPE1 code of the validation precedence step (R11 §7.2) that a
+/// provider-protocol request failed.
+const fn request_step(error: SandboxProviderProtocolError) -> SandboxProviderErrorCode {
+    match error {
+        SandboxProviderProtocolError::InvalidEncoding => SandboxProviderErrorCode::InvalidEncoding,
+        SandboxProviderProtocolError::UnsupportedVersion => {
+            SandboxProviderErrorCode::UnsupportedVersion
+        }
+        // Fields that must agree are bounded fields of one record (journal
+        // 22582).
+        SandboxProviderProtocolError::FieldOutOfBounds
+        | SandboxProviderProtocolError::InconsistentFields => {
+            SandboxProviderErrorCode::FieldOutOfBounds
+        }
+        SandboxProviderProtocolError::NonCanonicalOrder => {
+            SandboxProviderErrorCode::NonCanonicalOrder
+        }
+        // Step 5 checks self-digests and signatures. A request carries no
+        // signature, so its decoder never reports one invalid.
+        SandboxProviderProtocolError::DigestMismatch
+        | SandboxProviderProtocolError::SignatureInvalid => {
+            SandboxProviderErrorCode::DigestMismatch
+        }
+    }
+}
 
-/// Validation precedence steps 1 to 5 for the EVR1 source record.
-const EVALUATION_STEPS: [(ProtocolError, SandboxProviderErrorCode); 5] = [
-    (
-        ProtocolError::InvalidEncoding,
-        SandboxProviderErrorCode::InvalidEncoding,
-    ),
-    (
-        ProtocolError::UnsupportedVersion,
-        SandboxProviderErrorCode::UnsupportedVersion,
-    ),
-    (
-        ProtocolError::FieldOutOfBounds,
-        SandboxProviderErrorCode::FieldOutOfBounds,
-    ),
-    (
-        ProtocolError::NonCanonicalOrder,
-        SandboxProviderErrorCode::NonCanonicalOrder,
-    ),
-    (
-        ProtocolError::DigestMismatch,
-        SandboxProviderErrorCode::DigestMismatch,
-    ),
-];
-
-/// The SPE1 code of the precedence step that `error` failed.
-fn step_code<E: PartialEq + Copy, const N: usize>(
-    error: E,
-    steps: [(E, SandboxProviderErrorCode); N],
-) -> SandboxProviderErrorCode {
-    steps
-        .into_iter()
-        .find(|(step, _)| *step == error)
-        .map_or(SandboxProviderErrorCode::InvalidEncoding, |(_, code)| code)
+/// The SPE1 code of the precedence step the EVR1 source record failed.
+/// EVR1 holds no set-like field, so its decoder never reports an order
+/// failure; were it to, that is the record's encoding.
+const fn evaluation_step(error: ProtocolError) -> SandboxProviderErrorCode {
+    match error {
+        ProtocolError::InvalidEncoding | ProtocolError::NonCanonicalOrder => {
+            SandboxProviderErrorCode::InvalidEncoding
+        }
+        ProtocolError::UnsupportedVersion => SandboxProviderErrorCode::UnsupportedVersion,
+        ProtocolError::FieldOutOfBounds => SandboxProviderErrorCode::FieldOutOfBounds,
+        ProtocolError::DigestMismatch => SandboxProviderErrorCode::DigestMismatch,
+    }
 }
 
 /// The authenticated identities a refusal after step 5 binds.
@@ -148,7 +142,9 @@ enum Refusal {
 }
 
 impl Refusal {
-    /// A record whose operation cannot be identified.
+    /// A record whose operation cannot be identified, including one whose
+    /// magic names no operation: SPE1 cannot encode code 1 without an
+    /// operation (journal 22582).
     const UNIDENTIFIED: Self = Self::Invalid {
         operation: None,
         code: SandboxProviderErrorCode::InvalidEncoding,
@@ -162,6 +158,21 @@ impl Refusal {
             code,
         }
     }
+}
+
+/// Whether a connection is answered or refused for capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Admission {
+    /// One of the `min(BHC1 13, 256)` answered connections.
+    Answered,
+    /// Beyond them: SPE1 `12` after precedence steps 1 to 6.
+    Busy,
+}
+
+/// The live workers of one acceptor.
+struct Workers<'scope> {
+    answered: Vec<ScopedJoinHandle<'scope, ()>>,
+    refusing: Vec<ScopedJoinHandle<'scope, ()>>,
 }
 
 /// The startup authority that answers requests, and its one signer.
@@ -178,8 +189,8 @@ impl<'a> Responder<'a> {
         Self { admitted, signer }
     }
 
-    /// Serve `execute` and `control` until a listener invariant fails, with
-    /// at most `pool` unfinished execute connections.
+    /// Serve `execute` and `control` until a listener invariant fails,
+    /// answering at most `pool` execute connections at once.
     pub(super) fn serve(
         &self,
         execute: &ProviderEndpoint,
@@ -187,7 +198,10 @@ impl<'a> Responder<'a> {
         pool: usize,
     ) -> ProviderRuntimeError {
         thread::scope(|scope| {
-            let mut workers = Vec::new();
+            let mut workers = Workers {
+                answered: Vec::new(),
+                refusing: Vec::new(),
+            };
             loop {
                 if let Err(error) = self.serve_once(scope, &mut workers, execute, control, pool) {
                     break error;
@@ -199,27 +213,33 @@ impl<'a> Responder<'a> {
     fn serve_once<'scope>(
         &'scope self,
         scope: &'scope Scope<'scope, '_>,
-        workers: &mut Vec<ScopedJoinHandle<'scope, ()>>,
+        workers: &mut Workers<'scope>,
         execute: &ProviderEndpoint,
         control: &ProviderEndpoint,
         pool: usize,
     ) -> Result<(), ProviderRuntimeError> {
-        workers.retain(|worker| !worker.is_finished());
-        if workers.len() >= pool {
-            // Accept nothing more until the oldest connection ends.
-            workers.remove(0).join().ok();
-            return Ok(());
-        }
+        workers.answered.retain(|worker| !worker.is_finished());
+        workers.refusing.retain(|worker| !worker.is_finished());
+        // While every refusal is in progress the execute listener is not
+        // polled; the control listener and both endpoint checks still are.
+        let accepting = workers.refusing.len() < pool.max(1);
         let mut ready = [
-            PollFd::new(execute.listener(), PollFlags::IN),
             PollFd::new(control.listener(), PollFlags::IN),
+            PollFd::new(
+                execute.listener(),
+                if accepting {
+                    PollFlags::IN
+                } else {
+                    PollFlags::empty()
+                },
+            ),
         ];
-        poll(&mut ready, None)
+        poll(&mut ready, (!accepting).then_some(&RECHECK))
             .map_err(unavailable)
             .map(|_| {
                 (
                     !ready[0].revents().is_empty(),
-                    !ready[1].revents().is_empty(),
+                    accepting && !ready[1].revents().is_empty(),
                 )
             })
             .and_then(|readiness| {
@@ -228,78 +248,113 @@ impl<'a> Responder<'a> {
                     .and_then(|()| control.verify())
                     .map(|()| readiness)
             })
-            .and_then(|(execute_ready, control_ready)| {
+            .and_then(|(control_ready, execute_ready)| {
                 // A control connection is dropped unread and unanswered
                 // (module docs).
                 control_ready
                     .then(|| control.accept())
                     .transpose()
                     .and_then(|_| execute_ready.then(|| execute.accept()).transpose())
+                    .map(|accepted| (execute_ready, accepted.flatten()))
             })
-            .map(|accepted| {
-                workers.extend(
-                    accepted
-                        .flatten()
-                        .map(|stream| scope.spawn(move || self.answer(&stream))),
-                );
+            .map(|(execute_ready, accepted)| {
+                // An accept that produced nothing backs off briefly instead
+                // of spinning on a listener that stays readable.
+                thread::sleep(ACCEPT_BACKOFF * u32::from(execute_ready && accepted.is_none()));
+                let admission = if workers.answered.len() < pool {
+                    Admission::Answered
+                } else {
+                    Admission::Busy
+                };
+                // A worker that cannot be spawned drops its connection.
+                let spawned = accepted.and_then(|stream| {
+                    thread::Builder::new()
+                        .spawn_scoped(scope, move || self.answer(&stream, admission))
+                        .ok()
+                });
+                match admission {
+                    Admission::Answered => workers.answered.extend(spawned),
+                    Admission::Busy => workers.refusing.extend(spawned),
+                }
             })
     }
 
     /// Answer one execute-socket connection, then send server write EOF. A
     /// peer that is not root is dropped with zero bytes read and written.
-    fn answer(&self, stream: &UnixStream) {
+    fn answer(&self, stream: &UnixStream, admission: Admission) {
         if root_peer(stream) {
-            self.answer_root(stream);
+            self.answer_root(stream, admission);
         }
     }
 
-    /// Answer a root peer's connection under the initial control deadline.
-    fn answer_root(&self, stream: &UnixStream) {
+    /// Answer a root peer's connection: read it under the initial control
+    /// deadline, then write the answer under its own deadline.
+    fn answer_root(&self, stream: &UnixStream, admission: Admission) {
         let limits = self.admitted.provider().broker_hard_caps();
-        let now = Instant::now();
-        let mut deadlined = Deadlined {
+        let mut reading = Deadlined::new(
             stream,
-            until: now
-                .checked_add(Duration::from_millis(
-                    limits[CONTROL_DEADLINE_LIMIT_ID].value,
-                ))
-                .unwrap_or(now),
+            Duration::from_millis(limits[CONTROL_DEADLINE_LIMIT_ID].value),
+        );
+        let response = match (self.classify(&mut reading), admission) {
+            (Ok(identity), Admission::Busy) => self.refuse(Refusal::Authenticated {
+                identity,
+                code: SandboxProviderErrorCode::AdmissionBusy,
+            }),
+            (Ok(identity), Admission::Answered) if identity.operation == DESCRIBE => {
+                self.describe(identity.request_id)
+            }
+            (Ok(identity), Admission::Answered) => self.refuse(Refusal::Authenticated {
+                identity,
+                code: SandboxProviderErrorCode::SandboxUnavailable,
+            }),
+            (Err(refusal), _) => self.refuse(refusal),
         };
-        let response = match self.classify(&mut deadlined) {
-            Ok(request_id) => self.describe(request_id),
-            Err(refusal) => self.refuse(refusal),
-        };
-        response.and_then(|bytes| {
-            control_framing::write_frame(&mut deadlined, &bytes, FRAME_LIMIT).ok()
-        });
+        let mut writing = Deadlined::new(stream, RESPONSE_DEADLINE);
+        response
+            .and_then(|bytes| control_framing::write_frame(&mut writing, &bytes, FRAME_LIMIT).ok());
         stream.shutdown(std::net::Shutdown::Write).ok();
     }
 
-    /// Validation precedence steps 1 to 6, then the `Starting` admission
-    /// state: the request ID of an admitted `describe`, or the refusal.
-    fn classify(&self, stream: &mut impl Read) -> Result<[u8; 16], Refusal> {
-        let first = read_record(stream)?;
-        match record_operation(&first) {
-            Some(DESCRIBE) => SandboxDescribeRequest::from_canonical_cbor(&first)
-                .map_err(|error| {
-                    Refusal::invalid(DESCRIBE, step_code(error, PROVIDER_RECORD_STEPS))
-                })
+    /// Validation precedence steps 1 to 6: the authenticated identities of
+    /// the request, or its refusal. Execute's SPX1 follows its EVR1 and the
+    /// selector sends nothing more before AGR1; after any other record the
+    /// rest of the request is read up to its EOF.
+    fn classify(&self, stream: &mut Deadlined<'_>) -> Result<RequestIdentity, Refusal> {
+        match read_record(stream) {
+            Ok(first) if record_operation(&first) == Some(EXECUTE) => {
+                self.classify_execute(&first, stream)
+            }
+            first => {
+                let classified = first.and_then(|first| self.classify_single(&first));
+                io::copy(stream, &mut io::sink()).ok();
+                classified
+            }
+        }
+    }
+
+    /// Describe, cancel, reconcile, or a record that names none of them.
+    fn classify_single(&self, first: &[u8]) -> Result<RequestIdentity, Refusal> {
+        match record_operation(first) {
+            Some(DESCRIBE) => SandboxDescribeRequest::from_canonical_cbor(first)
+                .map_err(|error| Refusal::invalid(DESCRIBE, request_step(error)))
                 .and_then(|request| {
-                    let identity = RequestIdentity {
-                        operation: DESCRIBE,
-                        request_id: request.request.request_id,
-                        request_digest: request.request_digest,
-                        attempt_id: None,
-                    };
-                    self.authorize(&request.request, true, identity)
-                        .map(|()| request.request.request_id)
-                }),
-            Some(EXECUTE) => self.classify_execute(&first, stream),
-            Some(CANCEL) => SandboxCancelRequest::from_canonical_cbor(&first)
-                .map_err(|error| Refusal::invalid(CANCEL, step_code(error, PROVIDER_RECORD_STEPS)))
-                .and_then(|request| {
-                    self.refuse_attempt_request(
+                    self.authorize(
                         &request.request,
+                        true,
+                        RequestIdentity {
+                            operation: DESCRIBE,
+                            request_id: request.request.request_id,
+                            request_digest: request.request_digest,
+                            attempt_id: None,
+                        },
+                    )
+                }),
+            Some(CANCEL) => SandboxCancelRequest::from_canonical_cbor(first)
+                .map_err(|error| Refusal::invalid(CANCEL, request_step(error)))
+                .and_then(|request| {
+                    self.authorize(
+                        &request.request,
+                        true,
                         RequestIdentity {
                             operation: CANCEL,
                             request_id: request.request.request_id,
@@ -308,13 +363,12 @@ impl<'a> Responder<'a> {
                         },
                     )
                 }),
-            Some(RECONCILE) => SandboxReconcileRequest::from_canonical_cbor(&first)
-                .map_err(|error| {
-                    Refusal::invalid(RECONCILE, step_code(error, PROVIDER_RECORD_STEPS))
-                })
+            Some(RECONCILE) => SandboxReconcileRequest::from_canonical_cbor(first)
+                .map_err(|error| Refusal::invalid(RECONCILE, request_step(error)))
                 .and_then(|request| {
-                    self.refuse_attempt_request(
+                    self.authorize(
                         &request.request,
+                        true,
                         RequestIdentity {
                             operation: RECONCILE,
                             request_id: request.request.request_id,
@@ -327,19 +381,21 @@ impl<'a> Responder<'a> {
         }
     }
 
-    /// Execute: EVR1, then SPX1, both under the same deadline.
+    /// Execute: EVR1, then SPX1, both under the same deadline. An invalid
+    /// EVR1 still has its SPX1 read, so nothing the selector sent is left.
     fn classify_execute(
         &self,
         evaluation: &[u8],
-        stream: &mut impl Read,
-    ) -> Result<[u8; 16], Refusal> {
-        EvaluationRequest::from_canonical_cbor(evaluation)
-            .map_err(|error| Refusal::invalid(EXECUTE, step_code(error, EVALUATION_STEPS)))
-            .and_then(|_| read_record(stream))
+        stream: &mut Deadlined<'_>,
+    ) -> Result<RequestIdentity, Refusal> {
+        let evaluation = EvaluationRequest::from_canonical_cbor(evaluation)
+            .map_err(|error| Refusal::invalid(EXECUTE, evaluation_step(error)));
+        let request = read_record(stream);
+        evaluation
+            .and(request)
             .and_then(|bytes| {
-                SandboxExecuteRequest::from_canonical_cbor(&bytes).map_err(|error| {
-                    Refusal::invalid(EXECUTE, step_code(error, PROVIDER_RECORD_STEPS))
-                })
+                SandboxExecuteRequest::from_canonical_cbor(&bytes)
+                    .map_err(|error| Refusal::invalid(EXECUTE, request_step(error)))
             })
             .and_then(|request| {
                 let installed = self.admitted.bootstrap().installed().manifest();
@@ -350,48 +406,37 @@ impl<'a> Responder<'a> {
                         authority.rvs1_digest,
                         authority.apt1_digest,
                     ];
-                let identity = RequestIdentity {
-                    operation: EXECUTE,
-                    request_id: request.request.request_id,
-                    request_digest: request.request_digest,
-                    attempt_id: Some(request.attempt_id),
-                };
-                self.authorize(&request.request, current, identity).and(Err(
-                    Refusal::Authenticated {
-                        identity,
-                        code: SandboxProviderErrorCode::SandboxUnavailable,
+                self.authorize(
+                    &request.request,
+                    current,
+                    RequestIdentity {
+                        operation: EXECUTE,
+                        request_id: request.request.request_id,
+                        request_digest: request.request_digest,
+                        attempt_id: Some(request.attempt_id),
                     },
-                ))
+                )
             })
     }
 
-    /// Step 6 for a cancel or reconcile request, then its `Starting` refusal.
-    fn refuse_attempt_request(
-        &self,
-        request: &RequestAuthority,
-        identity: RequestIdentity,
-    ) -> Result<[u8; 16], Refusal> {
-        self.authorize(request, true, identity)
-            .and(Err(Refusal::Authenticated {
-                identity,
-                code: SandboxProviderErrorCode::SandboxUnavailable,
-            }))
-    }
-
     /// Step 6: the request names the retained APT1 and its policy epoch, and
-    /// `current` holds for the operation's other authority.
+    /// `current` holds for the operation's other authority (execute's TRS1
+    /// and RVS1). Any difference is `7 AuthorityMismatch`; serving never
+    /// emits `6 TrustRevoked`, which is reserved for revocation found in the
+    /// retained authority itself, fixed for the runtime's life (R11 D9,
+    /// journal 22582).
     fn authorize(
         &self,
         request: &RequestAuthority,
         current: bool,
         identity: RequestIdentity,
-    ) -> Result<(), Refusal> {
+    ) -> Result<RequestIdentity, Refusal> {
         let policy = self.admitted.bootstrap().policy();
         if current
             && request.apt1_digest == policy.policy_digest()
             && request.policy_epoch == policy.policy_epoch()
         {
-            Ok(())
+            Ok(identity)
         } else {
             Err(Refusal::Authenticated {
                 identity,
@@ -515,7 +560,17 @@ struct Deadlined<'a> {
     until: Instant,
 }
 
-impl Deadlined<'_> {
+impl<'a> Deadlined<'a> {
+    /// `stream`, ending `duration` from now. A duration too long for the
+    /// clock ends at once.
+    fn new(stream: &'a UnixStream, duration: Duration) -> Self {
+        let now = Instant::now();
+        Self {
+            stream,
+            until: now.checked_add(duration).unwrap_or(now),
+        }
+    }
+
     fn remaining(&self) -> io::Result<Duration> {
         self.until
             .checked_duration_since(Instant::now())

@@ -114,6 +114,61 @@ fn binds_an_owner_only_leaf() -> TestResult {
     Ok(())
 }
 
+/// Every directory from `/` to the parent is opened beneath the one before
+/// it and must be a UID 0 directory that neither group nor other can write.
+fn refuses_unsafe_ancestors() -> TestResult {
+    // A world-writable ancestor (`/tmp` is `1777`).
+    assert_eq!(
+        bind("/tmp/provider.sock").err(),
+        Some(ProviderRuntimeError::UnsafeEndpoint)
+    );
+    // A group-writable ancestor between `/run/pigloros` and the parent.
+    fs::create_dir_all("/run/pigloros/shared/nested")?;
+    set_mode("/run/pigloros/shared", 0o775)?;
+    set_mode("/run/pigloros/shared/nested", 0o755)?;
+    assert_eq!(
+        bind("/run/pigloros/shared/nested/provider.sock").err(),
+        Some(ProviderRuntimeError::UnsafeEndpoint)
+    );
+    fs::remove_dir_all("/run/pigloros/shared")?;
+    // A symlink on the way, even to a safe directory.
+    fs::create_dir("/run/pigloros/real")?;
+    set_mode("/run/pigloros/real", 0o755)?;
+    symlink("/run/pigloros/real", "/run/pigloros/link")?;
+    assert_eq!(
+        bind("/run/pigloros/link/provider.sock").err(),
+        Some(ProviderRuntimeError::UnsafeEndpoint)
+    );
+    assert!(!Path::new("/run/pigloros/real/provider.sock").exists());
+    // `..` cannot leave the directory it is resolved beneath; `.` names the
+    // directory itself.
+    assert_eq!(
+        bind("/run/pigloros/real/../provider.sock").err(),
+        Some(ProviderRuntimeError::UnsafeEndpoint)
+    );
+    assert!(!Path::new("/run/pigloros/provider.sock").exists());
+    let current = bind("/run/pigloros/real/./provider.sock")?;
+    assert!(fs::symlink_metadata("/run/pigloros/real/provider.sock")?
+        .file_type()
+        .is_socket());
+    drop(current);
+    fs::remove_file("/run/pigloros/link")?;
+    fs::remove_dir("/run/pigloros/real")?;
+    // An ancestor owned by another user: the read-only checkout, when a
+    // non-root user owns it (as on hosted runners).
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if checkout
+        .ancestors()
+        .any(|directory| fs::metadata(directory).is_ok_and(|metadata| metadata.uid() != 0))
+    {
+        assert_eq!(
+            ProviderEndpoint::bind(&checkout.join("provider.sock")).err(),
+            Some(ProviderRuntimeError::UnsafeEndpoint)
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn endpoints_bind_only_fresh_owner_only_leaves_beneath_safe_directories() -> TestResult {
     if !in_isolated_root(
@@ -147,6 +202,7 @@ fn endpoints_bind_only_fresh_owner_only_leaves_beneath_safe_directories() -> Tes
     );
     assert!(!Path::new(EXECUTE).exists());
     set_mode(RUNTIME, 0o755)?;
+    refuses_unsafe_ancestors()?;
     refuses_every_existing_node()?;
     binds_an_owner_only_leaf()?;
     // A second-bind failure removes the first leaf only (invariant 6).

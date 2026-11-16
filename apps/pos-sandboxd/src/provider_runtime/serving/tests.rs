@@ -392,6 +392,20 @@ fn refuses_execute_while_starting(key: &VerifyingKey, staged: &StagedInstallatio
         Code::UnsupportedVersion,
     )?;
     assert_invalid(&exchange(&[evaluation])?, key, None, Code::InvalidEncoding)?;
+    // Step 4: a repeated capability ID.
+    let mut record: Value = ciborium::from_reader(staged.request())?;
+    if let Value::Array(values) = &mut record {
+        if let Value::Array(unsigned) = &mut values[0] {
+            unsigned[19] = Value::Array(vec![Value::Text("a".to_owned()); 2]);
+        }
+    }
+    let unordered = encode(&record)?;
+    assert_invalid(
+        &exchange(&[evaluation, &unordered])?,
+        key,
+        Some(1),
+        Code::NonCanonicalOrder,
+    )?;
     Ok(())
 }
 
@@ -470,13 +484,23 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     // A root control connection is closed with zero bytes.
     assert!(exchange_at(CONTROL, b"\0\0\0\x01x")?.is_empty());
     // An unfinished frame is cut at the initial control deadline (BHC1
-    // limit 16, 2 s in the fixture): nothing is written.
+    // limit 16, 2 s in the fixture) and still answered: SPE1 0 with no
+    // identities, then EOF (journal 22582).
     let mut stalled = UnixStream::connect(EXECUTE)?;
     stalled.set_read_timeout(Some(CLIENT_TIMEOUT))?;
     stalled.write_all(&[0, 0, 0, 10, 1, 2])?;
-    let mut nothing = Vec::new();
-    stalled.read_to_end(&mut nothing)?;
-    assert!(nothing.is_empty());
+    let mut answer = Vec::new();
+    stalled.read_to_end(&mut answer)?;
+    assert_invalid(
+        &answer,
+        &key,
+        None,
+        SandboxProviderErrorCode::InvalidEncoding,
+    )?;
+    // Frames after a describe are read before the answer, so the peer
+    // gets the SDY1 and a clean EOF.
+    let trailing = exchange(&[&describe([3; 16], retained)?, b"trailing"])?;
+    SandboxDescribeResponse::from_canonical_cbor(unframe(&trailing)?)?.verify_signature(&key)?;
     let replacement = replace_execute_leaf()?;
     let replaced = fs::symlink_metadata(EXECUTE)?.ino();
     assert_eq!(
@@ -491,10 +515,46 @@ fn the_runtime_binds_notifies_and_serves_while_starting() -> TestResult {
     Ok(())
 }
 
+/// Read one SPE1 `12` for the describe request `[id; 16]` from `stream`.
+fn assert_busy(
+    stream: &mut UnixStream,
+    key: &VerifyingKey,
+    id: u8,
+    retained: Authority,
+) -> TestResult {
+    let bytes = describe([id; 16], retained)?;
+    let decoded = SandboxDescribeRequest::from_canonical_cbor(&bytes)?;
+    stream.write_all(&framed(&[&bytes])?)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    assert_refused(
+        &response,
+        key,
+        (0, [id; 16], decoded.request_digest, None),
+        SandboxProviderErrorCode::AdmissionBusy,
+    )
+}
+
+/// Read the SPE1 0 that a connection which sent nothing gets at its
+/// deadline.
+fn assert_expired(stream: &mut UnixStream, key: &VerifyingKey) -> TestResult {
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    assert_invalid(
+        &response,
+        key,
+        None,
+        SandboxProviderErrorCode::InvalidEncoding,
+    )
+}
+
 #[test]
-fn unfinished_connections_beyond_the_pool_wait_in_the_backlog() -> TestResult {
+fn connections_beyond_the_pool_are_refused_as_busy() -> TestResult {
     if !in_isolated_root(
-        "provider_runtime::serving::tests::unfinished_connections_beyond_the_pool_wait_in_the_backlog",
+        "provider_runtime::serving::tests::connections_beyond_the_pool_are_refused_as_busy",
     )? {
         return Ok(());
     }
@@ -505,24 +565,39 @@ fn unfinished_connections_beyond_the_pool_wait_in_the_backlog() -> TestResult {
         apt1: admitted.bootstrap().policy().policy_digest(),
         epoch: admitted.bootstrap().policy().policy_epoch(),
     };
-    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
     let responder = Responder::new(&admitted, &signer);
+    // A full pool of one: the next connection is accepted and refused with
+    // SPE1 12 at once (journal 22582).
+    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
     std::thread::scope(|scope| -> TestResult {
         let serving = scope.spawn(|| responder.serve(&execute, &control, 1));
-        // The pool's one slot is held by a connection that sends nothing.
-        let holder = UnixStream::connect(EXECUTE)?;
+        let mut holder = UnixStream::connect(EXECUTE)?;
+        assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 2, retained)?;
+        assert_expired(&mut holder, &key)?;
+        let replacement = replace_execute_leaf()?;
+        assert_eq!(
+            serving.join().map_err(|_| "the runtime panicked")?,
+            ProviderRuntimeError::UnsafeEndpoint
+        );
+        drop(replacement);
+        Ok(())
+    })?;
+    drop((execute, control));
+    fs::remove_file(EXECUTE)?;
+    // Pool 0 (ELM1 exact deny-all) refuses every connection with 12. One
+    // refusal runs at a time: while it waits, the next connection stays
+    // unanswered, and is refused once the first ends.
+    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
+    std::thread::scope(|scope| -> TestResult {
+        let serving = scope.spawn(|| responder.serve(&execute, &control, 0));
+        assert_busy(&mut UnixStream::connect(EXECUTE)?, &key, 4, retained)?;
+        let mut holder = UnixStream::connect(EXECUTE)?;
         let mut waiting = UnixStream::connect(EXECUTE)?;
-        waiting.write_all(&framed(&[&describe([2; 16], retained)?])?)?;
-        waiting.shutdown(std::net::Shutdown::Write)?;
         waiting.set_read_timeout(Some(Duration::from_millis(300)))?;
         let mut early = [0; 1];
         assert!(waiting.read(&mut early).is_err());
-        drop(holder);
-        waiting.set_read_timeout(Some(CLIENT_TIMEOUT))?;
-        let mut response = Vec::new();
-        waiting.read_to_end(&mut response)?;
-        SandboxDescribeResponse::from_canonical_cbor(unframe(&response)?)?
-            .verify_signature(&key)?;
+        assert_expired(&mut holder, &key)?;
+        assert_busy(&mut waiting, &key, 5, retained)?;
         let replacement = replace_execute_leaf()?;
         assert_eq!(
             serving.join().map_err(|_| "the runtime panicked")?,
