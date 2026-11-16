@@ -7,6 +7,7 @@ mod admission;
 mod audit;
 mod authority;
 mod codec;
+mod evidence;
 mod execution;
 mod launch;
 mod network;
@@ -14,6 +15,7 @@ mod operations;
 mod policy;
 mod revocation;
 mod revocation_update;
+mod signing;
 mod termination;
 mod trust;
 
@@ -89,6 +91,14 @@ pub use authority::{
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
     SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
 };
+pub use evidence::{
+    AdmissionLedger, AttemptEvidence, AttemptEvidenceContext, BlockIdentity, CgroupEmptyBasis,
+    CgroupSources, CleanupRecord, DbusProperty, DbusValue, DeviceNumber, EffectiveLimitRecord,
+    KernelObservationEvidence, KernelObservationEvidenceFields, KernelObservationStatus,
+    LocalNetworkRecord, NamespaceIdentity, ObservedKernelState, OutputCaptureRecord,
+    RequestedConfigurationEvidence, RequestedConfigurationEvidenceFields, RootMount,
+    TerminationEvidence, TerminationEvidenceFields, TransferRecord,
+};
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
     PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
@@ -105,6 +115,7 @@ pub use operations::{
     SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
     SandboxReconcileResponse,
 };
+pub use signing::{Rls1, RuntimeSigned, SelfDigested, Verified};
 pub use termination::{
     attempt_watchdog_deadline, AttemptProgressCode, BarrierFailure, CancelSource, CgroupCounters,
     CgroupIdentity, CgroupSnapshot, CleanupResult, Contradiction, EndingCode,

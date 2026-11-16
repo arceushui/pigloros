@@ -8,7 +8,9 @@ use std::{
 };
 
 use ed25519_dalek::SigningKey;
-use pos_reference::sandbox_provider_protocol::{ExecutionRelease, FdIdentity, LauncherReady};
+use pos_reference::sandbox_provider_protocol::{
+    ExecutionRelease, FdIdentity, LauncherReady, RuntimeSigned, SelfDigested,
+};
 use rustix::{
     net::{
         recvmsg, sendmsg, socketpair, AddressFamily, RecvAncillaryBuffer, RecvFlags,
@@ -17,10 +19,8 @@ use rustix::{
     process::{getgid, getpid, getuid},
 };
 
-use super::{
-    release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
-};
-use crate::release_signer::{ReleaseSigner, ReleaseSignerError};
+use super::{ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck};
+use crate::runtime_signer::{AdmittedRuntimeKey, RuntimeAttestationSigner, RuntimeSignerError};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -103,18 +103,40 @@ impl Signer {
     }
 }
 
-impl ReleaseSigner for Signer {
+impl RuntimeAttestationSigner for Signer {
     fn runtime_attestation_key_id(&self) -> &str {
         KEY_ID
     }
 
-    fn sign(&self, message: &[u8]) -> [u8; 64] {
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
         if self.zero_signature {
             [0; 64]
         } else {
-            ed25519_dalek::Signer::sign(&self.key, message).to_bytes()
+            ed25519_dalek::Signer::sign(&self.key, &record.signature_message()).to_bytes()
         }
     }
+}
+
+/// The admitted runtime key the test signer's signatures verify under.
+static ADMITTED: std::sync::LazyLock<ed25519_dalek::VerifyingKey> =
+    std::sync::LazyLock::new(|| SigningKey::from_bytes(&[42; 32]).verifying_key());
+
+/// The barrier under test, signing for the admitted test key.
+fn release(
+    channel: impl AsFd,
+    main_pid: u32,
+    expected: &ExpectedLauncherReady,
+    recheck: &dyn ReleaseRecheck,
+    signer: &Signer,
+) -> Result<ExecutionRelease, ReleaseBarrierError> {
+    super::release_after_ready(
+        channel,
+        main_pid,
+        expected,
+        recheck,
+        signer,
+        AdmittedRuntimeKey::new(KEY_ID, &ADMITTED),
+    )
 }
 
 fn pair() -> Result<(OwnedFd, OwnedFd), Box<dyn Error>> {
@@ -162,11 +184,9 @@ fn error_of(
 ) -> Result<ReleaseBarrierError, Box<dyn Error>> {
     let (provider, launcher) = pair()?;
     launcher_sends(&launcher, bytes)?;
-    Ok(
-        release_after_ready(&provider, main_pid, expected, recheck, signer)
-            .err()
-            .ok_or("the barrier released")?,
-    )
+    Ok(release(&provider, main_pid, expected, recheck, signer)
+        .err()
+        .ok_or("the barrier released")?)
 }
 
 #[test]
@@ -176,7 +196,7 @@ fn a_matching_ready_is_released_once_with_the_rechecked_authority() -> TestResul
     launcher_sends(&launcher, &ready_bytes(&expected)?)?;
     let recheck = Recheck::allow();
     let signer = Signer::new();
-    let release = release_after_ready(&provider, pid()?, &expected, &recheck, &signer)?;
+    let release = release(&provider, pid()?, &expected, &recheck, &signer)?;
     assert_eq!(recheck.calls.get(), 1);
 
     let mut buffer = [0_u8; 4096];
@@ -309,7 +329,7 @@ fn malformed_oversized_and_control_carrying_ready_datagrams_are_refused() -> Tes
         &mut control,
         SendFlags::NOSIGNAL,
     )?;
-    let error = release_after_ready(&provider, pid()?, &expected, &recheck, &signer)
+    let error = release(&provider, pid()?, &expected, &recheck, &signer)
         .err()
         .ok_or("released")?;
     assert!(matches!(error, ReleaseBarrierError::ReadyFraming));
@@ -321,7 +341,7 @@ fn malformed_oversized_and_control_carrying_ready_datagrams_are_refused() -> Tes
 fn a_closed_launcher_and_a_non_socket_channel_are_unavailable() -> TestResult {
     let (provider, launcher) = pair()?;
     drop(launcher);
-    let error = release_after_ready(
+    let error = release(
         &provider,
         pid()?,
         &expected(),
@@ -333,7 +353,7 @@ fn a_closed_launcher_and_a_non_socket_channel_are_unavailable() -> TestResult {
     assert!(matches!(error, ReleaseBarrierError::ReadyUnavailable));
 
     let file = File::open("/")?;
-    let error = release_after_ready(
+    let error = release(
         &file,
         pid()?,
         &expected(),
@@ -358,7 +378,7 @@ fn a_failed_recheck_signing_failure_or_closed_launcher_sends_no_release() -> Tes
         calls: Cell::new(0),
         ready: Cell::new(None),
     };
-    let error = release_after_ready(&provider, pid()?, &expected, &refusing, &Signer::new())
+    let error = release(&provider, pid()?, &expected, &refusing, &Signer::new())
         .err()
         .ok_or("released")?;
     assert!(matches!(error, ReleaseBarrierError::Recheck));
@@ -377,18 +397,18 @@ fn a_failed_recheck_signing_failure_or_closed_launcher_sends_no_release() -> Tes
         zero_signature: true,
         ..Signer::new()
     };
-    let error = release_after_ready(&provider, pid()?, &expected, &Recheck::allow(), &zero)
+    let error = release(&provider, pid()?, &expected, &Recheck::allow(), &zero)
         .err()
         .ok_or("released")?;
     assert!(matches!(
         error,
-        ReleaseBarrierError::Sign(ReleaseSignerError::Protocol(_))
+        ReleaseBarrierError::Sign(RuntimeSignerError::Unverified)
     ));
 
     let (provider, launcher) = pair()?;
     launcher_sends(&launcher, &bytes)?;
     drop(launcher);
-    let error = release_after_ready(
+    let error = release(
         &provider,
         pid()?,
         &expected,
