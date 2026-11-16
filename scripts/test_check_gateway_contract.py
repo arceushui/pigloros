@@ -535,7 +535,10 @@ class CheckGatewayContractTest(unittest.TestCase):
                 for path in checker.FIXTURE_ORACLES.glob("*.json"):
                     if path.name != "positive.json":
                         (Path(only_head) / path.name).write_bytes(path.read_bytes())
-                with self.assertRaisesRegex(checker.ContractError, "^positive.json: .*head"):
+                # The first input naming the Local profile is refused, not an oracle.
+                with self.assertRaisesRegex(
+                    checker.ContractError, r"^(?!oracle )[\w-]+\.json: .*head"
+                ):
                     checker.check_fixtures(subject, oracles=Path(only_head))
         with tempfile.TemporaryDirectory() as empty:
             with self.assertRaisesRegex(checker.ContractError, "no gateway-client-conformance"):
