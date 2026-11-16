@@ -953,7 +953,8 @@ fn cav1_key_owners_follow_the_adr_128_grammar() -> TestResult {
         format!("communitx:{t}:{g}:0:p:0000000000000001"),
         format!("community:{zero32}:{g}:0:p:0000000000000001"),
         format!("community:{t}:{zero32}:0:p:0000000000000001"),
-        format!("community:{}:{g}:0:p:0000000000000001", t.to_uppercase()),
+        // A T in upper-case hex.
+        format!("community:{}:{g}:0:p:0000000000000001", "AB".repeat(16)),
         format!("community:{t}:{g}:0:p:000000000000000g"),
         format!("community:{t}:{g}0:0:p:0000000000000001"),
         format!("community:{t}:{g}:4:p:0000000000000001"),
