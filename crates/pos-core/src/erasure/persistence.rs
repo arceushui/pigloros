@@ -460,7 +460,8 @@ pub(super) fn recorded_active_attempt<P: ErasurePersistencePortV1 + ?Sized>(
                     port.read_object(active.admission)
                         .and_then(|bytes| ErasureRetryAdmissionV1::from_canonical_cbor(&bytes))
                         .and_then(|admission| {
-                            (admission.reference() == active.admission)
+                            (admission.reference() == active.admission
+                                && admission.request() == request)
                                 .then_some(admission)
                                 .ok_or(ErasureErrorV1::ProvenanceMissing)
                         })

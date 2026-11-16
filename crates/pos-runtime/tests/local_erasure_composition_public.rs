@@ -3321,14 +3321,14 @@ const fn owner_result(
     }
 }
 
-/// ELO1 `result` and an ELS1 of `purpose` over it by `key`: the records to
-/// retain, and the ELS1 address.
+/// ELO1 `result` and an ELS1 of `purpose` over it by `key` for the signer
+/// identity at `epoch`: the records to retain, and the ELS1 address.
 fn signed_result(
     result: &LocalErasureOwnerResultV1,
     purpose: LocalErasureSignaturePurposeV1,
-    key: &SigningKey,
+    (key, epoch): (&SigningKey, u64),
 ) -> TestResult<(Vec<Vec<u8>>, ErasureReferenceV1)> {
-    let signed = signature_record(purpose, result.reference()?, key, 1)?;
+    let signed = signature_record(purpose, result.reference()?, key, epoch)?;
     let address = signature_address(&signed)?;
     Ok((vec![result.to_canonical_cbor()?, signed], address))
 }
@@ -3405,8 +3405,8 @@ fn receipt_input(
 }
 
 /// A frozen private request 1 of `actor()`, who owns one root Timeline and
-/// holds a role-0 key, under a bundle naming owners of some classes; its
-/// frozen obligations and its attempt 0 as ADR-136 §5 and §6 derive it.
+/// holds a role-0 key, under `bundle`; its frozen obligations and its
+/// attempt 0 as ADR-136 §5 and §6 derive it.
 struct Attempted {
     store: LocalStore,
     owned: TimelineId,
@@ -3419,7 +3419,7 @@ struct Attempted {
 }
 
 impl Attempted {
-    fn new(mut actors: Vec<EntityId>, classes: &[(u64, &str)]) -> TestResult<Self> {
+    fn new(mut actors: Vec<EntityId>, bundle: LocalErasureBundleV1) -> TestResult<Self> {
         actors.sort_unstable();
         let store = LocalStore::new(&GrantShape {
             actors,
@@ -3431,7 +3431,6 @@ impl Attempted {
             Hash::from_bytes([0x81; 32]),
             None,
         ))?;
-        let bundle = owned_bundle(classes)?;
         let case = Case::signed(&bundle, &bundle_root(), &[])?;
         Self::freeze(&store, &case)?;
         let request = request_of(1)?;
@@ -3545,11 +3544,23 @@ impl Attempted {
             .ok_or("no obligation of the category")?)
     }
 
-    /// Retain a signed ELO1 for each obligation of `obligations`, negative
-    /// with its `error_of`, and return the matching acknowledgements.
+    /// Retain an ELO1 of attempt 0 for each obligation of `obligations`,
+    /// negative with its `error_of` and signed by the fixture signer, and
+    /// return the matching acknowledgements.
     fn owner_results(
         &self,
         obligations: &[ErasureObligationV1],
+        error_of: impl Fn(&ErasureObligationV1) -> Option<ErasureErrorV1>,
+    ) -> TestResult<Vec<ErasureAcknowledgementV1>> {
+        self.signed_results(&self.attempt, obligations, (&erasure_signer(), 1), error_of)
+    }
+
+    /// As [`Self::owner_results`], for `attempt` and signed by `signer`.
+    fn signed_results(
+        &self,
+        attempt: &ErasureRetryAdmissionV1,
+        obligations: &[ErasureObligationV1],
+        signer: (&SigningKey, u64),
         error_of: impl Fn(&ErasureObligationV1) -> Option<ErasureErrorV1>,
     ) -> TestResult<Vec<ErasureAcknowledgementV1>> {
         let mut retained = Vec::new();
@@ -3557,9 +3568,9 @@ impl Attempted {
         for obligation in obligations {
             let error = error_of(obligation);
             let (records, address) = signed_result(
-                &owner_result(&self.attempt, obligation, error),
+                &owner_result(attempt, obligation, error),
                 LocalErasureSignaturePurposeV1::OwnerResult,
-                &erasure_signer(),
+                signer,
             )?;
             retained.extend(records);
             let outcome = if error.is_some() {
@@ -3584,26 +3595,50 @@ impl Attempted {
         Ok(())
     }
 
-    /// `CA(ERCB1)` of the receipt that finalizing the active attempt with
-    /// `input` would commit: a host whose Local authority captures each
-    /// receipt admission records the normalized input core hands it, and
-    /// refuses it unsigned.
-    fn receipt_body(&self, input: &ErasureReceiptInputV1) -> TestResult<ErasureReferenceV1> {
-        let capture = Arc::new(ReceiptCapture {
-            local: self.case.compose(&mut self.store.sqlite()?).map_err(fail)?,
+    /// A host over this store whose authority is a [`Probe`] of the Local
+    /// authority `case` composes, evaluating `attempts` on every attempt
+    /// admission.
+    fn probe_host(
+        &self,
+        case: &Case,
+        attempts: Vec<ErasureRetryAdmissionV1>,
+    ) -> TestResult<(ErasureExecutionHostV1, Arc<Probe>)> {
+        let probe = Arc::new(Probe {
+            local: case.compose(&mut self.store.sqlite()?).map_err(fail)?,
+            attempts,
+            attempt_results: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
         });
         let composition = ErasureCoordinatorCompositionV1::new(
-            Arc::clone(&capture) as Arc<dyn ErasureCoordinatorAuthorityV1>,
+            Arc::clone(&probe) as Arc<dyn ErasureCoordinatorAuthorityV1>,
             local_erasure_coordinator_v1(ErasureReferenceV1::from_digest(STORE_IDENTITY))?,
         )?;
-        let mut host = ErasureExecutionHostV1::open_with_authority(
+        let host = ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Sqlite {
                 path: self.store.path.clone(),
             },
             &composition,
             ErasureRecoveryLimitsV1::from_maximum_requests(4_096)?,
         )?;
+        Ok((host, probe))
+    }
+
+    /// `CA(ERCB1)` of the receipt that finalizing the active attempt with
+    /// `input` would commit under this case.
+    fn receipt_body(&self, input: &ErasureReceiptInputV1) -> TestResult<ErasureReferenceV1> {
+        self.receipt_body_under(&self.case, input)
+    }
+
+    /// `CA(ERCB1)` of the receipt that finalizing the active attempt with
+    /// `input` would commit under `case`: a probe host records the
+    /// normalized input core hands the receipt admission, which the Local
+    /// authority refuses unsigned.
+    fn receipt_body_under(
+        &self,
+        case: &Case,
+        input: &ErasureReceiptInputV1,
+    ) -> TestResult<ErasureReferenceV1> {
+        let (mut host, probe) = self.probe_host(case, Vec::new())?;
         assert_eq!(
             host.command_sender()?
                 .finalize_erasure_request(self.request, input)
@@ -3611,7 +3646,7 @@ impl Attempted {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         drop(host);
-        let captured = capture
+        let captured = probe
             .receipts
             .lock()
             .map_err(|_| "receipt capture poisoned")?
@@ -3622,15 +3657,18 @@ impl Attempted {
     }
 }
 
-/// The Local authority, recording the normalized ERC1 input of each
-/// receipt admission, so a test can sign the ERCB1 a signer re-derives
-/// from the committed record.
-struct ReceiptCapture {
+/// The Local authority, probed inside real host commands: each attempt
+/// admission also evaluates `attempts` over the same host-built view, and
+/// each receipt admission records the normalized ERC1 input, so a test can
+/// sign the ERCB1 a signer re-derives from the committed record.
+struct Probe {
     local: ErasureCoordinatorCompositionV1,
+    attempts: Vec<ErasureRetryAdmissionV1>,
+    attempt_results: Mutex<Vec<Result<(), ErasureErrorV1>>>,
     receipts: Mutex<Vec<ErasureReceiptInputV1>>,
 }
 
-impl ErasureCoordinatorAuthorityV1 for ReceiptCapture {
+impl ErasureCoordinatorAuthorityV1 for Probe {
     fn validate_freeze_authorization_with_view(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -3796,7 +3834,21 @@ impl ErasureCoordinatorAuthorityV1 for ReceiptCapture {
         view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.local.authority().admit_attempt(view, admission)
+        let probed = self
+            .attempts
+            .iter()
+            .map(|attempt| {
+                self.local
+                    .authority()
+                    .admit_attempt(view, attempt)
+                    .map(drop)
+            })
+            .collect::<Vec<_>>();
+        self.attempt_results
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)
+            .map(|mut results| results.extend(probed))
+            .and_then(|()| self.local.authority().admit_attempt(view, admission))
     }
 
     fn admit_acknowledgement(
@@ -3824,7 +3876,9 @@ impl ErasureCoordinatorAuthorityV1 for ReceiptCapture {
 
 #[test]
 fn an_attempt_must_be_the_one_its_request_derives() -> TestResult {
-    let attempted = Attempted::new(vec![actor(), other_actor()], &ALL_CLASSES)?;
+    let mut expiring = owned_bundle(&ALL_CLASSES)?;
+    expiring.expiry = BUNDLE_EXPIRY;
+    let attempted = Attempted::new(vec![actor(), other_actor()], expiring)?;
     let request = attempted.request;
     let mut host = attempted.host()?;
     {
@@ -3868,16 +3922,19 @@ fn an_attempt_must_be_the_one_its_request_derives() -> TestResult {
             .map_err(fail)?;
     }
     drop(host);
-    // An attempt is a new admission, so an expired TPS1 closes it.
-    assert_eq!(
-        attempted
-            .store
-            .host(&attempted.case_at(after_trust_expiry)?, 4_096)?
-            .command_sender()?
-            .dispatch_erasure_destruction(request, &attempted.attempt)
-            .map(drop),
-        Err(ErasureHostErrorV1::RecoveryUnavailable)
-    );
+    // An attempt is a new admission, so an expired TPS1 or bundle closes
+    // it.
+    for clock in [after_trust_expiry as fn() -> u64, after_bundle_expiry] {
+        assert_eq!(
+            attempted
+                .store
+                .host(&attempted.case_at(clock)?, 4_096)?
+                .command_sender()?
+                .dispatch_erasure_destruction(request, &attempted.attempt)
+                .map(drop),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
     let mut host = attempted.host()?;
     let mut sender = host.command_sender()?;
     assert_eq!(
@@ -3965,7 +4022,7 @@ impl Attempted {
         let mut retained = Vec::new();
         let mut refused = Vec::new();
         for (result, purpose, key) in variants {
-            let (records, address) = signed_result(&result, purpose, &key)?;
+            let (records, address) = signed_result(&result, purpose, (&key, 1))?;
             retained.extend(records);
             refused.push(address);
         }
@@ -3980,7 +4037,7 @@ impl Attempted {
 
 #[test]
 fn only_a_signed_owner_result_that_binds_it_acknowledges() -> TestResult {
-    let attempted = Attempted::new(vec![actor()], &ALL_CLASSES)?;
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
     let request = attempted.request;
     let acknowledgements = attempted.owner_results(&attempted.obligations, |_| None)?;
     let refused = attempted.refused_results()?;
@@ -4000,20 +4057,22 @@ fn only_a_signed_owner_result_that_binds_it_acknowledges() -> TestResult {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
     }
-    // A positive ELO1 is no negative acknowledgement.
-    assert_eq!(
-        sender
-            .acknowledge_erasure(
-                request,
-                acknowledgement(
-                    &first,
-                    acknowledgements[0].evidence,
-                    ErasureAcknowledgementOutcomeV1::Negative
+    // A positive ELO1 is no negative acknowledgement, and no ELO1 stands
+    // for a stale one: Local owners are synchronous.
+    for outcome in [
+        ErasureAcknowledgementOutcomeV1::Negative,
+        ErasureAcknowledgementOutcomeV1::Stale,
+    ] {
+        assert_eq!(
+            sender
+                .acknowledge_erasure(
+                    request,
+                    acknowledgement(&first, acknowledgements[0].evidence, outcome)
                 )
-            )
-            .map(drop),
-        Err(ErasureHostErrorV1::AuthorizationDenied)
-    );
+                .map(drop),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+    }
     for acknowledged in acknowledgements {
         assert_eq!(
             sender
@@ -4027,7 +4086,7 @@ fn only_a_signed_owner_result_that_binds_it_acknowledges() -> TestResult {
 
 #[test]
 fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
-    let attempted = Attempted::new(vec![actor()], &ALL_CLASSES)?;
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
     let request = attempted.request;
     let obligations = &attempted.obligations;
     let acknowledgements = attempted.owner_results(obligations, |_| None)?;
@@ -4139,7 +4198,7 @@ impl Attempted {
 
 #[test]
 fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
-    let attempted = Attempted::new(vec![actor()], &ALL_CLASSES)?;
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
     rejected(&attempted.store, &[2])?;
     let request = attempted.request;
     let (receipt, unresolved) = attempted.partially_failed()?;
@@ -4167,7 +4226,12 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
         Err(ErasureHostErrorV1::Conflict)
     );
     sender.reject_erasure_request(request_of(2)?, rejection(2)?.reference()?)?;
+    // The ordinal must follow its source receipt's; core refuses any other.
     for wrong in [
+        ErasureRetryAdmissionInputV1 {
+            attempt_ordinal: 2,
+            ..retry_input.clone()
+        },
         ErasureRetryAdmissionInputV1 {
             admitted_position: admitted + 1,
             deadline_position: admitted + 1 + LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
@@ -4212,24 +4276,14 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
 fn a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject() -> TestResult {
     let signer_key_id = owned_bundle(&ALL_CLASSES)?.signer_key_id;
     for revoked in [signer_key_id, BUNDLE_ROOT.to_owned()] {
-        let attempted = Attempted::new(vec![actor()], &ALL_CLASSES)?;
+        let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
         let request = attempted.request;
         let acknowledgements = attempted.owner_results(&attempted.obligations[..1], |_| None)?;
         attempted.acknowledged(&[])?;
         // Compromise: the installed TPS1 revokes the old signer or its
         // root, and a new bundle under another root and signer is
         // installed.
-        let material = SigningKeyMaterial::new(rotated_signer());
-        attempted.store.register(KeyRegistrationV1::new(
-            signer_identity(2),
-            material.material_digest(),
-            Some(material.public_verification_key()),
-        ))?;
-        let rotated_key = rotated_signer().verifying_key().to_bytes();
-        let mut new = owned_bundle(&ALL_CLASSES)?;
-        new.signer_identity.epoch = 2;
-        new.signer_public_key = rotated_key;
-        new.signer_key_id = local_erasure_signer_key_id_v1(&rotated_key);
+        let mut new = rotated_bundle(&attempted.store)?;
         new.issued_by = OTHER_ROOT.to_owned();
         let case = Case::signed(&new, &other_root(), &[revoked.as_str()])?;
         let mut host = attempted.store.host(&case, 4_096)?;
@@ -4241,7 +4295,17 @@ fn a_revoked_pinned_bundle_signs_nothing_and_frees_its_subject() -> TestResult {
                 .map(drop),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
-        // It stays contained but no longer holds its subject.
+        // An attempt that cannot be read still holds its subject.
+        let admission = attempted.attempt.reference();
+        let original = overwrite_object(&attempted.store, admission, &[0])?;
+        assert_eq!(
+            sender
+                .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+                .map(drop),
+            Err(LocalErasureSubmitErrorV1::Concurrent)
+        );
+        overwrite_object(&attempted.store, admission, &original)?;
+        // Readable, it stays contained but no longer holds its subject.
         assert_eq!(
             sender
                 .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
@@ -4263,7 +4327,7 @@ fn an_owner_the_pinned_bundle_does_not_name_acknowledges_nothing() -> TestResult
     // The bundle names no `local-backup-inventory` owner, so the attempt
     // commits but its dispatch is refused, and that owner's result is never
     // admitted.
-    let attempted = Attempted::new(vec![actor()], &ALL_CLASSES[..7])?;
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES[..7])?)?;
     let request = attempted.request;
     let acknowledgements = attempted.owner_results(
         &[
@@ -4292,5 +4356,150 @@ fn an_owner_the_pinned_bundle_does_not_name_acknowledges_nothing() -> TestResult
             .lifecycle(),
         ErasureLifecycleV1::AwaitingAcknowledgements
     );
+    Ok(())
+}
+
+/// Overwrite the stored bytes of erasure object `reference` with `bytes`,
+/// and return the bytes it held.
+fn overwrite_object(
+    store: &LocalStore,
+    reference: ErasureReferenceV1,
+    bytes: &[u8],
+) -> TestResult<Vec<u8>> {
+    let connection = rusqlite::Connection::open(&store.path)?;
+    let digest = reference.digest();
+    let original: Vec<u8> = connection.query_row(
+        "SELECT object_cbor FROM erasure_evidence WHERE reference_digest = ?1",
+        [digest.as_slice()],
+        |row| row.get(0),
+    )?;
+    let changed = connection.execute(
+        "UPDATE erasure_evidence SET object_cbor = ?2 WHERE reference_digest = ?1",
+        rusqlite::params![digest.as_slice(), bytes],
+    )?;
+    assert_eq!(changed, 1);
+    Ok(original)
+}
+
+/// A bundle naming every owner whose signer is the rotated key at epoch 2,
+/// after registering that key in the store.
+fn rotated_bundle(store: &LocalStore) -> TestResult<LocalErasureBundleV1> {
+    let material = SigningKeyMaterial::new(rotated_signer());
+    store.register(KeyRegistrationV1::new(
+        signer_identity(2),
+        material.material_digest(),
+        Some(material.public_verification_key()),
+    ))?;
+    let rotated_key = rotated_signer().verifying_key().to_bytes();
+    let mut rotated = owned_bundle(&ALL_CLASSES)?;
+    rotated.signer_identity.epoch = 2;
+    rotated.signer_public_key = rotated_key;
+    rotated.signer_key_id = local_erasure_signer_key_id_v1(&rotated_key);
+    Ok(rotated)
+}
+
+#[test]
+fn a_retry_pins_a_retained_rotated_bundle_and_completes_at_its_reached_position() -> TestResult {
+    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    let request = attempted.request;
+    let (receipt, unresolved) = attempted.partially_failed()?;
+    // A routine rotation installs a new bundle with a new signer.
+    let rotated = rotated_bundle(&attempted.store)?;
+    let case = Case::signed(&rotated, &bundle_root(), &[])?;
+    let input = Attempted::attempt_input(
+        attempted.store.head,
+        rotated.reference()?,
+        &unresolved,
+        Some(&receipt),
+    )?;
+    let retry = ErasureRetryAdmissionV1::new(input.clone())?;
+    // The retry pins the new bundle only once its ELB1 is retained, so
+    // recovery can resolve it after a later rotation.
+    assert_eq!(
+        attempted
+            .store
+            .host(&case, 4_096)?
+            .command_sender()?
+            .dispatch_erasure_destruction(request, &retry)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    attempted.store.retain(&[rotated.to_canonical_cbor()?])?;
+    // Inside the admission, the authority admits ordinal 63 and refuses
+    // ordinal 64: the quota is 64 attempts per request.
+    let mut probes = Vec::new();
+    for attempt_ordinal in [63, 64] {
+        probes.push(ErasureRetryAdmissionV1::new(
+            ErasureRetryAdmissionInputV1 {
+                attempt_ordinal,
+                ..input.clone()
+            },
+        )?);
+    }
+    let (mut host, probe) = attempted.probe_host(&case, probes)?;
+    assert_eq!(
+        host.command_sender()?
+            .dispatch_erasure_destruction(request, &retry)?
+            .lifecycle(),
+        ErasureLifecycleV1::PartialFailure
+    );
+    drop(host);
+    let results = probe
+        .attempt_results
+        .lock()
+        .map_err(|_| "probe poisoned")?
+        .clone();
+    assert_eq!(results, [Ok(()), Err(ErasureErrorV1::PolicyConflict)]);
+    // The retry's results are signed by the new signer, and its complete
+    // receipt issues at its two executed obligations past admission.
+    let rotated_signer_key = rotated_signer();
+    let acknowledgements =
+        attempted.signed_results(&retry, &unresolved, (&rotated_signer_key, 2), |_| None)?;
+    {
+        let mut host = attempted.store.host(&case, 4_096)?;
+        let mut sender = host.command_sender()?;
+        for acknowledged in acknowledgements {
+            sender.acknowledge_erasure(request, acknowledged)?;
+        }
+    }
+    let issue = retry.admitted_position() + 2;
+    let body = attempted.receipt_body_under(
+        &case,
+        &receipt_input(&attempted.obligations, issue, reference(0xee)),
+    )?;
+    let signed = signature_record(
+        LocalErasureSignaturePurposeV1::ReceiptBody,
+        body,
+        &rotated_signer_key,
+        2,
+    )?;
+    attempted.store.retain(&[signed.clone()])?;
+    let mut host = attempted.store.host(&case, 4_096)?;
+    let complete = host.command_sender()?.finalize_erasure_request(
+        request,
+        &receipt_input(&attempted.obligations, issue, signature_address(&signed)?),
+    )?;
+    assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(complete.issue_position(), issue);
+    assert_eq!(complete.trust(), rotated.reference()?);
+    drop(host);
+    let mut host = attempted.store.host(&case, 4_096)?;
+    assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[test]
+fn a_bundle_owner_of_another_class_is_unencodable() -> TestResult {
+    // The ELB1 codec derives each owner from its store, category and class,
+    // so a bundle cannot name an owner under another class.
+    let store = ErasureReferenceV1::from_digest(STORE_IDENTITY);
+    let mut wrong = bundle();
+    wrong.owners = vec![LocalErasureOwnerRowV1 {
+        category: 1,
+        ack_class: "key-registry".to_owned(),
+        owner_ref: pos_core::local_erasure_owner_ref_v1(store, 0, "client-cache-signal")?,
+    }];
+    assert!(wrong.to_canonical_cbor().is_err());
+    assert!(Case::signed(&wrong, &bundle_root(), &[]).is_err());
     Ok(())
 }

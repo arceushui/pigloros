@@ -6,6 +6,10 @@
 //! it runs under the request's original authorization. Each owner result
 //! and each receipt needs an ELS1 by the signer of the bundle its attempt
 //! pins, which the installed TPS1 must not revoke.
+//!
+//! Automatic retry of transient owner results up to ELP1 `auto_retry_max`
+//! is the C4 driver's scheduling (ADR-136 §6): the authority admits any
+//! retry that recomputes, within the per-request attempt quota.
 
 use pos_core::{
     local_erasure_receipt_body_reference_v1, ErasureAcknowledgementOutcomeV1,
@@ -26,7 +30,9 @@ use crate::ErasureAuthorityReadViewV1;
 const FIRST_ATTEMPT_POSITION: u64 = LOCAL_FREEZE_POSITION + 1;
 
 /// Whether attempt `ordinal`, counted from 0, is within the request's
-/// lifetime attempt quota `quota_attempts` (ADR-136 §5).
+/// lifetime attempt quota `quota_attempts` (ADR-136 §5): 64 attempts per
+/// request. ERQ1 pins the compiled ELP1 (`authenticate` refuses any other),
+/// so the pinned and the compiled quota are the same value.
 const fn within_quota(ordinal: u64) -> bool {
     ordinal < LOCAL_ERASURE_QUOTA_ATTEMPTS_V1
 }
@@ -45,7 +51,8 @@ fn issue_position(attempt: &ErasureRetryAdmissionV1, lifecycle: ErasureLifecycle
 }
 
 /// The acknowledgement outcome an ELO1 stands for: a positive result
-/// acknowledges, a negative one is negative.
+/// acknowledges, a negative one is negative. No ELO1 stands for `Stale`:
+/// Local owners are synchronous, so a stale acknowledgement is refused.
 const fn outcome_of(result: &LocalErasureOwnerResultV1) -> ErasureAcknowledgementOutcomeV1 {
     if result.error.is_none() {
         ErasureAcknowledgementOutcomeV1::Acknowledged
@@ -91,19 +98,24 @@ impl LocalErasureAuthorityV1 {
             .filter(|bundle| !self.revoked(bundle))
     }
 
-    /// Whether `state` holds its subject's one active erasure (ADR-136 §6):
-    /// with an active attempt it does unless that attempt is pinned to a
-    /// revoked bundle (§5); without one it does while pre-terminal. An
-    /// attempt that cannot be read holds it.
-    pub(super) fn holds_subject(
+    /// Whether `state` holds its subject's one active erasure (ADR-136 §6).
+    /// A complete or rejected request never does, and its attempt is not
+    /// read. Otherwise, with an active attempt it does unless that attempt
+    /// is pinned to a revoked bundle (§5); without one it does while
+    /// pre-terminal. An attempt that cannot be read holds it.
+    pub(super) fn subject_held_by(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         state: &ErasureVerifiedStateV1,
     ) -> bool {
-        let pre_terminal = is_pre_terminal(state.lifecycle());
-        view.active_attempt(state.request().reference())
+        let lifecycle = state.lifecycle();
+        !matches!(
+            lifecycle,
+            ErasureLifecycleV1::Complete | ErasureLifecycleV1::Rejected
+        ) && view
+            .active_attempt(state.request().reference())
             .map_or(true, |active| {
-                active.map_or(pre_terminal, |attempt| {
+                active.map_or(is_pre_terminal(lifecycle), |attempt| {
                     !self
                         .pinned_bundle(view, attempt.trust())
                         .is_some_and(|bundle| self.revoked(&bundle))
@@ -123,7 +135,7 @@ impl LocalErasureAuthorityV1 {
                 state.request().subject() == erq1.subject()
                     && state.request().reference() != erq1.reference()
             })
-            .any(|state| self.holds_subject(view, state))
+            .any(|state| self.subject_held_by(view, state))
     }
 
     /// The ADR-136 §6 positions of `admission`: attempt 0 is admitted at 2
@@ -152,8 +164,9 @@ impl LocalErasureAuthorityV1 {
 
     /// Whether ERRA1 is the attempt ADR-136 §5 derives for `erq1`: within
     /// the lifetime attempt quota, under the request's own ERAZ1 and the
-    /// ELP1 ERQ1 pins, pinning the bundle current at admission, at the §6
-    /// positions.
+    /// ELP1 ERQ1 pins, at the §6 positions, pinning the bundle current at
+    /// admission. That bundle's ELB1 must already be retained under the
+    /// pinned `CA(ELB1)`, so recovery can resolve it after a rotation.
     fn binds_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
@@ -163,10 +176,10 @@ impl LocalErasureAuthorityV1 {
         within_quota(admission.attempt_ordinal())
             && admission.authorization_provenance() == erq1.authorization()
             && admission.policy() == erq1.policy()
-            && self
-                .bundle
-                .reference()
-                .is_ok_and(|trust| admission.trust() == trust)
+            && view
+                .retained_object(admission.trust())
+                .and_then(|bytes| LocalErasureBundleV1::from_canonical_cbor(&bytes).ok())
+                .is_some_and(|bundle| bundle == self.bundle)
             && Self::attempt_positions(view, erq1, admission)
                 == Some((admission.admitted_position(), admission.deadline_position()))
     }
@@ -204,7 +217,8 @@ impl LocalErasureAuthorityV1 {
     }
 
     /// The ELO1 a purpose-1 ELS1 `evidence` signs, verified with `bundle`'s
-    /// signer key.
+    /// signer key. The ELO1 must recompute to the signed digest, in defence
+    /// in depth over the content-addressed read.
     fn owner_result(
         view: &dyn ErasureAuthorityReadViewV1,
         bundle: &LocalErasureBundleV1,
@@ -221,15 +235,18 @@ impl LocalErasureAuthorityV1 {
                     evidence,
                 )
             })
-            .and_then(|digest| view.retained_object(digest))
-            .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes).ok())
+            .and_then(|digest| {
+                view.retained_object(digest)
+                    .and_then(|bytes| LocalErasureOwnerResultV1::from_canonical_cbor(&bytes).ok())
+                    .filter(|result| result.reference().ok() == Some(digest))
+            })
     }
 
     /// Admit one owner acknowledgement (ADR-136 §5): its owner must be an
     /// owner of the bundle its attempt pins, whose `owner_ref` the bundle
     /// codec derives from the store, category and acknowledgement class;
     /// its evidence must be a purpose-1 ELS1 by that bundle's signer over
-    /// an ELO1 that binds it.
+    /// an ELO1 that binds it. A `Stale` acknowledgement never binds one.
     ///
     /// # Errors
     /// `TrustSnapshotInvalid` when the pinned bundle is unknown or revoked;

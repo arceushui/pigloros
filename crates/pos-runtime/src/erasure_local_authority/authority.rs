@@ -222,7 +222,7 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
         view: &dyn ErasureAuthorityReadViewV1,
         state: &ErasureVerifiedStateV1,
     ) -> bool {
-        Self::holds_subject(self, view, state)
+        self.subject_held_by(view, state)
     }
 }
 
@@ -312,7 +312,7 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
                                 LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
                                 principal.grant.scope().actor_entity_ids().len(),
                             ),
-                            |state| self.holds_subject(view, state),
+                            |state| self.subject_held_by(view, state),
                         )
                         .map_err(|_| ErasureErrorV1::PolicyConflict)
                     })
@@ -503,10 +503,11 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
     }
 
     /// Recompute ERRA1 (ADR-136 §5): the request's ERAZ1, the ELP1 ERQ1
-    /// pins, the bundle current at admission and the §6 positions, within
-    /// the lifetime attempt quota. It needs no signature, but like every
-    /// new admission it closes on expiry, and it is refused while another
-    /// request of the subject holds it.
+    /// pins, the retained bundle current at admission and the §6 positions,
+    /// within the per-request quota of 64 attempts. It needs no signature,
+    /// but like every new admission it closes on expiry, and it is refused
+    /// while another request of the subject holds it. Automatic retry up to
+    /// `auto_retry_max` is the C4 driver's scheduling (§6).
     fn admit_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
