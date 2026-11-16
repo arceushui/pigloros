@@ -1035,6 +1035,11 @@ fn forge_pair(swap: bool, same_member: bool) -> Fallible<Result<(), Error>> {
 #[test]
 fn two_members_cannot_swap_initial_nodes_or_share_a_member() -> TestResult {
     assert_eq!(forge_pair(false, false)?, Ok(()));
+    // The swap is also refused by the existing producer check: each swapped
+    // `InitialState` cites the other member's CIS1. It therefore does not
+    // isolate the full-reference comparison; the single-member mis-cite case
+    // (`revision_ordinal: 3, cited_ordinal: Some(2)`) in
+    // `every_node_shape_violation_is_refused` is the one that guards it.
     assert_eq!(forge_pair(true, false)?, Err(Error::InvalidBinding));
     assert_eq!(forge_pair(false, true)?, Err(Error::InvalidBinding));
     Ok(())
