@@ -404,3 +404,80 @@ fn every_field_bound_holds_at_its_edge() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn the_decoders_refuse_correctly_digested_records_with_bad_fields() -> TestResult {
+    // An SDY1 with a zero request ID, digested and signed by the oracle.
+    let zero_request = oracle(
+        "SDY1",
+        vec![
+            Value::Text("SDY1".to_owned()),
+            int(1),
+            bytes(&[0; 16]),
+            bytes(&[2; 32]),
+            bytes(&[3; 32]),
+            bytes(&[4; 32]),
+            bytes(&[5; 32]),
+            Value::Text(KEY_ID.to_owned()),
+        ],
+    )?;
+    assert_eq!(
+        SandboxDescribeResponse::from_canonical_cbor(&zero_request).err(),
+        Some(SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    // SPE1 identities that only the field rules refuse: a refusal with no
+    // operation, a digest with no request, and an attempt with no operation
+    // or no request, under a code that requires no identity.
+    let unidentified = SandboxProviderErrorFields {
+        operation: None,
+        request_id: None,
+        request_digest: None,
+        attempt_id: None,
+        code: SandboxProviderErrorCode::InvalidEncoding,
+        safe_detail: None,
+        runtime_attestation_key_id: KEY_ID.to_owned(),
+    };
+    let cases = [
+        (
+            SandboxProviderErrorFields {
+                operation: None,
+                attempt_id: None,
+                ..refusal(0)
+            },
+            11,
+        ),
+        (
+            SandboxProviderErrorFields {
+                request_digest: Some([7; 32]),
+                ..unidentified.clone()
+            },
+            0,
+        ),
+        (
+            SandboxProviderErrorFields {
+                attempt_id: Some([8; 16]),
+                ..unidentified.clone()
+            },
+            0,
+        ),
+        (
+            SandboxProviderErrorFields {
+                operation: Some(1),
+                attempt_id: Some([8; 16]),
+                ..unidentified
+            },
+            0,
+        ),
+    ];
+    for (fields, code) in cases {
+        assert_eq!(
+            SandboxProviderError::self_digested(fields.clone()).err(),
+            Some(SandboxProviderProtocolError::InconsistentFields)
+        );
+        assert_eq!(
+            SandboxProviderError::from_canonical_cbor(&error_oracle(&fields, code)?).err(),
+            Some(SandboxProviderProtocolError::InconsistentFields)
+        );
+    }
+    Ok(())
+}
