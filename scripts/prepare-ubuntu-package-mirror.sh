@@ -16,14 +16,22 @@ set -euo pipefail
 # for every index file and produced no further output for 584 s, until the
 # 10-minute job timeout. Retries are off so the mirror method fails over at
 # once instead of retrying a dead host, the 10 s connect/read timeout caps
-# each attempt, and the 180 s bound per phase stops any stall the log could
-# not explain. The refresh fails on any index error, so nothing continues
-# with stale indices.
-APT_NETWORK_TIMEOUT_SECONDS=180
+# each attempt, and the 120 s bound per phase stops any stall the log could
+# not explain: two failed attempts of both phases (4 x 130 s with the kill
+# grace) still end inside a 10-minute job. The refresh fails on any index
+# error, so nothing continues with stale indices.
+#
+# Every apt-get call reads only the rewritten ubuntu.sources, so a flaky
+# third-party source on the runner (packages.microsoft.com and others) can
+# neither fail the strict refresh nor supply the installed packages.
+APT_NETWORK_TIMEOUT_SECONDS=120
+APT_KILL_AFTER_SECONDS=10
 EDGE_MIRROR=https://mirrors.edge.kernel.org/ubuntu
 apt_dir="${PIGLOROS_APT_DIR:-/etc/apt}"
 sources="${apt_dir}/sources.list.d/ubuntu.sources"
 mirror_list="${apt_dir}/pigloros-mirrors.txt"
+ubuntu_only_parts="${apt_dir}/pigloros-sources.d"
+apt_scope=(-o Dir::Etc::sourcelist=/dev/null -o "Dir::Etc::sourceparts=${ubuntu_only_parts}")
 
 if (($# == 0)); then
   echo "::error::usage: $0 <apt-get install arguments...>"
@@ -57,12 +65,25 @@ write_mirror_list() {
   printf '%s' "${entries}" | sudo tee "${mirror_list}" > /dev/null
 }
 
-# Refreshes every index and downloads the requested packages, each bounded.
+# Runs one bounded network phase of apt-get against the Ubuntu sources only.
+# On failure sets FAILURE to the phase and how it ended.
+bounded_apt() {
+  local phase="$1" status=0
+  shift
+  sudo timeout --kill-after="${APT_KILL_AFTER_SECONDS}" "${APT_NETWORK_TIMEOUT_SECONDS}" \
+    apt-get "${apt_scope[@]}" "$@" || status=$?
+  ((status != 0)) || return 0
+  case "${status}" in
+    124 | 137) FAILURE="${phase} timed out after ${APT_NETWORK_TIMEOUT_SECONDS}s (status ${status})" ;;
+    *) FAILURE="${phase} failed with status ${status}" ;;
+  esac
+  return 1
+}
+
+# Refreshes every Ubuntu index, then downloads the requested packages.
 fetch_packages() {
-  sudo timeout --kill-after=15 "${APT_NETWORK_TIMEOUT_SECONDS}" \
-    apt-get update --error-on=any &&
-    sudo timeout --kill-after=15 "${APT_NETWORK_TIMEOUT_SECONDS}" \
-      apt-get install --yes --download-only "$@"
+  bounded_apt "index refresh" update --error-on=any &&
+    bounded_apt "package download" install --yes --download-only "$@"
 }
 
 write_mirror_list
@@ -78,13 +99,19 @@ if ! grep -qxF "URIs: mirror+file:${mirror_list}" "${sources}"; then
   echo "::error::${sources} has no mirror+file Ubuntu archive source to redirect"
   exit 1
 fi
+sudo mkdir -p "${ubuntu_only_parts}"
+sudo cp "${sources}" "${ubuntu_only_parts}/ubuntu.sources"
 
+FAILURE=''
 if ! fetch_packages "$@"; then
-  echo "::warning::apt could not refresh indices and download packages within ${APT_NETWORK_TIMEOUT_SECONDS}s per phase; retrying without ${EDGE_MIRROR}"
+  echo "::warning::apt ${FAILURE} on the Ubuntu sources; retrying once with a mirror list without ${EDGE_MIRROR}"
   write_mirror_list "${EDGE_MIRROR}"
   if ! fetch_packages "$@"; then
-    echo "::error::apt could not refresh indices and download packages without ${EDGE_MIRROR} either; failing closed"
+    echo "::error::apt ${FAILURE} on the Ubuntu sources again without ${EDGE_MIRROR}; failing closed"
     exit 1
   fi
 fi
-sudo apt-get install --yes --no-download "$@"
+if ! sudo apt-get "${apt_scope[@]}" install --yes --no-download "$@"; then
+  echo "::error::apt could not install the downloaded packages; failing closed"
+  exit 1
+fi
