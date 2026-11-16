@@ -3,7 +3,9 @@
 
 The shell helpers run from the sourced scripts/qemu-closure-evidence.sh with
 a passthrough `sudo` stub, against real child processes of this test. The
-QMP helper runs against a fake QMP server on a Unix socket.
+QMP helper runs against a fake QMP server on a Unix socket. The Nix settings
+check runs from the sourced scripts/install-pinned-nix.sh against a stub
+`nix`, and the guest's process recording from the sourced collector.
 """
 
 from __future__ import annotations
@@ -26,6 +28,14 @@ import qemu_qmp_query_kvm as qmp
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "qemu-closure-evidence.sh"
+INSTALL_NIX = ROOT / "scripts" / "install-pinned-nix.sh"
+COLLECTOR = ROOT / "deploy" / "nixos" / "qemu-evidence" / "collect-evidence.sh"
+NIX_SETTINGS = {
+    "substituters": "https://cache.nixos.org",
+    "trusted-public-keys": "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+    "require-sigs": "true",
+    "sandbox": "true",
+}
 QEMU = "/nix/store/0123456789abcdfghijklmnpqrsvwxya-qemu-host-cpu-only-10.2.4"
 
 
@@ -38,13 +48,19 @@ class Shell:
         (self.bin / "sudo").write_text('#!/bin/sh\nexec "$@"\n')
         (self.bin / "sudo").chmod(0o755)
 
-    def run(self, script: str) -> subprocess.CompletedProcess:
+    def stub(self, name: str, body: str) -> None:
+        (self.bin / name).write_text(f"#!/bin/bash\n{body}\n")
+        (self.bin / name).chmod(0o755)
+
+    def run(self, script: str, source: pathlib.Path = SCRIPT) -> subprocess.CompletedProcess:
         environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
-        return subprocess.run(["bash", "-c", f'source "{SCRIPT}"\n{script}'], env=environment,
+        # writeShellApplication runs the collector with the same options.
+        prelude = "set -o errexit -o nounset -o pipefail\n" if source == COLLECTOR else ""
+        return subprocess.run(["bash", "-c", f'{prelude}source "{source}"\n{script}'], env=environment,
                               capture_output=True, text=True, check=False)
 
-    def out(self, script: str) -> str:
-        result = self.run(script)
+    def out(self, script: str, source: pathlib.Path = SCRIPT) -> str:
+        result = self.run(script, source)
         if result.returncode:
             raise AssertionError(result.stderr)
         return result.stdout
@@ -194,6 +210,91 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse((self.base / "w").exists())
         self.assertIn("unobserved-or-running", (out / "host/vm-cleanup").read_text())
+
+    def nix_stub(self, settings: dict[str, str]) -> pathlib.Path:
+        cases = "".join(f"  {name}) printf '%s\\n' '{value}' ;;\n" for name, value in settings.items())
+        nix = self.base / "nix"
+        nix.write_text(f'#!/bin/bash\n[[ $1 == config && $2 == show ]] || exit 2\n'
+                       f'case "$3" in\n{cases}  *) exit 1 ;;\nesac\n')
+        nix.chmod(0o755)
+        return nix
+
+    def test_nix_settings_must_equal_the_pinned_trust_settings(self):
+        result = self.shell.run(f'check_nix_settings "{self.nix_stub(NIX_SETTINGS)}"', INSTALL_NIX)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "".join(f"{name} = {value}\n" for name, value in NIX_SETTINGS.items()))
+        for name, value in (("substituters", "https://cache.nixos.org https://evil.example"),
+                            ("trusted-public-keys", "evil-1:AAAA"),
+                            ("require-sigs", "false"), ("sandbox", "relaxed"), ("sandbox", "")):
+            with self.subTest(name=name, value=value):
+                result = self.shell.run(
+                    f'check_nix_settings "{self.nix_stub({**NIX_SETTINGS, name: value})}"', INSTALL_NIX)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"effective {name} is", result.stderr)
+        # A setting Nix cannot show fails too.
+        settings = dict(NIX_SETTINGS)
+        del settings["sandbox"]
+        result = self.shell.run(f'check_nix_settings "{self.nix_stub(settings)}"', INSTALL_NIX)
+        self.assertNotEqual(result.returncode, 0)
+
+    def record(self, pid: int) -> subprocess.CompletedProcess:
+        work = self.base / "guest"
+        (work / "processes").mkdir(parents=True, exist_ok=True)
+        return self.shell.run(f'cd "{work}"\nrecord_process {pid}', COLLECTOR)
+
+    def test_collector_records_a_running_process(self):
+        process = self.child()
+        result = self.record(process.pid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.base / "guest/processes" / str(process.pid)
+        self.assertEqual({path.name for path in record.iterdir()}, {"exe", "environ", "namespaces"})
+        self.assertEqual((record / "exe").read_text(), f"{os.readlink(f'/proc/{process.pid}/exe')}\n")
+        self.assertEqual((record / "environ").read_bytes(),
+                         pathlib.Path(f"/proc/{process.pid}/environ").read_bytes())
+        self.assertEqual((record / "namespaces").read_text(), "".join(
+            f"{ns}\t{os.readlink(f'/proc/{process.pid}/ns/{ns}')}\n" for ns in ("pid", "user", "mnt")))
+
+    def test_collector_skips_a_process_that_exits_during_the_scan(self):
+        gone = self.child()
+        gone.kill()
+        gone.wait()
+        for pid in (gone.pid, self.zombie().pid):
+            with self.subTest(pid=pid):
+                result = self.record(pid)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.base / "guest/processes" / str(pid)).exists())
+        # A process that exits while it is read: the reads fail, then its
+        # /proc entry is gone.
+        exiting = self.child()
+        self.shell.stub("readlink", f"kill -KILL {exiting.pid}; while [[ -e /proc/{exiting.pid} ]]; "
+                                    f"do sleep 0.01; done; exit 1")
+        threading.Thread(target=exiting.wait, daemon=True).start()
+        result = self.record(exiting.pid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.base / "guest/processes" / str(exiting.pid)).exists())
+
+    def test_collector_skips_a_reused_pid(self):
+        process = self.child()
+        # The second stat read shows another start time: the PID was reused.
+        counter = self.base / "stat-reads"
+        self.shell.stub("cat", f'if [[ $1 == /proc/*/stat ]] && [[ -e "{counter}" ]]; then\n'
+                               "  /bin/cat \"$1\" | awk '{ $22 = 1; print }'\n"
+                               f'else\n  [[ $1 == /proc/*/stat ]] && touch "{counter}"\n  exec /bin/cat "$@"\nfi')
+        result = self.record(process.pid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(counter.exists())
+        self.assertFalse((self.base / "guest/processes" / str(process.pid)).exists())
+
+    def test_collector_fails_on_any_other_read_failure(self):
+        process = self.child()
+        self.shell.stub("readlink", "printf 'readlink: Permission denied\\n' >&2; exit 1")
+        result = self.record(process.pid)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"cannot read running process {process.pid}", result.stderr)
+        # So does a /proc entry whose stat cannot be read.
+        self.shell.stub("cat", "exit 1")
+        result = self.record(process.pid)
+        self.assertEqual(result.returncode, 1)
 
     def test_producer_and_checker_hash_the_same_inputs(self):
         import check_qemu_closure_evidence as checker

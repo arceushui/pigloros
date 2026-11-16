@@ -2,6 +2,61 @@
 # writeShellApplication adds the shebang, errexit, nounset and pipefail.
 # Every file is raw command output; scripts/check_qemu_closure_evidence.py on
 # the host owns every judgement. A missing `status` file means no evidence.
+
+# The start time of PID from /proc/PID/stat, or nothing once that process has
+# exited: /proc/PID is gone or the process is a zombie. Fails if /proc/PID
+# exists but cannot be read. The comm field may hold spaces, so fields are
+# read after its last ')'.
+start_time() { # PID
+  local stat fields
+  if ! stat="$(cat "/proc/$1/stat")"; then
+    [[ ! -e /proc/$1 ]]
+    return
+  fi
+  read -r -a fields <<<"${stat##*) }"
+  if [[ ${fields[0]} != [ZX] ]]; then
+    printf '%s\n' "${fields[19]}"
+  fi
+}
+
+# The PID, user and mount namespaces of PID.
+namespaces() { # PID
+  local ns link
+  for ns in pid user mnt; do
+    link="$(readlink "/proc/$1/ns/${ns}")" || return 1
+    printf '%s\t%s\n' "${ns}" "${link}"
+  done
+}
+
+# Record PID's executable, environment and namespaces in processes/PID. A
+# process that exits during the scan, so that its start time is gone or
+# differs afterwards (a reused PID), is skipped; any other failed read fails.
+record_process() { # PID
+  local before after recorded=0
+  before="$(start_time "$1")" || return 1
+  [[ -n ${before} ]] || return 0
+  mkdir "processes/$1" || return 1
+  if readlink "/proc/$1/exe" >"processes/$1/exe" \
+    && cat "/proc/$1/environ" >"processes/$1/environ" \
+    && namespaces "$1" >"processes/$1/namespaces"; then
+    recorded=1
+  fi
+  after="$(start_time "$1")" || return 1
+  if [[ ${after} != "${before}" ]]; then
+    rm -r -- "processes/$1"
+    return 0
+  fi
+  if [[ ${recorded} -eq 0 ]]; then
+    printf 'cannot read running process %s\n' "$1" >&2
+    return 1
+  fi
+}
+
+# scripts/test_qemu_closure_evidence_producer.py sources the functions above.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+  return 0
+fi
+
 out="$1"
 mkdir -p "$out"
 cd "$out"
@@ -91,15 +146,8 @@ for _ in $(seq 60); do
 done
 mkdir processes
 while read -r pid; do
-  mkdir "processes/${pid}"
-  readlink "/proc/${pid}/exe" >"processes/${pid}/exe"
-  cat "/proc/${pid}/environ" >"processes/${pid}/environ"
-  for ns in pid user mnt; do
-    printf '%s\t%s\n' "${ns}" "$(readlink "/proc/${pid}/ns/${ns}")"
-  done >"processes/${pid}/namespaces"
+  record_process "${pid}"
 done <"/sys/fs/cgroup${control_group}/cgroup.procs"
-for ns in pid user mnt; do
-  printf '%s\t%s\n' "${ns}" "$(readlink "/proc/1/ns/${ns}")"
-done >pid1-namespaces
+namespaces 1 >pid1-namespaces
 
 printf 'complete\n' >status

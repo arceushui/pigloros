@@ -5,6 +5,34 @@
 # Usage: install-pinned-nix.sh
 set -euo pipefail
 
+# The effective trust settings, each exactly as nix.conf below sets them.
+declare -A expected_settings=(
+  [substituters]=https://cache.nixos.org
+  [trusted-public-keys]=cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+  [require-sigs]=true
+  [sandbox]=true
+)
+
+# Print each effective setting of the Nix at $1; fail if any differs.
+check_nix_settings() {
+  local setting value status=0
+  for setting in substituters trusted-public-keys require-sigs sandbox; do
+    value="$("$1" config show "${setting}")"
+    printf '%s = %s\n' "${setting}" "${value}"
+    if [[ ${value} != "${expected_settings[${setting}]}" ]]; then
+      printf 'effective %s is %q, expected %q\n' "${setting}" "${value}" \
+        "${expected_settings[${setting}]}" >&2
+      status=1
+    fi
+  done
+  return "${status}"
+}
+
+# Sourced by scripts/test_qemu_closure_evidence_producer.py for the check above.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+  return 0
+fi
+
 version=2.34.9
 case "$(uname -m)" in
 x86_64)
@@ -46,6 +74,4 @@ EOF
 
 printf '%s\n' /nix/var/nix/profiles/default/bin >>"${GITHUB_PATH}"
 /nix/var/nix/profiles/default/bin/nix --version
-for setting in substituters trusted-public-keys require-sigs sandbox; do
-  printf '%s = %s\n' "${setting}" "$(/nix/var/nix/profiles/default/bin/nix config show "${setting}")"
-done
+check_nix_settings /nix/var/nix/profiles/default/bin/nix

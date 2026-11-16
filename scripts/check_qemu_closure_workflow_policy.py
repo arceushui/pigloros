@@ -34,7 +34,7 @@ ARTIFACT_SUFFIX = "${{ matrix.architecture }}-${{ github.sha }}"
 PRODUCER_SHA256 = {
     "scripts/check_asan_ci_policy.py": "ccf1c401c0d65022506efdea50f1d87674deeacc6f3631f31c5812f2f9b4ced2",
     "scripts/check_owner_runtime_custody_policy.py": "560aed1fd4634593a4027525642315740f7525a80cacb880249fd595e38fe02c",
-    "scripts/install-pinned-nix.sh": "8473cf9d96a25b6fb4a16427e2554ad1d3e1991ce3068cd07864d0d80983e14d",
+    "scripts/install-pinned-nix.sh": "d87e1b027174070441483c29bc0526cfbbf8d0fcbd73d034a44479361c822711",
     "scripts/qemu_qmp_query_kvm.py": "e146d1aa17af33d65b530a663b9ee2396cd45323df169502dda058c56ef73fc6",
     "scripts/qemu-closure-evidence.sh": "942d00479722deff9cadd9568de29948e94b2cd7a84f130abc0acca9c4e1d4ec",
     "scripts/check_qemu_closure_evidence.py": "c621b3de099744ef5b8cd3afdd004ce9bbadce8ed1c5fe800aa600bf571b4c01",
@@ -42,7 +42,7 @@ PRODUCER_SHA256 = {
     "deploy/nixos/flake.lock": "2e002544ff613a1b05d8f6a1a0d936a93278196c79ccd75f1f4fba58f28737c7",
     "deploy/nixos/modules/mountfsd-activation.nix": "5378ffda1f8f15c666091767e7fc346693e0b95f8715474235311dacc1e15c03",
     "deploy/nixos/qemu-evidence/guest.nix": "4b4105786ce137ac28e5833fabc0c8143615aaed4159acbc5b87a5b8fa18bfa3",
-    "deploy/nixos/qemu-evidence/collect-evidence.sh": "ab95ae1f830aa49bd7130d7eaaad46379a1fb407389761e7bba6caba487945a2",
+    "deploy/nixos/qemu-evidence/collect-evidence.sh": "b0cb6c007b46c7c3f306885851f59f48985620f6676648fcabd4b1dd941f619a",
     "deploy/nixos/dev-trust/root-hash-dev-test.crt": "d755a5f97a8c7865bc3f5f73b731098df03382577f02ae7087a3596ef8f5a5a7",
 }
 CHECKOUT_STEP = {"uses": CHECKOUT, "with": {"persist-credentials": False}}
