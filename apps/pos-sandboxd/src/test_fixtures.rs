@@ -87,6 +87,12 @@ pub const RUNTIME_KEY_ID: &str = "runtime-key";
 /// Seed belonging to that test-only admitted public key.
 pub const RUNTIME_SEED: [u8; 32] = [0x52; 32];
 
+/// The AGR1 self-digest of [`admitted`].
+pub const GRANT_DIGEST: [u8; 32] = [0x53; 32];
+
+/// The RQE1 self-digest of [`active`].
+pub const RQE1_DIGEST: [u8; 32] = [0x54; 32];
+
 /// The selected, pinned syscall record used by admitted attempt port tests.
 pub fn syscall_set() -> TestResult<pos_reference::sandbox_provider_protocol::SandboxSyscallSet> {
     pos_reference::sandbox_provider_protocol::SandboxSyscallSet::from_canonical_cbor(include_bytes!(
@@ -136,6 +142,7 @@ pub fn active() -> TestResult<ActiveAttempt> {
     Ok(ActiveAttempt::record(
         admitted()?,
         Instant::now() + Duration::from_secs(30),
+        RQE1_DIGEST,
     ))
 }
 
