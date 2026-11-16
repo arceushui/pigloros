@@ -44,16 +44,24 @@ NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
 NAMESPACE_RUNNER = "air-gapped-namespace.sh"
 NAMESPACE_HELPER = "air_gapped_seccomp_exec.py"
 NAMESPACE_DIGESTS = {
-    NAMESPACE_RUNNER: "842debcb18f53b1fa092c18eccf56dc3b84db8f59c019830b6b3217a12f9eff3",
-    NAMESPACE_HELPER: "c0f8bb522e0016682e7d7e64b387ad61dab43cba8906649d4423fdc61d0f39ff",
+    NAMESPACE_RUNNER: "fdf4de1050bb49fbb3872811fe157b45606e87e0246221252fbc9068b475ea1b",
+    NAMESPACE_HELPER: "5ac85eff890ffc95977879725d9104e78b997f658f889810d13d67a19dc0890d",
 }
 NAMESPACE_OWNER_ROOTS = (
     "apps/piglor-gateway/tests/",
     "apps/pos-gateway-conformance-adapter/tests/",
 )
 NAMESPACE_SUDO = "exec sudo -n -E unshare --net"
+# The one other mention of sudo: the check that it exists before the fallback.
+NAMESPACE_SUDO_GUARD = (
+    "command -v sudo >/dev/null || {\n"
+    '  echo "air-gapped-namespace.sh: unprivileged user namespaces are blocked and sudo is absent"'
+    " >&2\n"
+    "  exit 2\n"
+    "}\n"
+)
 NAMESPACE_FRAGMENTS = (
-    "unshare --user --map-root-user --net true",
+    "if unshare --user --map-root-user --net sh -c 'ip link set lo up' 2>/dev/null; then",
     "exec unshare --user --map-root-user --net",
     NAMESPACE_SUDO,
     'setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups "${DROP[@]}"',
@@ -64,7 +72,9 @@ NAMESPACE_FRAGMENTS = (
 )
 # Where Rust sources live; every one is scanned for runner references.
 RUST_ROOTS = ("apps", "crates", "fuzz", "plugins", "scripts")
-# A Rust test self-locates a runner through exactly this literal.
+# A Rust test self-locates a runner through exactly this literal. Owner discovery
+# follows only it, for the Docker runners and the namespace runner alike; the
+# runners' content is protected by their pins whatever names them.
 RUNNER_REFERENCE = re.compile(r'\.join\("\.\./\.\./scripts/([^"\n]+)"\)')
 # Comments, then string literals (raw, plain, byte) and char literals, in the
 # order a Rust lexer meets them, so a quote inside one never starts another.
@@ -255,7 +265,12 @@ def check_namespace_runner(scripts: Path) -> None:
     runner = pinned_content(runner_path, NAMESPACE_DIGESTS[NAMESPACE_RUNNER])
     if not runner.startswith(RUNNER_SHEBANG + "#") or RUNNER_ENVIRONMENT not in runner:
         raise SystemExit(f"{runner_path}: must start with {RUNNER_SHEBANG!r} and a fixed PATH")
-    code = "\n".join(line for line in runner.splitlines() if not line.lstrip().startswith("#"))
+    require(runner, NAMESPACE_SUDO_GUARD, runner_path)
+    code = "\n".join(
+        line
+        for line in runner.replace(NAMESPACE_SUDO_GUARD, "").splitlines()
+        if not line.lstrip().startswith("#")
+    )
     if len(re.findall(r"\bsudo\b", code)) != 1 or code.count(NAMESPACE_SUDO) != 1:
         raise SystemExit(f"{runner_path}: sudo is allowed only as its one namespace fallback")
     if "docker" in code or "--privileged" in code or "--cap-add" in code:

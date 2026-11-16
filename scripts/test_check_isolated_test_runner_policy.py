@@ -569,6 +569,14 @@ def check_namespace_runner(temporary: Path) -> None:
     result = invoke(foreign)
     if result.returncode == 0 or "only the Air-Gapped tests may own" not in result.stderr:
         raise SystemExit(f"a foreign owner of the namespace runner was accepted: {result.stderr}")
+    adapter_owner = temporary / "adapter-namespace-owner"
+    copy_fixture(adapter_owner)
+    adapter = adapter_owner / "apps/pos-gateway-conformance-adapter/tests/namespace_owner.rs"
+    adapter.parent.mkdir(parents=True, exist_ok=True)
+    adapter.write_text((adapter_owner / owner).read_text(encoding="utf-8"), encoding="utf-8")
+    result = invoke(adapter_owner)
+    if result.returncode != 0:
+        raise SystemExit(f"the conformance adapter tests were refused as owners: {result.stderr}")
     unowned = temporary / "unowned-namespace"
     copy_fixture(unowned)
     for source in NAMESPACE_OWNER_PATHS:
@@ -596,6 +604,12 @@ def check_namespace_runner(temporary: Path) -> None:
         ("set -euo pipefail\n", "set -euo pipefail\nsudo -n true\n"),
         ("#!/bin/bash -p\n", "#!/usr/bin/env bash\n"),
         ("export PATH=$RUNNER_PATH\n", "\n"),
+        ("exec unshare --user", "exec unshare --privileged --user"),
+        ("exec unshare --user", "exec unshare --cap-add=ALL --user"),
+        ("set -euo pipefail\n", "set -euo pipefail\nrm -rf /tmp/x\n"),
+        ('--init-groups "${DROP[@]}"', "--init-groups"),
+        ('"${DROP[@]}" \\\n  python3 "$HELPER" "$@"', '"${DROP[@]}" \\\n  "$@"'),
+        ("sh -c 'ip link set lo up' 2>/dev/null; then", "true; then"),
     )
     for index, (old, new) in enumerate(unsafe):
         if repinned(temporary, f"namespace-{index}", NAMESPACE_RUNNER, old, new).returncode == 0:

@@ -7,10 +7,12 @@ Test-only helper of `scripts/air-gapped-namespace.sh` (#1422; owner decision 202
 `AF_UNIX`, `AF_INET` and `AF_INET6` sockets; every other family, `AF_PACKET`, `AF_NETLINK` and
 `AF_VSOCK` included, fails with `EAFNOSUPPORT`. A system call of another audit architecture, or an
 x32 system call on x86_64, fails the same way. `/proc/self/status` then reports `Seccomp: 2`, so
-the program runs with the real filter that ADR-135 §4 item 3 asks for. It is never used by
-the Gateway.
+the program runs with the real filter that ADR-135 §4 item 3 asks for. Only `socket(2)` is
+filtered: like the namespace shape as a whole, it does not reproduce the deployment unit's exact
+`RestrictAddressFamilies=` set (an io_uring `IORING_OP_SOCKET` is not covered); #462 verifies the
+unit. It is never used by the Gateway.
 
-Usage: air_gapped_seccomp_exec.py PROGRAM [ARGUMENT...]
+Usage: air_gapped_seccomp_exec.py PROGRAM [ARGUMENT...], where PROGRAM is a path (no PATH lookup).
 """
 
 from __future__ import annotations
@@ -100,7 +102,11 @@ def main(argv: list[str]) -> int:
         print(f"no seccomp filter for the {machine} architecture", file=sys.stderr)
         return 2
     install(machine)
-    os.execv(argv[1], argv[1:])
+    try:
+        os.execv(argv[1], argv[1:])
+    except OSError as error:
+        print(f"cannot execute {argv[1]}: {error.strerror}", file=sys.stderr)
+        return 127
     return 1  # pragma: no cover - execv does not return
 
 
