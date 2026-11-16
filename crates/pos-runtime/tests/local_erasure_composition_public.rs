@@ -644,7 +644,7 @@ impl ErasureCoordinatorAuthorityV1 for SubmitOnlyAuthority {
     }
 }
 
-fn reference(byte: u8) -> ErasureReferenceV1 {
+const fn reference(byte: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([byte; 32])
 }
 
@@ -824,7 +824,7 @@ const ACK_CLASSES: [&str; 8] = [
 ];
 
 #[test]
-fn the_classification_is_exactly_the_owner_table() -> TestResult {
+fn the_classification_is_exactly_the_owner_table() {
     let owner: Vec<&str> = OWNER_CLASSIFICATION.split_whitespace().collect();
     assert_eq!(owner.len(), 48);
     assert_eq!(LOCAL_ERASURE_CLASSIFICATION_COUNT_V1, 48);
@@ -853,7 +853,6 @@ fn the_classification_is_exactly_the_owner_table() -> TestResult {
         }
     }
     assert_eq!(permitted, 48);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -910,15 +909,15 @@ fn fail<E: std::fmt::Debug>(error: E) -> Box<dyn std::error::Error> {
     format!("{error:?}").into()
 }
 
-fn grant_id() -> Hash {
+const fn grant_id() -> Hash {
     Hash::from_bytes([0x71; 32])
 }
 
-fn authority_timeline() -> TimelineId {
+const fn authority_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([0x72; 16]))
 }
 
-fn other_timeline() -> TimelineId {
+const fn other_timeline() -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([0x7a; 16]))
 }
 
@@ -926,11 +925,11 @@ fn principal() -> TestResult<PrincipalRefV1> {
     PrincipalRefV1::try_new([0x73; 16], "local").map_err(fail)
 }
 
-fn actor() -> EntityId {
+const fn actor() -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes([0x74; 16]))
 }
 
-fn other_actor() -> EntityId {
+const fn other_actor() -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes([0x7b; 16]))
 }
 
