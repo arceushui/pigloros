@@ -8,15 +8,16 @@
 //! signing oracle.
 //!
 //! [`RuntimeSigned`] is sealed. Its kinds are a subset of the R9 §5 set, and
-//! a kind joins only when its encoder does: RLS1, SDY1 and SPE1 now, SAU1,
-//! SPR1 and SPY1 with their emission. RQE1, KOE1, TME1 and RDY1 never do.
+//! a kind joins only when its encoder does: RLS1, SDY1, SPE1 and RCA1 now,
+//! SAU1, SPR1 and SPY1 with their emission. RQE1, KOE1, TME1 and RDY1 never
+//! do.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use super::codec::signature_message;
 use super::{
-    ExecutionReleaseFields, SandboxDescribeResponseFields, SandboxProviderErrorFields,
-    SandboxProviderProtocolError,
+    ExecutionReleaseFields, RevocationAcknowledgementFields, SandboxDescribeResponseFields,
+    SandboxProviderErrorFields, SandboxProviderProtocolError,
 };
 
 mod runtime_signed_sealed {
@@ -74,6 +75,21 @@ impl runtime_signed_sealed::Sealed for Spe1 {}
 impl RuntimeSigned for Spe1 {
     const MAGIC: &'static str = "SPE1";
     type Body = SandboxProviderErrorFields;
+
+    fn key_id(body: &Self::Body) -> &str {
+        &body.runtime_attestation_key_id
+    }
+}
+
+/// RCA1, the signed revocation acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rca1 {}
+
+impl runtime_signed_sealed::Sealed for Rca1 {}
+
+impl RuntimeSigned for Rca1 {
+    const MAGIC: &'static str = "RCA1";
+    type Body = RevocationAcknowledgementFields;
 
     fn key_id(body: &Self::Body) -> &str {
         &body.runtime_attestation_key_id

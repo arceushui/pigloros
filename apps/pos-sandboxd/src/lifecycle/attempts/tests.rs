@@ -1136,6 +1136,8 @@ mod cases {
                 .collect::<Vec<_>>(),
             vec![[2; 16], [6; 16], [7; 16]]
         );
+        // None of them proved its cleanup (R11 §8.5).
+        assert!(attempts.iter().all(|attempt| !attempt.cleanup_proved()));
         let unproved = &attempts[0];
         assert_eq!(unproved.unit_name().attempt_component().len(), 32);
         assert_eq!(unproved.sim1_digest(), SIM1);
@@ -1235,6 +1237,7 @@ mod cases {
         let snapshot = snapshot?;
         assert_eq!(snapshot.attempts()[0].cgroup(), Some(cgroup));
         assert_eq!(snapshot.attempts()[0].image(), None);
+        assert!(snapshot.attempts()[0].cleanup_proved());
         Ok(())
     }
 
