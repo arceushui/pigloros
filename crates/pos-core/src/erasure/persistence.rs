@@ -3626,7 +3626,7 @@ mod tests {
         }
 
         fn scope_index_count(&self, _request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-            u64::try_from(self.scope_nodes.len()).map_err(|_| ErasureErrorV1::ScopeInvalid)
+            Ok(u64::try_from(self.scope_nodes.len()).unwrap_or(u64::MAX))
         }
 
         fn administrative_resolution_ref(
