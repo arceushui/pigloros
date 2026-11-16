@@ -409,13 +409,30 @@ async fn an_empty_cgroup_drains_the_output_while_systemd_still_holds_its_end() -
     Ok(())
 }
 
-/// A scenario whose adapter writes `S` at once and then never exits, under a
-/// short watchdog; `fault` decides whether the kill is acknowledged, and
-/// `cancel` cancels the attempt as it is released.
-async fn hung(
-    fault: Option<Fault>,
+/// How a hung attempt is driven to its ending.
+#[derive(Clone, Copy, Default)]
+struct Ending {
+    /// A Local attempt whose FD 3 adapter does this; Air-Gapped otherwise.
+    local: Option<Fd3>,
+    /// Injected host faults.
+    faults: &'static [Fault],
+    /// Cancel the attempt as it is released.
     cancel: bool,
-) -> TestResult<AttemptExecution<String, FakeCgroup, u64>> {
+}
+
+/// What a hung Local adapter does on FD 3.
+#[derive(Clone, Copy)]
+enum Fd3 {
+    /// Send a zero-length frame: a protocol failure kills the unit.
+    Violation,
+    /// Hold FD 3 open: the watchdog closes it.
+    Silent,
+}
+
+/// A scenario whose adapter writes `S` at once and then never exits, under a
+/// 200 ms watchdog, driven to its ending as `ending` says; the execution and
+/// how long it took.
+async fn hung(ending: Ending) -> TestResult<(Duration, AttemptExecution<String, FakeCgroup, u64>)> {
     let mut scenario = Scenario::new()?;
     // The output is queued before the release, so the ending, however early,
     // finds it on the channel.
@@ -425,16 +442,21 @@ async fn hung(
         never_finish: true,
         ..StdioScript::default()
     });
-    scenario.host.faults.extend(fault);
-    if cancel {
+    scenario.host.faults.extend_from_slice(ending.faults);
+    if ending.cancel {
         scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
     }
-    let mut job = scenario.job(
-        ATTEMPT,
-        SandboxExecutionMode::AirGapped,
-        ModePlan::AirGapped,
-        200,
-    )?;
+    let (mode, plan) = match ending.local {
+        Some(fd3) => {
+            scenario.host.adapter = match fd3 {
+                Fd3::Violation => AdapterScript::ProtocolViolation,
+                Fd3::Silent => AdapterScript::Silent,
+            };
+            (SandboxExecutionMode::Local, local_plan(UNUSED_ENDPOINT)?.1)
+        }
+        None => (SandboxExecutionMode::AirGapped, ModePlan::AirGapped),
+    };
+    let mut job = scenario.job(ATTEMPT, mode, plan, 200)?;
     if let Some(cancel) = &scenario.barrier.cancel_on_release {
         job.cancel = cancel.signal();
     }
@@ -443,49 +465,148 @@ async fn hung(
         .with_limits(limits(100, 1_000, 200))
         .with_payload(Arc::new(TestPayload::with_input(INPUT)));
     let recheck = root_for(&scenario.log, &job.attempt);
+    let started = Instant::now();
     let outcome = scenario.run_on(&LoopbackNetwork, job, recheck).await;
-    outcome.map_err(|failure| format!("the execution failed: {}", failure.error).into())
+    let elapsed = started.elapsed();
+    let execution =
+        outcome.map_err(|failure| format!("the execution failed: {}", failure.error))?;
+    Ok((elapsed, execution))
+}
+
+/// The capture of an attempt that ended as `ending` with ending code
+/// `expected`.
+async fn captured_at(ending: Ending, expected: AttemptEnding) -> TestResult<OutputCaptureRecord> {
+    let (_, execution) = hung(ending).await?;
+    assert_eq!(execution.ending, expected);
+    Ok(execution.adapter.output().capture())
+}
+
+const DRAINED: OutputCaptureRecord = capture_record(70, false, true);
+const ABORTED: OutputCaptureRecord = capture_record(70, false, false);
+
+#[tokio::test]
+async fn every_acknowledged_kill_or_stop_drains_the_output_once_the_cgroup_is_empty() -> TestResult
+{
+    // R10 §4.6 (E), m6: endings 1, 3, 5 and 6 observe the cgroup empty.
+    let watchdog = Ending::default();
+    assert_eq!(
+        captured_at(watchdog, AttemptEnding::WatchdogKilled).await?,
+        DRAINED
+    );
+    let violation = Ending {
+        local: Some(Fd3::Violation),
+        ..Ending::default()
+    };
+    assert_eq!(
+        captured_at(violation, AttemptEnding::ProtocolFailureKilled).await?,
+        DRAINED
+    );
+    let cancelled = Ending {
+        cancel: true,
+        ..Ending::default()
+    };
+    assert_eq!(
+        captured_at(cancelled, AttemptEnding::Cancelled { watchdog: None }).await?,
+        DRAINED
+    );
+    let cancelled_then_killed = Ending {
+        local: Some(Fd3::Silent),
+        cancel: true,
+        ..Ending::default()
+    };
+    assert_eq!(
+        captured_at(
+            cancelled_then_killed,
+            AttemptEnding::Cancelled {
+                watchdog: Some(true)
+            }
+        )
+        .await?,
+        DRAINED
+    );
+    Ok(())
 }
 
 #[tokio::test]
-async fn a_kill_acknowledged_ending_drains_the_output_once_the_cgroup_is_empty() -> TestResult {
-    // Ending 1: the watchdog's SIGKILL was acknowledged, the cgroup is then
-    // observed empty, and the queued output is drained (R10 §4.6, m6).
-    let execution = hung(None, false).await?;
+async fn every_unacknowledged_kill_aborts_the_capture() -> TestResult {
+    // Endings 2, 4 and 7: the cgroup is never observed empty. Every byte
+    // read is kept, but an aborted capture is no complete frame.
+    let unkilled = Ending {
+        faults: &[Fault::Kill],
+        ..Ending::default()
+    };
+    assert_eq!(
+        captured_at(unkilled, AttemptEnding::WatchdogKillFailed).await?,
+        ABORTED
+    );
+    let violation = Ending {
+        local: Some(Fd3::Violation),
+        faults: &[Fault::Kill],
+        ..Ending::default()
+    };
+    assert_eq!(
+        captured_at(violation, AttemptEnding::ProtocolFailureKillFailed).await?,
+        ABORTED
+    );
+    let cancelled = Ending {
+        local: Some(Fd3::Silent),
+        faults: &[Fault::Kill],
+        cancel: true,
+    };
+    assert_eq!(
+        captured_at(
+            cancelled,
+            AttemptEnding::Cancelled {
+                watchdog: Some(false)
+            }
+        )
+        .await?,
+        ABORTED
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cgroup_still_busy_after_one_termination_call_aborts_the_capture() -> TestResult {
+    // The kill is acknowledged but the tasks linger: the cgroup is observed
+    // for one termination call (the 200 ms watchdog clamped to 1 s), no
+    // longer, and the capture aborts.
+    let lingering = Ending {
+        faults: &[Fault::Lingering],
+        ..Ending::default()
+    };
+    let (elapsed, execution) = hung(lingering).await?;
     assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
-    assert_eq!(
-        execution.adapter.output().capture(),
-        capture_record(70, false, true)
-    );
+    assert_eq!(execution.adapter.output().capture(), ABORTED);
+    // D (200 ms) and G (1 s) pass before the kill, then one 1 s call.
+    let call = Duration::from_secs(1);
+    assert!(elapsed >= Duration::from_millis(200) + ESCALATION_GRACE + call);
+    assert!(elapsed < Duration::from_millis(200) + ESCALATION_GRACE + 3 * call);
     Ok(())
 }
 
-#[tokio::test]
-async fn a_cancelled_ending_drains_the_output_once_the_cgroup_is_empty() -> TestResult {
-    // Ending 5: a stop was requested and the cgroup is then observed empty.
-    let execution = hung(None, true).await?;
-    assert_eq!(
-        execution.ending,
-        AttemptEnding::Cancelled { watchdog: None }
-    );
-    assert_eq!(
-        execution.adapter.output().capture(),
-        capture_record(70, false, true)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_unacknowledged_kill_aborts_the_capture() -> TestResult {
-    // Ending 2: the kill failed, so the cgroup is never observed empty.
-    let execution = hung(Some(Fault::Kill), false).await?;
-    assert_eq!(execution.ending, AttemptEnding::WatchdogKillFailed);
-    // Every byte read is kept, but an aborted capture is no complete frame.
-    assert_eq!(
-        execution.adapter.output().capture(),
-        capture_record(70, false, false)
-    );
-    Ok(())
+#[test]
+fn reservation_and_channel_refusals_keep_their_launch_failure() {
+    use pos_reference::sandbox_provider_protocol::LaunchFailure;
+    let cases = [
+        (
+            ExecuteError::OutputReservation(OutputReservationRefused::AggregateExceeded),
+            Some(LaunchFailure::OutputReservationRefused),
+        ),
+        (
+            ExecuteError::OutputReservation(OutputReservationRefused::AdmissionClosed),
+            Some(LaunchFailure::AdmissionClosed),
+        ),
+        (
+            ExecuteError::StdioChannel(crate::StdioChannelError::NotNullDevice),
+            Some(LaunchFailure::StdioChannelFailed),
+        ),
+        (ExecuteError::OutputAlreadyReserved, None),
+        (ExecuteError::HostTimeout, None),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.launch_failure(), expected, "{error}");
+    }
 }
 
 #[tokio::test]

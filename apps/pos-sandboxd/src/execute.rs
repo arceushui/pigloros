@@ -52,8 +52,8 @@ use std::time::{Duration, Instant};
 use futures_util::future::{join, select, Either};
 use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
-    CancelSource, LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore,
-    NetworkCaptureStoreError, NetworkEndpointConnector, NetworkExchangePlan,
+    CancelSource, LaunchFailure, LocalNetworkAdmission, LocalNetworkTermination,
+    NetworkCaptureStore, NetworkCaptureStoreError, NetworkEndpointConnector, NetworkExchangePlan,
     NetworkExchangeTranscript, ReplayedNetworkExchange, SandboxExecutionMode,
     SandboxProviderProtocolError, WATCHDOG_GRACE_NS,
 };
@@ -418,6 +418,21 @@ pub enum ExecuteError {
     /// The Local proxy could not be served.
     #[error(transparent)]
     Serve(#[from] ServeError),
+}
+
+impl ExecuteError {
+    /// TME1 `launch-failure` of an execution refused before its unit start
+    /// for its output reservation (3 or 5) or its standard channels (4),
+    /// ADR-069 R10 §4.7 and §4.1. `None` for every other error: the terminal
+    /// records give those their own codes.
+    #[must_use]
+    pub fn launch_failure(&self) -> Option<LaunchFailure> {
+        match self {
+            Self::OutputReservation(refused) => Some(LaunchFailure::from(*refused)),
+            Self::StdioChannel(_) => Some(LaunchFailure::StdioChannelFailed),
+            _ => None,
+        }
+    }
 }
 
 /// What is known of the unit when an execution failed.
