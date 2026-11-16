@@ -876,8 +876,16 @@ def image_verity(image: bytes) -> tuple[str, str, range]:
     if len(entries) != 3:
         raise EvidenceError("the recorded image does not have exactly three partitions")
     verity, signature = entries[1], entries[2]
-    if verity[:8] != b"verity\0\0" or struct.unpack_from("<H", verity, 80)[0] != 32:
-        raise EvidenceError("the recorded image's verity superblock is not format 1 with a 32-byte salt")
+    # cryptsetup's `struct verity_sb`: signature, version and hash type at
+    # 0, 8 and 12, the salt size at 80 and the salt from 88.
+    if len(verity) < 120:
+        raise EvidenceError("the recorded image's verity partition is shorter than its superblock and salt")
+    if verity[:8] != b"verity\0\0":
+        raise EvidenceError("the recorded image's verity partition has no verity superblock")
+    if struct.unpack_from("<II", verity, 8) != (1, 1):
+        raise EvidenceError("the recorded image's verity superblock is not version 1 with hash type 1")
+    if struct.unpack_from("<H", verity, 80)[0] != 32:
+        raise EvidenceError("the recorded image's verity salt is not 32 bytes")
     try:
         root_hash = json.loads(signature.split(b"\0", 1)[0])["rootHash"]
     except (ValueError, KeyError, TypeError) as error:

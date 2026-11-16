@@ -357,10 +357,8 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     let sector_bytes = u64::try_from(sector)?;
     let mut partitions = Vec::new();
     for index in 0..count {
-        let offset = index
-            .checked_mul(entry_size)
-            .and_then(|offset| offset.checked_add(first_entry))
-            .ok_or(OVERFLOW)?;
+        // An entry past the end of the address space lies outside the image.
+        let offset = first_entry.saturating_add(index.saturating_mul(entry_size));
         let entry = range(bytes, offset, entry_size)?;
         if entry[..16] == [0; 16] {
             continue;
@@ -370,7 +368,7 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
             .checked_sub(first)
             .and_then(|span| span.checked_add(1))
             .and_then(|sectors| sectors.checked_mul(sector_bytes))
-            .ok_or("a GPT entry ends before it starts")?;
+            .ok_or("a GPT entry ends before it starts or overflows")?;
         let start = first.checked_mul(sector_bytes).ok_or(OVERFLOW)?;
         let content = range(bytes, usize::try_from(start)?, usize::try_from(length)?)?;
         partitions.push(PartitionDescriptor {
@@ -498,4 +496,149 @@ fn fixture_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Res
     let length = u32::try_from(bytes.len()).map_err(std::io::Error::other)?;
     writer.write_all(&length.to_be_bytes())?;
     writer.write_all(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{described, StagedImage};
+    use crate::sandbox_provider_protocol::SandboxArchitecture;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// An expected refusal and the change to a valid DDI that causes it.
+    type Case = (&'static str, fn(&mut Ddi));
+
+    const ROOT_HASH: &str = "37e96f27ede7ca8a5e8eacd73dac416207f0cd8457df12055ca2492cd1be7457";
+
+    /// A minimal three-partition GPT DDI at 512-byte sectors: one data
+    /// sector, a verity superblock and the root-verity-sig JSON.
+    struct Ddi {
+        bytes: Vec<u8>,
+    }
+
+    impl Ddi {
+        fn new() -> Self {
+            let mut ddi = Self {
+                bytes: vec![0; 512 * 8],
+            };
+            ddi.bytes[512..520].copy_from_slice(b"EFI PART");
+            ddi.set_u64(512 + 72, 2);
+            ddi.set_u32(512 + 80, 3);
+            ddi.set_u32(512 + 84, 128);
+            for (index, sector) in [5_u64, 6, 7].into_iter().enumerate() {
+                let entry = 1024 + 128 * index;
+                ddi.bytes[entry..entry + 16].fill(u8::try_from(index + 1).unwrap_or(0));
+                ddi.bytes[entry + 16..entry + 32].fill(0xa0);
+                ddi.set_u64(entry + 32, sector);
+                ddi.set_u64(entry + 40, sector);
+            }
+            ddi.bytes[6 * 512..6 * 512 + 8].copy_from_slice(b"verity\0\0");
+            ddi.bytes[6 * 512 + 80] = 32;
+            ddi.bytes[6 * 512 + 88..6 * 512 + 120].fill(0x45);
+            ddi.signature(ROOT_HASH);
+            ddi
+        }
+
+        fn signature(&mut self, root_hash: &str) {
+            let json = format!(r#"{{"rootHash":"{root_hash}","signature":"AQID"}}"#);
+            self.bytes[7 * 512..8 * 512].fill(0);
+            self.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json.as_bytes());
+        }
+
+        fn set_u32(&mut self, offset: usize, value: u32) {
+            self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        fn set_u64(&mut self, offset: usize, value: u64) {
+            self.bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+
+        fn refusal(&self) -> String {
+            described(&StagedImage {
+                architecture: SandboxArchitecture::X86_64,
+                image: &self.bytes,
+                certificate: b"certificate",
+                key_description: "CN: 01",
+            })
+            .err()
+            .map_or_else(|| "accepted".to_owned(), |error| error.to_string())
+        }
+    }
+
+    #[test]
+    fn a_well_formed_ddi_is_described_from_its_own_bytes() -> TestResult {
+        let ddi = Ddi::new();
+        let (partitions, signing, salt) = described(&StagedImage {
+            architecture: SandboxArchitecture::Aarch64,
+            image: &ddi.bytes,
+            certificate: b"certificate",
+            key_description: "CN: 01",
+        })?;
+        assert_eq!(
+            partitions
+                .each_ref()
+                .map(|partition| (partition.start_bytes, partition.length_bytes)),
+            [(5 * 512, 512), (6 * 512, 512), (7 * 512, 512)]
+        );
+        assert_eq!(partitions[1].partition_type_uuid, [2; 16]);
+        assert_eq!(salt, [0x45; 32]);
+        assert_eq!(signing.root_hash[0], 0x37);
+        assert_eq!(signing.proof, [1, 2, 3]);
+        assert_eq!(signing.architecture, SandboxArchitecture::Aarch64);
+        Ok(())
+    }
+
+    #[test]
+    fn every_malformed_field_is_an_error_not_a_panic() {
+        let cases: [Case; 13] = [
+            ("no GPT header", |ddi| {
+                ddi.bytes[512] = b'X';
+            }),
+            ("shorter than its fixed fields", |ddi| {
+                ddi.set_u32(512 + 84, 47);
+            }),
+            ("overflows", |ddi| {
+                ddi.set_u64(512 + 72, u64::MAX);
+            }),
+            ("outside the image", |ddi| {
+                ddi.set_u64(512 + 72, 8);
+            }),
+            ("ends before it starts", |ddi| {
+                ddi.set_u64(1024 + 40, 4);
+            }),
+            ("ends before it starts", |ddi| {
+                ddi.set_u64(1024 + 40, u64::MAX);
+            }),
+            ("overflows", |ddi| {
+                ddi.set_u64(1024 + 32, u64::MAX / 2);
+                ddi.set_u64(1024 + 40, u64::MAX / 2);
+            }),
+            ("exactly three partitions", |ddi| {
+                ddi.bytes[1024 + 256..1024 + 272].fill(0);
+            }),
+            ("salt is not 32 bytes", |ddi| {
+                ddi.bytes[6 * 512 + 80] = 64;
+            }),
+            ("64 lowercase hexadecimal", |ddi| {
+                ddi.signature(&ROOT_HASH.to_uppercase());
+            }),
+            ("64 lowercase hexadecimal", |ddi| {
+                ddi.signature(&ROOT_HASH[..62]);
+            }),
+            ("64 lowercase hexadecimal", |ddi| {
+                ddi.signature(&ROOT_HASH.replace('3', "g"));
+            }),
+            ("base64", |ddi| {
+                let json = format!(r#"{{"rootHash":"{ROOT_HASH}","signature":"A"}}"#);
+                ddi.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json.as_bytes());
+                ddi.bytes[7 * 512 + json.len()..8 * 512].fill(0);
+            }),
+        ];
+        for (expected, change) in cases {
+            let mut ddi = Ddi::new();
+            change(&mut ddi);
+            let refusal = ddi.refusal();
+            assert!(refusal.contains(expected), "{expected}: {refusal}");
+        }
+    }
 }

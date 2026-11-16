@@ -244,7 +244,8 @@ REPLY = json.dumps({
 }, indent=4) + "\n"
 
 
-def ddi(root_hash: str = ROOT_HASH, salt: str = SALT) -> bytes:
+def ddi(root_hash: str = ROOT_HASH, salt: str = SALT, version: int = 1, hash_type: int = 1,
+        salt_size: int = 32) -> bytes:
     """A minimal three-partition GPT image: data, a verity superblock and the
     root-verity-sig JSON, at 512-byte sectors."""
     image = bytearray(512 * 8)
@@ -259,7 +260,8 @@ def ddi(root_hash: str = ROOT_HASH, salt: str = SALT) -> bytes:
         image[1024 + 128 * index:1024 + 128 * (index + 1)] = entry
     superblock = bytearray(512)
     superblock[:8] = b"verity\0\0"
-    struct.pack_into("<H", superblock, 80, 32)
+    struct.pack_into("<II", superblock, 8, version, hash_type)
+    struct.pack_into("<H", superblock, 80, salt_size)
     superblock[88:120] = bytes.fromhex(salt)
     image[6 * 512:7 * 512] = superblock
     signature = json.dumps({"rootHash": root_hash, "signature": "AA=="}).encode()
@@ -1083,6 +1085,11 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"host/images/root-hash.txt": "ef" * 32}),
             lambda f: f.update({"host/images/positive.raw": b"not a disk"}),
             lambda f: f.update({"host/images/positive.raw": ddi(root_hash="AB" * 32)}),
+            lambda f: f.update({"host/images/positive.raw": ddi(version=2)}),
+            lambda f: f.update({"host/images/positive.raw": ddi(hash_type=0)}),
+            lambda f: f.update({"host/images/positive.raw": ddi(salt_size=64)}),
+            lambda f: f.update({"host/images/positive.raw": ddi()[:6 * 512 + 100]}),
+            lambda f: f.update({"host/images/positive.raw": ddi()[:6 * 512] + b"veriti\0\0" + ddi()[6 * 512 + 8:]}),
             lambda f: f.update({"host/images/wrong-key.raw": ddi(root_hash="ef" * 32)}),
             lambda f: f.update({"host/images/wrong-key.raw": ddi(salt="ef" * 32)}),
             lambda f: f.update({"host/images/tampered.raw": ddi()}),
