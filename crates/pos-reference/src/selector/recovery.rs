@@ -20,14 +20,42 @@ pub enum RecoveryError {
     /// The pending SIR1, or a record or object it names, failed authentication.
     #[error(transparent)]
     Boundary(#[from] SelectorBoundaryError),
+    /// The evaluator endpoint pathname exists while a SIR1 is pending.
+    ///
+    /// The selector never unlinks a crash-stale node, so recovery stops
+    /// closed until an operator removes it (ADR-069 R12 §8 M4).
+    #[error("the evaluator endpoint exists while recovery is pending")]
+    EvaluatorEndpointPresent,
 }
 
 impl From<RecoveryError> for SelectorBoundaryError {
     fn from(error: RecoveryError) -> Self {
         match error {
             RecoveryError::Boundary(error) => error,
+            RecoveryError::EvaluatorEndpointPresent => Self::ArtifactInvalid,
         }
     }
+}
+
+/// Requires that no node exists at the evaluator endpoint `pathname`.
+///
+/// It only inspects the pathname, without following a symlink, and never
+/// removes anything.
+///
+/// # Errors
+/// Returns [`RecoveryError::EvaluatorEndpointPresent`] for any node at
+/// `pathname`, and [`RecoveryError::Boundary`] when it cannot be inspected.
+pub(crate) fn require_absent_evaluator_endpoint(
+    pathname: &std::path::Path,
+) -> Result<(), RecoveryError> {
+    std::fs::symlink_metadata(pathname).map_or_else(
+        |error| {
+            (error.kind() == std::io::ErrorKind::NotFound)
+                .then_some(())
+                .ok_or(RecoveryError::Boundary(SelectorBoundaryError::Io))
+        },
+        |_| Err(RecoveryError::EvaluatorEndpointPresent),
+    )
 }
 
 /// One authenticated pending SIR1, loaded only from the fixed installation
@@ -266,5 +294,40 @@ mod tests {
             SelectorBoundaryError::from(RecoveryError::from(SelectorBoundaryError::Io)),
             SelectorBoundaryError::Io
         );
+        assert_eq!(
+            SelectorBoundaryError::from(RecoveryError::EvaluatorEndpointPresent),
+            SelectorBoundaryError::ArtifactInvalid
+        );
+    }
+
+    #[test]
+    fn any_node_at_the_evaluator_endpoint_stops_recovery_and_is_kept() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let endpoint = directory.path().join("sandbox-provider.sock");
+        require_absent_evaluator_endpoint(&endpoint)?;
+
+        drop(std::os::unix::net::UnixListener::bind(&endpoint)?);
+        assert_eq!(
+            require_absent_evaluator_endpoint(&endpoint),
+            Err(RecoveryError::EvaluatorEndpointPresent)
+        );
+        assert!(endpoint.exists());
+        std::fs::remove_file(&endpoint)?;
+
+        std::os::unix::fs::symlink("missing-target", &endpoint)?;
+        assert_eq!(
+            require_absent_evaluator_endpoint(&endpoint),
+            Err(RecoveryError::EvaluatorEndpointPresent)
+        );
+        assert!(std::fs::symlink_metadata(&endpoint).is_ok());
+
+        // A parent that is not a directory cannot be inspected.
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"")?;
+        assert_eq!(
+            require_absent_evaluator_endpoint(&file.join("sandbox-provider.sock")),
+            Err(RecoveryError::Boundary(SelectorBoundaryError::Io))
+        );
+        Ok(())
     }
 }

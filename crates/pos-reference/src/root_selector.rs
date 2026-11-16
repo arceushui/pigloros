@@ -49,7 +49,7 @@ use crate::selector::installation::authority::{
 use crate::selector::installation::{
     open_directory_chain, FixedInstallation, InstallationObjectKind, InstalledSelectorState,
 };
-use crate::selector::recovery::PendingRecoveryTarget;
+use crate::selector::recovery::{require_absent_evaluator_endpoint, PendingRecoveryTarget};
 use crate::selector::runtime_lifecycle::ProviderLifecyclePort;
 use crate::selector::SelectorBoundaryError;
 
@@ -502,15 +502,14 @@ impl RootSelectorRuntime {
                             evaluator,
                         })
                 }),
-                FixedInstallation::RecoveryPending(installed) => {
-                    PendingRecoveryTarget::load(&installed)
-                        .map(|target| {
-                            SelectorMode::RecoveryPending(recovery_pending::PendingRecovery::fixed(
-                                target,
-                            ))
-                        })
-                        .map_err(SelectorBoundaryError::from)
-                }
+                FixedInstallation::RecoveryPending(installed) => require_absent_evaluator_endpoint(
+                    Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
+                )
+                .and_then(|()| PendingRecoveryTarget::load(&installed))
+                .map(|target| {
+                    SelectorMode::RecoveryPending(recovery_pending::PendingRecovery::fixed(target))
+                })
+                .map_err(SelectorBoundaryError::from),
             })
             .and_then(|mode| {
                 administrator
@@ -4068,6 +4067,44 @@ mod tests {
         fs::set_permissions(&recovery_record, fs::Permissions::from_mode(0o600))?;
         assert!(activate_in_process(Arc::new(InProcessProviderPort::refusing())).is_err());
         assert!(!evaluator.exists());
+        Ok(())
+    }
+
+    /// ADR-069 R12 §8 M4 (owner decision on #349): a crash-stale evaluator
+    /// leaf while a SIR1 is pending stops activation closed. The leaf is never
+    /// unlinked and no mode-1 challenge is served.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_recovery_activation_stops_closed_on_a_stale_evaluator_leaf() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::pending_recovery_activation_stops_closed_on_a_stale_evaluator_leaf"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        let root = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT);
+        drop(crate::selector::installation::tests::materialize_root_selector_state(root)?);
+        crate::selector::installation::tests::updates::UpdateFixture::at(root)?
+            .commit_pending_update(Vec::new(), Vec::new(), false)?;
+        let recovery_record = root.join("installation-update.cbor");
+        let evaluator = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
+        let administrator = Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET);
+        drop(UnixListener::bind(evaluator)?);
+        fs::set_permissions(evaluator, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let stale = path_identity(evaluator)?;
+
+        assert_eq!(
+            activate_in_process(Arc::new(InProcessProviderPort::refusing())).err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(path_identity(evaluator)?, stale);
+        assert!(!administrator.exists());
+        assert!(UnixStream::connect(administrator).is_err());
+        assert!(recovery_record.exists());
         Ok(())
     }
 
