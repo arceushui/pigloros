@@ -1895,6 +1895,25 @@ mod tests {
         Ok(())
     }
 
+    /// The registry digest also commits to the consent draft.
+    #[test]
+    fn the_registry_digest_commits_to_the_consent_draft() -> TestResult {
+        let digest =
+            |provision: &LocalPrincipalProvisionV1| provision.grant.authority_registry_digest();
+        let reconsented = LocalPrincipalProvisionV1::try_new_with_consent(
+            &principal()?,
+            [actor()?],
+            CONSENTED_OPERATIONS,
+            Some(&consent_of(vec![grant_draft(
+                "operation",
+                &["timeline", "society.signal"],
+                false,
+            )])?),
+        )?;
+        assert_ne!(digest(&consented_provision()?), digest(&reconsented));
+        Ok(())
+    }
+
     #[test]
     fn malformed_or_empty_documents_are_refused() -> TestResult {
         let actor = format!("\"{ACTOR}\"");
