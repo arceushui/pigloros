@@ -50,7 +50,7 @@ pub(super) struct LocalErasureAuthorityV1 {
 }
 
 /// The Local Principal as its recorded root grant chain states it.
-struct LocalPrincipalV1 {
+pub(super) struct LocalPrincipalV1 {
     authority: PersistedAuthorityV1,
     grant: CapabilityGrantV1,
     principal_ref: ErasureReferenceV1,
