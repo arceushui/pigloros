@@ -21,6 +21,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
 EXAMPLE_BASE_SHA = "a" * 40
+REV_LIST_CALL = (
+    f"rev-list\n--first-parent\n--skip=1\n--max-count=30\n{EXAMPLE_BASE_SHA}\n"
+)
+NO_ANCESTOR_REASON = (
+    ", and none of its 30 nearest first-parent main ancestors has a baseline; failing closed"
+)
 EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
     "src/fork_event_authority/tests/local_replay.rs",
     "src/sqlite/tests/protected_interval_cleanup.rs",
@@ -101,12 +107,18 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         base_sha: str = EXAMPLE_BASE_SHA,
         trusted_base_sha: str = EXAMPLE_BASE_SHA,
         git_status: int = 1,
+        ancestors: tuple[str, ...] = (),
+        ancestor_artifacts: dict[str, str | None] | None = None,
+        rev_list_status: int = 0,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         """Run the resolver against a stubbed ``gh``, ``git``, ``sleep`` and clock.
 
         Each list holds the stdout of successive ``gh api`` calls to the
         artifacts or main-run endpoint; the last entry repeats. ``sleep``
         advances the fake ``date +%s`` clock instead of waiting.
+        ``git rev-list`` prints ``ancestors``; an artifact query for an
+        ancestor prints its ``ancestor_artifacts`` entry (none by default),
+        and a ``None`` entry makes that ``gh`` call fail.
         """
         responses = {
             "artifacts": [artifact_responses] if isinstance(artifact_responses, str) else artifact_responses,
@@ -121,6 +133,14 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             for kind, outputs in responses.items():
                 for index, output in enumerate(outputs, start=1):
                     (replies / f"{kind}.{index}").write_text(output, encoding="utf-8")
+            for ancestor, output in (ancestor_artifacts or {}).items():
+                if output is None:
+                    (replies / f"ancestor-{ancestor}.fail").write_text("", encoding="utf-8")
+                else:
+                    (replies / f"ancestor-{ancestor}").write_text(output, encoding="utf-8")
+            (fixture / "ancestors").write_text(
+                "".join(f"{ancestor}\n" for ancestor in ancestors), encoding="utf-8"
+            )
             clock = fixture / "clock"
             clock.write_text("1000000\n", encoding="utf-8")
             logs = {
@@ -134,7 +154,16 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 tools / "gh",
                 "printf '%s\\0' \"$@\" >> \"${GH_ARGS}\"\n"
                 "case \"$5\" in\n"
-                "  */actions/artifacts) kind=artifacts ;;\n"
+                "  */actions/artifacts)\n"
+                "    kind=artifacts\n"
+                "    if [[ \"$7\" != \"name=cargo-crap-baseline-${TRUSTED_BASE_SHA}\" ]]; then\n"
+                "      ancestor=\"${7#name=cargo-crap-baseline-}\"\n"
+                "      printf 'ancestor:%s\\n' \"${ancestor}\" >> \"${GH_CALLS}\"\n"
+                "      [[ ! -e \"${GH_REPLIES}/ancestor-${ancestor}.fail\" ]] || exit 1\n"
+                "      cat \"${GH_REPLIES}/ancestor-${ancestor}\" 2>/dev/null || true\n"
+                "      exit 0\n"
+                "    fi\n"
+                "    ;;\n"
                 "  */actions/workflows/ci.yml/runs) kind=runs ;;\n"
                 "  *) exit 97 ;;\n"
                 "esac\n"
@@ -162,6 +191,10 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 "  printf '%s\\n' \"${TRUSTED_BASE_SHA}\"\n"
                 "  exit 0\n"
                 "fi\n"
+                "if [[ \"$1\" == \"rev-list\" ]]; then\n"
+                "  cat \"${FAKE_ANCESTORS}\"\n"
+                "  exit \"${FAKE_REV_LIST_STATUS}\"\n"
+                "fi\n"
                 "exit \"${FAKE_GIT_STATUS}\"\n",
             )
             environment = os.environ.copy()
@@ -180,6 +213,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     "FAKE_CLOCK": str(clock),
                     "GIT_CALLS": logs["git_calls"],
                     "FAKE_GIT_STATUS": str(git_status),
+                    "FAKE_ANCESTORS": str(fixture / "ancestors"),
+                    "FAKE_REV_LIST_STATUS": str(rev_list_status),
                 }
             )
             result = subprocess.run(
@@ -644,6 +679,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(
             logs["git_calls"],
             f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n"
+            f"{REV_LIST_CALL}"
             f"diff\n--quiet\n{EXAMPLE_BASE_SHA}...HEAD\n--\n"
             "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
             "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
@@ -679,6 +715,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(
             logs["git_calls"],
             f"merge-base\n{stacked_base}\norigin/main\n"
+            f"{REV_LIST_CALL}"
             f"diff\n--quiet\n{stacked_base}...HEAD\n--\n"
             "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
             "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
@@ -807,7 +844,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertIn(
             f"::error::Trusted main baseline unavailable: main ci.yml run 777 for trusted base "
             f"{EXAMPLE_BASE_SHA} completed with conclusion failure without publishing "
-            f"cargo-crap-baseline-{EXAMPLE_BASE_SHA}; failing closed",
+            f"cargo-crap-baseline-{EXAMPLE_BASE_SHA}{NO_ANCESTOR_REASON}",
             result.stdout,
         )
         self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
@@ -828,7 +865,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs"])
         self.assertIn(
             f"::error::Trusted main baseline unavailable: no main ci.yml run exists for "
-            f"trusted base {EXAMPLE_BASE_SHA}; failing closed",
+            f"trusted base {EXAMPLE_BASE_SHA}{NO_ANCESTOR_REASON}",
             result.stdout,
         )
 
@@ -849,10 +886,205 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertIn(
             f"::error::Trusted main baseline unavailable: main ci.yml run 777 for trusted base "
             f"{EXAMPLE_BASE_SHA} is still in_progress after 7190s; the 7200s wait bound "
-            f"expired without cargo-crap-baseline-{EXAMPLE_BASE_SHA}; failing closed",
+            f"expired without cargo-crap-baseline-{EXAMPLE_BASE_SHA}{NO_ANCESTOR_REASON}",
             result.stdout,
         )
         self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
+
+    ANCESTORS = ("c" * 40, "d" * 40, "e" * 40)
+
+    def assert_ancestor_baseline(self, result, logs, ancestor: str, run_id: str) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            logs["output"],
+            f"run-id={run_id}\nbaseline-sha={ancestor}\nbootstrap=false\n",
+        )
+        self.assertIn(f"::notice::Using the cargo-crap baseline of main ancestor {ancestor} because ", result.stdout)
+        self.assertIn(REV_LIST_CALL, logs["git_calls"])
+        # An ancestor baseline is a trusted baseline: the bootstrap check never runs.
+        self.assertNotIn("diff", logs["git_calls"])
+
+    def test_resolver_falls_back_to_the_nearest_ancestor_after_a_failed_main_run(self) -> None:
+        result, logs = self.run_resolver(
+            "",
+            "777 completed failure\n",
+            ancestors=self.ANCESTORS,
+            ancestor_artifacts={"d" * 40: "5151\n5150\n", "e" * 40: "4949\n"},
+        )
+
+        self.assert_ancestor_baseline(result, logs, "d" * 40, "5151")
+        self.assertEqual(
+            self.gh_calls(logs),
+            ["artifacts"] * 30 + ["runs", "artifacts", f"ancestor:{'c' * 40}", f"ancestor:{'d' * 40}"],
+        )
+        self.assertIn("because main ci.yml run 777 for trusted base", result.stdout)
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29)
+
+    def test_resolver_falls_back_to_an_ancestor_when_main_has_no_run(self) -> None:
+        result, logs = self.run_resolver(
+            "", "", ancestors=self.ANCESTORS, ancestor_artifacts={"c" * 40: "6060\n"}
+        )
+
+        self.assert_ancestor_baseline(result, logs, "c" * 40, "6060")
+        self.assertIn(f"because no main ci.yml run exists for trusted base {EXAMPLE_BASE_SHA}", result.stdout)
+
+    def test_resolver_falls_back_to_an_ancestor_once_the_wait_bound_expires(self) -> None:
+        result, logs = self.run_resolver(
+            "",
+            "777 in_progress none\n",
+            ancestors=self.ANCESTORS,
+            ancestor_artifacts={"e" * 40: "4949\n"},
+        )
+
+        self.assert_ancestor_baseline(result, logs, "e" * 40, "4949")
+        delays = [int(delay) for delay in logs["sleep_calls"].split()]
+        self.assertEqual(delays, [10] * 29 + [60] * 115)
+        self.assertIn("the 7200s wait bound expired", result.stdout)
+
+    def test_resolver_waits_for_main_before_using_an_ancestor_baseline(self) -> None:
+        result, logs = self.run_resolver(
+            [""] * 31 + ["4242\n"],
+            "777 in_progress none\n",
+            ancestors=self.ANCESTORS,
+            ancestor_artifacts={"c" * 40: "6060\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            logs["output"],
+            f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
+        )
+        self.assertNotIn("ancestor:", logs["gh_calls"])
+        self.assertNotIn("rev-list", logs["git_calls"])
+
+    def test_resolver_fails_closed_when_no_ancestor_within_the_bound_has_a_baseline(self) -> None:
+        result, logs = self.run_resolver("", "777 completed failure\n", ancestors=self.ANCESTORS)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(
+            self.gh_calls(logs)[-3:],
+            [f"ancestor:{ancestor}" for ancestor in self.ANCESTORS],
+        )
+        self.assertIn(f"::error::Trusted main baseline unavailable: ", result.stdout)
+        self.assertIn(NO_ANCESTOR_REASON, result.stdout)
+        self.assertEqual(
+            logs["git_calls"],
+            f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n{REV_LIST_CALL}"
+            f"diff\n--quiet\n{EXAMPLE_BASE_SHA}...HEAD\n--\n"
+            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
+            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+        )
+
+    def test_resolver_bootstraps_non_rust_changes_when_no_ancestor_has_a_baseline(self) -> None:
+        result, logs = self.run_resolver(
+            "", "777 completed failure\n", ancestors=self.ANCESTORS, git_status=0
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(logs["output"], "bootstrap=true\n")
+        self.assertIn(NO_ANCESTOR_REASON.removesuffix("; failing closed"), result.stdout)
+        self.assertIn("bootstrapping because this pull request changes no Rust", result.stdout)
+
+    def test_resolver_aborts_when_the_ancestor_walk_fails(self) -> None:
+        for name, options in {
+            "git rev-list": {"rev_list_status": 128},
+            "gh artifact query": {"ancestor_artifacts": {"c" * 40: None, "d" * 40: "5151\n"}},
+        }.items():
+            with self.subTest(name):
+                result, logs = self.run_resolver(
+                    "", "777 completed failure\n", ancestors=self.ANCESTORS, git_status=0, **options
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(logs["output"], "")
+                self.assertNotIn("diff", logs["git_calls"])
+
+    def test_resolver_ancestor_query_keeps_only_same_repository_main_artifacts(self) -> None:
+        ancestor = "c" * 40
+        _, logs = self.run_resolver("", "", ancestors=(ancestor,))
+        invocation = self.gh_invocations(logs)[-1]
+        self.assertEqual(
+            invocation[:-1],
+            [
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "repos/owner/repository/actions/artifacts",
+                "-f",
+                f"name=cargo-crap-baseline-{ancestor}",
+                "-f",
+                "per_page=100",
+                "--jq",
+            ],
+        )
+        same, other = 1, 2
+
+        def artifact(run_id: int, **changes) -> dict:
+            run = {"id": run_id, "head_branch": "main", "head_sha": ancestor,
+                   "head_repository_id": same, "repository_id": same}
+            expired = changes.pop("expired", False)
+            run.update(changes)
+            return {"expired": expired, "workflow_run": run}
+
+        artifacts = [
+            artifact(10),
+            artifact(11, expired=True),
+            artifact(12, head_repository_id=other),
+            artifact(13, head_branch="feature"),
+            artifact(14, head_sha=EXAMPLE_BASE_SHA),
+            artifact(15),
+        ]
+        selected = subprocess.run(
+            ["jq", "-r", invocation[-1]],
+            input=json.dumps({"artifacts": artifacts}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(selected.stdout, "10\n15\n")
+
+    def test_rejects_weakened_ancestor_baseline_fallback(self) -> None:
+        resolver = RESOLVER_PATH.read_text(encoding="utf-8")
+        ancestor_query = resolver[resolver.index("publish_ancestor_baseline() {"):]
+        mutations = {
+            "longer walk": ("ANCESTOR_BASELINE_WALK_LIMIT=30", "ANCESTOR_BASELINE_WALK_LIMIT=300"),
+            "any parent": ("git rev-list --first-parent --skip=1", "git rev-list --skip=1"),
+            "unbounded walk": ('--max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" ', ""),
+            "other history": (
+                '--max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"',
+                '--max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" HEAD)"',
+            ),
+            "any artifact name": ('-f name="cargo-crap-baseline-${ancestor}"', '-f name="cargo-crap-baseline"'),
+            "any commit": ('select(.workflow_run.head_sha == \\"${ancestor}\\") |', ""),
+            "wrong baseline commit": (
+                'echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"',
+                'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+            ),
+            "skips the wait": (
+                "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do\n",
+                "publish_ancestor_baseline\n"
+                "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do\n",
+            ),
+            "no fallback": ("\npublish_ancestor_baseline\nreason=", "\nreason="),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(name):
+                self.assertEqual(resolver.count(old), 1, old)
+                self.assert_resolver_rejected(lambda text: text.replace(old, new))
+        for name, fragment in {
+            "expired artifacts": "        select(.expired == false) |\n",
+            "other branches": '        select(.workflow_run.head_branch == \\"main\\") |\n',
+            "fork artifacts": (
+                "        select(.workflow_run.head_repository_id == .workflow_run.repository_id) |\n"
+            ),
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(ancestor_query.count(fragment), 1, fragment)
+                self.assert_resolver_rejected(
+                    lambda text: text[: text.index("publish_ancestor_baseline() {")]
+                    + text[text.index("publish_ancestor_baseline() {"):].replace(fragment, "", 1)
+                )
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
         self.assert_rejected(

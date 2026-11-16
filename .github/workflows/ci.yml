@@ -1036,7 +1036,9 @@ jobs:
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       # Polls up to 120 minutes while main's ci.yml run for the trusted base is
-      # still queued or in progress, then fails closed as before.
+      # still queued or in progress, then falls back to the nearest first-parent
+      # main ancestor's baseline (fetch-depth 0 above provides that history),
+      # then fails closed as before.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
         timeout-minutes: 125

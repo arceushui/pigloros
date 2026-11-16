@@ -10,6 +10,13 @@ BASELINE_RETRY_DELAY_SECONDS=10
 # wait below (the cargo-crap step and job timeouts leave room for it).
 MAIN_RUN_POLL_DELAY_SECONDS=60
 BASELINE_WAIT_LIMIT_SECONDS=7200
+# When the trusted base never gets its own baseline (its main run failed, was
+# cancelled or skipped, does not exist, or outlasted the wait bound), use the
+# baseline of the nearest first-parent main ancestor among this many commits
+# before it. An older baseline is never weaker: every main commit already
+# passed the no-existing-function-grows rule against its own base, so changes
+# made after the ancestor are charged to this pull request, never hidden.
+ANCESTOR_BASELINE_WALK_LIMIT=30
 
 if [[ "${EVENT_NAME}" != "pull_request" ]]; then
   echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
@@ -69,6 +76,37 @@ read_main_run() {
   MAIN_RUN="${completed}"
 }
 
+# Publishes the baseline of the nearest of the ANCESTOR_BASELINE_WALK_LIMIT
+# first-parent ancestors of the trusted base that has a non-expired
+# same-repository main artifact for that exact commit. Returns when none has
+# one. A failed git or gh call aborts the resolver (set -e) instead of being
+# read as "no baseline".
+publish_ancestor_baseline() {
+  local ancestors ancestor run_ids candidate
+  ancestors="$(git rev-list --first-parent --skip=1 \
+    --max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"
+  while IFS= read -r ancestor; do
+    [[ -n "${ancestor}" ]] || continue
+    run_ids="$(gh api --method GET --paginate \
+      "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+      -f name="cargo-crap-baseline-${ancestor}" -f per_page=100 \
+      --jq ".artifacts[] |
+        select(.expired == false) |
+        select(.workflow_run.head_branch == \"main\") |
+        select(.workflow_run.head_sha == \"${ancestor}\") |
+        select(.workflow_run.head_repository_id == .workflow_run.repository_id) |
+        .workflow_run.id")"
+    while IFS= read -r candidate; do
+      [[ -n "${candidate}" ]] || continue
+      echo "::notice::Using the cargo-crap baseline of main ancestor ${ancestor} because ${reason}"
+      echo "run-id=${candidate}" >> "${GITHUB_OUTPUT}"
+      echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"
+      echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
+      exit 0
+    done <<< "${run_ids}"
+  done <<< "${ancestors}"
+}
+
 for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do
   publish_baseline_if_available
   if (( attempt < BASELINE_RETRY_ATTEMPTS )); then
@@ -102,6 +140,9 @@ while true; do
   sleep "${MAIN_RUN_POLL_DELAY_SECONDS}"
   publish_baseline_if_available
 done
+
+publish_ancestor_baseline
+reason="${reason}, and none of its ${ANCESTOR_BASELINE_WALK_LIMIT} nearest first-parent main ancestors has a baseline"
 
 # If the trusted main artifact is missing (for example, after a failed main
 # run), bootstrap only when this PR cannot change Rust or Cargo policy inputs.

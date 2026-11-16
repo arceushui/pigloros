@@ -303,9 +303,44 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
             "baseline resolver must publish the trusted artifact commit",
         ),
+        ("ANCESTOR_BASELINE_WALK_LIMIT=30\n", "ancestor baseline walk bound changed"),
+        (
+            'ancestors="$(git rev-list --first-parent --skip=1 \\\n'
+            '    --max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"',
+            "ancestor baseline fallback must walk a bounded first-parent main history",
+        ),
+        (
+            '-f name="cargo-crap-baseline-${ancestor}"',
+            "ancestor baseline fallback must request that ancestor's exact artifact",
+        ),
+        (
+            'select(.workflow_run.head_sha == \\"${ancestor}\\")',
+            "ancestor baseline fallback must require the exact ancestor commit",
+        ),
+        (
+            'echo "baseline-sha=${ancestor}" >> "${GITHUB_OUTPUT}"',
+            "ancestor baseline fallback must publish the ancestor artifact commit",
+        ),
+        (
+            "  publish_baseline_if_available\ndone\n\npublish_ancestor_baseline\n",
+            "ancestor baseline fallback must run only after the wait for main's trusted-base run",
+        ),
     )
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
+    for fragment, message in (
+        ("select(.expired == false)", "baseline resolver must reject expired artifacts"),
+        ('select(.workflow_run.head_branch == \\"main\\")', "baseline resolver must require a main-branch artifact"),
+        (
+            "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
+            "baseline resolver must reject fork artifacts",
+        ),
+    ):
+        require(resolver.count(fragment) == 2, f"{message} for the trusted base and its ancestors")
+    require(
+        resolver.count("publish_ancestor_baseline\n") == 1,
+        "ancestor baseline fallback must run exactly once, after the wait",
+    )
     require(
         "-f status=success" not in resolver,
         "baseline resolver must not require whole-workflow completion",
