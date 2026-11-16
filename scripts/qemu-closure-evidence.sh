@@ -46,7 +46,7 @@ store_path() {
 }
 
 build() {
-  local architecture="$1" out="$2" vm built
+  local architecture="$1" out="$2" vm built dev
   require_architecture "${architecture}"
   mkdir -p "${out}/host"
   nix flake metadata --json --no-update-lock-file "${flake}" >"${out}/host/flake-metadata.json"
@@ -59,7 +59,18 @@ build() {
     printf 'built %s, expected %s\n' "${built}" "${vm}" >&2
     exit 1
   fi
-  local names=(vm toplevel kernel systemd qemu trustedCertificate kernelConfig collector collectorUnit)
+  # The kernel's dev output holds the unstripped vmlinux; the checker's own
+  # ELF reader copies its compiled-in certificate list into the evidence.
+  dev="$(store_path kernelDev "${out}")"
+  built="$(nix build --no-update-lock-file --no-link --print-build-logs --print-out-paths \
+    "${flake}#nixosConfigurations.qemu-evidence-${architecture}.config.boot.kernelPackages.kernel.dev")"
+  if [[ "${built}" != "${dev}" ]]; then
+    printf 'built %s, expected %s\n' "${built}" "${dev}" >&2
+    exit 1
+  fi
+  python3 -I "${root}/scripts/check_qemu_closure_evidence.py" extract-certificate-list \
+    "${dev}/vmlinux" "${out}/host/system-certificate-list"
+  local names=(vm toplevel kernel kernelDev systemd qemu trustedCertificate kernelConfig collector collectorUnit)
   local paths=() name
   for name in "${names[@]}"; do
     paths+=("$(store_path "${name}" "${out}")")

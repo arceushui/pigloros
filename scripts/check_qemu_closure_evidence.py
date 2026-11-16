@@ -8,6 +8,9 @@ packaged NixOS 26.05 closure and on both architectures:
 - the full .builtin_trusted_keys contents, tied to the root-hash certificate
   by its exact kernel key description: exactly one member carries it, and
   that member is `asymmetric`;
+- the store kernel's compiled-in certificate list, which must be the
+  committed certificate's DER byte for byte, so that the key material and
+  not only its description is the certificate's;
 - the three dm-verity root-hash signature keyring options;
 - the kernel command line, which must pass the provider's strict
   `systemd.allow_userspace_verity=0` rule;
@@ -27,6 +30,11 @@ Usage:
 
   check_qemu_closure_evidence.py --architecture ARCH --certificate PEM \
       --flake-lock LOCK --verdict OUT EVIDENCE_DIR
+  check_qemu_closure_evidence.py extract-certificate-list VMLINUX OUT
+
+The second form is the producer's: it copies `system_certificate_list` out
+of the store kernel's unstripped vmlinux, located through its ELF symbols,
+into OUT, so that this file owns the ELF parsing too.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import hashlib
 import json
 import pathlib
 import re
+import struct
 import sys
 
 
@@ -48,7 +57,7 @@ SYSTEMD_VERSION_LINE = ("systemd", "260", "(260.5)")
 KERNEL_SERIES = "6.12"
 ARCHITECTURES = {"x86_64": "bzImage", "aarch64": "Image"}
 STORE_PATH = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+")
-STORE_NAMES = ("vm", "toplevel", "kernel", "systemd", "qemu", "trustedCertificate",
+STORE_NAMES = ("vm", "toplevel", "kernel", "kernelDev", "systemd", "qemu", "trustedCertificate",
                "kernelConfig", "collector", "collectorUnit")
 REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 # The reviewed inputs whose exact bytes the evidence depends on; the host
@@ -106,7 +115,7 @@ HOST_FILES = {
     "flake-metadata.json", "store-paths.json", "path-info.json", "toplevel-closure.json",
     "system-trusted-keys.pem", "runner", "serial-console.log", "qemu-argv", "qemu-exe",
     "qemu-net-dev", "vm-exit-status", "provenance", "kernel-config", "qemu-query-kvm.json",
-    "vm-cleanup",
+    "vm-cleanup", "system-certificate-list",
 }
 GUEST_FILES = {
     "status", "collector", "boot-id", "mountinfo", "uname-machine", "uname-release", "systemctl-version", "current-system",
@@ -234,6 +243,85 @@ def kernel_key_description(der: bytes) -> str:
         raise EvidenceError("certificate subject is not UTF-8") from error
 
 
+# --- Store kernel: the compiled-in certificate list ---------------------------
+
+# certs/system_certificates.S: the list and its 64-bit length.
+CERTIFICATE_LIST_SYMBOL = "system_certificate_list"
+CERTIFICATE_LIST_SIZE_SYMBOL = "system_certificate_list_size"
+SHT_SYMTAB, SHT_NOBITS = 2, 8
+
+
+def elf_sections(image: bytes) -> list[tuple]:
+    """(name offset, type, address, offset, size, link) of each section of a
+    little-endian ELF64 image, as both supported architectures build vmlinux."""
+    if image[:6] != b"\x7fELF\x02\x01":
+        raise EvidenceError("vmlinux is not a little-endian ELF64 image")
+    shoff, = struct.unpack_from("<Q", image, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", image, 0x3A)
+    if shentsize != 64 or shnum == 0 or shoff + 64 * shnum > len(image):
+        raise EvidenceError("vmlinux has no readable section header table")
+    sections = []
+    for index in range(shnum):
+        name, kind, _, address, offset, size, link = struct.unpack_from(
+            "<IIQQQQI", image, shoff + 64 * index)
+        if kind != SHT_NOBITS and offset + size > len(image):
+            raise EvidenceError(f"vmlinux section {index} lies outside the image")
+        sections.append((name, kind, address, offset, size, link))
+    return sections
+
+
+def elf_symbols(image: bytes, sections: list[tuple], wanted: set[str]) -> dict[str, tuple[int, int]]:
+    """(section index, address) of each wanted symbol, which must be unique."""
+    tables = [section for section in sections if section[1] == SHT_SYMTAB]
+    if len(tables) != 1 or tables[0][5] >= len(sections):
+        raise EvidenceError("vmlinux must have exactly one symbol table; is it stripped?")
+    _, _, _, offset, size, link = tables[0]
+    strings_offset, strings_size = sections[link][3], sections[link][4]
+    strings = image[strings_offset:strings_offset + strings_size]
+    found: dict[str, list[tuple[int, int]]] = {name: [] for name in wanted}
+    for entry in range(offset, offset + size - size % 24, 24):
+        name, _, _, section, address, _ = struct.unpack_from("<IBBHQQ", image, entry)
+        end = strings.find(b"\0", name)
+        symbol = strings[name:end].decode("ascii", "replace") if end >= 0 else ""
+        if symbol in found:
+            found[symbol].append((section, address))
+    for symbol, matches in found.items():
+        if len(matches) != 1:
+            raise EvidenceError(f"vmlinux must define {symbol} exactly once, found {len(matches)}")
+    return {symbol: matches[0] for symbol, matches in found.items()}
+
+
+def elf_bytes(image: bytes, sections: list[tuple], section: int, address: int, length: int) -> bytes:
+    if section == 0 or section >= len(sections) or sections[section][1] == SHT_NOBITS:
+        raise EvidenceError("a certificate list symbol is not in a section with file contents")
+    _, _, base, offset, size, _ = sections[section]
+    if address < base or address + length > base + size:
+        raise EvidenceError("a certificate list symbol lies outside its section")
+    return image[offset + address - base:offset + address - base + length]
+
+
+def certificate_list(image: bytes) -> bytes:
+    """The `system_certificate_list` bytes, `system_certificate_list_size` long."""
+    sections = elf_sections(image)
+    symbols = elf_symbols(image, sections, {CERTIFICATE_LIST_SYMBOL, CERTIFICATE_LIST_SIZE_SYMBOL})
+    length, = struct.unpack("<Q", elf_bytes(image, sections, *symbols[CERTIFICATE_LIST_SIZE_SYMBOL], 8))
+    return elf_bytes(image, sections, *symbols[CERTIFICATE_LIST_SYMBOL], length)
+
+
+def check_certificate_list(evidence: Evidence, der: bytes) -> dict:
+    """ADR-087 Part C.1: the kernel compiles in exactly the committed certificate.
+
+    The kernel key description is derived from the certificate's names, so a
+    different certificate with the same CN and SKID would carry it too. The
+    whole compiled-in list must equal the committed DER: no other key, no
+    module signing key and no trailing bytes.
+    """
+    recorded = evidence.raw("host/system-certificate-list")
+    if recorded != der:
+        raise EvidenceError("the store kernel's compiled-in certificate list is not exactly the certificate")
+    return {"bytes": len(recorded), "sha256": hashlib.sha256(recorded).hexdigest()}
+
+
 # --- Recorded evidence --------------------------------------------------------
 
 
@@ -356,6 +444,14 @@ def check_store_identity(evidence: Evidence, architecture: str, lock: dict) -> d
     for name in ("toplevel", "kernel", "systemd", "collector", "collectorUnit"):
         if paths[name].removeprefix("/nix/store/") not in closure:
             raise EvidenceError(f"the toplevel closure lacks {name}")
+    # The vmlinux the certificate list came from is the booted kernel's own
+    # build: the dev output of the same derivation.
+    kernel_info = path_info[paths["kernel"].removeprefix("/nix/store/")]
+    dev_info = path_info[paths["kernelDev"].removeprefix("/nix/store/")]
+    if paths["kernelDev"].split("-", 1)[1] != paths["kernel"].split("-", 1)[1] + "-dev" \
+            or not isinstance(kernel_info.get("deriver"), str) \
+            or dev_info.get("deriver") != kernel_info["deriver"]:
+        raise EvidenceError("kernelDev is not the dev output of the recorded kernel's derivation")
     if evidence.line("guest/collector") != f"{paths['collector']}/{COLLECTOR_PROGRAM}":
         raise EvidenceError("the guest evidence was not written by the recorded collector")
     toplevel = evidence.line("guest/current-system")
@@ -728,7 +824,8 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
           repository: pathlib.Path = REPOSITORY) -> dict:
     if architecture not in ARCHITECTURES:
         raise EvidenceError(f"unsupported architecture {architecture!r}")
-    description = kernel_key_description(pem_certificate(certificate))
+    der = pem_certificate(certificate)
+    description = kernel_key_description(der)
     evidence = Evidence(root)
     provenance = check_provenance(evidence, repository)
     identity = check_store_identity(evidence, architecture, lock)
@@ -747,12 +844,31 @@ def check(root: pathlib.Path, architecture: str, certificate: str, lock: dict,
         "kernel_config": check_kernel_config(evidence, paths["trustedCertificate"]),
         "certificate_key_description": description,
         "builtin_trusted_keys": check_keyring(evidence, description),
+        "compiled_in_certificate_list": check_certificate_list(evidence, der),
         "verity_d": check_verity_d(evidence, paths["systemd"]),
         "mountfsd": check_mountfsd(evidence, paths["systemd"]),
     }
 
 
+def extract(argv: list[str]) -> int:
+    """extract-certificate-list VMLINUX OUT: the producer's recording step."""
+    if len(argv) != 2:
+        print("usage: check_qemu_closure_evidence.py extract-certificate-list VMLINUX OUT", file=sys.stderr)
+        return 2
+    try:
+        listed = certificate_list(pathlib.Path(argv[0]).read_bytes())
+        with open(argv[1], "xb") as output:
+            output.write(listed)
+    except (EvidenceError, OSError, struct.error) as error:
+        print(f"qemu closure evidence: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["extract-certificate-list"]:
+        return extract(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--architecture", required=True)
     parser.add_argument("--certificate", required=True, type=pathlib.Path)

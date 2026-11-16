@@ -9,10 +9,13 @@ import json
 import os
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import io
+from contextlib import redirect_stderr
 
 import check_qemu_closure_evidence as checker
 
@@ -36,6 +39,7 @@ PATHS = {
     "vm": store("nixos-vm"),
     "toplevel": store("nixos-system-piglor-qemu-evidence-26.05"),
     "kernel": store("linux-6.12.117"),
+    "kernelDev": store("linux-6.12.117-dev"),
     "systemd": store("systemd-260.5"),
     "qemu": store("qemu-host-cpu-only-10.1.2"),
     "trustedCertificate": store("root-hash-dev-test.crt"),
@@ -80,7 +84,11 @@ INITRD = store("initrd-linux-6.12.117", "c")
 
 
 def info(*names: str, paths: dict[str, str] = PATHS) -> str:
-    entries = {paths[name].removeprefix("/nix/store/"): {"narHash": f"sha256-{name}"} for name in names}
+    # The kernel's outputs share one derivation; every other path has its own.
+    entries = {paths[name].removeprefix("/nix/store/"): {
+        "narHash": f"sha256-{name}",
+        "deriver": f"{HASH}-{'linux-6.12.117' if name.startswith('kernel') else name}.drv",
+    } for name in names}
     if "toplevel" in names and len(names) > 1:  # a toplevel closure also holds its initrd
         entries[INITRD.removeprefix("/nix/store/")] = {"narHash": "sha256-initrd"}
     return json.dumps({"version": 2, "storeDir": "/nix/store", "info": entries})
@@ -124,6 +132,7 @@ def valid_files(architecture: str) -> dict[str, bytes | str]:
         "host/toplevel-closure.json": info(*CLOSURE),
         "host/provenance": PROVENANCE,
         "host/system-trusted-keys.pem": CERTIFICATE,
+        "host/system-certificate-list": checker.pem_certificate(CERTIFICATE),
         "host/runner": f"uname\tLinux 6.11.0-1018-azure #18 SMP {architecture}\ndev-kvm\tabsent\n",
         "host/serial-console.log": "[    0.000000] Booting Linux\n"
                                    "\x1b]3008;start=1;bootid=5f431e7d06ad4bf8a0985e35ceb5569a;pid=1\x1b\\\n",
@@ -296,6 +305,92 @@ class CertificateDescriptionTests(unittest.TestCase):
                 checker.der_oid(content)
 
 
+# --- Independent ELF64 writer for the certificate-list extraction ------------
+
+LIST_ADDRESS, SIZE_ADDRESS = 0xFFFFFFFF83000000, 0xFFFFFFFF83001000
+
+
+def vmlinux(listed: bytes, length: int | None = None, symbols=None, symtab: bool = True,
+            size_kind: int = 1) -> bytes:
+    """A little-endian ELF64 image: .init.rodata holds the list, .rodata its
+    64-bit length; .symtab and .strtab name them (section indexes 1 and 2)."""
+    length = len(listed) if length is None else length
+    symbols = symbols if symbols is not None else [
+        ("system_certificate_list", 1, LIST_ADDRESS), ("system_certificate_list_size", 2, SIZE_ADDRESS)]
+    strings = b"\0" + b"".join(name.encode() + b"\0" for name, _, _ in symbols)
+    table, offset = bytearray(24), 1
+    for name, section, address in symbols:
+        table += struct.pack("<IBBHQQ", offset, 0x10, 0, section, address, 0)
+        offset += len(name) + 1
+    blobs = [listed + b"\xee" * 16, struct.pack("<Q", length), bytes(table), strings]
+    position, offsets = 64, []
+    for blob in blobs:
+        offsets.append(position)
+        position += len(blob)
+    headers = [bytes(64),
+               struct.pack("<IIQQQQIIQQ", 0, 1, 0, LIST_ADDRESS, offsets[0], len(blobs[0]), 0, 0, 1, 0),
+               struct.pack("<IIQQQQIIQQ", 0, size_kind, 0, SIZE_ADDRESS, offsets[1], 8, 0, 0, 8, 0)]
+    if symtab:
+        headers.append(struct.pack("<IIQQQQIIQQ", 0, 2, 0, 0, offsets[2], len(blobs[2]), 4, 1, 8, 24))
+    headers.append(struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, offsets[3], len(blobs[3]), 0, 0, 1, 0))
+    header = b"\x7fELF\x02\x01\x01" + bytes(9) + struct.pack(
+        "<HHIQQQIHHHHHH", 2, 62, 1, 0, 0, position, 0, 64, 0, 0, 64, len(headers), 0)
+    return header + b"".join(blobs) + b"".join(headers)
+
+
+class CertificateListTests(unittest.TestCase):
+    DER = checker.pem_certificate(CERTIFICATE)
+
+    def test_the_list_is_read_through_the_elf_symbols(self):
+        self.assertEqual(checker.certificate_list(vmlinux(self.DER)), self.DER)
+        # The recorded length decides, so trailing bytes are copied, not hidden.
+        self.assertEqual(checker.certificate_list(vmlinux(self.DER, len(self.DER) + 4)),
+                         self.DER + b"\xee" * 4)
+
+    def test_malformed_or_stripped_images_are_refused(self):
+        stripped = vmlinux(self.DER, symtab=False)
+        cases = {
+            "not ELF": b"MZ" + vmlinux(self.DER)[2:],
+            "stripped": stripped,
+            "symbol absent": vmlinux(self.DER, symbols=[("system_certificate_list_size", 2, SIZE_ADDRESS)]),
+            "symbol twice": vmlinux(self.DER, symbols=[
+                ("system_certificate_list", 1, LIST_ADDRESS), ("system_certificate_list", 1, LIST_ADDRESS),
+                ("system_certificate_list_size", 2, SIZE_ADDRESS)]),
+            "undefined symbol": vmlinux(self.DER, symbols=[
+                ("system_certificate_list", 0, LIST_ADDRESS), ("system_certificate_list_size", 2, SIZE_ADDRESS)]),
+            "length past the section": vmlinux(self.DER, len(self.DER) + 17),
+            "address before the section": vmlinux(self.DER, symbols=[
+                ("system_certificate_list", 1, LIST_ADDRESS - 1), ("system_certificate_list_size", 2, SIZE_ADDRESS)]),
+            "length in a NOBITS section": vmlinux(self.DER, size_kind=checker.SHT_NOBITS),
+            "section headers cut off": vmlinux(self.DER)[:-10],
+        }
+        for case, image in cases.items():
+            with self.subTest(case=case), self.assertRaises(checker.EvidenceError):
+                checker.certificate_list(image)
+
+    def test_extract_cli_writes_the_list_once_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            (base / "vmlinux").write_bytes(vmlinux(self.DER))
+            (base / "stripped").write_bytes(vmlinux(self.DER, symtab=False))
+            (base / "short").write_bytes(b"\x7fELF\x02\x01")
+            command = [sys.executable, str(pathlib.Path(checker.__file__)), "extract-certificate-list",
+                       str(base / "vmlinux"), str(base / "list")]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((base / "list").read_bytes(), self.DER)
+            for arguments, code in (
+                ([str(base / "vmlinux"), str(base / "list")], 1),  # never overwrites
+                ([str(base / "missing"), str(base / "a")], 1),
+                ([str(base / "stripped"), str(base / "b")], 1),
+                ([str(base / "short"), str(base / "c")], 1),
+                ([str(base / "vmlinux")], 2),
+            ):
+                with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
+                    self.assertEqual(checker.main(["extract-certificate-list", *arguments]), code)
+            self.assertFalse((base / "a").exists() or (base / "b").exists() or (base / "c").exists())
+
+
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -458,6 +553,42 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(checker.EvidenceError):
                 checker.check(self.evidence(), "x86_64", CERTIFICATE, FLAKE_LOCK, repository)
 
+    def test_the_compiled_in_list_must_be_exactly_the_certificate(self):
+        der = checker.pem_certificate(CERTIFICATE)
+        self.assertEqual(self.verdict()["compiled_in_certificate_list"],
+                         {"bytes": len(der), "sha256": hashlib.sha256(der).hexdigest()})
+        # Same CN and SKID, so the same kernel key description, but another key.
+        twin = checker.pem_certificate(certificate([(CN, b"PiglorOS public dev-test root-hash signing")],
+                                                   b"\1", bytes.fromhex(DESCRIPTION.rsplit(": ", 1)[1])))
+        self.assertEqual(checker.kernel_key_description(twin), DESCRIPTION)
+        key = "host/system-certificate-list"
+        changes = [
+            lambda f: f.update({key: twin}),
+            lambda f: f.update({key: der + b"\0"}),
+            lambda f: f.update({key: der + twin}),
+            lambda f: f.update({key: der[:-1]}),
+            lambda f: f.update({key: b""}),
+            lambda f: f.pop(key),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+
+    def test_the_vmlinux_is_the_booted_kernel_build(self):
+        def deriver(files, value):
+            document = json.loads(files["host/path-info.json"])
+            document["info"][PATHS["kernelDev"].removeprefix("/nix/store/")]["deriver"] = value
+            files["host/path-info.json"] = json.dumps(document)
+        changes = [
+            lambda f: deriver(f, f"{HASH}-linux-6.12.118.drv"),
+            lambda f: deriver(f, None),
+            lambda f: with_paths(f, kernelDev=store("linux-6.12.117-headers")),
+            lambda f: with_paths(f, kernelDev=store("linux-6.12.117", "b")),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.refuses(change)
+
     def test_verdict_names_the_checker_and_the_commit(self):
         verdict = self.verdict()
         self.assertEqual(verdict["checker_sha256"],
@@ -529,7 +660,8 @@ class EvidenceTests(unittest.TestCase):
     def test_kernel_release_series_is_pinned(self):
         def kernel(release: str):
             def change(files):
-                paths = with_paths(files, kernel=store(f"linux-{release}"))
+                paths = with_paths(files, kernel=store(f"linux-{release}"),
+                                   kernelDev=store(f"linux-{release}-dev"))
                 files["guest/uname-release"] = f"{release}\n"
                 files["guest/booted-kernel"] = f"{paths['kernel']}/bzImage\n"
             return change

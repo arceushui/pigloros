@@ -3,20 +3,37 @@
 # Every file is raw command output; scripts/check_qemu_closure_evidence.py on
 # the host owns every judgement. A missing `status` file means no evidence.
 
-# The start time of PID from /proc/PID/stat, or nothing once that process has
-# exited: /proc/PID is gone or the process is a zombie. Fails if /proc/PID
-# exists but cannot be read. The comm field may hold spaces, so fields are
-# read after its last ')'.
-start_time() { # PID
+# The state of the task whose stat file is $1, or nothing once it is gone.
+# Fails if the task's directory exists but its stat cannot be read. The comm
+# field may hold spaces, so fields are read after its last ')'.
+task_state() { # STAT_FILE
   local stat fields
-  if ! stat="$(cat "/proc/$1/stat")"; then
-    [[ ! -e /proc/$1 ]]
+  if ! stat="$(cat "$1")"; then
+    [[ ! -e ${1%/stat} ]]
     return
   fi
   read -r -a fields <<<"${stat##*) }"
-  if [[ ${fields[0]} != [ZX] ]]; then
-    printf '%s\n' "${fields[19]}"
+  printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+}
+
+# The start time of PID, or nothing once every one of its threads has exited.
+# A zombie thread-group leader whose other threads still run is a process
+# that still exists, so it keeps its start time.
+start_time() { # PID
+  local state task
+  state="$(task_state "/proc/$1/stat")" || return 1
+  [[ -n ${state} ]] || return 0
+  if [[ ${state%% *} == [ZX] ]]; then
+    for task in "/proc/$1/task/"*/stat; do
+      task="$(task_state "${task}")" || return 1
+      if [[ -n ${task} && ${task%% *} != [ZX] ]]; then
+        printf '%s\n' "${state#* }"
+        return 0
+      fi
+    done
+    return 0
   fi
+  printf '%s\n' "${state#* }"
 }
 
 # The PID, user and mount namespaces of PID.

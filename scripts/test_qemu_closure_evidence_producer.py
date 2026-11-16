@@ -273,6 +273,32 @@ class ProducerShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.base / "guest/processes" / str(exiting.pid)).exists())
 
+    def test_collector_keeps_a_process_whose_zombie_leader_has_live_threads(self):
+        # The leader calls pthread_exit while another thread sleeps: the leader
+        # shows state Z, but the process still runs.
+        process = self.child(sys.executable, "-c", (
+            "import ctypes, threading, time\n"
+            "threading.Thread(target=time.sleep, args=(60,)).start()\n"
+            "ctypes.CDLL(None).pthread_exit(None)\n"))
+        deadline = time.monotonic() + 10
+        while self.state(process.pid) != "Z":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.assertEqual(self.shell.out(f"start_time {process.pid}", COLLECTOR), f"{start_time(process.pid)}\n")
+        # It is recorded, or its failed reads fail the collection: never skipped.
+        result = self.record(process.pid)
+        recorded = (self.base / "guest/processes" / str(process.pid)).exists()
+        self.assertTrue((result.returncode == 0 and recorded) or (
+            result.returncode == 1 and f"cannot read running process {process.pid}" in result.stderr),
+            result.stderr)
+        # Once every thread has exited, it is gone.
+        process.kill()
+        deadline = time.monotonic() + 10
+        while len(list(pathlib.Path(f"/proc/{process.pid}/task").glob("*"))) > 1:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.assertEqual(self.shell.out(f"start_time {process.pid}", COLLECTOR), "")
+
     def test_collector_skips_a_reused_pid(self):
         process = self.child()
         # The second stat read shows another start time: the PID was reused.

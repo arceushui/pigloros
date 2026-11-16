@@ -45,6 +45,8 @@
           vm = "${config.system.build.piglorQemuEvidenceVm}";
           toplevel = "${config.system.build.toplevel}";
           kernel = "${config.boot.kernelPackages.kernel}";
+          # The unstripped vmlinux of the same build, for its certificate list.
+          kernelDev = "${config.boot.kernelPackages.kernel.dev}";
           systemd = "${config.systemd.package}";
           qemu = "${config.virtualisation.qemu.package}";
           trustedCertificate = "${config.piglor.mountfsdActivation.rootHashCertificateFile}";
