@@ -98,7 +98,7 @@ impl From<ShortfallV1> for ErasureErrorV1 {
 
 impl ShortfallV1 {
     /// A refusal resolves to `None`; a failure stays an error.
-    pub(super) fn resolved<T>(self) -> Result<Option<T>, ErasureErrorV1> {
+    pub(super) const fn resolved<T>(self) -> Result<Option<T>, ErasureErrorV1> {
         match self {
             Self::Refused => Ok(None),
             Self::Failed(error) => Err(error),

@@ -1953,7 +1953,8 @@ impl ErasureExecutionHostV1 {
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
         host.world_replay_verifier = composition.world_replay_verifier();
-        host.local_submission = composition.local_submission.clone();
+        host.local_submission
+            .clone_from(&composition.local_submission);
         host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
@@ -2016,7 +2017,8 @@ impl ErasureExecutionHostV1 {
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
         host.world_replay_verifier = composition.world_replay_verifier();
-        host.local_submission = composition.local_submission.clone();
+        host.local_submission
+            .clone_from(&composition.local_submission);
         host.install_inventory_from_coordinator_with_limits(limits)
             .map(|_| host)
     }
