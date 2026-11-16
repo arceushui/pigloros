@@ -689,8 +689,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n"
             f"{REV_LIST_CALL}"
             f"diff\n--quiet\n{EXAMPLE_BASE_SHA}...HEAD\n--\n"
-            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
-            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+            "*.rs\n**/Cargo.toml\nCargo.toml\n**/Cargo.lock\nCargo.lock\n"
+            "rust-toolchain\nrust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
         )
 
     def test_resolver_uses_the_trusted_main_merge_base_for_stacked_pull_requests(self) -> None:
@@ -725,8 +725,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             f"merge-base\n{stacked_base}\norigin/main\n"
             f"{REV_LIST_CALL}"
             f"diff\n--quiet\n{stacked_base}...HEAD\n--\n"
-            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
-            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+            "*.rs\n**/Cargo.toml\nCargo.toml\n**/Cargo.lock\nCargo.lock\n"
+            "rust-toolchain\nrust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
         )
 
     def test_resolver_bootstraps_when_only_the_trusted_artifact_is_missing(self) -> None:
@@ -1105,8 +1105,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             logs["git_calls"],
             f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n{REV_LIST_CALL}"
             f"diff\n--quiet\n{EXAMPLE_BASE_SHA}...HEAD\n--\n"
-            "*.rs\n**/Cargo.toml\nCargo.toml\nCargo.lock\n"
-            "rust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
+            "*.rs\n**/Cargo.toml\nCargo.toml\n**/Cargo.lock\nCargo.lock\n"
+            "rust-toolchain\nrust-toolchain.toml\n.cargo/config.toml\n.cargo-crap.toml\n",
         )
 
     def test_resolver_bootstraps_non_rust_changes_when_no_ancestor_has_a_baseline(self) -> None:

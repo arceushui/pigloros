@@ -20,9 +20,12 @@ GH_API_RETRY_DELAY_SECONDS=30
 # When the trusted base never gets its own baseline (its main run failed, was
 # cancelled or skipped, does not exist, or outlasted the wait bound), use the
 # baseline of the nearest first-parent main ancestor among this many commits
-# before it. An older baseline is never weaker: every main commit already
-# passed the no-existing-function-grows rule against its own base, so changes
-# made after the ancestor are charged to this pull request, never hidden.
+# before it. Every main commit already passed the no-existing-function-grows
+# rule against its own base, so no function in this pull request can score
+# above its ancestor score unnoticed, and code main added after the ancestor
+# is charged to this pull request as new. The older baseline is weaker in one
+# way, accepted by the owner (2026-11-16) for the bounded walk: a function main
+# improved after the ancestor may regrow up to its ancestor score.
 # First-parent history is main's own history because main lands only squash
 # and merge-queue commits, so the trusted base is always on its mainline. The
 # walk adds at most this many sequential artifact queries after the wait
@@ -197,7 +200,8 @@ reason="${reason}, and none of its ${ANCESTOR_BASELINE_WALK_LIMIT} nearest first
 # The generated baseline then describes the unchanged production Rust surface;
 # Rust-affecting PRs continue to fail closed rather than self-baselining.
 if git diff --quiet "${BASE_SHA}...HEAD" -- \
-  '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
+  '*.rs' '**/Cargo.toml' Cargo.toml '**/Cargo.lock' Cargo.lock \
+  rust-toolchain rust-toolchain.toml \
   .cargo/config.toml .cargo-crap.toml; then
   echo "::notice::Trusted main baseline unavailable: ${reason}; bootstrapping because this pull request changes no Rust or Cargo policy inputs"
   echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
