@@ -665,6 +665,10 @@ def check_kernel_config(evidence: Evidence, certificate_path: str) -> dict:
     for name in VERITY_FALLBACKS:
         if recorded[name] not in ("n", "absent"):
             raise EvidenceError(f"CONFIG_{name} must be disabled")
+    # certs/system_certificates.S puts signing_key.x509 at the head of the list.
+    if values.get("MODULE_SIG", "n") != "n":
+        raise EvidenceError("CONFIG_MODULE_SIG must be disabled: module signing puts "
+                            "signing_key.x509 into system_certificate_list")
     if values.get("SYSTEM_TRUSTED_KEYS") != f'"{certificate_path}"':
         raise EvidenceError("CONFIG_SYSTEM_TRUSTED_KEYS is not the recorded certificate")
     return {"dm_verity_keyring": recorded,

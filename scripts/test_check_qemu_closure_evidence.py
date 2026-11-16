@@ -311,25 +311,28 @@ LIST_ADDRESS, SIZE_ADDRESS = 0xFFFFFFFF83000000, 0xFFFFFFFF83001000
 
 
 def vmlinux(listed: bytes, length: int | None = None, symbols=None, symtab: bool = True,
-            size_kind: int = 1) -> bytes:
+            size_kind: int = 1, padding: int = 0) -> bytes:
     """A little-endian ELF64 image: .init.rodata holds the list, .rodata its
-    64-bit length; .symtab and .strtab name them (section indexes 1 and 2)."""
+    64-bit length; .symtab and .strtab name them (section indexes 1 and 2).
+    PADDING bytes precede each symbol inside its section."""
     length = len(listed) if length is None else length
     symbols = symbols if symbols is not None else [
-        ("system_certificate_list", 1, LIST_ADDRESS), ("system_certificate_list_size", 2, SIZE_ADDRESS)]
+        ("system_certificate_list", 1, LIST_ADDRESS + padding),
+        ("system_certificate_list_size", 2, SIZE_ADDRESS + padding)]
     strings = b"\0" + b"".join(name.encode() + b"\0" for name, _, _ in symbols)
     table, offset = bytearray(24), 1
     for name, section, address in symbols:
         table += struct.pack("<IBBHQQ", offset, 0x10, 0, section, address, 0)
         offset += len(name) + 1
-    blobs = [listed + b"\xee" * 16, struct.pack("<Q", length), bytes(table), strings]
+    blobs = [b"\xdd" * padding + listed + b"\xee" * 16, b"\xdd" * padding + struct.pack("<Q", length),
+             bytes(table), strings]
     position, offsets = 64, []
     for blob in blobs:
         offsets.append(position)
         position += len(blob)
     headers = [bytes(64),
                struct.pack("<IIQQQQIIQQ", 0, 1, 0, LIST_ADDRESS, offsets[0], len(blobs[0]), 0, 0, 1, 0),
-               struct.pack("<IIQQQQIIQQ", 0, size_kind, 0, SIZE_ADDRESS, offsets[1], 8, 0, 0, 8, 0)]
+               struct.pack("<IIQQQQIIQQ", 0, size_kind, 0, SIZE_ADDRESS, offsets[1], len(blobs[1]), 0, 0, 8, 0)]
     if symtab:
         headers.append(struct.pack("<IIQQQQIIQQ", 0, 2, 0, 0, offsets[2], len(blobs[2]), 4, 1, 8, 24))
     headers.append(struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, offsets[3], len(blobs[3]), 0, 0, 1, 0))
@@ -346,6 +349,8 @@ class CertificateListTests(unittest.TestCase):
         # The recorded length decides, so trailing bytes are copied, not hidden.
         self.assertEqual(checker.certificate_list(vmlinux(self.DER, len(self.DER) + 4)),
                          self.DER + b"\xee" * 4)
+        # Symbols inside their sections are read at their offset from sh_addr.
+        self.assertEqual(checker.certificate_list(vmlinux(self.DER, padding=0x10)), self.DER)
 
     def test_malformed_or_stripped_images_are_refused(self):
         stripped = vmlinux(self.DER, symtab=False)
@@ -359,6 +364,10 @@ class CertificateListTests(unittest.TestCase):
             "undefined symbol": vmlinux(self.DER, symbols=[
                 ("system_certificate_list", 0, LIST_ADDRESS), ("system_certificate_list_size", 2, SIZE_ADDRESS)]),
             "length past the section": vmlinux(self.DER, len(self.DER) + 17),
+            "offset list past the section": vmlinux(self.DER, len(self.DER) + 17, padding=0x10),
+            "offset size past the section": vmlinux(self.DER, symbols=[
+                ("system_certificate_list", 1, LIST_ADDRESS + 0x10),
+                ("system_certificate_list_size", 2, SIZE_ADDRESS + 0x14)], padding=0x10),
             "address before the section": vmlinux(self.DER, symbols=[
                 ("system_certificate_list", 1, LIST_ADDRESS - 1), ("system_certificate_list_size", 2, SIZE_ADDRESS)]),
             "length in a NOBITS section": vmlinux(self.DER, size_kind=checker.SHT_NOBITS),
@@ -462,6 +471,18 @@ class EvidenceTests(unittest.TestCase):
             seal()(files)
             files["guest/status"] = "complete\n\n"
         self.refuses(tampered)
+
+    def test_module_signing_must_be_off(self):
+        def module_sig(value):
+            def change(files):
+                files["guest/kernel-config"] = files["guest/kernel-config"].replace(
+                    "# CONFIG_MODULE_SIG is not set\n", value)
+            return change
+        self.assertEqual(self.verdict(change=module_sig(""))["kernel_config"]["context"]["MODULE_SIG"], "absent")
+        for value in ("CONFIG_MODULE_SIG=y\n", "CONFIG_MODULE_SIG=m\n"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    checker.EvidenceError, "signing_key.x509 into system_certificate_list"):
+                self.verdict(change=module_sig(value))
 
     def test_fallbacks_recorded_as_not_set_still_hold(self):
         def not_set(files):
