@@ -32,6 +32,7 @@ against its schema. It then regenerates every output and compares it with the ch
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import struct
@@ -83,8 +84,8 @@ ULID_PATTERN = "[0-7][0-9A-HJKMNP-TV-Z]{25}"
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # The Principal of the authorized compositions' fixture Local Principal document: 16 bytes 0x01.
 PRINCIPAL_BYTES = bytes([1]) * 16
-# The ADR-134 golden digest of each Gateway execution-mode profile, as
-# `scripts/check_gateway_contract.py` pins them (`--check` verifies the two agree).
+# The ADR-134 digest of each Gateway execution-mode profile's current revision: the head of its
+# rotation chain in `scripts/check_gateway_contract.py` (`--check` verifies the two agree).
 MODE_PROFILE_DIGESTS = {
     "gateway-mode-air-gapped-v1":
         "455883a475edbf5cc24907a03e6e46a476ceec6227ecdb8429999646dac447e5",
@@ -1014,12 +1015,24 @@ def check_normalization() -> None:
         raise SystemExit("the ULID text encoding is broken")
 
 
+def rotation_chain_heads(checker: str) -> dict[str, str]:
+    """The head of each rotation chain the contract checker source declares."""
+    for node in ast.parse(checker).body:
+        if (
+            isinstance(node, ast.Assign)
+            and [getattr(target, "id", None) for target in node.targets]
+            == ["MODE_PROFILE_ROTATION_CHAINS"]
+        ):
+            chains = ast.literal_eval(node.value)
+            return {identifier: chain[-1] for identifier, chain in chains.items()}
+    raise SystemExit("the contract checker declares no MODE_PROFILE_ROTATION_CHAINS")
+
+
 def check_mode_profile_digests() -> None:
-    """The golden mode-profile digests are the ones the contract checker pins."""
+    """The mode-profile digests are the heads of the contract checker's rotation chains."""
     checker = (HERE / "check_gateway_contract.py").read_text(encoding="utf-8")
-    for identifier, digest in MODE_PROFILE_DIGESTS.items():
-        if f'"{identifier}"' not in checker or f'"{digest}"' not in checker:
-            raise SystemExit(f"{identifier}: the golden digest is not the contract checker's")
+    if rotation_chain_heads(checker) != MODE_PROFILE_DIGESTS:
+        raise SystemExit("the mode-profile digests are not the contract checker's chain heads")
 
 
 def provider() -> dict:
