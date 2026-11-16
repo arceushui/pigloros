@@ -1,13 +1,16 @@
 use std::{
     io::IoSlice,
     mem::MaybeUninit,
-    os::{fd::OwnedFd as StdOwnedFd, unix::fs::PermissionsExt},
+    os::fd::OwnedFd as StdOwnedFd,
     sync::atomic::AtomicUsize,
     thread::{self, JoinHandle},
 };
 
 use ed25519_dalek::{Signer, SigningKey};
-use pos_reference::sandbox_provider_protocol::{LauncherReady, LauncherReadyFields};
+use pos_reference::sandbox_provider_protocol::{
+    KernelObservationStatus, LauncherReady, LauncherReadyFields, RuntimeSigned,
+    SandboxProviderProtocolError, SelfDigested,
+};
 use rustix::{
     net::{recv, sendmsg, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, UCred},
     process::{getgid, getpid, getuid},
@@ -16,11 +19,11 @@ use rustix::{
 use std::os::fd::AsFd;
 
 use super::*;
-use crate::test_fixtures::{authority, TestResult, ATTEMPT};
+use crate::test_fixtures::{authority, TestResult, ATTEMPT, GRANT_DIGEST, RQE1_DIGEST};
+use crate::KernelObservation;
 
 const KEY_ID: &str = crate::test_fixtures::RUNTIME_KEY_ID;
 const EXPECTED_READBACK: [u8; 32] = [5; 32];
-const OBSERVED_READBACK: [u8; 32] = [6; 32];
 const INVOCATION: [u8; 16] = [0x12; 16];
 const ADAPTER_IDENTITY: FdIdentity = FdIdentity {
     mount_id: 9,
@@ -33,13 +36,13 @@ struct TestSigner {
     key_id: &'static str,
 }
 
-impl ReleaseSigner for TestSigner {
+impl RuntimeAttestationSigner for TestSigner {
     fn runtime_attestation_key_id(&self) -> &str {
         self.key_id
     }
 
-    fn sign(&self, message: &[u8]) -> [u8; 64] {
-        self.key.sign(message).to_bytes()
+    fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+        self.key.sign(&record.signature_message()).to_bytes()
     }
 }
 
@@ -62,6 +65,10 @@ enum Behaviour {
     HangsAfterFirstRead,
     /// The second `MainPID` read names another process.
     MainPidDrifts,
+    /// The third `InvocationID` read, the recheck's observation, fails.
+    InvocationBreaksOnRecheck,
+    /// The third `MainPID` read, the recheck's observation, never answers.
+    HangsOnRecheck,
 }
 
 struct TestIdentity {
@@ -88,6 +95,7 @@ impl TestIdentity {
         match self.behaviour {
             Behaviour::Hangs => true,
             Behaviour::HangsAfterFirstRead => reads > 0,
+            Behaviour::HangsOnRecheck => reads == 2,
             _ => false,
         }
     }
@@ -128,6 +136,7 @@ impl UnitIdentitySource for TestIdentity {
         match self.behaviour {
             Behaviour::InvocationDown => Err(IdentityDown),
             Behaviour::InvocationBreaksAfterFirstRead if reads > 0 => Err(IdentityDown),
+            Behaviour::InvocationBreaksOnRecheck if reads == 2 => Err(IdentityDown),
             Behaviour::InvocationDrifts if reads > 0 => Ok([0x13; 16]),
             _ => Ok(INVOCATION),
         }
@@ -155,23 +164,9 @@ fn observation(main_pid: u32) -> TestResult<KernelObservation> {
         [7; 32],
         false,
     );
-    let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
+    let readback = crate::KernelObservedReadback::new(provider);
     let observed = readback.observe(&unit, &context)?;
     Ok(*observed.observation())
-}
-
-/// The KOE1 digest stand-in: a fixed value for any accepted `ReadyV1`.
-struct FixedDigest;
-
-impl crate::ObservedStateDigest for FixedDigest {
-    fn observed_state_digest(
-        &self,
-        ready1_digest: [u8; 32],
-        _observation: &KernelObservation,
-    ) -> [u8; 32] {
-        assert_ne!(ready1_digest, [0; 32]);
-        OBSERVED_READBACK
-    }
 }
 
 /// How the fake observation behaves after `ReadyV1`.
@@ -187,6 +182,8 @@ enum Observing {
     VanishesOnRecheck,
     /// Both observations read the unit identity through the barrier.
     ReadsUnit,
+    /// The observation is no valid KOE1: its `MainPID` is zero.
+    Invalid,
 }
 
 struct TestObserved {
@@ -219,17 +216,12 @@ impl ObservedReadback for TestObserved {
                 Err(ObservedReadbackUnavailable(KernelObservationError::Exited))
             }
             (Observing::Changes, 1..) => Ok(ObservedUnit::new(&self.second)),
+            (Observing::Invalid, _) => Ok(ObservedUnit::new(&self.first.with_main_pid_for_test(0))),
             (Observing::ReadsUnit, _) => unit()
                 .map(|_| ObservedUnit::new(&self.first))
                 .map_err(ObservedReadbackUnavailable),
             _ => Ok(ObservedUnit::new(&self.first)),
         }
-    }
-
-    fn digest(&self, ready1_digest: [u8; 32], observation: &KernelObservation) -> [u8; 32] {
-        assert_ne!(ready1_digest, [0; 32]);
-        assert_eq!(*observation, self.first);
-        OBSERVED_READBACK
     }
 }
 
@@ -351,7 +343,7 @@ fn receive_release(unit_end: &StdOwnedFd) -> Option<ExecutionRelease> {
 
 /// A launcher that answers with a correct `ReadyV1` and reports the release it
 /// receives.
-fn launcher<S: ReleaseSigner + Send + Sync>(
+fn launcher<S: RuntimeAttestationSigner + Send + Sync>(
     barrier: &mut TestBarrier<S>,
 ) -> TestResult<JoinHandle<Option<ExecutionRelease>>> {
     let attempt = barrier.admitted.clone();
@@ -367,6 +359,7 @@ fn active(attempt: AdmittedAttempt, milliseconds: u64) -> ActiveAttempt {
     ActiveAttempt::record(
         attempt,
         Instant::now() + Duration::from_millis(milliseconds),
+        RQE1_DIGEST,
     )
 }
 
@@ -384,7 +377,19 @@ fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> 
     assert_eq!(fields.attempt_id, ATTEMPT);
     assert_eq!(fields.nonce, barrier.parameters.nonce);
     assert_eq!(fields.expected_readback_digest, EXPECTED_READBACK);
-    assert_eq!(fields.observed_readback_digest, OBSERVED_READBACK);
+    // The release binds the frozen KOE1, which binds the attempt's RQE1.
+    let (_, frozen) = barrier.frozen.as_ref().ok_or("no frozen observation")?;
+    assert_eq!(fields.observed_readback_digest, frozen.digest());
+    assert_eq!(frozen.fields().attempt_id, ATTEMPT);
+    assert_eq!(frozen.fields().agr1_digest, GRANT_DIGEST);
+    assert_eq!(
+        frozen.fields().requested_configuration_evidence,
+        RQE1_DIGEST
+    );
+    assert_eq!(
+        frozen.fields().status.ready1_digest(),
+        Some(fields.ready1_digest)
+    );
     assert_eq!(fields.runtime_attestation_key_id, KEY_ID);
     assert!(fields.deadline_monotonic_ns > monotonic_ns());
     release.verify_signature(barrier.admitted.runtime_key())?;
@@ -489,7 +494,7 @@ async fn a_missing_observed_readback_is_not_released() -> TestResult {
     let error = refused(Refusal::NoObservation, own_pid()).await?;
     assert!(matches!(
         error,
-        BarrierError::Refused(RecheckRefusal::Observation(_))
+        BarrierError::Refused(RecheckRefusal::FirstObservation(_))
     ));
     Ok(())
 }
@@ -631,7 +636,7 @@ async fn an_attempt_past_its_deadline_is_not_released() -> TestResult {
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     let error = barrier
         .release(
-            &ActiveAttempt::record(attempt, Instant::now()),
+            &ActiveAttempt::record(attempt, Instant::now(), RQE1_DIGEST),
             cgroup_view(),
         )
         .await
@@ -1064,27 +1069,21 @@ fn assert_no_release_received(launcher: JoinHandle<Option<ExecutionRelease>>) ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_safe_key_file_cannot_substitute_another_runtime_signing_identity() -> TestResult {
+async fn another_runtime_key_cannot_substitute_the_signing_identity() -> TestResult {
     for (key_id, seed) in [
         ("foreign-runtime-key", crate::test_fixtures::RUNTIME_SEED),
         (KEY_ID, [0x53; 32]),
     ] {
-        assert_foreign_signer_refuses_release(safe_key_file_signer(key_id, &seed)?).await?;
+        assert_foreign_signer_refuses_release(foreign_signer(key_id, &seed)).await?;
     }
     Ok(())
 }
 
-fn safe_key_file_signer(key_id: &str, seed: &[u8; 32]) -> TestResult<crate::KeyFileReleaseSigner> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("key");
-    std::fs::write(&path, seed)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-    let (held, owner) = File::open(directory.path())
-        .and_then(|held| held.metadata().map(|metadata| (held, metadata.uid())))?;
-    crate::KeyFileReleaseSigner::open(&held, "key", owner, key_id.to_owned()).map_err(Into::into)
+fn foreign_signer(key_id: &str, seed: &[u8; 32]) -> crate::KeyFileRuntimeSigner {
+    crate::KeyFileRuntimeSigner::from_signing_key(SigningKey::from_bytes(seed), key_id.to_owned())
 }
 
-async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileReleaseSigner) -> TestResult {
+async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileRuntimeSigner) -> TestResult {
     let (parts, attempt) = barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     let mut barrier = ProviderReleaseBarrier::new(
         &attempt,
@@ -1147,6 +1146,7 @@ async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestR
             work: false,
         },
         ready: Cell::new(None),
+        requested_configuration_evidence: RQE1_DIGEST,
         frozen: RefCell::new(None),
     };
     // Model a valid Ready followed by provider preemption. Immediate manager
@@ -1167,6 +1167,15 @@ mod kernel_observation {
         observing: Observing,
         behaviour: Behaviour,
     ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
+        observed_within(observing, behaviour, GENEROUS_MS).await
+    }
+
+    /// [`observed_with`] under a deadline `milliseconds` away.
+    async fn observed_within(
+        observing: Observing,
+        behaviour: Behaviour,
+        milliseconds: u64,
+    ) -> TestResult<(ReleaseOutcome, Result<(), BarrierError>)> {
         let attempt =
             AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
         let identity = TestIdentity::behaving(own_pid(), behaviour);
@@ -1174,13 +1183,95 @@ mod kernel_observation {
         barrier.check.observed = TestObserved::new(observing)?;
         let launcher = launcher(&mut barrier)?;
         let released = barrier
-            .release(&active(attempt, GENEROUS_MS), cgroup_view())
+            .release(&active(attempt, milliseconds), cgroup_view())
             .await;
         let evidence = barrier.evidence();
         drop(barrier);
         let received = launcher.join().map_err(|_| "launcher thread")?;
         assert_eq!(received.as_ref(), evidence.release());
         Ok((evidence, released))
+    }
+
+    /// R9 barrier failure 8: the recheck's manager read failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_whose_identity_read_fails_records_barrier_failure_8() -> TestResult {
+        let (evidence, released) =
+            observed_with(Observing::ReadsUnit, Behaviour::InvocationBreaksOnRecheck).await?;
+        let error = released.err().ok_or("released")?;
+        assert!(matches!(
+            error,
+            BarrierError::Refused(RecheckRefusal::Identity(_))
+        ));
+        assert_eq!(
+            error.barrier_failure(),
+            Some(BarrierFailure::RecheckIdentityUnreadable)
+        );
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    /// R9 barrier failure 10: the recheck's manager read outlived the
+    /// attempt deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recheck_whose_identity_read_outlives_the_deadline_records_barrier_failure_10(
+    ) -> TestResult {
+        let (evidence, released) =
+            observed_within(Observing::ReadsUnit, Behaviour::HangsOnRecheck, 3_000).await?;
+        let error = released.err().ok_or("released")?;
+        assert!(matches!(
+            error,
+            BarrierError::Refused(RecheckRefusal::Expired)
+        ));
+        assert_eq!(
+            error.barrier_failure(),
+            Some(BarrierFailure::RecheckExpired)
+        );
+        assert!(evidence.release().is_none());
+        Ok(())
+    }
+
+    /// A signer that outlasts the attempt deadline before it signs.
+    struct SlowSigner(TestSigner, Duration);
+
+    impl RuntimeAttestationSigner for SlowSigner {
+        fn runtime_attestation_key_id(&self) -> &str {
+            self.0.runtime_attestation_key_id()
+        }
+
+        fn sign<M: RuntimeSigned>(&self, record: &SelfDigested<M>) -> [u8; 64] {
+            thread::sleep(self.1);
+            self.0.sign(record)
+        }
+    }
+
+    /// A release sent after the recheck, once the deadline then passed, is
+    /// no barrier failure: the attempt has progress 2 (R9 §4.6.3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_sent_before_the_deadline_passed_records_no_barrier_failure() -> TestResult {
+        let (parts, attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        let mut barrier = ProviderReleaseBarrier::new(
+            &attempt,
+            parts.parameters.nonce,
+            parts.evidence,
+            SlowSigner(test_signer(), Duration::from_millis(3_500)),
+            parts.identity,
+            parts.check,
+        )?;
+        let launcher = launcher(&mut barrier)?;
+        let error = barrier
+            .release(&active(attempt, 3_000), cgroup_view())
+            .await
+            .err()
+            .ok_or("no expiry")?;
+        assert!(matches!(error, BarrierError::ExpiredAfterRelease));
+        assert_eq!(error.barrier_failure(), None);
+        let sent = barrier.sent_release().cloned();
+        assert!(sent.is_some());
+        drop(barrier);
+        let received = launcher.join().map_err(|_| "launcher thread")?;
+        assert_eq!(received, sent);
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1190,7 +1281,8 @@ mod kernel_observation {
         released?;
         let release = evidence.release().ok_or("no release")?;
         assert_eq!(evidence.ready1_digest(), Some(release.fields.ready1_digest));
-        assert_eq!(release.fields.observed_readback_digest, OBSERVED_READBACK);
+        let frozen = evidence.kernel_observation_evidence().ok_or("no KOE1")?;
+        assert_eq!(release.fields.observed_readback_digest, frozen.digest());
         let observation = evidence.observation().ok_or("no observation")?;
         assert_eq!(observation.main_pid(), own_pid());
         assert!(evidence.work().is_none());
@@ -1217,7 +1309,7 @@ mod kernel_observation {
             observed_with(Observing::VanishesOnRecheck, Behaviour::Normal).await?;
         assert!(matches!(
             released,
-            Err(BarrierError::Refused(RecheckRefusal::Observation(_)))
+            Err(BarrierError::Refused(RecheckRefusal::RecheckObservation(_)))
         ));
         assert!(evidence.observation().is_some());
         Ok(())
@@ -1228,10 +1320,27 @@ mod kernel_observation {
         let (evidence, released) = observed_with(Observing::Unavailable, Behaviour::Normal).await?;
         assert!(matches!(
             released,
-            Err(BarrierError::Refused(RecheckRefusal::Observation(_)))
+            Err(BarrierError::Refused(RecheckRefusal::FirstObservation(_)))
         ));
         assert!(evidence.ready1_digest().is_some());
         assert!(evidence.observation().is_none());
+        assert!(evidence.kernel_observation_evidence().is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_observation_that_is_no_valid_koe1_is_not_released() -> TestResult {
+        let (evidence, released) = observed_with(Observing::Invalid, Behaviour::Normal).await?;
+        assert!(matches!(
+            released,
+            Err(BarrierError::Refused(RecheckRefusal::FirstObservation(
+                ObservedReadbackUnavailable(KernelObservationError::Evidence(
+                    SandboxProviderProtocolError::FieldOutOfBounds
+                ))
+            )))
+        ));
+        assert!(evidence.ready1_digest().is_some());
+        assert!(evidence.kernel_observation_evidence().is_none());
         Ok(())
     }
 
@@ -1244,7 +1353,7 @@ mod kernel_observation {
         .await?;
         assert!(matches!(
             released,
-            Err(BarrierError::Refused(RecheckRefusal::Observation(
+            Err(BarrierError::Refused(RecheckRefusal::FirstObservation(
                 ObservedReadbackUnavailable(KernelObservationError::Identity)
             )))
         ));
@@ -1308,6 +1417,7 @@ mod kernel_observation {
                 work: false,
             },
             ready: Cell::new(None),
+            requested_configuration_evidence: RQE1_DIGEST,
             frozen: RefCell::new(None),
         };
         assert!(matches!(
@@ -1333,7 +1443,7 @@ mod kernel_observation {
         let provider = crate::ProviderNamespaces::for_test(crate::NamespaceSet::for_test_shifted(
             own.namespaces(),
         ));
-        let readback = crate::KernelObservedReadback::new(provider, FixedDigest);
+        let readback = crate::KernelObservedReadback::new(provider);
         let check = AuthorityCheck::new(
             root_check(Refusal::None, &attempt),
             readback,
@@ -1378,9 +1488,18 @@ mod kernel_observation {
         let evidence = barrier.evidence();
         let received = launcher.join().map_err(|_| "launcher thread")?;
         assert_eq!(received.as_ref(), evidence.release());
-        // The release binds the digest the production readback derived.
+        // The release binds the KOE1 of the production readback.
         let release = evidence.release().ok_or("no release")?;
-        assert_eq!(release.fields.observed_readback_digest, OBSERVED_READBACK);
+        let frozen = evidence.kernel_observation_evidence().ok_or("no KOE1")?;
+        assert_eq!(release.fields.observed_readback_digest, frozen.digest());
+        let KernelObservationStatus::Observed {
+            ready1_digest,
+            observation: state,
+        } = &frozen.fields().status
+        else {
+            return Err("the KOE1 is not observed".into());
+        };
+        assert_eq!(*ready1_digest, release.fields.ready1_digest);
         let observation = evidence.observation().ok_or("no observation")?;
         assert_eq!(observation.main_pid(), own_pid());
         assert_eq!(observation.invocation_id(), INVOCATION);
@@ -1395,6 +1514,140 @@ mod kernel_observation {
             barrier.parameters.expected_fdl1_digest
         );
         assert_eq!(observation.work(), None);
+        assert_eq!(**state, observation.evidence_state());
         Ok(())
     }
+}
+
+/// Every barrier failure records its R9 `barrier-failure` code (ADR-069 R9
+/// §4.6.1, §4.6.3 and §11 O5).
+#[test]
+fn every_barrier_failure_records_its_r9_code() {
+    use BarrierFailure as Code;
+    let unavailable = || ObservedReadbackUnavailable(KernelObservationError::Exited);
+    let refused = |refusal| BarrierError::Refused(refusal);
+    let cases: Vec<(BarrierError, Option<Code>)> = vec![
+        (
+            BarrierError::Identity(Box::new(IdentityDown)),
+            Some(Code::ReadyUnavailable),
+        ),
+        (BarrierError::LauncherIdentity, Some(Code::ReadyUnavailable)),
+        (
+            BarrierError::Timeout(io::Error::other("timeout")),
+            Some(Code::ReadyUnavailable),
+        ),
+        (BarrierError::Expired, Some(Code::ReadyUnavailable)),
+        (BarrierError::ExpiredAfterRelease, None),
+        (
+            BarrierError::Release(ReleaseBarrierError::ReadyUnavailable),
+            Some(Code::ReadyUnavailable),
+        ),
+        (
+            BarrierError::Release(ReleaseBarrierError::ReadyFraming),
+            Some(Code::ReadyFraming),
+        ),
+        (
+            BarrierError::Release(ReleaseBarrierError::PidMismatch),
+            Some(Code::ReadyPidMismatch),
+        ),
+        (
+            BarrierError::Release(ReleaseBarrierError::ReadyMalformed),
+            Some(Code::ReadyMalformed),
+        ),
+        (
+            BarrierError::Release(ReleaseBarrierError::ReadyMismatch),
+            Some(Code::ReadyMismatch),
+        ),
+        (
+            BarrierError::Release(ReleaseBarrierError::ReleaseSend),
+            Some(Code::ReleaseSend),
+        ),
+        (BarrierError::Release(ReleaseBarrierError::Recheck), None),
+        (
+            BarrierError::Release(ReleaseBarrierError::Sign(
+                crate::RuntimeSignerError::Unverified,
+            )),
+            None,
+        ),
+        (
+            refused(RecheckRefusal::Root(ImageActivationError::EvidenceMismatch)),
+            Some(Code::RecheckAuthority),
+        ),
+        (refused(RecheckRefusal::Cancelled), None),
+        (
+            refused(RecheckRefusal::FirstObservation(unavailable())),
+            None,
+        ),
+        (
+            refused(RecheckRefusal::RecheckObservation(unavailable())),
+            Some(Code::RecheckObservationUnavailable),
+        ),
+        (
+            refused(RecheckRefusal::ObservationChanged),
+            Some(Code::RecheckObservationChanged),
+        ),
+        (
+            refused(RecheckRefusal::Identity(Box::new(IdentityDown))),
+            Some(Code::RecheckIdentityUnreadable),
+        ),
+        (refused(RecheckRefusal::Expired), Some(Code::RecheckExpired)),
+        (
+            refused(RecheckRefusal::ExecutableUnreadable),
+            Some(Code::RecheckExecutableUnreadable),
+        ),
+        (
+            refused(RecheckRefusal::UnitChanged),
+            Some(Code::RecheckUnitChanged),
+        ),
+        (BarrierError::AttemptMismatch, None),
+        (
+            BarrierError::Parameters(SandboxProviderProtocolError::FieldOutOfBounds),
+            None,
+        ),
+        (BarrierError::Channel(io::Error::other("channel")), None),
+        (BarrierError::UnitEndTaken, None),
+        (BarrierError::RuntimeFlavor, None),
+        (BarrierError::AlreadyAttempted, None),
+    ];
+    for (error, code) in cases {
+        assert_eq!(error.barrier_failure(), code, "{error:?}");
+    }
+}
+
+/// A recheck's identity read that failed is barrier failure 8, one cut off
+/// at the deadline is 10, and any other unavailable observation is 6.
+#[test]
+fn a_recheck_observation_keeps_the_cause_of_its_identity_read() {
+    let unavailable = ObservedReadbackUnavailable;
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::Identity)),
+        RecheckRefusal::Identity(_)
+    ));
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::IdentityExpired)),
+        RecheckRefusal::Expired
+    ));
+    assert!(matches!(
+        recheck_observation(unavailable(KernelObservationError::Exited)),
+        RecheckRefusal::RecheckObservation(_)
+    ));
+    assert_eq!(
+        identity_error(&RecheckRefusal::Expired),
+        KernelObservationError::IdentityExpired
+    );
+    assert_eq!(
+        identity_error(&RecheckRefusal::Identity(Box::new(IdentityDown))),
+        KernelObservationError::Identity
+    );
+}
+
+/// A release sent after the deadline passed is no barrier failure: the
+/// attempt has progress 2 (ADR-069 R9 §4.6.3).
+#[test]
+fn a_release_that_ends_past_the_deadline_is_no_barrier_failure() {
+    assert!(matches!(
+        released_by(Instant::now()),
+        Err(BarrierError::ExpiredAfterRelease)
+    ));
+    assert!(released_by(Instant::now() + Duration::from_mins(1)).is_ok());
 }

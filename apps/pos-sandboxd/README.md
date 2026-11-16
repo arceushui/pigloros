@@ -225,7 +225,7 @@ job cannot supply another independently validated allow-list.
 The attempt also retains the SPM1-selected runtime key ID and authenticated
 verifying key. The production barrier requires that ID from its signer and
 verifies the produced signature under the admitted key before sending any
-release; a safe but incorrect key file cannot authorize execution.
+release; a key other than the admitted one cannot authorize execution.
 `AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
 device/inode from the authenticated SIC1 role-11 provider executable. Neither
 the execute job nor barrier evidence can supply a separate path or digest.
@@ -300,7 +300,9 @@ process.
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
 held or observed evidence, rechecks current authority through the
-`ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.
+`ReleaseRecheck` port, and sends one `ReleaseV1` signed through
+`RuntimeAttestationSigner` and verified under the admitted runtime key before
+it is sent.
 
 ## Local attempt namespaces (#911)
 

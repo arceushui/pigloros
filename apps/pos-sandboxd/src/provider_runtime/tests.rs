@@ -9,14 +9,19 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_reference::sandbox_provider_protocol::SandboxLimit;
+use pos_reference::sandbox_provider_protocol::{
+    SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxLimit,
+};
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 
 use super::{bind, required_slots, ProviderStartupError, RuntimeAuthority};
-use crate::{ProviderInstallation, ProviderInstallationError, ReleaseSigner};
+use crate::{
+    sign_verified, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
+    RuntimeAttestationSigner,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -199,11 +204,20 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
     let expected = SigningKey::from_bytes(&RUNTIME_SEED).verifying_key();
     assert_eq!(*admitted.provider().runtime_attestation_key(), expected);
     assert_eq!(signer.runtime_attestation_key_id(), RUNTIME_KEY_ID);
-    let signature = signer.sign(b"message");
-    expected.verify_strict(
-        b"message",
-        &ed25519_dalek::Signature::from_bytes(&signature),
+    let record = SandboxDescribeResponse::self_digested(SandboxDescribeResponseFields {
+        request_id: [1; 16],
+        spm1_digest: [2; 32],
+        provider_binary_digest: [3; 32],
+        hcp1_digest: [4; 32],
+        active_apt1_digest: [5; 32],
+        runtime_attestation_key_id: RUNTIME_KEY_ID.to_owned(),
+    })?;
+    let verified = sign_verified(
+        &signer,
+        AdmittedRuntimeKey::new(RUNTIME_KEY_ID, &expected),
+        record,
     )?;
+    SandboxDescribeResponse::new(verified, &expected)?.verify_signature(&expected)?;
     assert_eq!(installation.attempt_range().slots(), 256);
     assert_eq!(
         admitted.provider().manifest().runtime_attestation_key_id,

@@ -334,7 +334,7 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
         "image_proof",
         "webpki",
         "x509",
-        "ReleaseSigner",
+        "RuntimeAttestationSigner",
     ];
     let mut sources = Vec::new();
     rust_sources(&manifest_root().join("src/launcher"), &mut sources)?;
