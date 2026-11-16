@@ -54,7 +54,8 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// repository Draft authority records. The Draft authority declares no EPF1
 /// for `RecordedReplay` or `LiveUnverified`, so `replay-v1` and
 /// `live-local-v1` are `deterministic-local-v1` restricted to that one class,
-/// under their own id and digest. The TPS1 is the bundled Draft snapshot, so
+/// and `live-air-gapped-v1` (ADR-135) is `deterministic-air-gapped-v1`
+/// restricted to `LiveUnverified`, each under its own id and digest. The TPS1 is the bundled Draft snapshot, so
 /// its root, revocation and continuity evidence is the host's own. Its
 /// signature evidence is not: the host authenticates the TPS1 operator
 /// signature under its own pin of the Draft authority's deployment-operator
@@ -64,6 +65,7 @@ pub(super) struct HostV1 {
     air_gapped: ExecutionProfileV1,
     replay: ExecutionProfileV1,
     live: ExecutionProfileV1,
+    live_air_gapped: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
     snapshot_digest: [u8; 32],
     operator_key: [u8; 32],
@@ -108,6 +110,11 @@ impl HostV1 {
                         ProfileV1::Live,
                         ReproducibilityClassV1::LiveUnverified,
                     ),
+                    live_air_gapped: restricted(
+                        &air_gapped,
+                        ProfileV1::LiveAirGapped,
+                        ReproducibilityClassV1::LiveUnverified,
+                    ),
                     local,
                     air_gapped,
                     snapshot,
@@ -123,6 +130,7 @@ impl HostV1 {
             ProfileV1::AirGapped => &self.air_gapped,
             ProfileV1::Replay => &self.replay,
             ProfileV1::Live => &self.live,
+            ProfileV1::LiveAirGapped => &self.live_air_gapped,
         }
     }
 

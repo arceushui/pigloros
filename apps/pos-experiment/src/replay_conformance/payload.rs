@@ -54,6 +54,8 @@ pub(super) enum ProfileV1 {
     Replay,
     #[serde(rename = "live-local-v1")]
     Live,
+    #[serde(rename = "live-air-gapped-v1")]
+    LiveAirGapped,
 }
 
 impl ProfileV1 {
@@ -64,6 +66,7 @@ impl ProfileV1 {
             Self::AirGapped => "deterministic-air-gapped-v1",
             Self::Replay => "replay-v1",
             Self::Live => "live-local-v1",
+            Self::LiveAirGapped => "live-air-gapped-v1",
         }
     }
 }
