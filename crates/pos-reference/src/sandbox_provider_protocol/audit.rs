@@ -139,12 +139,6 @@ impl SandboxAuditRecord {
         record.validate(fields).map(|()| record)
     }
 
-    /// The runtime-attestation signature over the self-digest.
-    #[must_use]
-    pub const fn signature(&self) -> [u8; 64] {
-        self.signature
-    }
-
     pub(super) fn verify_signature(
         &self,
         key: &ed25519_dalek::VerifyingKey,

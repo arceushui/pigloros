@@ -397,9 +397,11 @@ impl AttemptEvidence {
 
     /// Rule 8: SPY1's outcome is the one TME1's code selects, and its last
     /// event is that code; `Completed` has no terminal event, and code 0
-    /// never occurs.
+    /// never occurs. A `Completed` output descriptor is exactly as long as
+    /// the captured output TME1 records (R10 I6).
     fn reported(&self, result: &SandboxProviderResult) -> bool {
-        let code = self.termination.fields().terminal_code;
+        let termination = self.termination.fields();
+        let code = termination.terminal_code;
         let outcome = self
             .termination
             .facts(&self.requested, &self.observed)
@@ -407,6 +409,11 @@ impl AttemptEvidence {
             .outcome();
         result.outcome == outcome
             && code.is_none_or(|code| result.operational_events.last() == Some(&code.code()))
+            && result.output.as_ref().is_none_or(|output| {
+                termination
+                    .output_capture
+                    .is_some_and(|capture| capture.accepted_bytes == output.byte_length)
+            })
     }
 
     /// Rule 6's RLS1 binding: a `ReleaseV1` exactly when SPR1 names one,

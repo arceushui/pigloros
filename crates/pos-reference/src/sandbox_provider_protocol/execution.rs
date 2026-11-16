@@ -786,12 +786,6 @@ impl SandboxProviderResult {
         self.result_digest
     }
 
-    /// The runtime-attestation signature over the self-digest.
-    #[must_use]
-    pub const fn signature(&self) -> [u8; 64] {
-        self.signature
-    }
-
     /// Verify SPY1 using a caller-authorized runtime-attestation key.
     ///
     /// # Errors
@@ -1300,12 +1294,6 @@ impl SandboxProviderReceipt {
     #[must_use]
     pub const fn receipt_digest(&self) -> [u8; 32] {
         self.receipt_digest
-    }
-
-    /// The runtime-attestation signature over the self-digest.
-    #[must_use]
-    pub const fn signature(&self) -> [u8; 64] {
-        self.signature
     }
 
     /// Verify SPR1 using a caller-authorized runtime-attestation key.

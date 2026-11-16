@@ -18,7 +18,8 @@ use pos_reference::sandbox_provider_protocol::{
 use super::bundle::{elm1_digest, Fixture, APT1, LPS1, RUNTIME_KEY};
 use super::oracle::{encode, integer, self_digest, text, unhex, TestResult};
 use super::vectors::{
-    SAU1_EVENT_11_AUTHORITY, SAU1_EVENT_1_AUTHORITY, SAU1_EVENT_2_AUTHORITY, TME1_A, TME1_C,
+    KOE1_A_DIGEST, SAU1_EVENT_11_AUTHORITY, SAU1_EVENT_1_AUTHORITY, SAU1_EVENT_2_AUTHORITY, TME1_A,
+    TME1_B_DIGEST, TME1_C, TME1_C_DIGEST,
 };
 
 /// The admitted runtime-attestation key of every response.
@@ -69,6 +70,17 @@ fn signed(magic: &str, unsigned: Vec<Value>, key: &SigningKey) -> TestResult<Vec
     ]))
 }
 
+/// `record` with an all-zero signature: an unsigned record.
+fn zero_signature(record: &[u8]) -> TestResult<Vec<u8>> {
+    match ciborium::from_reader::<Value, _>(record)? {
+        Value::Array(mut parts) if parts.len() == 3 => {
+            parts[2] = bytes(&[0; 64]);
+            encode(&Value::Array(parts))
+        }
+        _ => Err("not a signed wrapper".into()),
+    }
+}
+
 /// The self-digest a signed wrapper carries.
 fn signed_digest(record: &[u8]) -> TestResult<[u8; 32]> {
     match ciborium::from_reader::<Value, _>(record)? {
@@ -86,7 +98,7 @@ const fn unchanged(_: &mut [Value]) {}
 
 /// How the oracle builds one response: the SAU1 events and SPY1 outcome,
 /// changes to the signed records' fields, the records a foreign key signs,
-/// and whether the `ReleaseV1` is presented.
+/// the records left unsigned, and whether the `ReleaseV1` is presented.
 struct Plan<'a> {
     events: &'a [u8],
     outcome: u64,
@@ -95,6 +107,7 @@ struct Plan<'a> {
     receipt: Change<'a>,
     result: Change<'a>,
     foreign: &'a [&'a str],
+    zero: &'a [&'a str],
     present_release: Option<bool>,
 }
 
@@ -108,6 +121,7 @@ impl<'a> Plan<'a> {
             receipt: &unchanged,
             result: &unchanged,
             foreign: &[],
+            zero: &[],
             present_release: None,
         }
     }
@@ -117,6 +131,16 @@ impl<'a> Plan<'a> {
             foreign_key()
         } else {
             runtime_key()
+        }
+    }
+
+    /// The record `magic` signed by its key, or with a zero signature.
+    fn signed(&self, magic: &str, unsigned: Vec<Value>) -> TestResult<Vec<u8>> {
+        let record = signed(magic, unsigned, &self.key(magic))?;
+        if self.zero.contains(&magic) {
+            zero_signature(&record)
+        } else {
+            Ok(record)
         }
     }
 }
@@ -203,7 +227,7 @@ fn build(fixture: Fixture, plan: &Plan<'_>) -> TestResult<Built> {
     let elm1 = elm1_digest(&fixture.limits)?;
     let mut grant = grant_fields(elm1);
     (plan.grant)(grant.as_mut_slice());
-    let grant = signed("AGR1", grant, &plan.key("AGR1"))?;
+    let grant = plan.signed("AGR1", grant)?;
     let agr1 = signed_digest(&grant)?;
     let mut fixture = fixture
         .rqe1(&[3], bytes(&agr1))?
@@ -269,7 +293,7 @@ fn release_record(bound: &Bound, ready: [u8; 32], plan: &Plan<'_>) -> TestResult
         text(RUNTIME_KEY),
     ];
     (plan.release)(fields.as_mut_slice());
-    signed("RLS1", fields, &plan.key("RLS1"))
+    plan.signed("RLS1", fields)
 }
 
 fn audit_chain(bound: &Bound, rls1: Option<[u8; 32]>, plan: &Plan<'_>) -> TestResult<Vec<Vec<u8>>> {
@@ -282,7 +306,7 @@ fn audit_chain(bound: &Bound, rls1: Option<[u8; 32]>, plan: &Plan<'_>) -> TestRe
             12 => vec![bound.agr1, ready?, rls1.ok_or("no ReleaseV1")?, bound.koe1],
             _ => vec![bound.agr1, bound.elm1, bound.tme1],
         };
-        let record = signed(
+        let record = plan.signed(
             "SAU1",
             vec![
                 text("SAU1"),
@@ -299,7 +323,6 @@ fn audit_chain(bound: &Bound, rls1: Option<[u8; 32]>, plan: &Plan<'_>) -> TestRe
                 previous.map_or(Value::Null, |digest| bytes(&digest)),
                 text(RUNTIME_KEY),
             ],
-            &plan.key("SAU1"),
         )?;
         previous = Some(signed_digest(&record)?);
         audit.push(record);
@@ -345,7 +368,7 @@ fn receipt_record(
         text(RUNTIME_KEY),
     ];
     (plan.receipt)(fields.as_mut_slice());
-    signed("SPR1", fields, &plan.key("SPR1"))
+    plan.signed("SPR1", fields)
 }
 
 fn result_record(bound: &Bound, spr1: [u8; 32], plan: &Plan<'_>) -> TestResult<Vec<u8>> {
@@ -356,7 +379,8 @@ fn result_record(bound: &Bound, spr1: [u8; 32], plan: &Plan<'_>) -> TestResult<V
         bytes(&ATTEMPT),
         integer(plan.outcome),
         if plan.outcome == 0 {
-            Value::Array(vec![integer(5), bytes(&[0x99; 32])])
+            // TME1-A captured 70 bytes (R10 I6).
+            Value::Array(vec![integer(70), bytes(&[0x99; 32])])
         } else {
             Value::Null
         },
@@ -371,7 +395,7 @@ fn result_record(bound: &Bound, spr1: [u8; 32], plan: &Plan<'_>) -> TestResult<V
         text(RUNTIME_KEY),
     ];
     (plan.result)(fields.as_mut_slice());
-    signed("SPY1", fields, &plan.key("SPY1"))
+    plan.signed("SPY1", fields)
 }
 
 fn completed(plan: &Plan<'_>) -> TestResult<Built> {
@@ -413,7 +437,21 @@ fn rule_10_every_record_is_signed_by_the_admitted_key() -> TestResult {
         let mut plan = COMPLETED;
         plan.foreign = &foreign;
         completed(&plan)?.unsigned(magic);
+        let mut plan = COMPLETED;
+        plan.zero = &foreign;
+        completed(&plan)?.unsigned(magic);
     }
+    Ok(())
+}
+
+#[test]
+fn rule_8_completed_output_is_the_captured_length() -> TestResult {
+    let longer = |fields: &mut [Value]| {
+        fields[5] = Value::Array(vec![integer(71), bytes(&[0x99; 32])]);
+    };
+    let mut plan = COMPLETED;
+    plan.result = &longer;
+    completed(&plan)?.rejects("an output descriptor longer than the capture");
     Ok(())
 }
 
@@ -461,6 +499,14 @@ fn rule_6_the_release_binds_koe1_and_exists_exactly_when_spr1_names_it() -> Test
     let mut extra = UNSTARTED;
     extra.present_release = Some(true);
     unstarted(&extra)?.rejects("a ReleaseV1 for an attempt never released");
+    // KOE1 status 2: the observation failed, which selects code 2, so no
+    // ReleaseV1 may bind it.
+    let failed = Fixture::released(TME1_A)?
+        .koe1(&[4], integer(2))?
+        .koe1(&[7], Value::Null)?
+        .tme1(&[26], integer(2))?;
+    build(failed, &Plan::new(&[11, 12, 2], 4))?
+        .rejects("a ReleaseV1 binding a KOE1 whose observation failed");
 
     let cases: [(&str, usize, Value); 5] = [
         ("attempt", 2, bytes(&[0x12; 16])),
@@ -515,21 +561,18 @@ fn the_encoders_reproduce_the_oracle_records() -> TestResult {
             let record = SandboxAuditRecord::self_digested(audit_fields(&decoded))?;
             assert_eq!(record.digest(), decoded.record_digest);
             let encoded = SandboxAuditRecord::new(sign(record, &key)?, &public)?;
-            assert_eq!(encoded.signature(), decoded.signature());
             assert_eq!(&encoded.to_canonical_cbor()?, oracle);
         }
         let decoded = SandboxProviderReceipt::from_canonical_cbor(&built.receipt)?;
         let record = SandboxProviderReceipt::self_digested(receipt_fields(&decoded))?;
         let encoded = SandboxProviderReceipt::new(sign(record, &key)?, &public)?;
         assert_eq!(encoded.receipt_digest(), decoded.receipt_digest());
-        assert_eq!(encoded.signature(), decoded.signature());
         assert_eq!(encoded.to_canonical_cbor()?, built.receipt);
 
         let decoded = SandboxProviderResult::from_canonical_cbor(&built.result)?;
         let record = SandboxProviderResult::self_digested(result_fields(&decoded))?;
         let encoded = SandboxProviderResult::new(sign(record, &key)?, &public)?;
         assert_eq!(encoded.result_digest(), decoded.result_digest());
-        assert_eq!(encoded.signature(), decoded.signature());
         assert_eq!(encoded.to_canonical_cbor()?, built.result);
     }
     Ok(())
@@ -610,12 +653,19 @@ fn audit_record(event_code: u8, authority_digests: Vec<[u8; 32]>) -> SandboxAudi
 #[test]
 fn sau1_binds_the_r9_authority_vectors_and_signs_its_domain() -> TestResult {
     let key = runtime_key();
-    for (event, vector) in [
-        (11, SAU1_EVENT_11_AUTHORITY),
-        (2, SAU1_EVENT_2_AUTHORITY),
-        (1, SAU1_EVENT_1_AUTHORITY),
+    for (event, vector, evidence) in [
+        (11, SAU1_EVENT_11_AUTHORITY, KOE1_A_DIGEST),
+        // R10 §8.3 replaced R9 §7.6 and §7.6a for these two (R10 D6).
+        (2, SAU1_EVENT_2_AUTHORITY, TME1_B_DIGEST),
+        (1, SAU1_EVENT_1_AUTHORITY, TME1_C_DIGEST),
     ] {
-        let record = SandboxAuditRecord::self_digested(audit_record(event, authority(vector)?))?;
+        let digests = authority(vector)?;
+        // The last digest is the KOE1 or TME1 the event binds.
+        assert_eq!(
+            digests.last().map(|digest| digest.to_vec()),
+            Some(unhex(evidence)?)
+        );
+        let record = SandboxAuditRecord::self_digested(audit_record(event, digests))?;
         // R9 §7.8: the SAU1 message is its domain followed by the digest.
         let mut message = b"PiglorOS.SAU1.Signature.v1\0".to_vec();
         message.extend(record.digest());
