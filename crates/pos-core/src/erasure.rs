@@ -4206,14 +4206,15 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Host-owned verifier for authorization attached to recovered erasure
-/// extensions and administrative resolutions.
+/// Host-owned verifier for the evidence of recovered erasure records.
 ///
-/// The persistence layer validates immutable structural bindings. The host
-/// remains responsible for interpreting retained #186/#187 evidence and
-/// checking capabilities, principals, policy, and trust semantics.
-/// This verifier revalidates already admitted evidence during recovery; it
-/// does not itself make the admission decision.
+/// It covers future-Fork extensions, administrative resolutions, attempt
+/// admissions, owner acknowledgements and receipts. The persistence layer
+/// validates immutable structural bindings. The host remains responsible
+/// for interpreting retained #186/#187 evidence and checking capabilities,
+/// principals, policy, trust, and signature semantics. This verifier
+/// revalidates already admitted evidence during recovery, once for each
+/// recovered record; it does not itself make the admission decision.
 pub trait ErasureRecoveryAuthorizationVerifierV1 {
     /// Verify the host admission which authorized one future-Fork extension.
     ///
@@ -4236,6 +4237,51 @@ pub trait ErasureRecoveryAuthorizationVerifierV1 {
     fn validate_administrative_resolution(
         &self,
         resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the host evidence of one recovered attempt admission.
+    ///
+    /// Recovery calls it once for each attempt of `request`, completed or
+    /// active, after the attempt's structural bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization, policy, trust, or provenance error
+    /// when the admission is not the attempt the host derives for `request`.
+    fn validate_attempt_admission(
+        &self,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the evidence of one recovered owner acknowledgement.
+    ///
+    /// Recovery calls it once for each acknowledgement it recovers, after
+    /// the acknowledgement binds its attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed owner, evidence, trust, or provenance error when the
+    /// retained evidence does not authenticate the acknowledgement.
+    fn validate_acknowledgement(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the signature commitment of one recovered receipt.
+    ///
+    /// Recovery calls it once for each completed attempt, with the attempt
+    /// admission the receipt closes, after the receipt's structural
+    /// bindings hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy, trust, signature, or provenance error when
+    /// the retained evidence does not authenticate the receipt.
+    fn validate_receipt(
+        &self,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
     ) -> Result<(), ErasureErrorV1>;
 }
 

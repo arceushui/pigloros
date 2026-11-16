@@ -800,6 +800,32 @@ impl ErasureCoordinatorAuthorityV1 for FixtureErasureAuthorityV1 {
         Ok(())
     }
 
+    fn validate_attempt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &pos_core::ErasureRequestV1,
+        _admission: &pos_core::ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_acknowledgement_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_receipt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _attempt: &pos_core::ErasureRetryAdmissionV1,
+        _receipt: &pos_core::ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
     fn verified_topology_observation(
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,

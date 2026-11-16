@@ -14,11 +14,12 @@ use pos_core::{
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedStateV1,
-    ErasureVerifiedTopologyObservationV1, Hash, LocalErasureAuthorizationV1, LocalErasureBundleV1,
-    LocalErasureIdempotencyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
-    PersistedAuthorityV1, TimelineId, TimelineMeta, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Hash,
+    LocalErasureAuthorizationV1, LocalErasureBundleV1, LocalErasureIdempotencyV1,
+    LocalErasureRejectionV1, LocalErasureSelectorV1, PersistedAuthorityV1, TimelineId,
+    TimelineMeta, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 
 use super::freeze::{extension_admitted, observation, ShortfallV1, LOCAL_FREEZE_POSITION};
@@ -256,6 +257,42 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::PolicyConflict)
+    }
+
+    /// A recovered ERRA1 must still be the attempt ADR-136 §5 derives for
+    /// its request, pinning a bundle that resolves, the retained one after
+    /// a rotation. The admission-time fences (expiry, the current bundle,
+    /// the subject fence) are not re-run.
+    fn validate_attempt_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        request: &ErasureRequestV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.attempt_verified(view, request, admission)
+    }
+
+    /// A recovered owner acknowledgement must carry a purpose-1 ELS1 over
+    /// its binding ELO1 by the signer of the bundle it pins, the retained
+    /// one after a rotation or a revocation.
+    fn validate_acknowledgement_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.acknowledgement_verified(view, acknowledgement)
+    }
+
+    /// A recovered receipt must issue at its §6 position under a purpose-2
+    /// ELS1 over its ERCB1 by the signer of the bundle its attempt pins,
+    /// the retained one after a rotation or a revocation.
+    fn validate_receipt_with_view(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        attempt: &ErasureRetryAdmissionV1,
+        receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.receipt_verified(view, attempt, receipt)
     }
 
     /// Bind every ERSC1 Timeline to the subject and every ERSE1 child to

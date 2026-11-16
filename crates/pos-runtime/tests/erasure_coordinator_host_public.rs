@@ -350,6 +350,32 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         Ok(())
     }
 
+    fn validate_attempt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _request: &pos_core::ErasureRequestV1,
+        _admission: &pos_core::ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_acknowledgement_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_receipt_with_view(
+        &self,
+        _view: &dyn ErasureAuthorityReadViewV1,
+        _attempt: &pos_core::ErasureRetryAdmissionV1,
+        _receipt: &pos_core::ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
     fn verified_topology_observation(
         &self,
         _view: &dyn ErasureAuthorityReadViewV1,
@@ -2469,6 +2495,14 @@ fn closed_authority_rejects_retry_and_acknowledgement_operations(
         authority.admit_acknowledgement(&view()?, &acknowledgement),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    assert_eq!(
+        authority.validate_attempt_with_view(&view()?, &request, &retry),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_acknowledgement_with_view(&view()?, &acknowledgement),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -2523,6 +2557,32 @@ fn closed_authority_rejects_receipt_and_administrative_operations(
     };
     assert_eq!(
         authority.admit_receipt(&view()?, &receipt),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let obligation = test_stage(
+        "construct closed-authority receipt obligation",
+        obligation(request_reference, persistence_target()),
+    )?;
+    let attempt = test_stage(
+        "construct closed-authority receipt attempt",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: &[obligation],
+            policy: reference(215),
+            trust: reference(216),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(217),
+        }),
+    )?;
+    let recovered = test_stage(
+        "construct closed-authority recovered receipt",
+        ErasureReceiptV1::new(receipt),
+    )?;
+    assert_eq!(
+        authority.validate_receipt_with_view(&view()?, &attempt, &recovered),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(

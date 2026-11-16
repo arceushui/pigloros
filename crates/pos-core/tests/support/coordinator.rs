@@ -21,7 +21,7 @@ use pos_core::{
     ErasureFreezeFailureV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
     ErasureInventoryObservationV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedTopologyObservationV1,
@@ -104,6 +104,9 @@ pub enum PublicCoordinatorOperation {
     ValidateFreezeAuthorization,
     ValidateScopeExtension,
     ValidateAdministrativeResolution,
+    ValidateAttemptAdmission,
+    ValidateAcknowledgement,
+    ValidateReceipt,
     AdmitAuthorization,
     AdmitCorrectedSubmission,
     AdmitAtomicFreeze,
@@ -1556,6 +1559,29 @@ impl ErasureRecoveryAuthorizationVerifierV1 for PublicCoordinatorPort {
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
         self.maybe_fail(PublicCoordinatorOperation::ValidateAdministrativeResolution)
+    }
+
+    fn validate_attempt_admission(
+        &self,
+        _request: &ErasureRequestV1,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::ValidateAttemptAdmission)
+    }
+
+    fn validate_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::ValidateAcknowledgement)
+    }
+
+    fn validate_receipt(
+        &self,
+        _attempt: &ErasureRetryAdmissionV1,
+        _receipt: &ErasureReceiptV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::ValidateReceipt)
     }
 }
 
