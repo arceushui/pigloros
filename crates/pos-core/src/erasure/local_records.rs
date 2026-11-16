@@ -479,8 +479,9 @@ pub fn local_erasure_fork_scope_v1(
 }
 
 /// `CA("ELFX1", [request, parent, child, lineage_rule])`, the ERSE1
-/// admission provenance of one Fork child of an affected parent. It is a
-/// pure digest that recovery recomputes from ERSE1 and the child's
+/// admission provenance of one Fork child of an affected parent.
+///
+/// It is a pure digest that recovery recomputes from ERSE1 and the child's
 /// `fork_point`; nothing is retained.
 ///
 /// # Errors
