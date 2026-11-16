@@ -113,8 +113,8 @@ pub trait ErasureAuthorityReadViewV1: view_sealed::Sealed {
 pub(crate) const VIEW_LIST_MAX: usize = pos_core::ERASURE_MAX_OBLIGATIONS_PER_CATEGORY;
 
 /// The view error of a failed ARD1 Timeline read: the read's bound
-/// overflow is the list's `ScopeInvalid`, any other failure an unreadable
-/// store.
+/// overflow is [`ErasureViewListErrorV1::OverBound`], any other failure an
+/// unreadable store.
 pub(crate) fn registration_read_error(
     error: pos_core::ArtifactRegistrationPersistenceErrorV1,
 ) -> ErasureViewListErrorV1 {

@@ -3079,14 +3079,26 @@ fn bound_ard1_rows_of_the_consented_class_are_targets() -> TestResult {
 impl LocalStore {
     /// Register the actor's role-0 subject keys of epochs `epochs`.
     fn register_subject_keys(&self, epochs: std::ops::RangeInclusive<u64>) -> TestResult {
+        self.register_subject_owner_keys(KeyRoleV1::SubjectDataEncryption, epochs)
+    }
+
+    /// Register keys of `role` and `epochs` under the actor's ADR-091
+    /// subject owner.
+    fn register_subject_owner_keys(
+        &self,
+        role: KeyRoleV1,
+        epochs: std::ops::RangeInclusive<u64>,
+    ) -> TestResult {
         let mut sqlite = self.sqlite()?;
         let mut registry = sqlite.load_key_registry()?.ok_or("no key registry")?;
+        let owner = subject_key(1)?.owner_id;
         for epoch in epochs {
             let mut material = [0x80; 32];
             material[..8].copy_from_slice(&epoch.to_be_bytes());
+            material[8] = role.code();
             registry
                 .register_key(KeyRegistrationV1::new(
-                    subject_key(epoch)?,
+                    KeyIdentityV1::from_parts(owner, role, epoch),
                     Hash::from_bytes(material),
                     None,
                 ))
@@ -3133,4 +3145,96 @@ fn the_key_and_backup_bound_is_exact_at_submit() -> TestResult {
     // 4,097 identities are over the key list's own bound.
     store.register_subject_keys(4_097..=4_097)?;
     over(&store, 3)
+}
+
+#[test]
+fn the_key_list_is_bounded_on_its_own() -> TestResult {
+    let store = LocalStore::new(&GrantShape::standard())?;
+    rejected(&store, &[1])?;
+    // One role-0 key and 4,095 role-7 keys of the subject owner: 4,096
+    // identities, a closure of two targets.
+    store.register_subject_keys(1..=1)?;
+    store.register_subject_owner_keys(KeyRoleV1::CommunityArtifactEncryption, 1..=4_095)?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        let mut sender = host.command_sender()?;
+        assert_eq!(
+            sender
+                .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+                .map_err(fail)?
+                .lifecycle(),
+            ErasureLifecycleV1::Submitted
+        );
+        sender.reject_erasure_request(request_of(1)?, rejection(1)?.reference()?)?;
+    }
+    // A 4,097th identity is over the list's bound, though the closure would
+    // still hold two targets.
+    store.register_subject_owner_keys(KeyRoleV1::CommunityArtifactEncryption, 4_096..=4_096)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?)
+            .map(drop),
+        Err(LocalErasureSubmitErrorV1::ScopeTooLarge)
+    );
+    Ok(())
+}
+
+#[test]
+fn no_timeline_is_deletable_under_the_host_and_the_partition_survives() -> TestResult {
+    let owned = OwnedStore::new()?;
+    let request = request_of(1)?;
+    let (host, _) = signed_freeze(
+        &owned.store,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    drop(host);
+    // A store bound to a fail-closed gate, as the erasure host binds it,
+    // refuses every direct deletion, affected or not.
+    {
+        let mut sqlite = SqliteStore::open(&owned.store.path)?;
+        sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
+        for timeline in [owned.owned, owned.other] {
+            assert!(matches!(
+                sqlite.delete_timeline(timeline),
+                Err(pos_core::CoreError::ErasureContainmentUnavailable)
+            ));
+        }
+    }
+    let mut host = owned.store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        lifecycle(&mut host, request)?,
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_frozen(&mut host, &[owned.owned], owned.other)
+}
+
+#[test]
+fn an_anchor_only_scope_freezes_and_recovers() -> TestResult {
+    // An actor with a role-0 key and no owned Timeline: ERSC1 is the
+    // subject anchor alone.
+    let store = LocalStore::new(&GrantShape::standard())?;
+    let other = store.owned_roots(other_actor(), 1)?[0];
+    store.register_subject_keys(1..=1)?;
+    let request = request_of(1)?;
+    let (host, signed) = signed_freeze(
+        &store,
+        1,
+        ErasureScopeV1::PrivateSubjectData,
+        |_| Ok(()),
+        |_| Ok(Vec::new()),
+    )?;
+    drop(host);
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        lifecycle(&mut host, request)?,
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_frozen(&mut host, &[], other)?;
+    let mut cells = store_cells()?;
+    cells.extend(subject_key_cells()?);
+    assert_committed_freeze(&store, host, request, Vec::new(), &cells, &signed)
 }
