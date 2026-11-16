@@ -372,7 +372,47 @@ def missing_citations(revision: str, spellings: tuple[str, ...]) -> list[str]:
     ]
 
 
+def check_prefilter() -> None:
+    """Strip only files that contain a guarded token, and still reject a guarded violation.
+
+    The prefilter is exact because stripping comments only removes text, so a file
+    whose raw bytes name no guarded token cannot match after stripping.
+    """
+    import check_plugin_trust_registry_impls as checker
+
+    stripped: list[str] = []
+    original = checker.strip_comments
+
+    def recording(text: str) -> str:
+        stripped.append(text)
+        return original(text)
+
+    files = {
+        "crates/pos-state/src/forged.rs": "struct S;\nimpl PluginTrustPolicyRegistryV1 for S {}\n",
+        # Rule 4 lints every registry module, so one without a guarded token is still read.
+        "crates/pos-store/src/plugin_trust_registry/mod.rs": "pub fn signature_ok() {}\n",
+        "crates/pos-state/src/plain.rs": "// plain\nfn plain() {}\n",
+    }
+    checker.strip_comments = recording
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            found = checker.violations(root)
+    finally:
+        checker.strip_comments = original
+    for relative in ("crates/pos-state/src/forged.rs", "crates/pos-store/src/plugin_trust_registry/mod.rs"):
+        if not any(finding.startswith(relative + ":") for finding in found):
+            raise SystemExit(f"prefilter hid the violation in {relative}: {found}")
+    if sorted(stripped) != sorted(files[relative] for relative in ("crates/pos-state/src/forged.rs", "crates/pos-store/src/plugin_trust_registry/mod.rs")):
+        raise SystemExit(f"prefilter stripped a file without a guarded token: {stripped}")
+
+
 def main() -> None:
+    check_prefilter()
     missing = missing_citations("5", ("revision 5", "revisions 4 and 5", "revisions 4, 5")) + (
         missing_citations("7", ("revision 7", "revisions 4, 5 and 7"))
     )
