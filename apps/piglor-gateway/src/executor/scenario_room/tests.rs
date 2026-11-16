@@ -455,19 +455,26 @@ fn a_revision_identity_is_never_appended_twice() -> TestResult {
     Ok(())
 }
 
-/// A host refusal is the room's store failure: a room whose Timeline the
-/// erasure fence froze cannot be read.
+/// A host refusal is the room's store failure: a room whose Timeline holds
+/// an Event past the revision read bounds cannot be read.
 #[test]
-fn a_frozen_room_is_a_store_failure() -> TestResult {
+fn a_host_refusal_is_a_store_failure() -> TestResult {
     let mut host = host(true)?;
     let created = ok(create(&mut host, 1, 1, 1, &admission()?)?)?;
     let (_, stored) = stored_of(&created);
-    host.freeze_timeline_for_test(stored.timeline);
+    host.command_sender()?.append(
+        stored.timeline,
+        &[EventDraft::new(
+            EntityId::new(),
+            Kind::new("x".repeat(ROOM_REVISION_EVENT_TYPE.len() + 1)),
+            CanonicalBytes::from_vec(Vec::new()),
+        )],
+    )?;
     assert_eq!(
         refusal(read(&mut host, stored.descriptor.room_id(), 1)?),
         format!(
             "{:?}",
-            RoomStoreErrorV1::Store(CoreError::ErasureAccessFrozen)
+            RoomStoreErrorV1::Store(host_error_to_core(ErasureHostErrorV1::AdapterFailure))
         )
     );
     Ok(())
