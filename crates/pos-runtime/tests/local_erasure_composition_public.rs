@@ -3617,6 +3617,7 @@ impl Attempted {
             local: case.compose(&mut self.store.sqlite()?).map_err(fail)?,
             attempts,
             attempt_results: Mutex::new(Vec::new()),
+            frozen_trusts: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
         });
         let composition = ErasureCoordinatorCompositionV1::new(
@@ -3668,13 +3669,15 @@ impl Attempted {
 }
 
 /// The Local authority, probed inside real host commands: each attempt
-/// admission also evaluates `attempts` over the same host-built view, and
-/// each receipt admission records the normalized ERC1 input, so a test can
-/// sign the ERCB1 a signer re-derives from the committed record.
+/// admission also evaluates `attempts` and records the frozen trust of its
+/// request over the same host-built view, and each receipt admission
+/// records the normalized ERC1 input, so a test can sign the ERCB1 a
+/// signer re-derives from the committed record.
 struct Probe {
     local: ErasureCoordinatorCompositionV1,
     attempts: Vec<ErasureRetryAdmissionV1>,
     attempt_results: Mutex<Vec<Result<(), ErasureErrorV1>>>,
+    frozen_trusts: Mutex<Vec<Result<Option<ErasureReferenceV1>, ErasureErrorV1>>>,
     receipts: Mutex<Vec<ErasureReceiptInputV1>>,
 }
 
@@ -3854,10 +3857,17 @@ impl ErasureCoordinatorAuthorityV1 for Probe {
                     .map(drop)
             })
             .collect::<Vec<_>>();
+        let frozen = view.frozen_trust(admission.request());
         self.attempt_results
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)
             .map(|mut results| results.extend(probed))
+            .and_then(|()| {
+                self.frozen_trusts
+                    .lock()
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)
+                    .map(|mut trusts| trusts.push(frozen))
+            })
             .and_then(|()| self.local.authority().admit_attempt(view, admission))
     }
 
@@ -4420,6 +4430,47 @@ fn rotated_bundle(store: &LocalStore) -> TestResult<LocalErasureBundleV1> {
     Ok(rotated)
 }
 
+impl Attempted {
+    /// Acknowledge `retry` positively for each of `unresolved`, and
+    /// finalize its complete receipt at its two executed obligations past
+    /// admission.
+    fn complete_retry(
+        &self,
+        retry: &ErasureRetryAdmissionV1,
+        unresolved: &[ErasureObligationV1],
+    ) -> TestResult {
+        // The retry's complete receipt issues at its two executed obligations
+        // past admission.
+        let acknowledgements =
+            self.signed_results(retry, unresolved, (&erasure_signer(), 1), |_| None)?;
+        {
+            let mut host = self.host()?;
+            let mut sender = host.command_sender()?;
+            for acknowledged in acknowledgements {
+                sender.acknowledge_erasure(self.request, acknowledged)?;
+            }
+        }
+        let issue = retry.admitted_position() + 2;
+        let body = self.receipt_body(&receipt_input(&self.obligations, issue, reference(0xee)))?;
+        let signed = signature_record(
+            LocalErasureSignaturePurposeV1::ReceiptBody,
+            body,
+            &erasure_signer(),
+            1,
+        )?;
+        self.store.retain(&[signed.clone()])?;
+        let mut host = self.host()?;
+        let complete = host.command_sender()?.finalize_erasure_request(
+            self.request,
+            &receipt_input(&self.obligations, issue, signature_address(&signed)?),
+        )?;
+        assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
+        assert_eq!(complete.issue_position(), issue);
+        assert_eq!(complete.trust(), self.bundle.reference()?);
+        Ok(())
+    }
+}
+
 #[test]
 fn a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position() -> TestResult {
     let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
@@ -4442,10 +4493,11 @@ fn a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position() -
         trust: rotated.reference()?,
         ..input.clone()
     })?;
+    let frozen = attempted.bundle.reference()?;
+    let current = rotated.reference()?;
+    let (mut host, rotated_probe) =
+        attempted.probe_host(&Case::signed(&rotated, &bundle_root(), &[])?, Vec::new())?;
     {
-        let mut host = attempted
-            .store
-            .host(&Case::signed(&rotated, &bundle_root(), &[])?, 4_096)?;
         let mut sender = host.command_sender()?;
         for refused in [&rotated_retry, &retry] {
             assert_eq!(
@@ -4456,6 +4508,21 @@ fn a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position() -
             );
         }
     }
+    drop(host);
+    // The view inside each admission records the frozen trust as the
+    // original bundle. The retry pinning the current, retained bundle is
+    // therefore refused by the frozen-trust check; the retry pinning the
+    // frozen trust passes it and is refused because that bundle is not
+    // current.
+    let observed = rotated_probe
+        .frozen_trusts
+        .lock()
+        .map_err(|_| "probe poisoned")?
+        .clone();
+    assert_eq!(observed, [Ok(Some(frozen)), Ok(Some(frozen))]);
+    assert_eq!(rotated_retry.trust(), current);
+    assert_ne!(current, frozen);
+    assert_eq!(retry.trust(), frozen);
     // Under the frozen bundle the retry is admitted. Inside its admission
     // the authority admits ordinal 63 and refuses ordinal 64: the quota is
     // 64 attempts per request.
@@ -4482,39 +4549,7 @@ fn a_retry_pins_only_the_frozen_bundle_and_completes_at_its_reached_position() -
         .map_err(|_| "probe poisoned")?
         .clone();
     assert_eq!(results, [Ok(()), Err(ErasureErrorV1::PolicyConflict)]);
-    // The retry's complete receipt issues at its two executed obligations
-    // past admission.
-    let acknowledgements =
-        attempted.signed_results(&retry, &unresolved, (&erasure_signer(), 1), |_| None)?;
-    {
-        let mut host = attempted.host()?;
-        let mut sender = host.command_sender()?;
-        for acknowledged in acknowledgements {
-            sender.acknowledge_erasure(request, acknowledged)?;
-        }
-    }
-    let issue = retry.admitted_position() + 2;
-    let body = attempted.receipt_body(&receipt_input(
-        &attempted.obligations,
-        issue,
-        reference(0xee),
-    ))?;
-    let signed = signature_record(
-        LocalErasureSignaturePurposeV1::ReceiptBody,
-        body,
-        &erasure_signer(),
-        1,
-    )?;
-    attempted.store.retain(&[signed.clone()])?;
-    let mut host = attempted.host()?;
-    let complete = host.command_sender()?.finalize_erasure_request(
-        request,
-        &receipt_input(&attempted.obligations, issue, signature_address(&signed)?),
-    )?;
-    assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
-    assert_eq!(complete.issue_position(), issue);
-    assert_eq!(complete.trust(), attempted.bundle.reference()?);
-    drop(host);
+    attempted.complete_retry(&retry, &unresolved)?;
     let mut host = attempted.host()?;
     assert_eq!(lifecycle(&mut host, request)?, ErasureLifecycleV1::Complete);
     Ok(())

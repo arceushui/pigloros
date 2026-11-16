@@ -411,9 +411,14 @@ pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
         .and_then(|manifest| {
             manifest
                 .and_then(|manifest| manifest.scope)
-                .map(|scope| {
-                    port.read_object(scope)
+                .map(|reference| {
+                    port.read_object(reference)
                         .and_then(|bytes| ErasureScopeCommitmentV1::from_canonical_cbor(&bytes))
+                        .and_then(|scope| {
+                            (scope.reference() == reference)
+                                .then_some(scope)
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        })
                         .and_then(|scope| {
                             port.scope_index_count(request)
                                 .and_then(|count| {
@@ -485,10 +490,14 @@ pub(super) fn recorded_obligation_trust<P: ErasurePersistencePortV1 + ?Sized>(
         .and_then(|manifest| {
             manifest
                 .and_then(|manifest| manifest.obligation_set)
-                .map(|set| {
-                    port.read_object(set)
+                .map(|reference| {
+                    port.read_object(reference)
                         .and_then(|bytes| ErasureObligationSetV1::from_canonical_cbor(&bytes))
-                        .map(|set| set.trust())
+                        .and_then(|set| {
+                            (set.reference() == reference)
+                                .then_some(set.trust())
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        })
                 })
                 .transpose()
         })
@@ -3654,6 +3663,118 @@ mod tests {
         assert_eq!(
             recorded_active_attempt(&active_attempt_port(&foreign)?, request),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    /// The manifest of `manifest_value` without an active attempt, with
+    /// `field` set to `reference`.
+    fn manifest_naming(field: usize, reference: ErasureReferenceV1) -> Value {
+        let mut manifest = manifest_value(Value::Null);
+        if let Value::Array(fields) = &mut manifest {
+            fields[field] = digest(reference);
+        }
+        manifest
+    }
+
+    /// A port whose stored manifest is `manifest` and whose objects are
+    /// `objects`.
+    fn manifest_port(
+        manifest: &Value,
+        objects: Vec<(ErasureReferenceV1, Vec<u8>)>,
+    ) -> Result<TestPersistencePort, ErasureErrorV1> {
+        let bytes = encode_limited(manifest, ERASURE_COORDINATOR_RECORD_MAX_BYTES)?;
+        let mut port = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        port.manifest = Some(StoredErasureManifestV1::new(
+            ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &bytes)),
+            bytes,
+        )?);
+        port.objects.extend(objects);
+        Ok(port)
+    }
+
+    #[test]
+    fn the_recorded_obligation_trust_is_the_frozen_sets_own() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let set_of = |trust| {
+            ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+                request,
+                obligations: Vec::new(),
+                policy: reference(6),
+                trust,
+            })
+        };
+        let set = set_of(reference(0x70))?;
+        let other = set_of(reference(0x71))?;
+        let named = manifest_naming(12, set.reference());
+        // No manifest, or a manifest without an obligation set: no trust.
+        let empty = TestPersistencePort::new(None, ErasureCasEffectV1::None);
+        assert_eq!(recorded_obligation_trust(&empty, request), Ok(None));
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&manifest_value(Value::Null), Vec::new())?,
+                request
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&named, vec![(set.reference(), set.to_canonical_cbor()?)])?,
+                request
+            ),
+            Ok(Some(reference(0x70)))
+        );
+        // A missing or undecodable set, or another set under its address,
+        // fails closed.
+        assert_eq!(
+            recorded_obligation_trust(&manifest_port(&named, Vec::new())?, request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert!(recorded_obligation_trust(
+            &manifest_port(&named, vec![(set.reference(), vec![0])])?,
+            request
+        )
+        .is_err());
+        assert_eq!(
+            recorded_obligation_trust(
+                &manifest_port(&named, vec![(set.reference(), other.to_canonical_cbor()?)])?,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        // The sealed trait forwards to the same read.
+        assert_eq!(
+            crate::ErasureRecordedAttemptReadV1::recorded_obligation_trust(&empty, request),
+            Ok(None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_scope_is_the_committed_scope_itself() -> Result<(), ErasureErrorV1> {
+        let request = reference(1);
+        let committed = scope(request)?;
+        let other = scope(reference(2))?;
+        let named = manifest_naming(7, committed.reference());
+        assert_eq!(
+            recorded_scope(
+                &manifest_port(
+                    &named,
+                    vec![(committed.reference(), other.to_canonical_cbor()?)]
+                )?,
+                request
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            recorded_scope(
+                &manifest_port(
+                    &named,
+                    vec![(committed.reference(), committed.to_canonical_cbor()?)]
+                )?,
+                request
+            ),
+            Ok(Some((committed, Vec::new())))
         );
         Ok(())
     }
