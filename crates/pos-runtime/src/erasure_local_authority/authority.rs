@@ -15,7 +15,7 @@ use pos_core::{
     ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureLifecycleV1, ErasureReceiptInputV1,
     ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedStateV1,
     ErasureVerifiedTopologyObservationV1, Hash, LocalErasureAuthorizationV1, LocalErasureBundleV1,
     LocalErasureIdempotencyV1, LocalErasureRejectionV1, LocalErasureSelectorV1,
     PersistedAuthorityV1, TimelineId, TimelineMeta, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
@@ -38,6 +38,9 @@ pub(super) struct LocalErasureAuthorityV1 {
     pub(super) bundle: LocalErasureBundleV1,
     /// The installed TPS1 `offline_valid_through`, in Unix seconds (UTC).
     pub(super) trust_expiry: u64,
+    /// The installed TPS1 `revoked_key_ids`: a bundle whose root or signer
+    /// it names can never sign again (ADR-136 §5, *Compromise*).
+    pub(super) revoked_key_ids: Vec<String>,
     /// The clock new admissions are checked against, in Unix seconds (UTC).
     pub(super) clock: fn() -> u64,
     /// The Local Principal root grant (owner decision Q2).
@@ -213,6 +216,14 @@ impl LocalErasurePreparationV1 for LocalErasureAuthorityV1 {
             })
             .map(|draft| (draft.body_digest, draft.retained))
     }
+
+    fn holds_subject(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        state: &ErasureVerifiedStateV1,
+    ) -> bool {
+        Self::holds_subject(self, view, state)
+    }
 }
 
 impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
@@ -301,6 +312,7 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
                                 LOCAL_ERASURE_STORE_REQUEST_RESERVE_V1,
                                 principal.grant.scope().actor_entity_ids().len(),
                             ),
+                            |state| self.holds_subject(view, state),
                         )
                         .map_err(|_| ErasureErrorV1::PolicyConflict)
                     })
@@ -490,27 +502,38 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
             .ok_or(ErasureErrorV1::ScopeInvalid)
     }
 
+    /// Recompute ERRA1 (ADR-136 §5): the request's ERAZ1, the ELP1 ERQ1
+    /// pins, the bundle current at admission and the §6 positions, within
+    /// the lifetime attempt quota. It needs no signature, but like every
+    /// new admission it closes on expiry, and it is refused while another
+    /// request of the subject holds it.
     fn admit_attempt(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _admission: &ErasureRetryAdmissionV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        self.admits_new_work()
+            .and_then(|()| self.attempt_admitted(view, admission))
     }
 
+    /// The evidence must be a purpose-1 ELS1 over the ELO1 of exactly this
+    /// command, obligation, owner and attempt, with the same outcome.
+    /// Completing admitted work does not close on expiry.
     fn admit_acknowledgement(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        self.acknowledgement_admitted(view, acknowledgement)
     }
 
+    /// The receipt must issue at its §6 position under a purpose-2 ELS1
+    /// over its ERCB1. Completing admitted work does not close on expiry.
     fn admit_receipt(
         &self,
-        _view: &dyn ErasureAuthorityReadViewV1,
-        _input: &ErasureReceiptInputV1,
+        view: &dyn ErasureAuthorityReadViewV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<(), ErasureErrorV1> {
-        Err(ErasureErrorV1::ProvenanceMissing)
+        self.receipt_admitted(view, input)
     }
 }

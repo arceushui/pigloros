@@ -679,6 +679,15 @@ pub(crate) trait LocalErasurePreparationV1: Send + Sync {
         view: &dyn ErasureAuthorityReadViewV1,
         request: ErasureReferenceV1,
     ) -> Result<(ErasureReferenceV1, Vec<Vec<u8>>), ErasureErrorV1>;
+
+    /// Whether `state` holds its subject's one active erasure on this view:
+    /// it is pre-terminal or has an active attempt, unless that attempt is
+    /// pinned to a bundle the installed TPS1 revokes.
+    fn holds_subject(
+        &self,
+        view: &dyn ErasureAuthorityReadViewV1,
+        state: &ErasureVerifiedStateV1,
+    ) -> bool;
 }
 
 /// One Local erasure submission from the Gateway (ADR-136 §6).
@@ -697,8 +706,8 @@ pub struct LocalErasureSubmissionV1 {
 /// The typed refusals of [`ErasureCommandSenderV1::submit_local_erasure`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalErasureSubmitErrorV1 {
-    /// Another request of the subject has not reached its first receipt;
-    /// retryable.
+    /// Another request of the subject has not reached its first receipt or
+    /// has an active attempt; retryable.
     Concurrent,
     /// The subject has used its lifetime request quota.
     QuotaExhausted,
@@ -863,10 +872,8 @@ pub(crate) enum LocalSubjectRefusalV1 {
 }
 
 /// Whether a request of this lifecycle has not reached its first receipt
-/// (ADR-136 §6).
-///
-/// No destruction attempt can be admitted before attempt admission lands,
-/// so a `partial-failure` request never has an active one.
+/// (ADR-136 §6). A `partial-failure` request with an active retry attempt
+/// also holds its subject, through the authority's active-attempt read.
 pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
     matches!(
         lifecycle,
@@ -880,19 +887,21 @@ pub(crate) const fn is_pre_terminal(lifecycle: ErasureLifecycleV1) -> bool {
 
 /// The ADR-136 §6 admission checks of one more request of `subject`.
 ///
-/// Over the installed requests, the subject may have no pre-terminal
-/// request, and fewer than its lifetime quota
+/// Over the installed requests, no request of the subject may `hold` it
+/// (be pre-terminal or have an active attempt), and the subject must have
+/// fewer requests than its lifetime quota
 /// `floor((maximum_requests - reserve) / A)`.
 pub(crate) fn local_subject_admission<'state>(
     states: impl Iterator<Item = &'state ErasureVerifiedStateV1>,
     subject: ErasureReferenceV1,
     (maximum_requests, reserve, actors): (usize, u64, usize),
+    holds: impl Fn(&ErasureVerifiedStateV1) -> bool,
 ) -> Result<(), LocalSubjectRefusalV1> {
     let mut count = 0_u64;
     let mut concurrent = false;
     for state in states.filter(|state| state.request().subject() == subject) {
         count += 1;
-        concurrent |= is_pre_terminal(state.lifecycle());
+        concurrent |= holds(state);
     }
     let quota = u64::try_from(maximum_requests)
         .ok()
@@ -1021,6 +1030,18 @@ impl ErasureAuthorityStoreReadsV1 for RefCell<&mut dyn ErasureHostStore> {
             .ok_or(ErasureErrorV1::ProvenanceMissing)
             .and_then(|store| {
                 pos_core::ErasureRecordedScopeReadV1::recorded_scope(&**store, request)
+            })
+    }
+
+    fn active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+        self.try_borrow()
+            .ok()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|store| {
+                pos_core::ErasureRecordedAttemptReadV1::recorded_active_attempt(&**store, request)
             })
     }
 
@@ -4264,7 +4285,8 @@ impl ErasureCommandSenderV1<'_> {
     ///
     /// # Errors
     /// Returns [`LocalErasureSubmitErrorV1::Concurrent`] while another
-    /// request of the subject is pre-terminal,
+    /// request of the subject is pre-terminal or has an active attempt not
+    /// pinned to a revoked bundle,
     /// [`LocalErasureSubmitErrorV1::QuotaExhausted`] once the subject's
     /// quota is used, and otherwise a payload-free host error: a host with
     /// no Local composition or Local Principal record refuses with
@@ -4306,21 +4328,31 @@ impl ErasureCommandSenderV1<'_> {
                     ErasureHostErrorV1::Conflict,
                 ));
         }
-        local_subject_admission(
-            installed.states(),
-            records.request.subject(),
-            (
-                self.host.recovery_limits.maximum_requests(),
-                binding.store_request_reserve,
-                records.actors,
-            ),
-        )?;
+        let subject = records.request.subject();
+        let limits = (
+            self.host.recovery_limits.maximum_requests(),
+            binding.store_request_reserve,
+            records.actors,
+        );
         self.with_local_view(installed, |view| {
-            binding
-                .preparation
-                .closure_fits(view, submission.actor, submission.scope)
+            local_subject_admission(
+                view.verified_requests().into_iter(),
+                subject,
+                limits,
+                |state| binding.preparation.holds_subject(view, state),
+            )
+            .map_or_else(
+                |refusal| Ok(Err(refusal)),
+                |()| {
+                    binding
+                        .preparation
+                        .closure_fits(view, submission.actor, submission.scope)
+                        .map(Ok)
+                },
+            )
         })
         .map_err(LocalErasureSubmitErrorV1::from)
+        .and_then(|admission| admission.map_err(LocalErasureSubmitErrorV1::from))
         .and_then(|fits| {
             fits.then_some(())
                 .ok_or(LocalErasureSubmitErrorV1::ScopeTooLarge)

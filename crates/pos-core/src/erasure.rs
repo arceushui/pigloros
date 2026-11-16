@@ -3953,8 +3953,31 @@ pub trait ErasureRecordedScopeReadV1: recorded_scope_sealed::Sealed {
     ) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1>;
 }
 
+/// The admission of one request's active attempt, read through its current
+/// manifest without validating the record.
+///
+/// ADR-136 §5 and §6 need it for the `admit_attempt` subject fence and the
+/// active-attempt leg of pre-terminal.
+///
+/// The trait is sealed and implemented for every persistence port, so no
+/// adapter can override it. The result is evidence, not authority: core
+/// recovery verifies the record itself.
+pub trait ErasureRecordedAttemptReadV1: recorded_scope_sealed::Sealed {
+    /// The request's active attempt admission, `Ok(None)` when it has no
+    /// manifest or no active attempt.
+    ///
+    /// # Errors
+    /// Once the manifest records an active attempt, a closed read or
+    /// decoding error of its admission.
+    fn recorded_active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1>;
+}
+
 mod recorded_scope_sealed {
-    /// Keeps [`super::ErasureRecordedScopeReadV1`] core-implemented.
+    /// Keeps [`super::ErasureRecordedScopeReadV1`] and
+    /// [`super::ErasureRecordedAttemptReadV1`] core-implemented.
     pub trait Sealed {}
 
     impl<P: super::ErasurePersistencePortV1 + ?Sized> Sealed for P {}
@@ -3967,6 +3990,15 @@ impl<P: ErasurePersistencePortV1 + ?Sized> ErasureRecordedScopeReadV1 for P {
     ) -> Result<Option<(ErasureScopeCommitmentV1, Vec<ErasureScopeExtensionV1>)>, ErasureErrorV1>
     {
         persistence::recorded_scope(self, request)
+    }
+}
+
+impl<P: ErasurePersistencePortV1 + ?Sized> ErasureRecordedAttemptReadV1 for P {
+    fn recorded_active_attempt(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+        persistence::recorded_active_attempt(self, request)
     }
 }
 

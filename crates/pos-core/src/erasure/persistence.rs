@@ -441,6 +441,34 @@ pub(super) fn recorded_scope<P: ErasurePersistencePortV1 + ?Sized>(
         })
 }
 
+/// Read the admission of a request's active attempt through its current
+/// manifest, without validating the record.
+pub(super) fn recorded_active_attempt<P: ErasurePersistencePortV1 + ?Sized>(
+    port: &P,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureRetryAdmissionV1>, ErasureErrorV1> {
+    port.read_manifest(request)
+        .and_then(|stored| {
+            stored
+                .map(|stored| ManifestV1::decode(stored.canonical_cbor()))
+                .transpose()
+        })
+        .and_then(|manifest| {
+            manifest
+                .and_then(|manifest| manifest.active)
+                .map(|active| {
+                    port.read_object(active.admission)
+                        .and_then(|bytes| ErasureRetryAdmissionV1::from_canonical_cbor(&bytes))
+                        .and_then(|admission| {
+                            (admission.reference() == active.admission)
+                                .then_some(admission)
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        })
+                })
+                .transpose()
+        })
+}
+
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
 }

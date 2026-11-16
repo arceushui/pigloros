@@ -4,10 +4,12 @@
 //! composition-time verification of the installed ELB1/ELB1S bundle against
 //! the profile's TPS1 anchor and the store (ADR-136 §4, *Bundle*), and the
 //! verify-only `LocalErasureAuthorityV1` that composition installs over the
-//! verified bundle. The executor, signer and driver of ADR-136 §1 are later
-//! slices of the same module.
+//! verified bundle, from submission through freeze to attempt,
+//! acknowledgement and receipt admission. The executor, signer and driver of
+//! ADR-136 §1 are later slices of the same module.
 
 mod authority;
+mod destruction;
 mod freeze;
 mod policy;
 
@@ -156,6 +158,7 @@ impl ErasureCoordinatorCompositionV1 {
                         let authority = Arc::new(LocalErasureAuthorityV1 {
                             bundle,
                             trust_expiry: inputs.trust.expiry(),
+                            revoked_key_ids: inputs.trust.snapshot().revoked_key_ids.clone(),
                             clock: inputs.clock,
                             principal_grant: inputs.principal_grant,
                             authority_timeline: inputs.authority_timeline,
