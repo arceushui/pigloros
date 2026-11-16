@@ -41,6 +41,12 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// The composition-root seal of the local experiment host (ADR-129 A5.9, #1374): this crate
+/// is the trusted composition root of its sessions and the only place it is minted. Private to
+/// the crate; it is passed only by reference.
+static AUTHORITY_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn bind_test_erasure_gate(registry: &mut PluginRegistry) {
@@ -965,7 +971,7 @@ fn observe_scheduled_admission(
     registry: &PluginRegistry,
     timeline_id: pos_core::ids::TimelineId,
 ) -> Result<PipelineSecurityRevisionsV1, ExperimentError> {
-    LocalScheduledAdmissionHostV1::shared()
+    LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
         .and_then(|host| host.observe(registry, store, timeline_id))
         .map_err(map_runtime_error)
 }
@@ -996,7 +1002,7 @@ fn admit_scheduled_pass_receipt(
     commit_head: pos_core::clock::Seq,
     commit_now_secs: u64,
 ) -> Result<Option<pos_core::PipelineCommitReceiptV1>, ExperimentError> {
-    LocalScheduledAdmissionHostV1::shared()
+    LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
         .and_then(|host| host.admit(registry, store, revisions, commit_head, commit_now_secs))
         .map_err(map_runtime_error)
 }
@@ -1063,7 +1069,7 @@ fn admit_human_action(
                 .map_err(ExperimentError::from)
         })
         .and_then(|(revisions, head)| {
-            LocalScheduledAdmissionHostV1::shared()
+            LocalScheduledAdmissionHostV1::shared(&AUTHORITY_TRUST_ROOT)
                 .map_err(map_runtime_error)
                 .and_then(|host| {
                     host.admit_action(registry, store, proposal, revisions, (timeline_id, head))
@@ -8527,6 +8533,7 @@ mod coverage_entrypoints {
         let timeline = ok(store.create_timeline("foreign-authority-host"));
         let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
             pos_core::AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
                 pos_core::Hash::from_bytes([3; 32]),
                 vec![pos_core::Hash::from_bytes([4; 32])],
                 Vec::new(),
@@ -8583,6 +8590,7 @@ mod coverage_entrypoints {
         .start());
         let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
             pos_core::AuthorityRegistrySnapshotV1::try_new(
+                &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
                 pos_core::Hash::from_bytes([5; 32]),
                 vec![pos_core::Hash::from_bytes([6; 32])],
                 Vec::new(),
