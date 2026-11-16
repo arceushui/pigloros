@@ -373,7 +373,7 @@ fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> 
     let sent = barrier.sent_release();
     assert_eq!(received, sent);
     let release = sent.ok_or("no release was sent")?;
-    let fields = &release.fields;
+    let fields = release.fields();
     assert_eq!(fields.attempt_id, ATTEMPT);
     assert_eq!(fields.nonce, barrier.parameters.nonce);
     assert_eq!(fields.expected_readback_digest, EXPECTED_READBACK);
@@ -398,12 +398,12 @@ fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> 
 
 fn check_authority(release: &ExecutionRelease) {
     let admitted = authority();
-    assert_eq!(release.fields.trs1_digest, admitted.trs1_digest);
-    assert_eq!(release.fields.rvs1_digest, admitted.rvs1_digest);
-    assert_eq!(release.fields.apt1_digest, admitted.apt1_digest);
-    assert_eq!(release.fields.trust_epoch, admitted.trust_epoch);
-    assert_eq!(release.fields.revocation_epoch, admitted.revocation_epoch);
-    assert_eq!(release.fields.policy_epoch, admitted.policy_epoch);
+    assert_eq!(release.fields().trs1_digest, admitted.trs1_digest);
+    assert_eq!(release.fields().rvs1_digest, admitted.rvs1_digest);
+    assert_eq!(release.fields().apt1_digest, admitted.apt1_digest);
+    assert_eq!(release.fields().trust_epoch, admitted.trust_epoch);
+    assert_eq!(release.fields().revocation_epoch, admitted.revocation_epoch);
+    assert_eq!(release.fields().policy_epoch, admitted.policy_epoch);
 }
 
 /// The kernel thread id of a thread that stays alive until the sender drops.
@@ -1286,9 +1286,12 @@ mod kernel_observation {
         let (evidence, released) = observed_with(Observing::ReadsUnit, Behaviour::Normal).await?;
         released?;
         let release = evidence.release().ok_or("no release")?;
-        assert_eq!(evidence.ready1_digest(), Some(release.fields.ready1_digest));
+        assert_eq!(
+            evidence.ready1_digest(),
+            Some(release.fields().ready1_digest)
+        );
         let frozen = evidence.kernel_observation_evidence().ok_or("no KOE1")?;
-        assert_eq!(release.fields.observed_readback_digest, frozen.digest());
+        assert_eq!(release.fields().observed_readback_digest, frozen.digest());
         let observation = evidence.observation().ok_or("no observation")?;
         assert_eq!(observation.main_pid(), own_pid());
         assert!(evidence.work().is_none());
@@ -1497,7 +1500,7 @@ mod kernel_observation {
         // The release binds the KOE1 of the production readback.
         let release = evidence.release().ok_or("no release")?;
         let frozen = evidence.kernel_observation_evidence().ok_or("no KOE1")?;
-        assert_eq!(release.fields.observed_readback_digest, frozen.digest());
+        assert_eq!(release.fields().observed_readback_digest, frozen.digest());
         let KernelObservationStatus::Observed {
             ready1_digest,
             observation: state,
@@ -1505,7 +1508,7 @@ mod kernel_observation {
         else {
             return Err("the KOE1 is not observed".into());
         };
-        assert_eq!(*ready1_digest, release.fields.ready1_digest);
+        assert_eq!(*ready1_digest, release.fields().ready1_digest);
         let observation = evidence.observation().ok_or("no observation")?;
         assert_eq!(observation.main_pid(), own_pid());
         assert_eq!(observation.invocation_id(), INVOCATION);

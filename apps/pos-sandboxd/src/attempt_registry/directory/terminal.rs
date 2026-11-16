@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::super::delete_record;
 use super::{PlannedAttemptIntent, PreparedAttemptDirectory, SystemdAttemptRegistryError};
-use crate::{ReleasedAttemptRoot, SystemdAttemptUnitTeardownObservation};
+use crate::{AttemptCgroupEmptyBasis, ReleasedAttemptRoot, SystemdAttemptUnitTeardownObservation};
 
 type TerminalResult<T = ()> = Result<T, SystemdAttemptRegistryError>;
 
@@ -30,6 +30,7 @@ pub enum AttemptUnitTermination<'a> {
 #[derive(Debug, Eq, PartialEq)]
 pub struct CompletedAttemptCleanup {
     intent: PlannedAttemptIntent,
+    empty_basis: Option<AttemptCgroupEmptyBasis>,
 }
 
 impl CompletedAttemptCleanup {
@@ -37,6 +38,14 @@ impl CompletedAttemptCleanup {
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {
         &self.intent
+    }
+
+    /// TME1 `cleanup.empty-basis`: how the bound cgroup was proved empty
+    /// after the unit was stopped; `None` when no unit start was requested,
+    /// so no cgroup was bound.
+    #[must_use]
+    pub const fn empty_basis(&self) -> Option<AttemptCgroupEmptyBasis> {
+        self.empty_basis
     }
 }
 
@@ -112,6 +121,10 @@ impl PreparedAttemptDirectory {
         let Ok(mut state) = self.planned.state.lock() else {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         };
+        let empty_basis = match unit {
+            AttemptUnitTermination::Unsubmitted => None,
+            AttemptUnitTermination::Stopped(observed) => Some(observed.cgroup_empty().basis()),
+        };
         let result = self
             .require_terminal_evidence(unit, root)
             .and_then(|()| self.remove_tree())
@@ -126,6 +139,7 @@ impl PreparedAttemptDirectory {
         drop(state);
         result.map(|()| CompletedAttemptCleanup {
             intent: self.intent().clone(),
+            empty_basis,
         })
     }
 

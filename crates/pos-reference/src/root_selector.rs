@@ -5161,7 +5161,7 @@ mod tests {
                 begun: 0,
                 refusal: if already_classified {
                     ProviderTransportError::AfterAdmission {
-                        agr1_digest: grant.grant_digest,
+                        agr1_digest: grant.grant_digest(),
                         failure: expected_failure,
                     }
                 } else {
@@ -5184,7 +5184,7 @@ mod tests {
             assert!(matches!(
                 &execution.result,
                 Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
-                    if *agr1_digest == grant.grant_digest
+                    if *agr1_digest == grant.grant_digest()
                         && *failure == expected_failure
             ));
             assert_eq!(admission.begun, 2);
@@ -5258,7 +5258,7 @@ mod tests {
         assert!(matches!(
             &execution.result,
             Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
-                if *agr1_digest == grant.grant_digest
+                if *agr1_digest == grant.grant_digest()
                     && *failure == PostAdmissionProviderFailure::EvidenceInvalid
         ));
         assert!(provider_retains_namespace(&execution.result));
