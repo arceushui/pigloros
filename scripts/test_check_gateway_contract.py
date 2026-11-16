@@ -531,9 +531,15 @@ class CheckGatewayContractTest(unittest.TestCase):
         with rotated_local_chain():
             with self.assertRaisesRegex(checker.ContractError, "oracle positive.json: .*head"):
                 checker.check_fixtures(subject)
-            with tempfile.TemporaryDirectory() as empty:
+            with tempfile.TemporaryDirectory() as only_head:
+                for path in checker.FIXTURE_ORACLES.glob("*.json"):
+                    if path.name != "positive.json":
+                        (Path(only_head) / path.name).write_bytes(path.read_bytes())
                 with self.assertRaisesRegex(checker.ContractError, "^positive.json: .*head"):
-                    checker.check_fixtures(subject, oracles=Path(empty))
+                    checker.check_fixtures(subject, oracles=Path(only_head))
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaisesRegex(checker.ContractError, "no gateway-client-conformance"):
+                checker.check_fixtures(subject, oracles=Path(empty))
 
     def test_the_generator_names_the_checker_chain_heads(self) -> None:
         source = (checker.ROOT / "scripts/check_gateway_contract.py").read_text(encoding="utf-8")
@@ -598,6 +604,18 @@ class CheckGatewayContractTest(unittest.TestCase):
             self.assertEqual(checker.check_mode_profiles(rotation, schema), 2)
             with self.assertRaisesRegex(checker.ContractError, "local-v1 does not name"):
                 checker.check_mode_profiles(declaration, schema)
+        middle = "e" * 64
+        three = {LOCAL_MODE: (LOCAL_HEAD, middle, NEXT_HEAD)}
+        with mock.patch.dict(checker.MODE_PROFILE_ROTATION_CHAINS, three):
+            rotation["profiles"][1].update(previous_mode_profile_digest=middle)
+            self.assertEqual(checker.check_mode_profiles(rotation, schema), 2)
+            rotation["profiles"][1].update(previous_mode_profile_digest=LOCAL_HEAD)
+            with self.assertRaisesRegex(checker.ContractError, "local-v1 does not name"):
+                checker.check_mode_profiles(rotation, schema)
+        for broken in ((), (LOCAL_HEAD, LOCAL_HEAD), (LOCAL_HEAD.upper(),), ("0" * 63,)):
+            with mock.patch.dict(checker.MODE_PROFILE_ROTATION_CHAINS, {LOCAL_MODE: broken}):
+                with self.assertRaisesRegex(checker.ContractError, "rotation chain is not"):
+                    checker.check_mode_profiles(declaration, schema)
 
     def test_a_resource_has_exactly_one_ordinal_and_no_unknown_member(self) -> None:
         subject = contract()

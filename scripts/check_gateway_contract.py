@@ -1273,6 +1273,13 @@ def check_mode_profiles(declaration: object, schema: dict) -> int:
         raise ContractError(
             "execution-mode profile declaration: profiles are not the rotation-chain set"
         )
+    for identifier, chain in MODE_PROFILE_ROTATION_CHAINS.items():
+        if not chain or len(set(chain)) != len(chain) or not all(
+            re.fullmatch(r"[0-9a-f]{64}", digest) for digest in chain
+        ):
+            raise ContractError(
+                f"{identifier}: the rotation chain is not unique lower-case 64-hex digests"
+            )
     for profile in profiles:
         chain = MODE_PROFILE_ROTATION_CHAINS[profile["mode_profile_id"]]
         predecessor = chain[-2] if len(chain) > 1 else None
@@ -1368,7 +1375,10 @@ def check_fixtures(
     contract: Contract, inputs: Path = FIXTURE_INPUTS, oracles: Path = FIXTURE_ORACLES
 ) -> int:
     """Validate every expected exchange; every input and oracle names the mode-profile heads."""
-    for path in sorted(oracles.glob("*.json")):
+    oracle_paths = sorted(oracles.glob("*.json"))
+    if not oracle_paths:
+        raise ContractError("no gateway-client-conformance oracles")
+    for path in oracle_paths:
         errors = mode_profile_errors(load(path))
         if errors:
             raise ContractError(f"oracle {path.name}: {errors[:3]}")
