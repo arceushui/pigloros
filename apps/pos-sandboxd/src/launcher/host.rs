@@ -63,7 +63,7 @@ impl LaunchHost for ProcessHost {
     }
 
     fn monotonic_ns(&self) -> io::Result<u64> {
-        crate::monotonic_ns()
+        super::clock::monotonic_ns()
     }
 
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error {

@@ -542,7 +542,7 @@ mod cases {
         for id in 1..=8 {
             let fixture = manager(id).await?;
             let steps = FixtureSteps::over(&fixture.transport, fixture.bound);
-            let before = crate::monotonic_ns()?;
+            let before = crate::launcher::clock::monotonic_ns()?;
             let ended = runtime.run(FakeInput::new(id), &steps).await?;
             assert_eq!(ended.attempt_id(), [id; 16]);
             // Stamped once the cleanup returned; the unit's cgroup was
@@ -604,7 +604,7 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn an_input_failed_after_its_grant_ends_with_nothing_committed() -> TestResult {
         let runtime = Runtime::new()?;
-        let before = crate::monotonic_ns()?;
+        let before = crate::launcher::clock::monotonic_ns()?;
         let ended: EndedAttempt<()> = runtime.lifecycle.record_failed(&FakeFailed(1))?;
         assert_eq!(ended.attempt_id(), [1; 16]);
         assert_eq!(ended.cancel_source(), None);
