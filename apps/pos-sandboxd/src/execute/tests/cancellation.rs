@@ -20,7 +20,7 @@ mod cases {
         let recheck = root_for(&scenario.log, &job.attempt);
         let canceller = async move {
             let released = logged(&log, "release").await;
-            cancel.cancel();
+            cancel.cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
             released
         };
         let run = scenario.run_on(&LoopbackNetwork, job, recheck);
@@ -29,11 +29,32 @@ mod cases {
         Ok(outcome)
     }
 
+    #[test]
+    fn the_first_cancellation_source_is_kept() {
+        use pos_reference::sandbox_provider_protocol::CancelSource;
+        let cancel = AttemptCancel::new();
+        let signal = cancel.signal();
+        assert_eq!(cancel.source(), None);
+        assert!(cancel.source().is_none());
+        assert!(!signal.is_requested());
+        cancel.cancel(CancelSource::Revocation);
+        cancel.cancel(CancelSource::CancelRequest);
+        assert_eq!(cancel.source(), Some(CancelSource::Revocation));
+        assert!(cancel.source().is_some());
+        assert!(signal.is_requested());
+        let other = AttemptCancel::default();
+        other.cancel(CancelSource::CancelRequest);
+        other.cancel(CancelSource::Revocation);
+        assert_eq!(other.source(), Some(CancelSource::CancelRequest));
+    }
+
     #[tokio::test]
     async fn a_cancellation_before_the_release_kills_the_unit_and_keeps_its_cgroup() -> TestResult {
         let mut scenario = Scenario::new()?;
-        scenario.cancel.cancel();
-        assert!(scenario.cancel.is_requested());
+        scenario
+            .cancel
+            .cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
+        assert!(scenario.cancel.source().is_some());
         let failed = scenario.fails().await?;
         assert!(matches!(failed.error, ExecuteError::Cancelled));
         assert_eq!(failed.unit, UnitState::Killed);
@@ -126,7 +147,7 @@ mod cases {
         let recheck = root_for(&scenario.log, &job.attempt);
         let execution = scenario.run_on(&LoopbackNetwork, job, recheck).await?;
         assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
-        assert!(!scenario.cancel.is_requested());
+        assert!(scenario.cancel.source().is_none());
         Ok(())
     }
 
