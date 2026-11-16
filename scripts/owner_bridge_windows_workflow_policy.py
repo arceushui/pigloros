@@ -306,7 +306,7 @@ EXPECTED_NATIVE["jobs"]["owner-bridge-windows"]["steps"].extend([{'name': 'Expor
 
 PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'd14edbd050f0fab86bea3d5aec16d88eb518a2ecd3d64a396178490e866e199b',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
- 'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
+ 'scripts/observe-owner-desktop.ps1': '2045bc3d18b34c5508286e1d28b418d4c7fafd6d10fd08d7f1450fa36bb225e4'}
 
 
 def producer_sources(root=ROOT):

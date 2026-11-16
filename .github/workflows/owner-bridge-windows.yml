@@ -71,7 +71,9 @@ jobs:
       - name: Measure only shim source coverage
         id: coverage
         # Successful runs take 41-54 minutes. A hung fixture fails this step,
-        # so the failure-only diagnostics below still run inside the job budget.
+        # so the failure-only diagnostics below still run inside the job budget:
+        # steps before this one take about 4 minutes, so 4 + 65 + diagnostics
+        # stays under the 90-minute job timeout.
         timeout-minutes: 65
         shell: pwsh
         env:
