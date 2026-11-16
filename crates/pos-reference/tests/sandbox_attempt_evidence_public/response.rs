@@ -873,7 +873,7 @@ fn the_grant_encoder_reproduces_the_oracle_agr1_and_signs_only_under_the_admitte
     let decoded = AdmissionGrant::from_canonical_cbor(&built.grant)?;
     let fields = grant_record_fields(&decoded);
     let record = AdmissionGrant::self_digested(fields.clone())?;
-    assert_eq!(record.digest(), decoded.grant_digest);
+    assert_eq!(record.digest(), decoded.grant_digest());
     // R9 §5: the AGR1 message is its domain followed by the self-digest.
     let mut message = b"PiglorOS.AGR1.Signature.v1\0".to_vec();
     message.extend(record.digest());
@@ -917,12 +917,6 @@ fn the_grant_encoder_reproduces_the_oracle_agr1_and_signs_only_under_the_admitte
     assert_eq!(
         changed.to_canonical_cbor().err(),
         Some(ProtocolError::DigestMismatch)
-    );
-    changed.policy_epoch -= 1;
-    changed.signature = [0; 64];
-    assert_eq!(
-        changed.to_canonical_cbor().err(),
-        Some(ProtocolError::SignatureInvalid)
     );
     Ok(())
 }

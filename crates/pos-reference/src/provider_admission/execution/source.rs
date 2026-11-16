@@ -450,7 +450,7 @@ impl PreparedProviderExecution {
                 .and_then(|grant| {
                     grant
                         .to_canonical_cbor()
-                        .map(|bytes| (bytes, grant.grant_digest))
+                        .map(|bytes| (bytes, grant.grant_digest()))
                 })
                 .ok()
         })
@@ -1406,13 +1406,13 @@ mod tests {
         assert_eq!(verified.len(), staged.input().len() as u64);
         assert!(!verified.is_empty());
         // Cancel and reconcile requests must name exactly the AGR1 sent.
-        assert_eq!(verified.entry().grant_digest(), sent_grant.grant_digest);
-        assert_ne!(sent_grant.grant_digest, [0; 32]);
+        assert_eq!(verified.entry().grant_digest(), sent_grant.grant_digest());
+        assert_ne!(sent_grant.grant_digest(), [0; 32]);
         // The exact AGR1 bytes are retained, with the ledger when it was
         // issued: this attempt live and its input still incomplete.
         let issued = verified.entry().grant();
         assert_eq!(issued.bytes(), sent_bytes.as_slice());
-        assert_eq!(issued.digest(), sent_grant.grant_digest);
+        assert_eq!(issued.digest(), sent_grant.grant_digest());
         assert_eq!(
             issued.admission(),
             AdmissionLedger {

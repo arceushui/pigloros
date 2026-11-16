@@ -254,7 +254,7 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
     let grant = pos_reference::sandbox_provider_protocol::AdmissionGrant::from_canonical_cbor(
         failed.grant().bytes(),
     )?;
-    assert_eq!(grant.grant_digest, failed.grant().digest());
+    assert_eq!(grant.grant_digest(), failed.grant().digest());
     assert_eq!(grant.attempt_id, attempt_id);
     let transfer = failed.transfer();
     assert_eq!(transfer.accepted_bytes, 0);

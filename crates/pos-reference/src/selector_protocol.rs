@@ -909,7 +909,7 @@ fn validate_evidence(
         hcp1_digest: spx.authority.hcp1_digest,
     };
     let expected_receipt_authority = ReceiptAuthority {
-        agr1_digest: grant.grant_digest,
+        agr1_digest: grant.grant_digest(),
         spm1_digest: grant.authority.spm1_digest,
         provider_binary_digest: receipt.authority.provider_binary_digest,
         lps1_digest: grant.authority.lps1_digest,
@@ -960,7 +960,7 @@ fn result_matches_evidence(
     grant.request_id == result.request_id
         && grant.attempt_id == result.attempt_id
         && receipt.attempt_id == result.attempt_id
-        && result.agr1_digest == Some(grant.grant_digest)
+        && result.agr1_digest == Some(grant.grant_digest())
         && result.spr1_digest == Some(receipt.receipt_digest())
         && grant.runtime_attestation_key_id == receipt.runtime_attestation_key_id
         && receipt.runtime_attestation_key_id == result.runtime_attestation_key_id
@@ -987,7 +987,7 @@ fn receipt_matches_grant(
     grant: &AdmissionGrant,
     expected_authority: &ReceiptAuthority,
 ) -> bool {
-    receipt.authority.agr1_digest == grant.grant_digest
+    receipt.authority.agr1_digest == grant.grant_digest()
         && receipt.authority == *expected_authority
         && receipt.trust_epoch == grant.trust_epoch
         && receipt.revocation_epoch == grant.revocation_epoch

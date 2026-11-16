@@ -467,8 +467,8 @@ pub struct AdmissionGrant {
     pub expected_launch_policy_digest: [u8; 32],
     pub expected_readback_set_digest: [u8; 32],
     pub runtime_attestation_key_id: String,
-    pub grant_digest: [u8; 32],
-    pub signature: [u8; 64],
+    grant_digest: [u8; 32],
+    signature: [u8; 64],
 }
 
 impl AdmissionGrant {
@@ -563,6 +563,35 @@ impl AdmissionGrant {
             signature,
         };
         grant.validate(fields).map(|()| grant)
+    }
+
+    /// The AGR1 self-digest, which SPR1, SPY1 and every later cancel and
+    /// reconcile request name.
+    #[must_use]
+    pub const fn grant_digest(&self) -> [u8; 32] {
+        self.grant_digest
+    }
+
+    /// An unsigned grant of `fields` with the filler self-digest `digest`,
+    /// for tests that authenticate nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn unsigned_fixture(fields: AdmissionGrantFields, digest: [u8; 32]) -> Self {
+        Self {
+            request_id: fields.request_id,
+            attempt_id: fields.attempt_id,
+            authority: fields.authority,
+            trust_epoch: fields.trust_epoch,
+            revocation_epoch: fields.revocation_epoch,
+            policy_epoch: fields.policy_epoch,
+            elm1_digest: fields.elm1_digest,
+            input_digest: fields.input_digest,
+            exchange_plan_digests: fields.exchange_plan_digests,
+            expected_launch_policy_digest: fields.expected_launch_policy_digest,
+            expected_readback_set_digest: fields.expected_readback_set_digest,
+            runtime_attestation_key_id: fields.runtime_attestation_key_id,
+            grant_digest: digest,
+            signature: [0; 64],
+        }
     }
 
     /// Verify AGR1 using a caller-authorized runtime-attestation key.
