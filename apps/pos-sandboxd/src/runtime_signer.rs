@@ -102,11 +102,13 @@ impl KeyFileRuntimeSigner {
     /// The signer of `key` for the SPM1-admitted `key_id`.
     ///
     /// This bypasses the R11 §4.4 key-file contract: it trusts that `key`
-    /// came from the key file. Only the provider's composition root calls
+    /// came from the key file. Only the provider's composition root may call
     /// it, with the key it loaded and checked through `RuntimeKey` (#1066);
-    /// tests build signers from a fixed key.
+    /// until that composition lands with it, only tests build a signer, from
+    /// a fixed key.
+    #[cfg(test)]
     #[must_use]
-    pub const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
+    pub(crate) const fn from_signing_key(key: SigningKey, key_id: String) -> Self {
         Self { key, key_id }
     }
 }
