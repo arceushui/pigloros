@@ -864,14 +864,18 @@ use pos_core::{
     local_erasure_body_digest_v1, local_erasure_id_v1, local_erasure_request_v1,
     local_erasure_requester_v1, local_erasure_subject_v1, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, EntityId, ErasureAdministrativeResolutionActionV1,
-    ErasureAdministrativeResolutionInputV1, ErasureArtifactClassV1,
-    ErasureCorrectionProvenanceInputV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
+    AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureCorrectionProvenanceInputV1,
+    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeApplicabilityRowV1,
+    ErasureFreezeAuthorizationEvidenceInputV1, ErasureHostErrorV1, ErasureInventoryCategoryV1,
     ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInventoriesV1, ErasureReplayClaimV1,
-    ErasureRequiredTargetV1, ErasureScopeExtensionInputV1, LocalErasureAuthorizationV1,
-    LocalErasureIdempotencyV1, LocalErasureOwnerRowV1, LocalErasureRejectionV1,
-    LocalErasureSelectorV1, PrincipalRefV1, Seq, LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1,
+    LocalErasureAuthorizationV1, LocalErasureIdempotencyV1, LocalErasureOwnerRowV1,
+    LocalErasureRejectionV1, LocalErasureSelectorV1, PrincipalRefV1, Seq,
+    LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
 };
 use pos_runtime::{LocalErasureSubmissionV1, LocalErasureSubmitErrorV1};
 use ulid::Ulid;
@@ -997,6 +1001,26 @@ impl GrantShape {
     }
 }
 
+/// An authority-persistence host over the registry that attests `grant`,
+/// bound to `store`.
+fn bound_authority_host(
+    store: &mut SqliteStore,
+    grant: &CapabilityGrantV1,
+) -> TestResult<AuthorityPersistenceHostV1> {
+    let registry = AuthorityRegistrySnapshotV1::try_new(
+        grant.authority_registry_digest(),
+        vec![Hash::from_bytes([0x76; 32])],
+        vec![grant.binding_digest().map_err(fail)?],
+        Vec::new(),
+    )
+    .map_err(fail)?;
+    let host = AuthorityPersistenceHostV1::new(&registry);
+    store
+        .bind_authority_persistence(host.persistence_binding())
+        .map_err(fail)?;
+    Ok(host)
+}
+
 /// A provisioned `SQLite` store that records the root grant of `shape`.
 struct LocalStore {
     _directory: tempfile::TempDir,
@@ -1019,17 +1043,7 @@ impl LocalStore {
         store.init_erasure_store_identity(Hash::from_bytes(STORE_IDENTITY))?;
         register_signer(&mut store, &erasure_signer(), 1)?;
         let grant = shape.root_grant()?;
-        let registry = AuthorityRegistrySnapshotV1::try_new(
-            grant.authority_registry_digest(),
-            vec![Hash::from_bytes([0x76; 32])],
-            vec![grant.binding_digest().map_err(fail)?],
-            Vec::new(),
-        )
-        .map_err(fail)?;
-        let host = AuthorityPersistenceHostV1::new(&registry);
-        store
-            .bind_authority_persistence(host.persistence_binding())
-            .map_err(fail)?;
+        let host = bound_authority_host(&mut store, &grant)?;
         let permit = host.authorize_grant(&grant).map_err(fail)?;
         store.issue_capability_grant(permit, &grant).map_err(fail)?;
         let head = store
@@ -1042,6 +1056,31 @@ impl LocalStore {
             path,
             head,
         })
+    }
+
+    /// Revoke the root grant of `shape` with a fence one past the recorded
+    /// chain head; the chain head advances to that fence.
+    fn revoke(&self, shape: &GrantShape) -> TestResult {
+        let mut store = SqliteStore::open(&self.path)?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let grant = shape.root_grant()?;
+        let host = bound_authority_host(&mut store, &grant)?;
+        let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+            grant_id: grant.grant_id(),
+            authority_timeline: grant.issuance_timeline(),
+            fence_position: Seq::from_u64(self.head + 1),
+            revocation_epoch: 1,
+            policy_revision: grant.policy_revision(),
+            authority_registry_digest: grant.authority_registry_digest(),
+        })
+        .map_err(fail)?;
+        let permit = host
+            .authorize_revocation(&grant, &revocation)
+            .map_err(fail)?;
+        store
+            .revoke_capability_grant(permit, &revocation)
+            .map_err(fail)?;
+        Ok(())
     }
 
     /// Retain `objects` in the store's erasure object store.
@@ -1252,6 +1291,45 @@ fn authorization_names_the_requests_own_evidence() -> TestResult {
             .authorize_erasure_request(request, authorization(1, store.head)?.reference()?)?
             .lifecycle(),
         ErasureLifecycleV1::Authorized
+    );
+    Ok(())
+}
+
+#[test]
+fn a_root_grant_revocation_refuses_new_submissions_but_not_older_requests() -> TestResult {
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    {
+        let mut host = store.host(&local_case()?, 4_096)?;
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?)
+            .map_err(fail)?;
+    }
+    // The revocation is fenced after the head request 1 is bound to.
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    let mut sender = host.command_sender()?;
+    assert_eq!(
+        sender
+            .authorize_erasure_request(request_of(1)?, authorization(1, store.head)?.reference()?)?
+            .lifecycle(),
+        ErasureLifecycleV1::Authorized
+    );
+    Ok(())
+}
+
+#[test]
+fn a_fresh_submission_after_a_root_grant_revocation_is_unauthorized() -> TestResult {
+    let shape = GrantShape::standard();
+    let store = LocalStore::new(&shape)?;
+    store.revoke(&shape)?;
+    let mut host = store.host(&local_case()?, 4_096)?;
+    assert_eq!(
+        host.command_sender()?
+            .submit_local_erasure(&submission(1, ErasureScopeV1::PrivateSubjectData)?),
+        Err(LocalErasureSubmitErrorV1::Host(
+            ErasureHostErrorV1::AuthorizationDenied
+        ))
     );
     Ok(())
 }
@@ -1655,6 +1733,76 @@ fn the_local_authority_admits_no_freeze_or_scope_extension_yet() -> TestResult {
         authority
             .resolve_fork_child_scope(&view, child.id, &child)
             .map(drop),
+        missing
+    );
+    Ok(())
+}
+
+#[test]
+fn the_local_authority_admits_no_attempt_or_acknowledgement_yet() -> TestResult {
+    let (_store, composition, mut host, _owner) = local_authority()?;
+    let view = host.authority_view()?;
+    let authority = composition.authority();
+    let request = reference(0x90);
+    let mut matrix = Vec::new();
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        matrix.push(ErasureFreezeApplicabilityRowV1::new(
+            category,
+            0,
+            ErasureApplicabilityDecisionV1::Inapplicable,
+            None,
+        )?);
+    }
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        request,
+        scope_commitment: reference(0xc0),
+        obligation_set: reference(0xc1),
+        applicability_matrix: matrix,
+        freeze_position: 1,
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        trust: reference(0xc2),
+        authorization_provenance: reference(0xc3),
+    })?;
+    let freeze_authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: admission.authorization_body_digest()?,
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust: reference(0xc2),
+            evidence: vec![0xc4],
+        })?;
+    let attempt = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![reference(0xc5)],
+        command_identities: vec![reference(0xc6)],
+        policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+        trust: reference(0xc2),
+        admitted_position: 2,
+        deadline_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+        authorization_provenance: reference(0xc7),
+    })?;
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request,
+            command: reference(0xc6),
+            attempt: attempt.reference(),
+            obligation: reference(0xc5),
+            owner: reference(0xc8),
+            scope: reference(0xc0),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(0xc9),
+            policy: LOCAL_ERASURE_POLICY_REFERENCE_V1,
+            trust: reference(0xc2),
+        })?;
+    let missing = Err(ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(
+        authority.validate_freeze_authorization_with_view(&view, &admission, &freeze_authorization),
+        missing
+    );
+    assert_eq!(authority.admit_attempt(&view, &attempt).map(drop), missing);
+    assert_eq!(
+        authority.admit_acknowledgement(&view, &acknowledgement),
         missing
     );
     Ok(())

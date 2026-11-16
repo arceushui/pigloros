@@ -717,50 +717,97 @@ impl LocalSubmissionRecordsV1 {
             local_erasure_id_v1(principal_ref, actor, submission.idempotency_key_digest)
                 .and_then(local_erasure_request_v1)
                 .and_then(|request| {
-                    let authorization = LocalErasureAuthorizationV1 {
-                        principal_ref,
-                        actor_entity: actor,
-                        operation: LOCAL_ERASURE_REQUEST_OPERATION.to_owned(),
-                        authority_registry_digest: binding.authority_registry_digest,
-                        authority_chain: binding.authority_timeline,
-                        chain_head_position: authority.head_position().as_u64(),
-                        revocation_epoch: authority.revocation_epoch(),
-                        erq1_request: request,
-                    };
-                    let subject = local_erasure_subject_v1(principal_ref, actor)?;
-                    let selector = LocalErasureSelectorV1 { subject };
-                    let idempotency = LocalErasureIdempotencyV1 {
-                        idempotency_key_digest: submission.idempotency_key_digest,
-                        body_digest: local_erasure_body_digest_v1(submission.scope)?,
-                    };
-                    let objects = [
-                        authorization.to_canonical_cbor()?,
-                        selector.to_canonical_cbor()?,
-                        idempotency.to_canonical_cbor()?,
-                    ];
-                    ErasureRequestV1::new(ErasureRequestInputV1 {
-                        request,
-                        subject,
-                        scope: submission.scope,
-                        selectors: vec![selector.reference()?],
-                        requester: local_erasure_requester_v1(principal_ref)?,
-                        authorization: authorization.reference()?,
-                        policy: binding.policy,
-                        request_position: 0,
-                        horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
-                        provenance: idempotency.reference()?,
-                    })
-                    .map(|request| Self {
-                        request,
-                        objects,
-                        actors: authority
-                            .chain()
-                            .grants()
-                            .last()
-                            .map_or(0, |grant| grant.scope().actor_entity_ids().len()),
+                    local_erasure_subject_v1(principal_ref, actor).and_then(|subject| {
+                        local_erasure_body_digest_v1(submission.scope).map(|body_digest| {
+                            (
+                                LocalErasureAuthorizationV1 {
+                                    principal_ref,
+                                    actor_entity: actor,
+                                    operation: LOCAL_ERASURE_REQUEST_OPERATION.to_owned(),
+                                    authority_registry_digest: binding.authority_registry_digest,
+                                    authority_chain: binding.authority_timeline,
+                                    chain_head_position: authority.head_position().as_u64(),
+                                    revocation_epoch: authority.revocation_epoch(),
+                                    erq1_request: request,
+                                },
+                                LocalErasureSelectorV1 { subject },
+                                LocalErasureIdempotencyV1 {
+                                    idempotency_key_digest: submission.idempotency_key_digest,
+                                    body_digest,
+                                },
+                            )
+                        })
                     })
                 })
+                .and_then(|(authorization, selector, idempotency)| {
+                    Self::encode(
+                        submission,
+                        binding,
+                        principal_ref,
+                        &authorization,
+                        &selector,
+                        &idempotency,
+                    )
+                })
+                .map(|(request, objects)| Self {
+                    request,
+                    objects,
+                    actors: authority
+                        .chain()
+                        .grants()
+                        .last()
+                        .map_or(0, |grant| grant.scope().actor_entity_ids().len()),
+                })
         })
+    }
+
+    /// Encode ERAZ1, ELSEL1 and ELIDEM1, and build the ERQ1 that names them.
+    fn encode(
+        submission: &LocalErasureSubmissionV1,
+        binding: &LocalErasureSubmissionBindingV1,
+        principal_ref: ErasureReferenceV1,
+        authorization: &LocalErasureAuthorizationV1,
+        selector: &LocalErasureSelectorV1,
+        idempotency: &LocalErasureIdempotencyV1,
+    ) -> Result<(ErasureRequestV1, [Vec<u8>; 3]), ErasureErrorV1> {
+        authorization
+            .to_canonical_cbor()
+            .and_then(|eraz1| selector.to_canonical_cbor().map(|elsel1| [eraz1, elsel1]))
+            .and_then(|[eraz1, elsel1]| {
+                idempotency
+                    .to_canonical_cbor()
+                    .map(|elidem1| [eraz1, elsel1, elidem1])
+            })
+            .and_then(|objects| {
+                selector
+                    .reference()
+                    .and_then(|selector| {
+                        local_erasure_requester_v1(principal_ref)
+                            .map(|requester| (selector, requester))
+                    })
+                    .and_then(|(selector, requester)| {
+                        authorization
+                            .reference()
+                            .map(|authorization| (selector, requester, authorization))
+                    })
+                    .and_then(|(selector_reference, requester, authorization_reference)| {
+                        idempotency.reference().and_then(|provenance| {
+                            ErasureRequestV1::new(ErasureRequestInputV1 {
+                                request: authorization.erq1_request,
+                                subject: selector.subject,
+                                scope: submission.scope,
+                                selectors: vec![selector_reference],
+                                requester,
+                                authorization: authorization_reference,
+                                policy: binding.policy,
+                                request_position: 0,
+                                horizon_position: LOCAL_ERASURE_ATTEMPT_WINDOW_V1,
+                                provenance,
+                            })
+                        })
+                    })
+                    .map(|request| (request, objects))
+            })
     }
 }
 
@@ -4194,10 +4241,12 @@ impl ErasureCommandSenderV1<'_> {
                     .retain_erasure_object(object, ERASURE_RETAINED_OBJECT_MAX_BYTES_V1)
                     .map(drop)
             })
-            .map_err(map_erasure_error)?;
-        let provenance = records.request.provenance();
-        self.submit_erasure_request(records.request, provenance)
-            .map_err(LocalErasureSubmitErrorV1::Host)
+            .map_err(|error| LocalErasureSubmitErrorV1::Host(map_erasure_error(error)))
+            .and_then(|()| {
+                let provenance = records.request.provenance();
+                self.submit_erasure_request(records.request, provenance)
+                    .map_err(LocalErasureSubmitErrorV1::Host)
+            })
     }
 
     /// Authenticate and persist an authorization decision through the
