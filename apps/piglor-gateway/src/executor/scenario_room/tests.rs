@@ -454,3 +454,43 @@ fn a_revision_identity_is_never_appended_twice() -> TestResult {
     assert_eq!(refusal(again), format!("{:?}", identity_reused()));
     Ok(())
 }
+
+/// A host refusal is the room's store failure: a room whose Timeline the
+/// erasure fence froze cannot be read.
+#[test]
+fn a_frozen_room_is_a_store_failure() -> TestResult {
+    let mut host = host(true)?;
+    let created = ok(create(&mut host, 1, 1, 1, &admission()?)?)?;
+    let (_, stored) = stored_of(&created);
+    host.freeze_timeline_for_test(stored.timeline);
+    assert_eq!(
+        refusal(read(&mut host, stored.descriptor.room_id(), 1)?),
+        format!(
+            "{:?}",
+            RoomStoreErrorV1::Store(CoreError::ErasureAccessFrozen)
+        )
+    );
+    Ok(())
+}
+
+/// A room command that expires before the worker runs it answers that its
+/// deadline passed.
+#[test]
+fn an_expired_room_command_replies() -> TestResult {
+    let (reply, receiver) = oneshot::channel();
+    crate::executor::expire_command(crate::executor::Command::Action(Box::new(
+        ScenarioRoomCommandV1 {
+            operation: RoomOperationV1::Read {
+                room_id: EntityId::new(),
+                revision: 1,
+            },
+            admission: admission()?,
+            reply,
+        },
+    )));
+    assert!(matches!(
+        receiver.blocking_recv()?,
+        Err(StoreExecutorError::DeadlineExceeded)
+    ));
+    Ok(())
+}

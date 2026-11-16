@@ -221,31 +221,12 @@ impl LocalPrincipalProvisionV1 {
         Self::try_new_provisioned(principal, actor_entity_ids, operations, consent, None)
     }
 
-    /// [`Self::try_new`], also recording `governance_record` as the host's
-    /// single-participant Scenario Room governance record (#303 decision
-    /// 1a): one scope resource of the root grant,
+    /// The complete provisioning: [`Self::try_new_with_consent`], also
+    /// recording `governance_record` as the host's single-participant
+    /// Scenario Room governance record (#303 decision 1a): one scope
+    /// resource of the root grant,
     /// [`crate::authorization::GOVERNANCE_RESOURCE_PREFIX`] followed by the
     /// record's ULID. That resource names no operation.
-    ///
-    /// # Errors
-    /// Returns the refusals of [`Self::try_new`].
-    pub fn try_new_governed(
-        principal: &PrincipalRefV1,
-        actor_entity_ids: impl IntoIterator<Item = EntityId>,
-        operations: impl IntoIterator<Item = GatewayOperationV1>,
-        governance_record: Option<EntityId>,
-    ) -> Result<Self, LocalPrincipalErrorV1> {
-        Self::try_new_provisioned(
-            principal,
-            actor_entity_ids,
-            operations,
-            None,
-            governance_record,
-        )
-    }
-
-    /// The complete provisioning: [`Self::try_new_with_consent`] with the
-    /// optional governance record of [`Self::try_new_governed`].
     ///
     /// # Errors
     /// Returns the refusals of [`Self::try_new_with_consent`].

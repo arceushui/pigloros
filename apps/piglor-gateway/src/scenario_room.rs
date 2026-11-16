@@ -51,12 +51,6 @@ pub(crate) enum RoomFailureV1 {
     Store(RoomStoreErrorV1),
 }
 
-impl From<GatewayError> for RoomFailureV1 {
-    fn from(error: GatewayError) -> Self {
-        Self::Gateway(error)
-    }
-}
-
 impl From<RoomFailureV1> for ProblemV1 {
     fn from(failure: RoomFailureV1) -> Self {
         match failure {
@@ -456,7 +450,7 @@ impl Gateway {
         self.store
             .scenario_room(operation, self.room_admission())
             .await
-            .map_err(|error| RoomFailureV1::from(GatewayError::from(error)))?
+            .map_err(|error| RoomFailureV1::Gateway(GatewayError::from(error)))?
             .map_err(RoomFailureV1::Store)
     }
 
@@ -469,10 +463,9 @@ impl Gateway {
     ///
     /// # Errors
     /// A refusal that yields no recordable denial fails closed with
-    /// [`GatewayError::AuthorizationEvidenceUnavailable`] (`503`). It is not
-    /// reachable: a protected composition always has the decision, and
-    /// `deny_at_commit_fence` records every outcome but `Active`. It stops a
-    /// future outcome change from skipping the consent check.
+    /// [`GatewayError::AuthorizationEvidenceUnavailable`] (`503`): a permit
+    /// without a decision (one a composition that protects nothing issued)
+    /// never skips a protected composition's consent check.
     fn room_consent_denial(
         &self,
         permit: &GatewayOperationPermitV1,

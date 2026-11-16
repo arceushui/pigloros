@@ -110,13 +110,12 @@ mod served {
         )?)
     }
 
-    /// A served Gateway over a bound `SQLite` store, its router, the
-    /// directory to keep alive and the store's path.
+    /// A served Gateway over a bound `SQLite` store and its router. The
+    /// caller keeps the store's directory, so the store outlives the
+    /// Gateway, which is shut down and dropped after its last use.
     struct Served {
         gateway: Gateway,
         app: Router,
-        directory: tempfile::TempDir,
-        path: String,
         /// The `consent_ref` of the Principal's consent.
         consent: String,
     }
@@ -125,23 +124,23 @@ mod served {
         fn descriptor(&self, value_micro: i64) -> Value {
             descriptor(value_micro, &self.consent)
         }
-
-        /// Shut the Gateway down, keeping the store directory and path for
-        /// reading the store afterwards.
-        async fn close(self) -> TestResult<(tempfile::TempDir, String)> {
-            self.gateway.shutdown().await?;
-            Ok((self.directory, self.path))
-        }
     }
 
-    async fn served(provision: &LocalPrincipalProvisionV1) -> TestResult<Served> {
-        let directory = tempfile::tempdir()?;
-        let path = directory
+    /// The path of the `SQLite` store in `directory`.
+    fn store_path(directory: &tempfile::TempDir) -> TestResult<String> {
+        Ok(directory
             .path()
             .join("gateway.db")
             .to_str()
             .ok_or("temporary path is not UTF-8")?
-            .to_owned();
+            .to_owned())
+    }
+
+    async fn served(
+        directory: &tempfile::TempDir,
+        provision: &LocalPrincipalProvisionV1,
+    ) -> TestResult<Served> {
+        let path = store_path(directory)?;
         bind_test_store(
             &mut SqliteStore::open(&path)?,
             GatewayModeProfileIdV1::Local,
@@ -170,8 +169,6 @@ mod served {
         Ok(Served {
             gateway,
             app,
-            directory,
-            path,
             consent,
         })
     }
@@ -264,7 +261,8 @@ mod served {
 
     #[tokio::test]
     async fn a_room_is_created_retried_read_and_derived_over_http() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let directory = tempfile::tempdir()?;
+        let served = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let app = &served.app;
         // The golden example's own request, so the served body has its shape.
         let example: Value = serde_json::from_str(include_str!(
@@ -348,7 +346,8 @@ mod served {
             (StatusCode::BAD_REQUEST, &json!("invalid-request"))
         );
         derive_over_http(&served, &room, &created).await?;
-        drop(served.close().await?);
+        served.gateway.shutdown().await?;
+        drop(served);
         Ok(())
     }
 
@@ -423,7 +422,8 @@ mod served {
 
     #[tokio::test]
     async fn malformed_and_ungoverned_rooms_are_refused() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let directory = tempfile::tempdir()?;
+        let served = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let with = |edit: fn(&mut Value)| {
             let mut body = json!({"descriptor": served.descriptor(1)});
             edit(&mut body["descriptor"]);
@@ -505,7 +505,8 @@ mod served {
         let derive = format!("/v1/scenario-rooms/{}/revisions", EntityId::new());
         let (status, _) = post(&served.app, &derive, Some("bad-derive"), &body).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        drop(served.close().await?);
+        served.gateway.shutdown().await?;
+        drop(served);
         Ok(())
     }
 
@@ -513,7 +514,8 @@ mod served {
     /// denial evidence is in the authority store before the answer.
     #[tokio::test]
     async fn an_uncovered_persona_is_a_recorded_denial() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let directory = tempfile::tempdir()?;
+        let served = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let mut body = json!({"descriptor": served.descriptor(1)});
         body["descriptor"]["participants"][1]["entity_id"] = json!("01JC0GATEWAYW90S0C1ETY0009");
         let (status, problem) =
@@ -522,7 +524,9 @@ mod served {
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("unauthorized"))
         );
-        let (_directory, path) = served.close().await?;
+        served.gateway.shutdown().await?;
+        drop(served);
+        let path = store_path(&directory)?;
         let denials = SqliteStore::open(&path)?
             .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?;
         assert!(
@@ -540,12 +544,15 @@ mod served {
     #[tokio::test]
     async fn every_room_operation_needs_its_grant_and_the_governance_record() -> TestResult {
         let create = |served: &Served| json!({"descriptor": served.descriptor(1)});
-        let full = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let directory = tempfile::tempdir()?;
+        let full = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let (_, created) = post(&full.app, "/v1/scenario-rooms", Some("k"), &create(&full)).await?;
         let room = created["id"].as_str().ok_or("room id")?.to_owned();
-        drop(full.close().await?);
+        full.gateway.shutdown().await?;
+        drop(full);
         for granted in [&ROOMS[1..], &[ROOMS[0], ROOMS[2]][..], &ROOMS[..2]] {
-            let served = served(&provision(granted, Some(id(GOVERNANCE)?))?).await?;
+            let directory = tempfile::tempdir()?;
+            let served = served(&directory, &provision(granted, Some(id(GOVERNANCE)?))?).await?;
             let derive = json!({"parent_revision": 1, "descriptor": served.descriptor(2)});
             let answers = [
                 post(
@@ -578,9 +585,11 @@ mod served {
                 })
                 .count();
             assert_eq!(refused, 1, "{answers:?}");
-            drop(served.close().await?);
+            served.gateway.shutdown().await?;
+            drop(served);
         }
-        let ungoverned = served(&provision(&ROOMS, None)?).await?;
+        let directory = tempfile::tempdir()?;
+        let ungoverned = served(&directory, &provision(&ROOMS, None)?).await?;
         let (status, problem) = post(
             &ungoverned.app,
             "/v1/scenario-rooms",
@@ -595,7 +604,8 @@ mod served {
                 &json!("admission-rejected")
             )
         );
-        drop(ungoverned.close().await?);
+        ungoverned.gateway.shutdown().await?;
+        drop(ungoverned);
         Ok(())
     }
 
@@ -606,7 +616,8 @@ mod served {
     /// create commits and the next one is refused.
     #[tokio::test]
     async fn a_room_names_a_held_unrevoked_consent() -> TestResult {
-        let served = served(&provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let directory = tempfile::tempdir()?;
+        let served = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
         let (status, created) = post(
             &served.app,
             "/v1/scenario-rooms",
@@ -675,7 +686,9 @@ mod served {
             (status, &problem["code"]),
             (StatusCode::FORBIDDEN, &json!("revoked"))
         );
-        let (_directory, path) = served.close().await?;
+        served.gateway.shutdown().await?;
+        drop(served);
+        let path = store_path(&directory)?;
         // Each consent refusal left its ADN1 record before it was answered.
         let outcomes = SqliteStore::open(&path)?
             .load_authorization_denials(0, pos_core::MAX_AUTHORIZATION_DENIALS_PER_READ)?
@@ -703,15 +716,24 @@ mod served {
     /// queued behind the permit's read guard. The create still commits on
     /// its pin, and releasing its permit lets the revocation through.
     async fn revoke_while_a_create_holds_its_permit(served: &Served) -> TestResult {
-        let permit = served
-            .gateway
-            .authorize_operation(
-                GatewayOperationV1::CREATE_SCENARIO_ROOM,
-                Some(id(ACTOR)?),
-                None,
-                None,
-            )
-            .await?;
+        let actor = id(ACTOR)?;
+        revoke_under(
+            served,
+            served
+                .gateway
+                .authorize_operation(
+                    GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                    Some(actor),
+                    None,
+                    None,
+                )
+                .await?,
+        )
+        .await
+    }
+
+    /// The revocation racing the create that holds `permit`.
+    async fn revoke_under(served: &Served, permit: GatewayOperationPermitV1) -> TestResult {
         let authorization = served
             .gateway
             .authorization
@@ -783,6 +805,57 @@ mod served {
         );
         gateway.shutdown().await?;
         drop(gateway);
+        Ok(())
+    }
+
+    /// A permit without a decision, as a composition that protects nothing
+    /// issues it, never skips a protected room's consent check: the
+    /// refusal has no decision to record, so it fails closed as unavailable
+    /// evidence. A room operation on a shut-down Gateway is refused by its
+    /// closed store executor.
+    #[tokio::test]
+    async fn a_room_operation_fails_closed_without_a_decision_or_an_executor() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let served = served(&directory, &provision(&ROOMS, Some(id(GOVERNANCE)?))?).await?;
+        let open = Gateway::new(pos_store::open_store(StoreConfig::Memory)?);
+        let actor = id(ACTOR)?;
+        let parsed =
+            parse_create(&json!({"descriptor": served.descriptor(1)})).map_err(|_| "parse")?;
+        let undecided = served
+            .gateway
+            .create_scenario_room(
+                open.authorize_operation(
+                    GatewayOperationV1::CREATE_SCENARIO_ROOM,
+                    Some(actor),
+                    None,
+                    None,
+                )
+                .await?,
+                "undecided",
+                parsed,
+            )
+            .await;
+        assert!(
+            matches!(
+                undecided,
+                Err(RoomFailureV1::Gateway(
+                    GatewayError::AuthorizationEvidenceUnavailable
+                ))
+            ),
+            "{undecided:?}"
+        );
+        open.shutdown().await?;
+        drop(open);
+        served.gateway.shutdown().await?;
+        let closed = served.gateway.read_scenario_room(EntityId::new(), 1).await;
+        assert!(
+            matches!(
+                closed,
+                Err(RoomFailureV1::Gateway(GatewayError::StoreExecutorClosed))
+            ),
+            "{closed:?}"
+        );
+        drop(served);
         Ok(())
     }
 
