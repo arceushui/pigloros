@@ -36,8 +36,9 @@ const OVERFLOW_UNIT: &[u8; 16] = b"F1-OVERFLOW-UNIT";
 /// Copies of the unit: a 12,288-byte payload spread over a leaf cell and
 /// three 4,096-byte overflow pages.
 const OVERFLOW_UNITS: usize = 768;
-/// Copies a page boundary can split: at most one per boundary between the
-/// leaf cell and the three overflow pages, rounded up.
+/// Copies the controls may miss: one split at each of the 3 boundaries
+/// between the leaf cell and the three overflow pages, plus 1 copy that a
+/// freelist-trunk header can overwrite when the deletion frees those pages.
 const OVERFLOW_SPLIT_SLACK: usize = 4;
 /// Index scenario: rounds of one victim batch and one kept batch each.
 const INDEX_ROUNDS: usize = 10;
