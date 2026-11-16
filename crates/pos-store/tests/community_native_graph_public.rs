@@ -54,6 +54,11 @@ const COB: Hash = Hash::from_bytes([0x40; 32]);
 const CPV: Hash = Hash::from_bytes([0x41; 32]);
 const SCOPE_COVER: Hash = Hash::from_bytes([0x42; 32]);
 const ENTRIES: [&str; 2] = ["Entry-A_1", "Entry-B_1"];
+const AUTHORIZATION: ArtifactRefV1 = ArtifactRefV1 {
+    schema_id: 0x4341_0002,
+    byte_length: 41,
+    digest: [0x51; 32],
+};
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -212,11 +217,7 @@ fn request_input<'a>(
             byte_length: 40,
             digest: [0x50; 32],
         },
-        authorization_ref: ArtifactRefV1 {
-            schema_id: 0x4341_0002,
-            byte_length: 41,
-            digest: [0x51; 32],
-        },
+        authorization_ref: AUTHORIZATION,
         evidence_not_after_micros: REQUEST_HORIZON,
     }
 }
@@ -721,6 +722,9 @@ fn batch_input<'a>(
     CommunityArtifactBatchInputV1 {
         store_incarnation: INCARNATION,
         profile_digest: assembled.profile_digest,
+        operation_id: OPERATION,
+        authorization_ref: AUTHORIZATION,
+        owner_binding_digest: COB,
         records,
         graph_root,
         selected_head: assembled.graph.selected_head(),
@@ -857,7 +861,7 @@ fn the_extractor_refuses_tampered_records() -> TestResult {
     // A COW1 that does not decode.
     let mut records = batch_records(graph);
     records[0].object = &object[..object.len() - 1];
-    assert!(prepare(&records).is_some());
+    assert_eq!(prepare(&records), Some(Error::InvalidEncoding));
     // Another record's ARD1, or the ARD1 of an altered child list.
     let mut records = batch_records(graph);
     records[0].registration = graph.records()[1].protected().registration();
@@ -942,7 +946,8 @@ fn the_extractor_refuses_an_incomplete_or_extended_closure() -> TestResult {
 }
 
 #[test]
-fn the_extractor_refuses_a_root_of_another_store_profile_or_head() -> TestResult {
+fn the_extractor_refuses_another_store_profile_head_or_request() -> TestResult {
+    let other = assembled(&Fixture::with_seed(1)?)?;
     let assembled = assembled(&Fixture::new()?)?;
     let graph = &assembled.graph;
     let records = batch_records(graph);
@@ -958,15 +963,37 @@ fn the_extractor_refuses_a_root_of_another_store_profile_or_head() -> TestResult
             profile_digest: hash(0x78),
             ..input
         },
-        // A CSH1 other than the one CGR1 selects.
+        // A valid CSH1 that this CGR1 does not select.
         CommunityArtifactBatchInputV1 {
-            selected_head: graph.host_progress(),
+            selected_head: other.graph.selected_head(),
+            ..input
+        },
+        // Another COB1 than every CAR1 and CSR1 binds.
+        CommunityArtifactBatchInputV1 {
+            owner_binding_digest: hash(0x79),
+            ..input
+        },
+        // Note 22661, items 1 and 3: another CGI1 operation or authorization.
+        CommunityArtifactBatchInputV1 {
+            operation_id: [0x11; 16],
+            ..input
+        },
+        CommunityArtifactBatchInputV1 {
+            authorization_ref: ArtifactRefV1 {
+                digest: [0x52; 32],
+                ..AUTHORIZATION
+            },
             ..input
         },
     ];
-    assert!(prepare(cases[2]).is_some());
-    for case in &cases[..2] {
-        assert_eq!(prepare(*case), Some(Error::InvalidBinding));
+    for (index, case) in cases.into_iter().enumerate() {
+        assert_eq!(prepare(case), Some(Error::InvalidBinding), "case {index}");
     }
+    // Bytes that are not a CSH1.
+    let not_a_head = CommunityArtifactBatchInputV1 {
+        selected_head: graph.host_progress(),
+        ..input
+    };
+    assert_eq!(prepare(not_a_head), Some(Error::InvalidEncoding));
     Ok(())
 }

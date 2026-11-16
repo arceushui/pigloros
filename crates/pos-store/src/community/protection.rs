@@ -227,6 +227,32 @@ impl CommunityArtifactProtectorV1 {
             })
     }
 
+    /// Protect `plaintext` with a CAR1 that claims `claimed` and, when
+    /// `fresh_envelope`, the address of a second envelope of the same
+    /// plaintext: a record whose proof does not bind its content, for the
+    /// extractor's CAR1 checks.
+    #[cfg(test)]
+    pub(super) fn protect_with_mismatched_proof(
+        &mut self,
+        kind: CommunityArtifactKindV1,
+        plaintext: &[u8],
+        claimed: &[u8],
+        fresh_envelope: bool,
+        evidence: CommunityRecordEvidenceV1<'_>,
+    ) -> Result<CommunityProtectedRecordV1, Error> {
+        let header = self.header(kind)?;
+        let identity = header.key_identity();
+        let content = self.key.seal_envelope(header, plaintext)?;
+        let claimed_content = if fresh_envelope {
+            let header = self.header(kind)?;
+            self.key.seal_envelope(header, plaintext)?
+        } else {
+            content.clone()
+        };
+        let proof = self.seal_proof(kind, claimed, &claimed_content, evidence)?;
+        self.object(&content, &proof, evidence, identity)
+    }
+
     fn header(&self, kind: CommunityArtifactKindV1) -> Result<CommunityArtifactHeaderV1, Error> {
         CommunityArtifactHeaderV1::new(CommunityArtifactHeaderInputV1 {
             timeline: self.cohort.timeline,

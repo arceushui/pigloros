@@ -12,9 +12,14 @@
 //!    including the purpose's optionality and transition rule (note 22649);
 //! 4. derives each record's ARD1 children from its own content (note 22661,
 //!    item 4) and requires the CAR1 to list exactly those;
-//! 5. resolves every CGR1 root to a `StateRevision` CPN1 (item 5), walks
-//!    the complete required closure and re-derives the CGR1 counts over the
-//!    ARD1 graph (item 6), refusing any record outside the closure.
+//! 5. checks the note-22661 node shape (items 1 to 3): each `InitialState`
+//!    node 2·slot cites only its CMB1 locator, each `StateRevision` node
+//!    2·slot+1 cites only that node, every node shares one producer
+//!    ordinal and carries the CGI1 `authorization_ref`, and each CSR1, CIS1
+//!    and CSH1 member agree;
+//! 6. resolves every CGR1 root to a `StateRevision` CPN1 (item 5), walks
+//!    the complete required closure, refusing a cycle or any record outside
+//!    it, and re-derives the CGR1 counts over the ARD1 graph (item 6).
 //!
 //! This first profile admits the code-0 initialization graph: CSC1, CIS1,
 //! CSR1 and the `InitialState` and `StateRevision` CPN1s. Any other family
@@ -23,9 +28,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::community_lifecycle::{
-    CommunityArtifactHeaderInputV1, CommunityArtifactKindV1, CommunityArtifactOperationV1,
-    CommunityClassificationProofV1, CommunityEncryptedEnvelopeV1, CommunityGraphRootV1,
-    CommunityInitializationProducerV1, CommunityInputIndexV1, CommunityLifecycleErrorV1 as Error,
+    ArtifactRefV1, CommunityArtifactHeaderInputV1, CommunityArtifactKindV1,
+    CommunityArtifactOperationV1, CommunityClassificationProofV1, CommunityEncryptedEnvelopeV1,
+    CommunityGraphRootV1, CommunityInitializationProducerV1, CommunityInputIndexV1,
+    CommunityLifecycleErrorV1 as Error, CommunityLocatorProducerV1, CommunityMetadataSchemaV1,
     CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1, CommunityNativeNodeV1,
     CommunityProtectedObjectV1, CommunitySelectedHeadV1, CommunityStateContentV1,
     CommunityStateProducerV1, CommunityStateRevisionV1, CommunityTypedInputRefV1,
@@ -40,6 +46,10 @@ use super::protection::{
     derive_registration, CommunityArtifactProtectorV1, CommunityProtectedRecordV1,
 };
 
+/// The variant-3 `record_role` of a CMB1, its ADR-129 §3 whitelist index
+/// (owner decision on #560, note 22661, item 1).
+const CMB1_RECORD_ROLE: u16 = 11;
+
 /// One COW1 and the ARD1 its caller proposes for it.
 #[derive(Clone, Copy)]
 pub struct CommunityArtifactRecordInputV1<'a> {
@@ -49,13 +59,20 @@ pub struct CommunityArtifactRecordInputV1<'a> {
     pub registration: &'a ArtifactRegistrationV1,
 }
 
-/// One candidate graph and the current head it must extend.
+/// One candidate initialization graph, the admitted request facts it must
+/// bind and the current head it must extend.
 #[derive(Clone, Copy)]
 pub struct CommunityArtifactBatchInputV1<'a> {
     /// The protected store incarnation.
     pub store_incarnation: [u8; 16],
     /// The CDP1 the graph is selected under.
     pub profile_digest: Hash,
+    /// The CGI1 `operation_id` every CMB1 locator names.
+    pub operation_id: [u8; 16],
+    /// The CGI1 `authorization_ref` every CPN1 carries (note 22661, item 3).
+    pub authorization_ref: ArtifactRefV1,
+    /// The COB1 commitment every CAR1 and CSR1 binds.
+    pub owner_binding_digest: Hash,
     /// Every COW1 of the candidate closure.
     pub records: &'a [CommunityArtifactRecordInputV1<'a>],
     /// The canonical CGR1 execution root.
@@ -94,26 +111,33 @@ impl CommunityArtifactBatchV1 {
 enum Child {
     /// The record with this magic and logical digest.
     Record([u8; 4], Hash),
-    /// The CSC1 of the CSR1 with this logical digest: a `StateRevision`
-    /// node's result materialization.
-    StateOf(Hash),
+    /// The CSR1 with this logical digest and its CSC1: a `StateRevision`
+    /// node's content and result materialization.
+    Revision(Hash),
 }
 
 /// The facts one authenticated record contributes to the graph.
 struct Extracted {
     magic: [u8; 4],
     logical: Hash,
-    state: Option<Hash>,
+    /// A CSR1's or CIS1's member binding; zero otherwise.
+    member: Hash,
+    /// A CSR1's CSC1; zero otherwise.
+    state: Hash,
+    /// A CSR1's producer CIS1, or an `InitialState` node's content CIS1;
+    /// zero otherwise.
+    producer: Hash,
     node: Option<(CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1)>,
     children: Vec<Child>,
     record: CommunityProtectedRecordV1,
 }
 
-/// The decoded CGR1 facts every record is checked against.
+/// The decoded CGR1 and CSH1 facts every record is checked against.
 struct Root {
     timeline: TimelineId,
     generation: [u8; 16],
     roots: Vec<CommunityNativeNodeReferenceV1>,
+    members: BTreeSet<Hash>,
     counts: [u64; 6],
     digest: Hash,
 }
@@ -137,9 +161,9 @@ struct Root {
 /// Returns `StaleFrontier` when the current head is not the expected prior
 /// head; `EvidenceUnavailable` when no supplied key handle owns a record's
 /// operation or an envelope does not authenticate; the codec refusal for a
-/// malformed COW1, envelope, CAR1, record, CGR1 or CSH1; and
-/// `InvalidBinding` for any header, key, CAR1, ARD1, record-schema, child,
-/// root, closure, count or head-binding mismatch.
+/// malformed COW1, record, CGR1 or CSH1; and `InvalidBinding` for any
+/// header, key, CAR1, ARD1, owner-binding, record-schema, node-shape, child,
+/// member, root, cycle, closure, count or head-binding mismatch.
 pub fn prepare_community_artifact_batch_v1(
     _seal: &'static AuthorityTrustRootSealV1,
     input: CommunityArtifactBatchInputV1<'_>,
@@ -155,6 +179,7 @@ pub fn prepare_community_artifact_batch_v1(
         .map(|record| extract(*record, &input, &root, keys))
         .collect::<Result<Vec<_>, Error>>()?;
     let edges = resolve_children(&extracted)?;
+    check_shape(&extracted, &edges, &root)?;
     check_closure(&extracted, &edges, &root)?;
     Ok(CommunityArtifactBatchV1 {
         records: extracted.into_iter().map(|record| record.record).collect(),
@@ -163,7 +188,7 @@ pub fn prepare_community_artifact_batch_v1(
 }
 
 /// Decode CGR1 and its CSH1 and check that they name each other and this
-/// store and profile.
+/// store and profile. Decoding already validated every root row.
 fn read_root(input: &CommunityArtifactBatchInputV1<'_>) -> Result<Root, Error> {
     let root = CommunityGraphRootV1::from_canonical_cbor(input.graph_root)?;
     let head = CommunitySelectedHeadV1::from_canonical_cbor(input.selected_head)?;
@@ -183,7 +208,12 @@ fn read_root(input: &CommunityArtifactBatchInputV1<'_>) -> Result<Root, Error> {
     Ok(Root {
         timeline: fields.timeline,
         generation: fields.generation,
-        roots: fields.roots.iter().collect::<Result<_, Error>>()?,
+        roots: fields.roots.iter().flatten().collect(),
+        members: selected
+            .member_heads
+            .iter()
+            .map(|head| head.member_binding_digest)
+            .collect(),
         counts: [
             counts.registrations,
             counts.edges,
@@ -220,13 +250,15 @@ fn extract(
                 })
                 .ok_or(Error::EvidenceUnavailable)?;
             let intent = key.key_intent().as_input();
+            let kinds = intent.allowed_record_kinds;
             let bound = header.timeline == intent.timeline
                 && header.generation == intent.generation
                 && header.timeline == root.timeline
                 && header.generation == root.generation
                 && header.purpose == intent.purpose
                 && header.evidence_not_after_micros == intent.evidence_not_after_micros
-                && intent.allowed_record_kinds.contains(header.record_kind);
+                && kinds.contains(header.record_kind)
+                && kinds.contains(CommunityArtifactKindV1::ClassificationProof);
             if !bound {
                 return Err(Error::InvalidBinding);
             }
@@ -246,6 +278,7 @@ fn extract(
                         if car1.envelope_address != content.address()
                             || car1.plaintext_commitment
                                 != plaintext_commitment(header.record_kind, &plaintext)
+                            || car1.owner_binding_digest != batch.owner_binding_digest
                             || registration != *input.registration
                         {
                             return Err(Error::InvalidBinding);
@@ -272,8 +305,8 @@ fn extract(
     )
 }
 
-/// Validate the plain record's schema and derive its logical identity and
-/// the logical children its ARD1 must list.
+/// Validate the plain record's schema and derive its logical identity, its
+/// graph facts and the logical children its ARD1 must list.
 fn read_record(
     header: &CommunityArtifactHeaderInputV1,
     provenance: Hash,
@@ -284,7 +317,9 @@ fn read_record(
     let extracted = |magic, logical, children| Extracted {
         magic,
         logical,
-        state: None,
+        member: Hash::zero(),
+        state: Hash::zero(),
+        producer: Hash::zero(),
         node: None,
         children,
         record,
@@ -302,45 +337,60 @@ fn read_record(
             if !matches!(
                 fields.producer_origin,
                 CommunityStateProducerV1::Initialization { .. }
-            ) {
+            ) || fields.protected_owner_binding_digest != batch.owner_binding_digest
+            {
                 return Err(Error::InvalidBinding);
             }
             let logical = private_digest(b"PiglorOS.Community.CSR1.v1", &[plaintext]);
-            let mut record = extracted(
-                *b"CSR1",
-                logical,
-                vec![
-                    Child::Record(*b"CSC1", fields.state_content_digest),
-                    Child::Record(*b"CIS1", fields.producer_digest),
-                ],
-            );
-            record.state = Some(fields.state_content_digest);
-            Ok(record)
+            Ok(Extracted {
+                member: fields.member_binding_digest,
+                state: fields.state_content_digest,
+                producer: fields.producer_digest,
+                ..extracted(
+                    *b"CSR1",
+                    logical,
+                    vec![
+                        Child::Record(*b"CSC1", fields.state_content_digest),
+                        Child::Record(*b"CIS1", fields.producer_digest),
+                    ],
+                )
+            })
         }
         CommunityArtifactKindV1::ExecutionProvenance
             if plaintext.get(2..6) == Some(b"CIS1".as_slice()) =>
         {
-            CommunityInitializationProducerV1::from_canonical_cbor(plaintext)
-                .map(|producer| extracted(*b"CIS1", producer.digest(), Vec::new()))
+            CommunityInitializationProducerV1::from_canonical_cbor(plaintext).map(|producer| {
+                Extracted {
+                    member: producer.as_input().member_binding_digest,
+                    ..extracted(*b"CIS1", producer.digest(), Vec::new())
+                }
+            })
         }
         CommunityArtifactKindV1::ExecutionProvenance => {
-            read_node(header, provenance, plaintext, batch).map(|(node, children)| {
-                let mut record = extracted(*b"CPN1", node.1.node_digest, children);
-                record.node = Some(node);
-                record
+            read_node(header, provenance, plaintext, batch).map(|(node, producer, children)| {
+                Extracted {
+                    producer,
+                    node: Some(node),
+                    ..extracted(*b"CPN1", node.1.node_digest, children)
+                }
             })
         }
         _ => Err(Error::InvalidBinding),
     }
 }
 
-/// A CPN1's node facts and logical children: its content record, every
-/// native input node and, for a `StateRevision`, the CSC1 of its CSR1.
+/// A CPN1's kind and reference, its content CIS1 (for `InitialState`) and
+/// its logical children.
 type NodeFacts = (
     (CommunityNativeNodeKindV1, CommunityNativeNodeReferenceV1),
+    Hash,
     Vec<Child>,
 );
 
+/// Validate one CPN1 against its envelope, the request and the note-22661
+/// shape (items 1 to 3): `InitialState` node 2·slot over CIS1 cites only
+/// its CMB1 locator; `StateRevision` node 2·slot+1 over CSR1 cites only
+/// node 2·slot of the same producer.
 fn read_node(
     header: &CommunityArtifactHeaderInputV1,
     provenance: Hash,
@@ -350,44 +400,66 @@ fn read_node(
     let node = CommunityNativeNodeV1::from_canonical_cbor(plaintext)?;
     let fields = node.as_input();
     let content = fields.content;
-    let content_matches = match fields.kind {
-        CommunityNativeNodeKindV1::InitialState => content.record_magic == *b"CIS1",
-        CommunityNativeNodeKindV1::StateRevision => content.record_magic == *b"CSR1",
-        _ => false,
-    };
-    let scope_cover = header.scope_cover_digest;
-    let bound = content_matches
-        && fields.store_incarnation == batch.store_incarnation
-        && fields.timeline == header.timeline
-        && fields.generation == header.generation
-        && fields.scope_binding_digest == scope_cover
-        && fields.provenance_digest == provenance
-        && fields.evidence_not_after_micros == header.evidence_not_after_micros;
     let CommunityInputIndexV1::Direct(inputs) = fields.input_index else {
         return Err(Error::InvalidBinding);
     };
-    if !bound {
-        return Err(Error::InvalidBinding);
-    }
-    let mut children = vec![Child::Record(content.record_magic, content.logical_digest)];
-    if fields.kind == CommunityNativeNodeKindV1::StateRevision {
-        children.push(Child::StateOf(content.logical_digest));
-    }
-    for input in inputs.iter() {
-        match input? {
-            // A metadata source is CNE1-resident and has no ARD1.
-            CommunityTypedInputRefV1::Metadata { .. } => {}
-            CommunityTypedInputRefV1::Native(reference) => {
-                children.push(Child::Record(*b"CPN1", reference.node_digest));
-            }
-            _ => return Err(Error::InvalidBinding),
+    // Decoding already validated every row.
+    let inputs: Vec<CommunityTypedInputRefV1<'_>> = inputs.iter().flatten().collect();
+    let control = CommunityLocatorProducerV1::Control(batch.operation_id);
+    let shape = match (fields.kind, inputs.as_slice()) {
+        (
+            CommunityNativeNodeKindV1::InitialState,
+            [CommunityTypedInputRefV1::Metadata {
+                schema: CommunityMetadataSchemaV1::Cmb1,
+                locator,
+                ..
+            }],
+        ) => (content.record_magic == *b"CIS1"
+            && locator.timeline == header.timeline
+            && locator.generation == header.generation
+            && locator.producer == control
+            && locator.record_role == CMB1_RECORD_ROLE
+            && u32::from(locator.slot) * 2 == fields.node_ordinal)
+            .then(|| vec![Child::Record(*b"CIS1", content.logical_digest)]),
+        (CommunityNativeNodeKindV1::StateRevision, [CommunityTypedInputRefV1::Native(initial)]) => {
+            (content.record_magic == *b"CSR1"
+                && fields.node_ordinal % 2 == 1
+                && initial.producer_ordinal == fields.producer_ordinal
+                && fields.node_ordinal.checked_sub(1) == Some(initial.node_ordinal))
+            .then(|| {
+                vec![
+                    Child::Revision(content.logical_digest),
+                    Child::Record(*b"CPN1", initial.node_digest),
+                ]
+            })
         }
+        _ => None,
+    };
+    let scope_cover = header.scope_cover_digest;
+    let bound = fields.store_incarnation == batch.store_incarnation
+        && fields.timeline == header.timeline
+        && fields.generation == header.generation
+        && fields.scope_binding_digest == scope_cover
+        && fields.authorization_digest == Hash::from_bytes(batch.authorization_ref.digest)
+        && fields.provenance_digest == provenance
+        && fields.evidence_not_after_micros == header.evidence_not_after_micros;
+    match shape {
+        Some(children) if bound => {
+            let producer = if fields.kind == CommunityNativeNodeKindV1::InitialState {
+                content.logical_digest
+            } else {
+                Hash::zero()
+            };
+            Ok(((fields.kind, node.reference()), producer, children))
+        }
+        _ => Err(Error::InvalidBinding),
     }
-    Ok(((fields.kind, node.reference()), children))
 }
 
 /// Resolve every record's logical children to records and require its ARD1
-/// to list exactly their required edges.
+/// to list exactly their required edges. A record's resolved children keep
+/// the order of its logical children: a CSR1 lists `[CSC1, CIS1]` and a
+/// `StateRevision` node `[CSR1, CSC1, InitialState]`.
 fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
     let mut by_identity = BTreeMap::new();
     for (index, record) in extracted.iter().enumerate() {
@@ -407,19 +479,17 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
     extracted
         .iter()
         .map(|record| {
-            let children = record
-                .children
-                .iter()
-                .map(|child| match *child {
-                    Child::Record(magic, digest) => find(magic, digest),
-                    Child::StateOf(revision) => find(*b"CSR1", revision).and_then(|index| {
-                        extracted[index]
-                            .state
-                            .ok_or(Error::InvalidBinding)
-                            .and_then(|state| find(*b"CSC1", state))
-                    }),
-                })
-                .collect::<Result<Vec<usize>, Error>>()?;
+            let mut children = Vec::with_capacity(3);
+            for child in &record.children {
+                match *child {
+                    Child::Record(magic, digest) => children.push(find(magic, digest)?),
+                    Child::Revision(digest) => {
+                        let revision = find(*b"CSR1", digest)?;
+                        children.push(revision);
+                        children.push(find(*b"CSC1", extracted[revision].state)?);
+                    }
+                }
+            }
             let mut expected: Vec<ArtifactChildEdgeV1> = children
                 .iter()
                 .map(|child| {
@@ -448,9 +518,45 @@ fn resolve_children(extracted: &[Extracted]) -> Result<Vec<Vec<usize>>, Error> {
         .collect()
 }
 
+/// Check the cross-record shape (note 22661, items 2 and 3): every node
+/// shares one producer ordinal at a distinct node ordinal; each
+/// `StateRevision` node's `InitialState` input cites the CIS1 its CSR1
+/// names; each CSR1 names its CIS1's member; and the CSR1 members are
+/// exactly the CSH1 members.
+///
+/// A `StateRevision` input sits at an even ordinal, where only an
+/// `InitialState` node can, so its kind needs no separate check.
+fn check_shape(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Result<(), Error> {
+    let nodes: Vec<CommunityNativeNodeReferenceV1> = extracted
+        .iter()
+        .filter_map(|record| record.node.map(|(_, reference)| reference))
+        .collect();
+    let producers: BTreeSet<u64> = nodes.iter().map(|node| node.producer_ordinal).collect();
+    let ordinals: BTreeSet<u32> = nodes.iter().map(|node| node.node_ordinal).collect();
+    let mut members = BTreeSet::new();
+    let mut linked = true;
+    for (record, children) in extracted.iter().zip(edges) {
+        match (record.magic, record.node, children.as_slice()) {
+            (_, Some((CommunityNativeNodeKindV1::StateRevision, _)), [revision, _, initial]) => {
+                linked &= extracted[*initial].producer == extracted[*revision].producer;
+            }
+            (magic, None, [_, producer]) if magic == *b"CSR1" => {
+                linked &=
+                    extracted[*producer].member == record.member && members.insert(record.member);
+            }
+            _ => {}
+        }
+    }
+    if producers.len() <= 1 && ordinals.len() == nodes.len() && linked && members == root.members {
+        Ok(())
+    } else {
+        Err(Error::InvalidBinding)
+    }
+}
+
 /// Resolve every CGR1 root to a `StateRevision` CPN1, walk the complete
 /// closure and require it to be exactly the batch with exactly the CGR1
-/// counts. Child edges name content digests, so they cannot form a cycle.
+/// counts.
 fn check_closure(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> Result<(), Error> {
     let roots = root
         .roots
@@ -464,21 +570,7 @@ fn check_closure(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> 
                 .ok_or(Error::InvalidBinding)
         })
         .collect::<Result<Vec<usize>, Error>>()?;
-    let mut heights: BTreeMap<usize, u64> = BTreeMap::new();
-    let mut stack: Vec<(usize, bool)> = roots.iter().map(|index| (*index, false)).collect();
-    while let Some((index, expanded)) = stack.pop() {
-        if expanded {
-            let height = 1 + edges[index]
-                .iter()
-                .map(|child| heights.get(child).copied().unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            heights.insert(index, height);
-        } else if !heights.contains_key(&index) {
-            stack.push((index, true));
-            stack.extend(edges[index].iter().map(|child| (*child, false)));
-        }
-    }
+    let heights = heights(&roots, edges)?;
     let keys: BTreeSet<_> = extracted
         .iter()
         .flat_map(|record| &record.record.registration().fields().key_dependencies)
@@ -498,6 +590,33 @@ fn check_closure(extracted: &[Extracted], edges: &[Vec<usize>], root: &Root) -> 
     } else {
         Err(Error::InvalidBinding)
     }
+}
+
+/// The height of every record reachable from `roots`, counting a leaf as
+/// one, by an iterative depth-first walk. A child still on the current path
+/// is a cycle and refuses.
+fn heights(roots: &[usize], edges: &[Vec<usize>]) -> Result<BTreeMap<usize, u64>, Error> {
+    let mut heights: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    let mut stack: Vec<(usize, bool)> = roots.iter().map(|index| (*index, false)).collect();
+    while let Some((index, expanded)) = stack.pop() {
+        if expanded {
+            visiting.remove(&index);
+            let height = 1 + edges[index]
+                .iter()
+                .map(|child| heights.get(child).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            heights.insert(index, height);
+        } else if visiting.contains(&index) {
+            return Err(Error::InvalidBinding);
+        } else if !heights.contains_key(&index) {
+            visiting.insert(index);
+            stack.push((index, true));
+            stack.extend(edges[index].iter().map(|child| (*child, false)));
+        }
+    }
+    Ok(heights)
 }
 
 #[cfg(test)]
