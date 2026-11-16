@@ -115,6 +115,14 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("usage:", result.stderr)
 
+    def test_a_program_that_cannot_be_executed_is_a_clean_error(self) -> None:
+        with mock.patch.object(helper, "install"), \
+                mock.patch.object(helper.platform, "machine", return_value="x86_64"), \
+                mock.patch("sys.stderr") as stderr:
+            self.assertEqual(helper.main(["helper", "/nonexistent/program"]), 127)
+        self.assertIn("cannot execute /nonexistent/program",
+                      "".join(call.args[0] for call in stderr.write.call_args_list))
+
     def test_an_unknown_architecture_installs_nothing(self) -> None:
         with mock.patch.object(helper.platform, "machine", return_value="riscv64"), \
                 mock.patch.object(helper, "install") as install, \

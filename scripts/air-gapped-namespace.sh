@@ -18,7 +18,8 @@
 #
 # bash -p reads no BASH_ENV or ENV file and imports no shell functions; the fixed PATH below
 # chooses every program this runner starts. The environment is otherwise passed through
-# (sudo -E), so test and coverage variables reach PROGRAM.
+# (sudo -E), so test and coverage variables reach PROGRAM, except the variables sudo always
+# strips (LD_PRELOAD, LD_LIBRARY_PATH and the like) in the fallback.
 set -euo pipefail
 readonly RUNNER_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH=$RUNNER_PATH
@@ -28,15 +29,27 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
+for tool in unshare ip setpriv python3; do
+  command -v "$tool" >/dev/null || {
+    echo "air-gapped-namespace.sh: $tool is required" >&2
+    exit 2
+  }
+done
+
 readonly HELPER=$(realpath -- "$(dirname -- "$0")/air_gapped_seccomp_exec.py")
 readonly DROP=(--no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all)
 # Bring `lo` up while CAP_NET_ADMIN is still held, then exec the rest of the arguments.
 readonly LOOPBACK_UP='ip link set lo up && exec "$@"'
 
-if unshare --user --map-root-user --net true 2>/dev/null; then
+# Probe the whole user-namespace step, `lo` included, before choosing it.
+if unshare --user --map-root-user --net sh -c 'ip link set lo up' 2>/dev/null; then
   exec unshare --user --map-root-user --net \
     sh -c "$LOOPBACK_UP" sh setpriv "${DROP[@]}" python3 "$HELPER" "$@"
 fi
+command -v sudo >/dev/null || {
+  echo "air-gapped-namespace.sh: unprivileged user namespaces are blocked and sudo is absent" >&2
+  exit 2
+}
 exec sudo -n -E unshare --net \
   sh -c "$LOOPBACK_UP" sh \
   setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups "${DROP[@]}" \
