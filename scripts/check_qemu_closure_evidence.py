@@ -159,7 +159,7 @@ MOUNTED_CASES = ("positive", "tampered")
 DRIVER_FILES = {"arguments", "report", "driver-stderr", "driver-status", "timing", "devices-before",
                 "devices-after", "runtime-after"}
 HELD_FILES = {"devices-held", "mountinfo-held", "dm-table-held", "readback"}
-REPLY_FILES = {"devices-before", "reply", "stderr", "status", "devices-after"}
+REPLY_FILES = {"devices-before", "reply", "stderr", "status", "timing", "devices-after"}
 CASE_ENTRIES = {*DRIVER_CASES, "mountfsd-reply", "verity-d-planted", "kernel-log", "mountfsd-log"}
 ATTEMPT_ROOT = re.compile(r"/run/pigloros/sandbox/attempts/[0-9a-f]{32}/root")
 PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
@@ -987,12 +987,17 @@ def readback_records(evidence: Evidence, case: str) -> dict[str, tuple[str, str]
     return records
 
 
-def activation_seconds(evidence: Evidence, case: str) -> float:
-    """Seconds from the driver's start to its activation report (recorded, not judged)."""
-    match = re.fullmatch(r"activation-seconds\t(\d+\.\d{2})", evidence.line(f"guest/cases/{case}/timing"))
+def recorded_seconds(evidence: Evidence, case: str, what: str) -> float:
+    """A case's recorded duration in seconds: kept in the verdict, not judged."""
+    match = re.fullmatch(rf"{what}-seconds\t([0-9]+\.[0-9]{{2}})", evidence.line(f"guest/cases/{case}/timing"))
     if not match:
         raise EvidenceError(f"malformed {case} timing")
     return float(match.group(1))
+
+
+def activation_seconds(evidence: Evidence, case: str) -> float:
+    """Seconds from the driver's start to its activation report."""
+    return recorded_seconds(evidence, case, "activation")
 
 
 def check_mounted_case(evidence: Evidence, case: str, root_verity: tuple[str, str]) -> dict:
@@ -1060,7 +1065,8 @@ def check_mountfsd_reply(evidence: Evidence, image_size: int) -> dict:
     for name in ("devices-before", "devices-after"):
         require_no_devices(evidence, f"{base}/{name}")
     return {"imageSize": reply["imageSize"], "sectorSize": reply["sectorSize"],
-            "imagePolicy": reply.get("imagePolicy")}
+            "imagePolicy": reply.get("imagePolicy"),
+            "cold_mountimage_seconds": recorded_seconds(evidence, "mountfsd-reply", "mountimage")}
 
 
 def check_cases(evidence: Evidence, paths: dict, trusted: tuple[bytes, str],

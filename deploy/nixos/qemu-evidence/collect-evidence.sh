@@ -180,16 +180,20 @@ driver_case() { # NAME IMAGE CERTIFICATE_DER DESCRIPTION
 # reply mountfsd sends is recorded verbatim. varlinkctl exits with the reply,
 # closing the returned mount descriptor; the devices must then go away.
 mountfsd_reply_case() { # IMAGE
-  local dir=cases/mountfsd-reply image=/run/piglor-evidence-image.raw status=0 fd
+  local dir=cases/mountfsd-reply image=/run/piglor-evidence-image.raw status=0 fd start
   mkdir -p "${dir}"
   cp -- "$1" "${image}"
   devices >"${dir}/devices-before"
   # Pass a read-only descriptor, as the provider does, not a path.
   exec {fd}<"${image}"
-  varlinkctl call --push-fd="${fd}" /run/systemd/io.systemd.MountFileSystem \
+  start="$(cut -d ' ' -f 1 /proc/uptime)"
+  # varlinkctl's own default timeout is shorter than this cold first call
+  # under aarch64 TCG (run 43903782177); its duration is recorded instead.
+  varlinkctl call --timeout=600 --push-fd="${fd}" /run/systemd/io.systemd.MountFileSystem \
     io.systemd.MountFileSystem.MountImage \
     '{"imageFileDescriptor":0,"readOnly":true,"growFileSystems":false,"imagePolicy":"root=signed+erofs:=absent","relaxExtensionReleaseChecks":false,"veritySharing":false,"allowInteractiveAuthentication":false}' \
     >"${dir}/reply" 2>"${dir}/stderr" || status=$?
+  awk -v start="${start}" '{ printf "mountimage-seconds\t%.2f\n", $1 - start }' /proc/uptime >"${dir}/timing"
   exec {fd}<&-
   printf '%s\n' "${status}" >"${dir}/status"
   settled_devices "${dir}/devices-after"
@@ -301,7 +305,9 @@ namespaces 1 >pid1-namespaces
 images="${PIGLOR_EVIDENCE_IMAGES:?}"
 mkdir cases
 # The raw call runs first. Its first MountImage also loads what mountfsd's
-# probing needs, which under TCG can take much of the provider's 60 s bound.
+# probing needs, which under aarch64 TCG took longer than the provider's 60 s
+# bound (run 43854451008). So the driver cases measure warm activations only;
+# the cold call's duration is recorded in its timing file.
 mountfsd_reply_case "${images}/positive.raw"
 for case in positive tampered wrong-key; do
   driver_case "${case}" "${images}/${case}.raw" "${images}/${case}.der" "$(cat "${images}/${case}.description")"

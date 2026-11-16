@@ -294,6 +294,7 @@ def case_files() -> dict[str, bytes | str]:
         "guest/cases/mountfsd-reply/reply": REPLY,
         "guest/cases/mountfsd-reply/stderr": "",
         "guest/cases/mountfsd-reply/status": "0\n",
+        "guest/cases/mountfsd-reply/timing": "mountimage-seconds\t71.25\n",
         "guest/cases/mountfsd-reply/devices-after": "",
     }
     for case, image, signer, description in (
@@ -1064,6 +1065,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual((verdict["mountfsd_reply"]["imageSize"], verdict["mountfsd_reply"]["sectorSize"]),
                          (4096, 512))
         self.assertEqual(verdict["tampered_offset"], TAMPERED_OFFSET)
+        self.assertEqual(verdict["mountfsd_reply"]["cold_mountimage_seconds"], 71.25)
+        self.assertEqual(verdict["positive"]["activation_seconds"], 12.5)
         self.assertEqual(verdict["positive"]["held"]["dm_device"], "253:0")
 
     def test_mount_image_case_fabrication_fails_closed(self):
@@ -1159,6 +1162,8 @@ class EvidenceTests(unittest.TestCase):
             lambda f: f.update({"guest/cases/verity-d-planted": ""}),
             # The raw reply.
             lambda f: f.update({f"{reply}/status": "1\n"}),
+            lambda f: f.update({f"{reply}/timing": "activation-seconds\t71.25\n"}),
+            lambda f: f.update({f"{reply}/timing": "mountimage-seconds\t\u0667\u0661.25\n"}),
             lambda f: f.update({f"{reply}/reply": without("imageSize")}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"sectorSize": 512', '"sectorSize": true')}),
             lambda f: f.update({f"{reply}/reply": REPLY.replace('"erofs"', '"ext4"')}),
