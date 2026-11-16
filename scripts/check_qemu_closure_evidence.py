@@ -169,7 +169,7 @@ PLANTED_CERTIFICATE = "/run/verity.d/piglor-untrusted.crt"
 REPLY_POLICY = "root=signed:=absent"
 # mountfsd mounts the dm-verity node it opened through a descriptor, so the
 # mount's source is that descriptor's /proc path, as recorded in that run.
-MOUNT_SOURCE = re.compile(r"/proc/self/fd/\d+")
+MOUNT_SOURCE = re.compile(r"/proc/self/fd/[0-9]+")
 READBACK_BLOCKS = 16
 PROCESS_FILES = {"exe", "environ", "namespaces"}
 OID_COMMON_NAME = "2.5.4.3"

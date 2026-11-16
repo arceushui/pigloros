@@ -340,26 +340,22 @@ type DescribedImage = ([PartitionDescriptor; 3], ImageSigning, [u8; 32]);
 /// root, root-verity and root-verity-sig; admission rejects any other order.
 /// Every offset is checked: a malformed image is an error, never a panic.
 fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> {
-    const OVERFLOW: &str = "a GPT field overflows";
     let bytes = image.image;
-    let sector = [512_usize, 4096]
+    let sector = [512_u64, 4096]
         .into_iter()
-        .find(|sector| bytes.get(*sector..*sector + 8) == Some(b"EFI PART".as_slice()))
+        .find(|sector| range(bytes, *sector, 8).is_ok_and(|magic| magic == b"EFI PART"))
         .ok_or("the image has no GPT header")?;
-    let first_entry = usize::try_from(le64(bytes, sector + 72)?)?
+    let first_entry = le64(bytes, sector + 72)?
         .checked_mul(sector)
-        .ok_or(OVERFLOW)?;
-    let count = usize::try_from(le32(bytes, sector + 80)?)?;
-    let entry_size = usize::try_from(le32(bytes, sector + 84)?)?;
+        .ok_or("a GPT field overflows")?;
+    let (count, entry_size) = (le32(bytes, sector + 80)?, le32(bytes, sector + 84)?);
     if entry_size < 48 {
         return Err("a GPT entry is shorter than its fixed fields".into());
     }
-    let sector_bytes = u64::try_from(sector)?;
+    // Both factors are 32-bit, so the table length cannot overflow 64 bits.
+    let table = range(bytes, first_entry, u64::from(count) * u64::from(entry_size))?;
     let mut partitions = Vec::new();
-    for index in 0..count {
-        // An entry past the end of the address space lies outside the image.
-        let offset = first_entry.saturating_add(index.saturating_mul(entry_size));
-        let entry = range(bytes, offset, entry_size)?;
+    for entry in table.chunks_exact(entry_size as usize) {
         if entry[..16] == [0; 16] {
             continue;
         }
@@ -367,10 +363,10 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
         let length = last
             .checked_sub(first)
             .and_then(|span| span.checked_add(1))
-            .and_then(|sectors| sectors.checked_mul(sector_bytes))
+            .and_then(|sectors| sectors.checked_mul(sector))
             .ok_or("a GPT entry ends before it starts or overflows")?;
-        let start = first.checked_mul(sector_bytes).ok_or(OVERFLOW)?;
-        let content = range(bytes, usize::try_from(start)?, usize::try_from(length)?)?;
+        let start = first.checked_mul(sector).ok_or("a GPT field overflows")?;
+        let content = range(bytes, start, length)?;
         partitions.push(PartitionDescriptor {
             role: [
                 PartitionRole::RootData,
@@ -390,18 +386,27 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     let partitions: [PartitionDescriptor; 3] = partitions
         .try_into()
         .map_err(|_| "the image does not have exactly three partitions")?;
-    // The format-1 verity superblock (cryptsetup `verity_sb`): a 32-byte salt.
+    // cryptsetup's format-1 `verity_sb`: signature, version 1, hash type 1,
+    // the salt size at 80 and a 32-byte salt from 88, as the checker reads it.
     let superblock = extent(bytes, &partitions[1])?;
+    if superblock.get(..8) != Some(b"verity\0\0".as_slice()) {
+        return Err("the root-verity partition has no verity superblock".into());
+    }
+    if superblock.get(8..16) != Some([1, 0, 0, 0, 1, 0, 0, 0].as_slice()) {
+        return Err("the verity superblock is not version 1 with hash type 1".into());
+    }
     if superblock.get(80..82) != Some([32, 0].as_slice()) {
         return Err("the verity superblock's salt is not 32 bytes".into());
     }
-    let salt = range(superblock, 88, 32)?.try_into()?;
+    let mut salt = [0; 32];
+    salt.copy_from_slice(range(superblock, 88, 32)?);
     let signature = extent(bytes, &partitions[2])?;
     let json = signature
         .iter()
         .position(|byte| *byte == 0)
         .map_or(signature, |end| &signature[..end]);
-    let json: serde_json::Value = serde_json::from_slice(json)?;
+    let json: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|_| "the root-verity-sig partition is not one JSON value")?;
     let root_hash = json["rootHash"]
         .as_str()
         .filter(|text| {
@@ -411,11 +416,13 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
         .ok_or("the root-verity-sig rootHash is not 64 lowercase hexadecimal digits")?;
-    let root_hash = (0..32)
-        .map(|index| u8::from_str_radix(&root_hash[2 * index..2 * index + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()?
-        .try_into()
-        .map_err(|_| "the root-verity-sig rootHash is not 32 bytes")?;
+    let mut root_hash_bytes = [0; 32];
+    for (byte, pair) in root_hash_bytes
+        .iter_mut()
+        .zip(root_hash.as_bytes().chunks_exact(2))
+    {
+        *byte = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
+    }
     let proof = base64_decode(
         json["signature"]
             .as_str()
@@ -425,7 +432,7 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
         partitions,
         ImageSigning {
             architecture: image.architecture,
-            root_hash,
+            root_hash: root_hash_bytes,
             proof,
             certificate: image.certificate.to_vec(),
             key_description: image.key_description.to_owned(),
@@ -434,30 +441,38 @@ fn described(image: &StagedImage<'_>) -> Result<DescribedImage, Box<dyn Error>> 
     ))
 }
 
+/// One lowercase hexadecimal digit that the caller already validated.
+const fn hex_value(digit: u8) -> u8 {
+    if digit.is_ascii_digit() {
+        digit - b'0'
+    } else {
+        digit - b'a' + 10
+    }
+}
+
 fn extent<'a>(
     bytes: &'a [u8],
     partition: &PartitionDescriptor,
 ) -> Result<&'a [u8], Box<dyn Error>> {
-    range(
-        bytes,
-        usize::try_from(partition.start_bytes)?,
-        usize::try_from(partition.length_bytes)?,
-    )
+    range(bytes, partition.start_bytes, partition.length_bytes)
 }
 
-fn range(bytes: &[u8], start: usize, length: usize) -> Result<&[u8], Box<dyn Error>> {
+fn range(bytes: &[u8], start: u64, length: u64) -> Result<&[u8], Box<dyn Error>> {
     start
         .checked_add(length)
-        .and_then(|end| bytes.get(start..end))
+        .and_then(|end| Some((usize::try_from(start).ok()?, usize::try_from(end).ok()?)))
+        .and_then(|(start, end)| bytes.get(start..end))
         .ok_or_else(|| "a GPT extent lies outside the image".into())
 }
 
-fn le32(bytes: &[u8], offset: usize) -> Result<u32, Box<dyn Error>> {
-    Ok(u32::from_le_bytes(range(bytes, offset, 4)?.try_into()?))
+fn le32(bytes: &[u8], offset: u64) -> Result<u32, Box<dyn Error>> {
+    range(bytes, offset, 4)
+        .map(|field| u32::from_le_bytes([field[0], field[1], field[2], field[3]]))
 }
 
-fn le64(bytes: &[u8], offset: usize) -> Result<u64, Box<dyn Error>> {
-    Ok(u64::from_le_bytes(range(bytes, offset, 8)?.try_into()?))
+fn le64(bytes: &[u8], offset: u64) -> Result<u64, Box<dyn Error>> {
+    range(bytes, offset, 8)
+        .map(|field| u64::from_le_bytes(std::array::from_fn(|index| field[index])))
 }
 
 /// A GPT GUID's mixed-endian bytes in RFC 4122 order, as SIM1 records them.
@@ -482,9 +497,10 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         for byte in &chunk[..4 - padding] {
             let digit = ALPHABET
                 .iter()
-                .position(|candidate| candidate == byte)
+                .zip(0_u32..)
+                .find_map(|(candidate, digit)| (candidate == byte).then_some(digit))
                 .ok_or("invalid base64 digit")?;
-            value = (value << 6) | u32::try_from(digit)?;
+            value = (value << 6) | digit;
         }
         value <<= 6 * padding;
         output.extend_from_slice(&value.to_be_bytes()[1..4 - padding]);
@@ -533,6 +549,8 @@ mod tests {
                 ddi.set_u64(entry + 40, sector);
             }
             ddi.bytes[6 * 512..6 * 512 + 8].copy_from_slice(b"verity\0\0");
+            ddi.set_u32(6 * 512 + 8, 1);
+            ddi.set_u32(6 * 512 + 12, 1);
             ddi.bytes[6 * 512 + 80] = 32;
             ddi.bytes[6 * 512 + 88..6 * 512 + 120].fill(0x45);
             ddi.signature(ROOT_HASH);
@@ -590,7 +608,7 @@ mod tests {
 
     #[test]
     fn every_malformed_field_is_an_error_not_a_panic() {
-        let cases: [Case; 13] = [
+        let cases: [Case; 19] = [
             ("no GPT header", |ddi| {
                 ddi.bytes[512] = b'X';
             }),
@@ -615,6 +633,30 @@ mod tests {
             }),
             ("exactly three partitions", |ddi| {
                 ddi.bytes[1024 + 256..1024 + 272].fill(0);
+            }),
+            ("more than three partitions", |ddi| {
+                ddi.set_u32(512 + 80, 4);
+                ddi.bytes[1024 + 384..1024 + 400].fill(4);
+                ddi.set_u64(1024 + 384 + 32, 5);
+                ddi.set_u64(1024 + 384 + 40, 5);
+            }),
+            // A verity extent cut short by the end of the image.
+            ("outside the image", |ddi| {
+                ddi.bytes.truncate(6 * 512 + 100);
+            }),
+            ("no verity superblock", |ddi| {
+                ddi.bytes[6 * 512] = b'X';
+            }),
+            ("version 1 with hash type 1", |ddi| {
+                ddi.bytes[6 * 512 + 8] = 2;
+            }),
+            ("not one JSON value", |ddi| {
+                ddi.bytes[7 * 512..7 * 512 + 8].copy_from_slice(b"not json");
+            }),
+            ("64 lowercase hexadecimal", |ddi| {
+                let json = br#"{"signature":"AQID"}"#;
+                ddi.bytes[7 * 512..8 * 512].fill(0);
+                ddi.bytes[7 * 512..7 * 512 + json.len()].copy_from_slice(json);
             }),
             ("salt is not 32 bytes", |ddi| {
                 ddi.bytes[6 * 512 + 80] = 64;

@@ -1135,6 +1135,12 @@ class EvidenceTests(unittest.TestCase):
                 "/proc/self/fd/20", "/dev/loop0p1")}),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace(
                 "/proc/self/fd/20", "/proc/self/fd/x")}),
+            # A non-ASCII decimal digit (ARABIC-INDIC DIGIT TWO) is not a descriptor number.
+            lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace(
+                "/proc/self/fd/20", "/proc/self/fd/\u0662")}),
+            # mountfsd's journal is recorded, not judged, but it must be there exactly once.
+            lambda f: f.pop("guest/cases/mountfsd-log"),
+            lambda f: f.update({"guest/cases/mountfsd-log.1": ""}),
             lambda f: f.update({f"{positive}/timing": "activation-seconds\tlong\n"}),
             lambda f: f.pop(f"{positive}/timing"),
             lambda f: f.update({f"{positive}/mountinfo-held": MOUNTINFO + held_mount.replace("253:0", "253:1")}),
