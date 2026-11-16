@@ -19,8 +19,10 @@ pub trait LocalReplicaResidualPortV1 {
     ///
     /// # Errors
     /// - [`ErasureErrorV1::ReplicaTimeout`]: another connection still holds
-    ///   the store, so the purge could not complete. This code is transient
-    ///   and the driver retries it.
+    ///   the store, so the purge could not complete. That connection is
+    ///   either a writer while the store is rebuilt or a reader while the
+    ///   write-ahead log is truncated. This code is transient and the driver
+    ///   retries it.
     /// - [`ErasureErrorV1::ReplicaNegativeAcknowledgement`]: any other
     ///   failure, or a store with no file the proof could cover. This code is
     ///   permanent.

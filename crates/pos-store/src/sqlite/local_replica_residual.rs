@@ -11,12 +11,17 @@
 //!
 //! The proof is strict. The purge is positive only when the checkpoint
 //! reports no busy reader and no remaining frames (`0, 0, 0`), and the
-//! `-wal` file is empty afterwards. A checkpoint blocked by another
-//! connection is the transient `ReplicaTimeout`. Every other outcome is a
-//! negative acknowledgement, including a read-only store and an in-memory
-//! database, which has no file to prove anything about.
+//! `-wal` file is empty afterwards. A store that another connection holds is
+//! the transient `ReplicaTimeout`. That covers a writer that makes `VACUUM`
+//! fail busy or locked, and a reader that keeps the checkpoint busy. Every
+//! other outcome is a negative acknowledgement. That includes a read-only
+//! store and an in-memory database, which has no file to prove anything
+//! about. A writer on another connection that commits between the
+//! checkpoint and the `-wal` size check also makes the purge negative, which
+//! fails closed.
 
 use pos_core::{ErasureErrorV1, LocalReplicaResidualPortV1};
+use rusqlite::ErrorCode;
 
 use super::SqliteStore;
 
@@ -36,14 +41,20 @@ impl SqliteStore {
         })
     }
 
-    /// Whether the store's `-wal` file exists and holds zero bytes.
+    /// Whether the `-wal` file at the store's path holds zero bytes.
     fn write_ahead_log_is_empty(&self) -> bool {
         self.conn
             .path()
-            .filter(|path| !path.is_empty())
             .and_then(|path| std::fs::metadata(format!("{path}-wal")).ok())
             .is_some_and(|metadata| metadata.len() == 0)
     }
+}
+
+/// Whether another connection holding the store caused the failure.
+fn held_by_another_connection(error: &rusqlite::Error) -> bool {
+    error
+        .sqlite_error_code()
+        .is_some_and(|code| code == ErrorCode::DatabaseBusy || code == ErrorCode::DatabaseLocked)
 }
 
 impl LocalReplicaResidualPortV1 for SqliteStore {
@@ -51,6 +62,7 @@ impl LocalReplicaResidualPortV1 for SqliteStore {
         match self.vacuum_and_truncate_wal() {
             Ok((1, _, _)) => Err(ErasureErrorV1::ReplicaTimeout),
             Ok((0, 0, 0)) if self.write_ahead_log_is_empty() => Ok(()),
+            Err(error) if held_by_another_connection(&error) => Err(ErasureErrorV1::ReplicaTimeout),
             _ => Err(ErasureErrorV1::ReplicaNegativeAcknowledgement),
         }
     }

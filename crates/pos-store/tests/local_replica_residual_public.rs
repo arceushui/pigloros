@@ -4,13 +4,14 @@
 //! Each scenario writes known markers, deletes them through
 //! `EventStore::delete_timeline`, purges through
 //! `LocalReplicaResidualPortV1`, and then scans the raw bytes of the database
-//! file and its `-wal` and `-shm` files. Control scans show that each marker
-//! really was on disk before the purge: first in the write-ahead log only,
-//! then in the database file after a checkpoint, and still there after the
-//! delete.
+//! file and its `-wal` and `-shm` files. Control scans show that every
+//! marker really was on disk before the purge: first in the write-ahead log
+//! only, then in the database file after a checkpoint, and still there after
+//! the delete. Each marker fits inside one page, so a page or frame boundary
+//! cannot split it.
 #![cfg(feature = "sqlite")]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,8 +30,15 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Width of every payload marker.
 const MARKER_BYTES: usize = 64;
-/// Overflow payload: three default 4,096-byte pages of distinct markers.
-const OVERFLOW_MARKERS: usize = 192;
+/// The repeated unit of the overflow payload. Any surviving fragment of the
+/// payload longer than twice its width contains a whole copy.
+const OVERFLOW_UNIT: &[u8; 16] = b"F1-OVERFLOW-UNIT";
+/// Copies of the unit: a 12,288-byte payload spread over a leaf cell and
+/// three 4,096-byte overflow pages.
+const OVERFLOW_UNITS: usize = 768;
+/// Copies a page boundary can split: at most one per boundary between the
+/// leaf cell and the three overflow pages, rounded up.
+const OVERFLOW_SPLIT_SLACK: usize = 4;
 /// Index scenario: rounds of one victim batch and one kept batch each.
 const INDEX_ROUNDS: usize = 10;
 /// Events per batch in the index scenario.
@@ -88,21 +96,43 @@ impl Replica {
         Ok(std::fs::metadata(self.file("-wal"))?.len())
     }
 
-    /// How many distinct markers occur in the named files. A missing file
-    /// holds no bytes.
-    fn found(&self, suffixes: &[&str], markers: &[Vec<u8>]) -> usize {
+    /// Occurrences of each marker in the named files. Every marker has the
+    /// same width, and every named file must exist.
+    fn occurrences(
+        &self,
+        suffixes: &[&str],
+        markers: &[Vec<u8>],
+    ) -> Fallible<HashMap<Vec<u8>, usize>> {
         let width = markers.first().map_or(1, Vec::len).max(1);
+        assert!(markers.iter().all(|marker| marker.len() == width));
         let wanted: HashSet<&[u8]> = markers.iter().map(Vec::as_slice).collect();
-        let mut seen = HashSet::new();
+        let mut counts = HashMap::new();
         for suffix in suffixes {
-            let bytes = std::fs::read(self.file(suffix)).unwrap_or_default();
+            let bytes = std::fs::read(self.file(suffix))?;
             for window in bytes.windows(width) {
                 if wanted.contains(window) {
-                    seen.insert(window.to_vec());
+                    *counts.entry(window.to_vec()).or_insert(0) += 1;
                 }
             }
         }
-        seen.len()
+        Ok(counts)
+    }
+
+    /// Control: every marker occurs, at least `minimum` times in total.
+    fn assert_on_disk(
+        &self,
+        suffixes: &[&str],
+        markers: &[Vec<u8>],
+        minimum: usize,
+        control: &str,
+    ) -> Fallible<()> {
+        let counts = self.occurrences(suffixes, markers)?;
+        assert_eq!(counts.len(), markers.len(), "{control}: every marker");
+        assert!(
+            counts.values().sum::<usize>() >= minimum,
+            "{control}: copies"
+        );
+        Ok(())
     }
 
     /// The shared proof: controls before the purge, none of the markers after.
@@ -111,25 +141,17 @@ impl Replica {
         victim: TimelineId,
         keep: TimelineId,
         markers: &[Vec<u8>],
+        minimum: usize,
     ) -> Fallible<()> {
-        assert!(
-            self.found(&["-wal"], markers) > 0,
-            "control: the markers are in the write-ahead log only"
-        );
+        self.assert_on_disk(&["-wal"], markers, minimum, "write-ahead log only")?;
         assert_eq!(self.store.purge_local_replica_residue(), POSITIVE);
         assert_eq!(self.wal_len()?, 0);
-        assert!(
-            self.found(&[""], markers) > 0,
-            "control: the checkpoint moved the markers into the database file"
-        );
+        self.assert_on_disk(&[""], markers, minimum, "database file after checkpoint")?;
         let kept = self.store.read(keep, SeqRange::all())?.len();
         self.store.delete_timeline(victim)?;
-        assert!(
-            self.found(&ALL_FILES, markers) > 0,
-            "control: deletion alone leaves the markers on disk"
-        );
+        self.assert_on_disk(&ALL_FILES, markers, minimum, "after deletion")?;
         assert_eq!(self.store.purge_local_replica_residue(), POSITIVE);
-        assert_eq!(self.found(&ALL_FILES, markers), 0);
+        assert!(self.occurrences(&ALL_FILES, markers)?.is_empty());
         assert_eq!(self.wal_len()?, 0);
         assert_eq!(self.store.read(keep, SeqRange::all())?.len(), kept);
         Ok(())
@@ -158,7 +180,7 @@ fn a_deleted_small_payload_leaves_no_residual_bytes() -> Fallible<()> {
     replica.store.append(victim, &[draft(deleted.clone())])?;
     replica.store.append(keep, &[draft(marker("F1-KEPT", 0))])?;
     let markers = [deleted];
-    replica.prove_purged(victim, keep, &markers)?;
+    replica.prove_purged(victim, keep, &markers, markers.len())?;
     Ok(())
 }
 
@@ -166,15 +188,15 @@ fn a_deleted_small_payload_leaves_no_residual_bytes() -> Fallible<()> {
 fn a_deleted_overflow_payload_leaves_no_residual_bytes() -> Fallible<()> {
     let mut replica = Replica::open()?;
     let (victim, keep) = replica.timelines()?;
-    let chunks: Vec<Vec<u8>> = (0..OVERFLOW_MARKERS)
-        .map(|index| marker("F1-OVERFLOW", index))
-        .collect();
-    replica.store.append(victim, &[draft(chunks.concat())])?;
-    replica.store.append(
-        keep,
-        &[draft(marker("F1-KEPT", 0).repeat(OVERFLOW_MARKERS))],
-    )?;
-    replica.prove_purged(victim, keep, &chunks)?;
+    replica
+        .store
+        .append(victim, &[draft(OVERFLOW_UNIT.repeat(OVERFLOW_UNITS))])?;
+    replica
+        .store
+        .append(keep, &[draft(b"F1-KEPT-OVERFLOW".repeat(OVERFLOW_UNITS))])?;
+    let markers = [OVERFLOW_UNIT.to_vec()];
+    let minimum = OVERFLOW_UNITS - OVERFLOW_SPLIT_SLACK;
+    replica.prove_purged(victim, keep, &markers, minimum)?;
     Ok(())
 }
 
@@ -201,7 +223,21 @@ fn deleted_index_keys_leave_no_residual_bytes() -> Fallible<()> {
         replica.store.append(keep, &batch("F1-KEPT"))?;
     }
     assert_eq!(markers.len(), 1 + INDEX_ROUNDS * INDEX_BATCH);
-    replica.prove_purged(victim, keep, &markers)?;
+    replica.prove_purged(victim, keep, &markers, markers.len())?;
+    Ok(())
+}
+
+#[test]
+fn a_writer_holding_the_store_is_a_transient_timeout() -> Fallible<()> {
+    let mut replica = Replica::open()?;
+    replica.timelines()?;
+    let writer = rusqlite::Connection::open(&replica.path)?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(replica.store.purge_local_replica_residue(), TIMEOUT);
+    writer.execute_batch("COMMIT")?;
+    drop(writer);
+    assert_eq!(replica.store.purge_local_replica_residue(), POSITIVE);
+    assert_eq!(replica.wal_len()?, 0);
     Ok(())
 }
 
