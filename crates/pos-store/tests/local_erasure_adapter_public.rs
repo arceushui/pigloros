@@ -61,15 +61,15 @@ fn address(bytes: &[u8]) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         .map(|object| object.reference())
 }
 
-fn limits() -> Result<ErasureRecoveryLimitsV1, ErasureErrorV1> {
+const fn limits() -> Result<ErasureRecoveryLimitsV1, ErasureErrorV1> {
     ErasureRecoveryLimitsV1::from_maximum_requests(16)
 }
 
-fn timeline_id(byte: u8) -> TimelineId {
+const fn timeline_id(byte: u8) -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([byte; 16]))
 }
 
-fn owner() -> pos_core::EntityId {
+const fn owner() -> pos_core::EntityId {
     pos_core::EntityId::from_ulid(Ulid::from_bytes([9; 16]))
 }
 
@@ -272,39 +272,9 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
     Ok(())
 }
 
-fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
-    seed_pending_destruction(store)?;
-    for (effect, tag, seed) in [
-        (
-            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
-            "ELAD1",
-            10,
-        ),
-        (
-            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)?),
-            "ELCG1",
-            11,
-        ),
-        (
-            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
-            "ELNEG1",
-            12,
-        ),
-    ] {
-        let elo1 = record("ELO1", seed)?;
-        assert_eq!(
-            store.commit_local_owner_effect(effect, &elo1)?,
-            address(&elo1)?
-        );
-        assert_eq!(store.read_object(address(&elo1)?)?, elo1);
-        assert_eq!(
-            store.read_object(address(&record(tag, 1)?)?)?,
-            record(tag, 1)?
-        );
-    }
-
-    // Each owner record has its own ADR-136 size bound: exactly the bound is
-    // admitted and one byte over is refused.
+/// Each owner record has its own ADR-136 size bound: exactly the bound is
+/// admitted and one byte over is refused.
+fn owner_effect_bounds(store: &mut impl LocalErasureStore) -> TestResult {
     for (tag, bound, seed) in [
         ("ELAD1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 30),
         ("ELCG1", LOCAL_OWNER_EFFECT_MAX_BYTES_V1, 31),
@@ -346,6 +316,41 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
+
+fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
+    seed_pending_destruction(store)?;
+    for (effect, tag, seed) in [
+        (
+            LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
+            "ELAD1",
+            10,
+        ),
+        (
+            LocalOwnerEffectV1::CacheGeneration(record("ELCG1", 1)?),
+            "ELCG1",
+            11,
+        ),
+        (
+            LocalOwnerEffectV1::Negative(record("ELNEG1", 1)?),
+            "ELNEG1",
+            12,
+        ),
+    ] {
+        let elo1 = record("ELO1", seed)?;
+        assert_eq!(
+            store.commit_local_owner_effect(effect, &elo1)?,
+            address(&elo1)?
+        );
+        assert_eq!(store.read_object(address(&elo1)?)?, elo1);
+        assert_eq!(
+            store.read_object(address(&record(tag, 1)?)?)?,
+            record(tag, 1)?
+        );
+    }
+
+    owner_effect_bounds(store)?;
 
     // A record effect under the wrong tag, or a non-ELO1 owner result,
     // commits nothing.
