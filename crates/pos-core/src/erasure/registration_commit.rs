@@ -9,7 +9,7 @@ use super::{
     MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
 };
 use crate::{
-    AdapterAdmissionV1, AdapterTranscriptV1, Hash, OwnerIdV1, ReproManifestRootV1,
+    AdapterAdmissionV1, AdapterTranscriptV1, Hash, OwnerIdV1, ReproManifestRootV1, TimelineId,
     WorldRecordingReceiptV1,
 };
 
@@ -110,6 +110,10 @@ pub enum ArtifactRegistrationPreparationErrorV1 {
     /// The trusted local owner rejected its native commit facts.
     #[error("local artifact owner rejected the commit")]
     OwnerRejected,
+    /// A `PrivateSubjectData` or `ConsentedSharedData` record has no source
+    /// Timeline, so erasure could never find it (ADR-136 §2.6).
+    #[error("destruction-eligible artifact registration has no source Timeline")]
+    SourceTimelineRequired,
 }
 
 /// A validated immutable artifact/registration pair read from the owner catalog.
@@ -376,6 +380,7 @@ pub struct PreparedArtifactRegistrationBatchV1 {
     owner_id: OwnerIdV1,
     root_registration_address: Hash,
     root_operation_id: Hash,
+    source_timeline: Option<TimelineId>,
     records: Vec<PreparedArtifactRegistrationRecordV1>,
 }
 
@@ -398,6 +403,16 @@ impl PreparedArtifactRegistrationBatchV1 {
         self.root_operation_id
     }
 
+    /// Return the Timeline whose data this closure was derived from.
+    ///
+    /// The store binds every record of the closure to it in the same
+    /// transaction as the registration. It is always present when any record
+    /// is `PrivateSubjectData` or `ConsentedSharedData`.
+    #[must_use]
+    pub const fn source_timeline(&self) -> Option<TimelineId> {
+        self.source_timeline
+    }
+
     /// Borrow every exact artifact/ARD1 pair in the root's complete closure.
     #[must_use]
     pub fn records(&self) -> &[PreparedArtifactRegistrationRecordV1] {
@@ -413,6 +428,7 @@ impl PreparedArtifactRegistrationBatchV1 {
             owner_id: OwnerIdV1::from_static("unsupported-event-store-test"),
             root_registration_address: Hash::zero(),
             root_operation_id: Hash::zero(),
+            source_timeline: None,
             records: Vec::new(),
         }
     }
@@ -479,6 +495,9 @@ pub enum ArtifactRegistrationPersistenceErrorV1 {
     /// The adapter could not complete or determine the persistence operation.
     #[error("artifact registration storage operation failed")]
     StorageFailure,
+    /// A bounded read found more rows than the caller's maximum.
+    #[error("artifact registration read exceeds its bound")]
+    FieldOutOfBounds,
 }
 
 /// Outcome of one atomic immutable artifact and ARD1 catalog commit.
@@ -517,6 +536,24 @@ pub trait ArtifactRegistrationPersistencePortV1 {
         owner_id: &OwnerIdV1,
         registration_address: Hash,
     ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>;
+
+    /// Read every row bound to `timeline`, whatever its owner, in increasing
+    /// registration-address order (ADR-136 §2.6).
+    ///
+    /// A row is bound when a committed batch named `timeline` as its source
+    /// Timeline. A row shared by several closures is bound to each of their
+    /// Timelines.
+    ///
+    /// # Errors
+    /// Returns [`ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds`]
+    /// when more than `max` rows are bound, never a truncated list, and a
+    /// closed corruption or storage failure if a bound row is missing or not
+    /// internally consistent.
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>;
 }
 
 /// Derive, owner-verify, and prepare one complete MRM1 registration closure.
@@ -527,18 +564,31 @@ pub trait ArtifactRegistrationPersistencePortV1 {
 /// extractors; structural `TimelineReplay` bytes alone cannot be committed as
 /// an authoritative root.
 ///
+/// `source_timeline` names the Timeline whose data the closure was derived
+/// from. It is required when any record is `PrivateSubjectData` or
+/// `ConsentedSharedData`, so destruction-eligible data can never be stored
+/// unbound, and optional otherwise.
+///
 /// # Errors
 /// Rejects unsupported formats/classes, incomplete or invalid child graphs,
-/// mismatched ARD1 bytes, excessive input, and local-owner verification failure.
+/// mismatched ARD1 bytes, excessive input, local-owner verification failure,
+/// and destruction-eligible records without a source Timeline.
 pub fn prepare_artifact_registration_batch_v1(
     owner_id: OwnerIdV1,
     root_registration_address: Hash,
+    source_timeline: Option<TimelineId>,
     inputs: Vec<ArtifactRegistrationInputV1>,
     owner_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
 ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
     let parsed = parse_artifact_inputs(inputs)?;
     let (records, root_operation_id) =
         derive_records(root_registration_address, &owner_id, parsed, owner_verifier)?;
+    let destruction_eligible = records
+        .iter()
+        .any(|record| !record.registration.fields().data_class.is_always_retained());
+    if destruction_eligible && source_timeline.is_none() {
+        return Err(ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired);
+    }
     let graph_nodes: Vec<_> = records
         .iter()
         .map(|record| ArtifactRegistrationGraphNodeV1 {
@@ -564,6 +614,7 @@ pub fn prepare_artifact_registration_batch_v1(
         owner_id,
         root_registration_address,
         root_operation_id,
+        source_timeline,
         records,
     })
 }
@@ -1110,7 +1161,7 @@ mod tests {
         root: Hash,
         inputs: Vec<ArtifactRegistrationInputV1>,
     ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, &StructuralOwner)
+        prepare_artifact_registration_batch_v1(owner_id, root, None, inputs, &StructuralOwner)
     }
 
     fn catalog_row(

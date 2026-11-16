@@ -250,6 +250,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
     let prepared = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs.clone(),
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -275,6 +276,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
     let no_label_batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs_without_label,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -294,6 +296,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             incorrectly_classified_label,
             &WrongLabelClassificationVerifier,
         ),
@@ -311,6 +314,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             missing_admission,
             &TestOnlyStructuralOwnerVerifier,
         ),
@@ -328,6 +332,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             duplicate_transcript,
             &TestOnlyStructuralOwnerVerifier,
         ),
@@ -340,7 +345,13 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
 fn rejecting_test_owner_does_not_produce_a_batch() -> Result<(), Box<dyn std::error::Error>> {
     let (owner_id, root, inputs) = repro_manifest_closure()?;
     assert_eq!(
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, &RejectingTestOwnerVerifier,),
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            None,
+            inputs,
+            &RejectingTestOwnerVerifier,
+        ),
         Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
     );
     Ok(())
@@ -355,6 +366,7 @@ fn exact_artifact_byte_bound_is_256_mib_and_checked_before_parsing() {
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: vec![0; MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 + 1],
@@ -386,6 +398,7 @@ fn unsupported_timeline_replay_class_stays_unavailable() -> Result<(), Box<dyn s
         prepare_artifact_registration_batch_v1(
             owner_id,
             registration.address(),
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: bytes,
@@ -405,6 +418,7 @@ fn persisted_registration_rows_reject_each_mismatched_identity_column(
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -500,6 +514,7 @@ fn complete_native_catalog_closure_revalidates_through_the_public_port(
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -534,7 +549,7 @@ fn assert_preparation_error(
     expected: ArtifactRegistrationPreparationErrorV1,
 ) {
     assert_eq!(
-        prepare_artifact_registration_batch_v1(owner_id, root, inputs, owner_verifier),
+        prepare_artifact_registration_batch_v1(owner_id, root, None, inputs, owner_verifier),
         Err(expected)
     );
 }
@@ -967,6 +982,7 @@ fn catalog_fixture() -> Result<CatalogFixture, Box<dyn std::error::Error>> {
     let batch = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
+        None,
         inputs,
         &TestOnlyStructuralOwnerVerifier,
     )?;
@@ -1276,6 +1292,7 @@ fn registration_preparation_covers_registration_byte_and_native_owner_failures(
         prepare_artifact_registration_batch_v1(
             owner_id,
             Hash::from_bytes([0x91; 32]),
+            None,
             vec![ArtifactRegistrationInputV1 {
                 owner_id,
                 artifact_bytes: Vec::new(),

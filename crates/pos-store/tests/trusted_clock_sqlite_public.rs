@@ -262,7 +262,8 @@ fn shared_memory_authority_fails_the_durability_read_back() -> TestResult {
     let store = Connection::open(&path)?;
     store.execute_batch(
         "CREATE TABLE artifact_registrations (owner_id TEXT);
-         CREATE TABLE artifact_registration_operations (owner_id TEXT)",
+         CREATE TABLE artifact_registration_operations (owner_id TEXT);
+         CREATE TABLE artifact_registration_timelines (timeline_id BLOB)",
     )?;
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let refused = reserve(&mut authority, T0).err();
