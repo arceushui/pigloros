@@ -344,11 +344,13 @@ pub struct ExecuteJob {
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
     /// This prepared directory's execution ownership was already consumed,
-    /// or terminal cleanup fenced it before the unit start was requested, or
-    /// another execution already made the admitted attempt's one output
-    /// reservation.
+    /// or terminal cleanup fenced it before the unit start was requested.
     #[error("the attempt already has an execution owner")]
     AttemptAlreadyClaimed,
+    /// Another execution, from another directory prepared for the same
+    /// admitted input, already made the attempt's one output reservation.
+    #[error("the attempt's output was already reserved")]
+    OutputAlreadyReserved,
     /// The staging ledger refused the attempt's output reservation, so the
     /// unit was not started (TME1 `launch-failure` 3 or 5, R10 §4.7).
     #[error("the attempt's output reservation was refused")]
@@ -738,7 +740,10 @@ where
     let (ended, on_end) = watch::channel(None);
     let supervision = async {
         let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds, cancel).await;
-        let empty = matches!(supervised, Ok((_, Supervised::Finished(Finish::Empty))));
+        let empty = match &supervised {
+            Ok((_, ending)) => observed_empty(&mut cgroup, *ending, bounds.call).await,
+            Err(_) => false,
+        };
         ended.send_replace(Some(empty));
         supervised
     };
@@ -1094,7 +1099,7 @@ where
     let payload = attempt.payload();
     let (charge, (stdio, provider)) = payload
         .reserve_output()
-        .ok_or(ExecuteError::AttemptAlreadyClaimed)
+        .ok_or(ExecuteError::OutputAlreadyReserved)
         .and_then(|reserved| reserved.map_err(ExecuteError::OutputReservation))
         .and_then(|charge| {
             open_channels()
@@ -1347,6 +1352,34 @@ where
     }
     Finish::Watchdog {
         killed: kill_everything(host, unit, Some(cgroup), bounds.call).await,
+    }
+}
+
+/// Whether the cgroup was observed empty at the attempt's ending, which lets
+/// the capture drain its channel (ADR-069 R10 §4.6 (E), m6).
+///
+/// Ending 0 observed it already. After an acknowledged kill (1, 3 and 6) or a
+/// requested stop (5) the cgroup is observed again until it is empty, at most
+/// for one termination call. An unacknowledged kill (2, 4 and 7) is never
+/// observed: its capture aborts.
+async fn observed_empty<K>(cgroup: &mut K, ending: Supervised, call: Duration) -> bool
+where
+    K: UnitCgroup + Send,
+{
+    match ending.ending() {
+        AttemptEnding::CgroupEmpty => true,
+        AttemptEnding::WatchdogKilled
+        | AttemptEnding::ProtocolFailureKilled
+        | AttemptEnding::Cancelled {
+            watchdog: None | Some(true),
+        } => wait_empty(cgroup, Instant::now() + call)
+            .await
+            .unwrap_or(false),
+        AttemptEnding::WatchdogKillFailed
+        | AttemptEnding::ProtocolFailureKillFailed
+        | AttemptEnding::Cancelled {
+            watchdog: Some(false),
+        } => false,
     }
 }
 

@@ -219,7 +219,7 @@ impl AdapterChannels {
         let deadline = window_start.checked_add(window);
         let fed = feed(
             provider.input,
-            &*payload,
+            &payload,
             deadline,
             ended_signal(ended.clone()),
         );
@@ -256,7 +256,7 @@ async fn ended_signal(mut ended: watch::Receiver<Option<bool>>) -> bool {
 /// then close the channel. The accepted bytes and when the feed stopped.
 async fn feed(
     channel: StdOwnedFd,
-    payload: &dyn AttemptPayload,
+    payload: &Arc<dyn AttemptPayload>,
     deadline: Option<tokio::time::Instant>,
     ended: impl Future<Output = bool> + Send,
 ) -> (u64, u64) {
@@ -281,21 +281,25 @@ async fn feed(
     (accepted, monotonic_now_ns())
 }
 
-/// Write every input byte, counting what the kernel pipe accepted. A
-/// non-blocking pipe write never fails with `EINTR`; any failure, `EPIPE`
-/// among them, stops the feed.
-async fn write_input(channel: &mut Sender, payload: &dyn AttemptPayload, accepted: &mut u64) {
+/// Write every input byte, counting what the kernel pipe accepted. The
+/// staged input is read on the blocking pool, never on the runtime thread
+/// that serves the watchdog and cancellation. A non-blocking pipe write
+/// never fails with `EINTR`; any failure, `EPIPE` among them, stops the feed.
+async fn write_input(channel: &mut Sender, payload: &Arc<dyn AttemptPayload>, accepted: &mut u64) {
     let expected = payload.input_len();
-    let mut chunk = vec![0; FEED_CHUNK];
     while *accepted < expected {
         let length =
             usize::try_from(expected - *accepted).map_or(FEED_CHUNK, |left| left.min(FEED_CHUNK));
-        if payload
-            .read_input_at(&mut chunk[..length], *accepted)
-            .is_err()
-        {
+        let source = Arc::clone(payload);
+        let offset = *accepted;
+        let read = tokio::task::spawn_blocking(move || {
+            let mut chunk = vec![0; length];
+            source.read_input_at(&mut chunk, offset).map(|()| chunk)
+        })
+        .await;
+        let Some(chunk) = read.ok().and_then(Result::ok) else {
             return;
-        }
+        };
         let mut written = 0;
         while written < length {
             let wrote = std::future::poll_fn(|context| {
@@ -437,12 +441,20 @@ fn room(limit: u64, accepted: usize) -> usize {
 /// Accept `read` up to ELM1[8]; the ceiling once a byte past it was read.
 fn accept(bytes: &mut Vec<u8>, read: &[u8], limit: u64) -> Option<CaptureStop> {
     let left = usize::try_from(limit - bytes.len() as u64).unwrap_or(usize::MAX);
-    if read.len() > left {
-        bytes.extend_from_slice(&read[..left]);
-        Some(CaptureStop::Ceiling)
-    } else {
-        bytes.extend_from_slice(read);
-        None
+    let accepted = &read[..read.len().min(left)];
+    grow(bytes, accepted.len(), bytes.len().saturating_add(left));
+    bytes.extend_from_slice(accepted);
+    (read.len() > left).then_some(CaptureStop::Ceiling)
+}
+
+/// Make room for `more` bytes in steps that double the capacity but never
+/// exceed `ceiling`, the bytes ELM1[8] allows, so the capture never holds
+/// more memory than its reservation.
+fn grow(bytes: &mut Vec<u8>, more: usize, ceiling: usize) {
+    let needed = bytes.len() + more;
+    if needed > bytes.capacity() {
+        let target = needed.max(bytes.capacity().saturating_mul(2)).min(ceiling);
+        bytes.reserve_exact(target - bytes.len());
     }
 }
 

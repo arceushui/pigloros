@@ -409,17 +409,73 @@ async fn an_empty_cgroup_drains_the_output_while_systemd_still_holds_its_end() -
     Ok(())
 }
 
-#[tokio::test]
-async fn an_ending_without_an_empty_cgroup_aborts_the_capture() -> TestResult {
-    let script = StdioScript {
+/// A scenario whose adapter writes `S` and then never exits, under a short
+/// watchdog; `fault` decides whether the kill is acknowledged.
+async fn hung(
+    fault: Option<Fault>,
+    cancel: bool,
+) -> TestResult<AttemptExecution<String, FakeCgroup, u64>> {
+    let mut scenario = Scenario::new()?;
+    scenario.host.stdio = Some(StdioScript {
         output: stream(),
         never_finish: true,
         ..StdioScript::default()
-    };
-    let limits = limits(100, 1_000, 200);
-    let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
-    let execution = run.execution()?;
+    });
+    scenario.host.faults.extend(fault);
+    if cancel {
+        scenario.barrier.cancel_on_release = Some(Arc::new(AttemptCancel::new()));
+    }
+    let mut job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
+        ModePlan::AirGapped,
+        200,
+    )?;
+    if let Some(cancel) = &scenario.barrier.cancel_on_release {
+        job.cancel = cancel.signal();
+    }
+    job.attempt = job
+        .attempt
+        .with_limits(limits(100, 1_000, 200))
+        .with_payload(Arc::new(TestPayload::with_input(INPUT)));
+    let recheck = root_for(&scenario.log, &job.attempt);
+    let outcome = scenario.run_on(&LoopbackNetwork, job, recheck).await;
+    outcome.map_err(|failure| format!("the execution failed: {}", failure.error).into())
+}
+
+#[tokio::test]
+async fn a_kill_acknowledged_ending_drains_the_output_once_the_cgroup_is_empty() -> TestResult {
+    // Ending 1: the watchdog's SIGKILL was acknowledged, the cgroup is then
+    // observed empty, and the queued output is drained (R10 §4.6, m6).
+    let execution = hung(None, false).await?;
     assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert_eq!(
+        execution.adapter.output().capture(),
+        capture_record(70, false, true)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancelled_ending_drains_the_output_once_the_cgroup_is_empty() -> TestResult {
+    // Ending 5: a stop was requested and the cgroup is then observed empty.
+    let execution = hung(None, true).await?;
+    assert_eq!(
+        execution.ending,
+        AttemptEnding::Cancelled { watchdog: None }
+    );
+    assert_eq!(
+        execution.adapter.output().capture(),
+        capture_record(70, false, true)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_aborts_the_capture() -> TestResult {
+    // Ending 2: the kill failed, so the cgroup is never observed empty.
+    let execution = hung(Some(Fault::Kill), false).await?;
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKillFailed);
     // Every byte read is kept, but an aborted capture is no complete frame.
     assert_eq!(
         execution.adapter.output().capture(),
@@ -525,7 +581,7 @@ async fn an_output_reserved_by_another_execution_is_never_reserved_again() -> Te
     let taken = TestPayload::with_input(INPUT);
     taken.reserved.store(true, Ordering::SeqCst);
     let failed = refused(taken).await?;
-    assert!(matches!(failed.error, ExecuteError::AttemptAlreadyClaimed));
+    assert!(matches!(failed.error, ExecuteError::OutputAlreadyReserved));
     Ok(())
 }
 

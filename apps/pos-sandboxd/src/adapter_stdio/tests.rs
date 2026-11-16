@@ -142,7 +142,7 @@ fn a_stderr_target_that_is_not_dev_null_refuses_the_channels() -> TestResult {
 async fn descriptors_the_reactor_refuses_feed_and_capture_nothing() -> TestResult {
     // A regular file cannot be registered with epoll.
     let file = tempfile::tempfile()?;
-    let payload = TestPayload::default();
+    let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::default());
     let (accepted, _) = feed(
         file.try_clone()?.into(),
         &payload,
@@ -160,10 +160,10 @@ async fn descriptors_the_reactor_refuses_feed_and_capture_nothing() -> TestResul
 #[tokio::test]
 async fn an_unreadable_input_stops_the_feed() -> TestResult {
     let (_unit, provider) = open_channels()?;
-    let payload = TestPayload {
+    let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload {
         fail_read: true,
         ..TestPayload::default()
-    };
+    });
     let (accepted, _) = feed(provider.input, &payload, None, std::future::pending()).await;
     assert_eq!(accepted, 0);
     Ok(())
@@ -172,7 +172,7 @@ async fn an_unreadable_input_stops_the_feed() -> TestResult {
 #[tokio::test]
 async fn a_feed_without_a_representable_deadline_runs_until_it_completes() -> TestResult {
     let (unit, provider) = open_channels()?;
-    let payload = TestPayload::with_input(b"input");
+    let payload: Arc<dyn AttemptPayload> = Arc::new(TestPayload::with_input(b"input"));
     let (accepted, finish) = feed(provider.input, &payload, None, std::future::pending()).await;
     assert_eq!(accepted, 5);
     assert!(finish > 0);
@@ -258,7 +258,7 @@ fn the_provider_only_writes_stdin_and_only_reads_stdout() {
         [Some("read_output".to_owned()), Some("drain".to_owned())]
     );
     // The feed holds only the stdin end and the capture only the stdout end.
-    assert!(production.contains("feed(provider.input,"));
+    assert!(production.contains("provider.input,\n            &payload,"));
     assert!(production.contains("capture(provider.output,"));
 }
 
@@ -294,4 +294,21 @@ fn each_read_outcome_has_its_capture_stop() {
     assert_eq!(take(&mut bytes, drained, 3), Some(CaptureStop::EndOfStream));
     let failed = Err(std::io::ErrorKind::BrokenPipe.into());
     assert_eq!(take(&mut bytes, failed, 3), Some(CaptureStop::Aborted));
+}
+
+#[test]
+fn the_capture_never_holds_more_memory_than_its_limit() {
+    let mut bytes = Vec::new();
+    let limit = 100_000;
+    let chunk = vec![7; 30_000];
+    for _ in 0..3 {
+        assert_eq!(accept(&mut bytes, &chunk, limit), None);
+        assert!(bytes.capacity() <= 100_000);
+    }
+    assert_eq!(
+        accept(&mut bytes, &chunk, limit),
+        Some(CaptureStop::Ceiling)
+    );
+    assert_eq!(bytes.len(), 100_000);
+    assert_eq!(bytes.capacity(), 100_000);
 }

@@ -452,6 +452,8 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "stop");
+        // A stopped unit's tasks exit.
+        self.adapter_done.store(true, Ordering::SeqCst);
         let hang = self.faulty(Fault::HangStop);
         async move {
             hang_if(hang).await;
@@ -468,6 +470,8 @@ impl UnitHost for FakeHost {
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
+            // An acknowledged SIGKILL ends the unit's tasks.
+            self.adapter_done.store(true, Ordering::SeqCst);
             Ok(())
         };
         let hang = self.faulty(Fault::HangKill);
