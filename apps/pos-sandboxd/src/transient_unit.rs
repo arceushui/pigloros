@@ -1013,6 +1013,10 @@ impl TransientUnitRequest {
     }
 }
 
+mod evidence;
+
+pub use evidence::{verified_requested_configuration, RequestedConfiguration};
+
 #[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {
     path.len() < MAX_PROVIDER_PATH_BYTES
