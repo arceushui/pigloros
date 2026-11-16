@@ -262,6 +262,10 @@ impl TransferWindow {
     }
 }
 
+/// A source of `CLOCK_MONOTONIC` nanoseconds. Production always uses
+/// [`monotonic_ns`]; only this crate's tests supply another.
+type Clock = fn() -> io::Result<u64>;
+
 /// The current `CLOCK_MONOTONIC` time in nanoseconds.
 ///
 /// # Errors
@@ -366,6 +370,7 @@ pub struct PreparedProviderExecution {
     initial_deadline: Instant,
     input_deadline: Instant,
     window: TransferWindow,
+    clock: Clock,
     grant: GrantState,
 }
 
@@ -395,6 +400,6 @@ impl PreparedProviderExecution {
     /// Refuses non-root peers, invalid source/installation, expired transfers
     /// and any exhausted independently derived or aggregate resource ceiling.
     pub fn receive(stream: &mut UnixStream, ledger: &StagingLedger) -> Result<Self, StagingError> {
-        source::receive(stream, ledger)
+        source::receive(stream, ledger, monotonic_ns)
     }
 }

@@ -28,9 +28,9 @@ use crate::{
 
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
-    monotonic_ns, AdmittedProviderExecution, ConnectionIdentity, ExecutionSource, FailedInput,
-    GrantState, InputRefusal, IssuedGrant, PreparedProviderExecution, ProviderExecutionPolicy,
-    RetainedCase, StagingCharge, StagingError, StagingLedger, TransferWindow,
+    AdmittedProviderExecution, Clock, ConnectionIdentity, ExecutionSource, FailedInput, GrantState,
+    InputRefusal, IssuedGrant, PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase,
+    StagingCharge, StagingError, StagingLedger, TransferWindow,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -199,6 +199,7 @@ fn installed_provider() -> Result<AdmittedSelectorProvider, StagingError> {
 pub(super) fn receive(
     stream: &mut UnixStream,
     ledger: &StagingLedger,
+    clock: Clock,
 ) -> Result<PreparedProviderExecution, StagingError> {
     if rustix::net::sockopt::socket_peercred(stream.as_fd())
         .map_err(io::Error::from)?
@@ -225,7 +226,7 @@ pub(super) fn receive(
     let spx_completed = Instant::now();
     // Sampled after the instant, so the recorded deadline is never earlier
     // than the enforced one.
-    let input_start = monotonic_ns()?;
+    let input_start = clock()?;
     let request =
         SandboxExecuteRequest::from_canonical_cbor(&request_record.bytes).map_err(invalid)?;
     require_grant_turn(reader.stream)?;
@@ -297,6 +298,7 @@ pub(super) fn receive(
         initial_deadline,
         input_deadline,
         window,
+        clock,
         grant: GrantState::Prepared,
     })
 }
@@ -493,7 +495,7 @@ impl PreparedProviderExecution {
                                 active_attempts: usage.attempts,
                                 incomplete_inputs: usage.queued_inputs,
                             },
-                            issued_at: monotonic_ns().ok(),
+                            issued_at: (self.clock)().ok(),
                         });
                     })
             })
@@ -527,7 +529,7 @@ impl PreparedProviderExecution {
         let verified = self.verify_input(stream, file, &mut received);
         let transfer = self.transfer(
             received.accepted,
-            received.finished.unwrap_or_else(monotonic_ns).ok(),
+            received.finished.unwrap_or_else(self.clock).ok(),
         );
         match verified {
             Ok((verified_input, root_image, proof, authority)) => {
@@ -590,7 +592,7 @@ impl PreparedProviderExecution {
             drop(record);
         }
         validator.finish().map_err(invalid_input)?;
-        received.finished = Some(monotonic_ns());
+        received.finished = Some((self.clock)());
         if reader.read(&mut [0; 1])? != 0 || file.metadata()?.len() != offset {
             return Err(StagingError::InvalidInput);
         }
@@ -1175,6 +1177,59 @@ mod tests {
         assert_eq!(failed.grant().bytes(), sent.as_slice());
         assert!(failed.transfer().is_some_and(|transfer| !transfer.complete));
         assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        Ok(())
+    }
+
+    /// A clock that cannot report the time.
+    fn broken_clock() -> io::Result<u64> {
+        Err(io::Error::from(io::ErrorKind::InvalidData))
+    }
+
+    #[test]
+    fn an_unreadable_clock_refuses_before_agr1_and_leaves_no_time_after_it() -> TestResult {
+        if !isolated("an_unreadable_clock_refuses_before_agr1_and_leaves_no_time_after_it")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        // Before AGR1 the exchange is refused, holding nothing.
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        staged.write_source(&mut selector)?;
+        let refused = receive(&mut provider, &ledger, broken_clock);
+        assert!(
+            matches!(&refused, Err(StagingError::Io(error)) if error.kind() == io::ErrorKind::InvalidData),
+            "{refused:?}"
+        );
+        drop((provider, selector));
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        for complete in [true, false] {
+            // After AGR1 the grant's issue time and the transfer are absent.
+            let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+            prepared.clock = broken_clock;
+            send_grant(&mut prepared, &mut provider)?;
+            drop(frame(&mut selector, &ledger)?);
+            if complete {
+                staged.write_input(&mut selector)?;
+            }
+            selector.shutdown(std::net::Shutdown::Write)?;
+            let file = tempfile::tempfile()?;
+            match prepared.receive_input(&mut provider, &file) {
+                Ok(admitted) => {
+                    assert!(complete);
+                    assert_eq!(admitted.grant().issued_at(), None);
+                    assert_eq!(admitted.transfer(), None);
+                }
+                Err(InputRefusal::Failed(failed)) => {
+                    assert!(!complete);
+                    assert_eq!(failed.grant().issued_at(), None);
+                    assert_eq!(failed.transfer(), None);
+                }
+                Err(InputRefusal::NotGranted(error)) => return Err(error.into()),
+            }
+            assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        }
         Ok(())
     }
 
