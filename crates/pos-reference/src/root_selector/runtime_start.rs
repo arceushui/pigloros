@@ -444,16 +444,18 @@ mod tests {
     fn a_started_but_unadmitted_runtime_is_stopped_again() -> TestResult {
         let (admitted, _, binary) = fixture()?;
         for (stale, start, digest, expected) in [
+            // A wrong echo fails before any kernel check: the failing digest
+            // is never reached.
             (
                 Reply::Echo,
                 Reply::WrongChallenge,
-                BINARY_DIGEST,
+                FAILING_DIGEST,
                 SelectorBoundaryError::ArtifactInvalid,
             ),
             (
                 Reply::Echo,
                 Reply::WrongScope,
-                BINARY_DIGEST,
+                FAILING_DIGEST,
                 SelectorBoundaryError::ArtifactInvalid,
             ),
             (
@@ -500,9 +502,7 @@ mod tests {
     const BINARY_DIGEST: ExecutableDigest = |_, _| Ok(fixture_digest());
     const OTHER_DIGEST: ExecutableDigest = |_, _| Ok([0; 32]);
 
-    fn failing_digest(_: NonZeroU64, _: u64) -> Result<[u8; 32], SelectorBoundaryError> {
-        Err(SelectorBoundaryError::Io)
-    }
+    const FAILING_DIGEST: ExecutableDigest = |_, _| Err(SelectorBoundaryError::Io);
 
     #[test]
     fn the_main_process_must_match_the_kernel_and_the_admitted_binary() -> TestResult {
@@ -519,7 +519,7 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         assert_eq!(
-            verify_started_process(&observed, &binary, failing_digest),
+            verify_started_process(&observed, &binary, FAILING_DIGEST),
             Err(SelectorBoundaryError::Io)
         );
         let pid = observed.main_pid();
