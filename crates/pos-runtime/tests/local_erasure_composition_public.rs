@@ -4439,8 +4439,6 @@ impl Attempted {
         retry: &ErasureRetryAdmissionV1,
         unresolved: &[ErasureObligationV1],
     ) -> TestResult {
-        // The retry's complete receipt issues at its two executed obligations
-        // past admission.
         let acknowledgements =
             self.signed_results(retry, unresolved, (&erasure_signer(), 1), |_| None)?;
         {
