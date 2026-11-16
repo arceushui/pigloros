@@ -123,6 +123,8 @@ struct SynchronizedInstallationUpdate {
     admission: ClosedSelectorAdmission,
     successor: AuthenticatedSelectorBootstrap,
     acknowledgement: Vec<u8>,
+    /// The cancelled-attempt set the authenticated RCA1 echoes (R11 §8.6 m10).
+    cancelled_attempt_ids: Vec<[u8; 16]>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -762,13 +764,12 @@ impl RootSelectorComposition {
                         current
                             .complete_committed_update(closed.committed, self.live_update_timeout)
                     })
-                    .map(
-                        |(successor, acknowledgement)| SynchronizedInstallationUpdate {
-                            admission: closed.admission,
-                            successor,
-                            acknowledgement,
-                        },
-                    )
+                    .map(|completed| SynchronizedInstallationUpdate {
+                        admission: closed.admission,
+                        successor: completed.successor,
+                        acknowledgement: completed.acknowledgement,
+                        cancelled_attempt_ids: completed.cancelled_attempt_ids,
+                    })
             })
             .and_then(|synchronized| {
                 self.service
@@ -785,9 +786,13 @@ impl RootSelectorComposition {
     /// never described again. The selector runs R11 §5.0 steps 2 to 8 for the
     /// successor: the port stops the fenced runtime and proves it unloaded,
     /// and a fresh runtime starts under a new slot. Only then does admission
-    /// reopen. If any step fails, admission stays closed for the successor
-    /// too; the acknowledgement is still returned, because the update itself
-    /// is durable.
+    /// reopen.
+    ///
+    /// If any step fails, admission stays closed for the successor too and
+    /// the previous generation is retired. A fresh runtime that started but
+    /// cannot be admitted is stopped again through `terminate_stale_runtimes`.
+    /// The acknowledgement is still returned, because the update itself is
+    /// durable.
     fn replace_runtime(
         &self,
         synchronized: SynchronizedInstallationUpdate,
@@ -796,30 +801,34 @@ impl RootSelectorComposition {
             admission,
             successor,
             acknowledgement,
+            cancelled_attempt_ids,
         } = synchronized;
         let previous = &admission.admitted;
-        let started = successor.admit_provider().and_then(|successor| {
-            runtime_start::start_provider_runtime(
-                &*self.lifecycle,
-                &successor,
-                self.executable_digest,
-            )
-            .map(|(transport, runtime)| (successor, transport, runtime))
-        });
-        match started {
-            Ok((successor, transport, runtime)) => {
-                self.service.transport.replace(transport).and_then(|()| {
-                    self.service.admission.admit_successor(
-                        previous,
-                        successor,
-                        runtime,
-                        &admission.live_attempt_ids,
-                    )
+        successor
+            .admit_provider()
+            .and_then(|successor| {
+                runtime_start::start_provider_runtime(
+                    &*self.lifecycle,
+                    &successor,
+                    self.executable_digest,
+                )
+                .and_then(|(transport, runtime)| {
+                    self.service
+                        .transport
+                        .replace(transport)
+                        .and_then(|()| {
+                            self.service.admission.admit_successor(
+                                previous,
+                                successor,
+                                runtime,
+                                &cancelled_attempt_ids,
+                            )
+                        })
+                        .inspect_err(|_| runtime_start::stop_started_runtime(&*self.lifecycle))
                 })
-            }
-            Err(_) => self.service.admission.retire_previous(previous),
-        }
-        .map(|()| acknowledgement)
+            })
+            .or_else(|_| self.service.admission.retire_previous(previous))
+            .map(|()| acknowledgement)
     }
 
     fn receive_installation_update(
@@ -4743,6 +4752,182 @@ mod tests {
         Ok(())
     }
 
+    /// How a replacement port misbehaves after the live update.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ReplacementFault {
+        /// `terminate_stale_runtimes` refuses: nothing is started.
+        StaleRefused,
+        /// The started unit echoes another challenge.
+        WrongChallenge,
+        /// The started unit reports another lifecycle scope.
+        WrongScope,
+        /// The started runtime closes the `describe` connection unanswered.
+        DescribeFails,
+        /// The runtime answers `describe`, but a provider-owned attempt is
+        /// missing from the RCA1 cancelled set, so admission refuses.
+        AdmissionRejected,
+    }
+
+    /// The in-process port with one injected fault; counts stale terminations.
+    struct FaultyPort {
+        inner: Arc<InProcessProviderPort>,
+        fault: ReplacementFault,
+        stale_calls: Arc<AtomicUsize>,
+    }
+
+    impl ProviderLifecyclePort for FaultyPort {
+        fn terminate_stale_runtimes(
+            &self,
+            challenge: ObservationChallenge,
+            deadline: std::time::Instant,
+        ) -> Result<StaleUnitsObservation, ProviderLifecycleError> {
+            self.stale_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fault == ReplacementFault::StaleRefused {
+                return Err(ProviderLifecycleError::ResidualResource);
+            }
+            self.inner.terminate_stale_runtimes(challenge, deadline)
+        }
+
+        fn start_provider_runtime(
+            &self,
+            slot: &RuntimeSlotTarget<'_>,
+            deadline: std::time::Instant,
+        ) -> Result<StartedRuntimeObservation, ProviderLifecycleError> {
+            let started = self.inner.start_provider_runtime(slot, deadline)?;
+            let challenge = if self.fault == ReplacementFault::WrongChallenge {
+                ObservationChallenge::for_test([9; 16])
+            } else {
+                started.challenge()
+            };
+            let scope = if self.fault == ReplacementFault::WrongScope {
+                [9; 16]
+            } else {
+                started.lifecycle_scope_id()
+            };
+            Ok(StartedRuntimeObservation::new(
+                challenge,
+                scope,
+                started.main_pid(),
+                started.main_start_time_ticks(),
+                started.control_group().clone(),
+            ))
+        }
+    }
+
+    fn replacement_start(fault: ReplacementFault) -> TestResult<RuntimeStart> {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        Ok(Box::new(move || {
+            if matches!(
+                fault,
+                ReplacementFault::WrongChallenge | ReplacementFault::WrongScope
+            ) {
+                return Ok(Vec::new());
+            }
+            let execute = bind_provider_endpoint("/run/pigloros/provider-execute.sock")?;
+            let control = bind_provider_endpoint("/run/pigloros/provider-control.sock")?;
+            Ok(vec![std::thread::spawn(move || {
+                let _control = control;
+                if fault == ReplacementFault::DescribeFails {
+                    drop(accept_test_connection(&execute).map_err(|error| error.to_string())?);
+                    return Ok(());
+                }
+                serve_installed_describe_response(&execute, &fixture)
+                    .map_err(|error| error.to_string())
+            })])
+        }))
+    }
+
+    /// R11 §8.6 failure paths under the fixed root installation: each one
+    /// keeps admission closed, still acknowledges the durable update, and
+    /// stops any runtime that was started but not admitted.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_replacement_failures_keep_admission_closed() -> TestResult {
+        if matches!(
+            isolated_role(
+                "root_selector::tests::runtime_replacement_failures_keep_admission_closed"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+        let _paths = FixedCompositionFixture::create()?;
+        installed_composition_fixture()?;
+        let provider_directory = tempfile::tempdir()?;
+        let provider_path = provider_directory.path().join("provider.sock");
+        let _provider_listener = UnixListener::bind(&provider_path)?;
+        for (fault, stale_calls_expected) in [
+            (ReplacementFault::StaleRefused, 1),
+            (ReplacementFault::WrongChallenge, 2),
+            (ReplacementFault::WrongScope, 2),
+            (ReplacementFault::DescribeFails, 2),
+            (ReplacementFault::AdmissionRejected, 2),
+        ] {
+            let inner = Arc::new(InProcessProviderPort::starting(vec![replacement_start(
+                fault,
+            )?]));
+            let stale_calls = Arc::new(AtomicUsize::new(0));
+            let admitted = InstalledSelectorState::open()?
+                .authenticate_bootstrap()?
+                .admit_provider()?;
+            let composition = RootSelectorComposition {
+                service: RootSelectorService {
+                    admission_time: fixture_admission_time,
+                    admission: SelectorAdmission::for_test(admitted)?,
+                    transport: SelectedProviderTransport::new(
+                        ProviderTransport::from_path_for_test(&provider_path)?,
+                    ),
+                    peer_uid: ROOT_UID,
+                    evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                    recovery_directory: test_recovery_directory()?,
+                    recovery_owner: ROOT_UID,
+                },
+                updates: Mutex::new(()),
+                live_update_timeout: LIVE_UPDATE_TIMEOUT,
+                lifecycle: Box::new(FaultyPort {
+                    inner: Arc::clone(&inner),
+                    fault,
+                    stale_calls: Arc::clone(&stale_calls),
+                }),
+                executable_digest: test_executable_digest,
+            };
+            let owned = composition.service.admission.acquire([1; 16])?;
+            if fault == ReplacementFault::AdmissionRejected {
+                composition
+                    .service
+                    .admission
+                    .retain_provider_state([1; 16])?;
+            }
+            let before = composition.service.transport.current()?;
+            let closed = composition.service.admission.close_and_snapshot()?;
+            let successor = InstalledSelectorState::open()?.authenticate_bootstrap()?;
+            let acknowledgement = composition.replace_runtime(SynchronizedInstallationUpdate {
+                admission: closed,
+                successor,
+                acknowledgement: vec![7, 8],
+                cancelled_attempt_ids: Vec::new(),
+            })?;
+            drop(owned);
+            assert_eq!(acknowledgement, vec![7, 8], "{fault:?}");
+            assert!(
+                composition.service.admission.current().is_err(),
+                "{fault:?}"
+            );
+            assert_eq!(
+                Arc::ptr_eq(&before, &composition.service.transport.current()?),
+                fault != ReplacementFault::AdmissionRejected,
+                "{fault:?}"
+            );
+            assert_eq!(
+                stale_calls.load(Ordering::SeqCst),
+                stale_calls_expected,
+                "{fault:?}"
+            );
+            inner.finish()?;
+        }
+        Ok(())
+    }
+
     /// R11 §8.6: if the fresh runtime cannot be started, admission stays
     /// closed for the successor too, and the durable update is still
     /// acknowledged.
@@ -4778,6 +4963,7 @@ mod tests {
             admission: closed,
             successor,
             acknowledgement: vec![7, 8],
+            cancelled_attempt_ids: Vec::new(),
         })?;
         assert_eq!(acknowledgement, vec![7, 8]);
         assert!(composition.service.admission.current().is_err());

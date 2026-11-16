@@ -137,6 +137,14 @@ fn stop_unadmitted_runtime(port: &dyn ProviderLifecyclePort, deadline: Instant) 
     terminate_stale_runtimes(port, deadline).ok();
 }
 
+/// Stop a runtime that was started and checked but could not be admitted,
+/// within the 10 s stale-termination bound (R11 §8.6).
+pub(super) fn stop_started_runtime(port: &dyn ProviderLifecyclePort) {
+    if let Ok(deadline) = deadline_after(STALE_TERMINATION_BOUND) {
+        stop_unadmitted_runtime(port, deadline);
+    }
+}
+
 /// R11 §5.0 step 7: the observed main process, as the kernel reports it.
 fn verify_started_process(
     observed: &StartedRuntimeObservation,
