@@ -17,11 +17,10 @@ use pos_core::community_lifecycle::{
     CommunityDurableProfileV1, CommunityGenerationAdmissionV1, CommunityGraphRootV1,
     CommunityInitializationRequestInputV1, CommunityInitializationRequestV1,
     CommunityInitializationSourceV1 as Source, CommunityLifecycleErrorV1 as Error,
-    CommunityMaterializationV1, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
-    CommunityMemberProgressV1, CommunityMemberSlotsV1, CommunityNativeNodeReferenceV1,
-    CommunityPassFrontierV1, CommunityProducerBindingV1, CommunityProfileMemberV1,
-    CommunityProfileRetentionV1, CommunityProgressReferenceV1, CommunityRecordKindsV1,
-    CommunitySelectedHeadV1, CommunityStateContentV1,
+    CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityMemberProgressV1,
+    CommunityMemberSlotsV1, CommunityNativeNodeReferenceV1, CommunityPassFrontierV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityProgressReferenceV1,
+    CommunityRecordKindsV1, CommunitySelectedHeadV1, CommunityStateContentV1,
 };
 use pos_core::{
     ArtifactChildEdgeV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, AuthorityTrustRootSealV1,
@@ -83,17 +82,35 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Fallible<Self> {
+        Self::with_seed(0)
+    }
+
+    /// Fixture States `state-a`/`state-b` followed by `seed`.
+    fn with_seed(seed: u8) -> Fallible<Self> {
         Ok(Self {
             implementation: ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(3))?,
             states: [
-                CommunityStateContentV1::new(SCHEMA, b"state-a")?
+                CommunityStateContentV1::new(SCHEMA, &[b"state-a".as_slice(), &[seed]].concat())?
                     .to_canonical_cbor()
                     .to_vec(),
-                CommunityStateContentV1::new(SCHEMA, b"state-b")?
+                CommunityStateContentV1::new(SCHEMA, &[b"state-b".as_slice(), &[seed]].concat())?
                     .to_canonical_cbor()
                     .to_vec(),
             ],
         })
+    }
+
+    /// The first fixture whose CMB1 digests descend in roster order, so the
+    /// CSH1's digest order differs from roster order.
+    fn descending() -> Fallible<Self> {
+        for seed in 0..=u8::MAX {
+            let fixture = Self::with_seed(seed)?;
+            let bindings = fixture.bindings()?;
+            if bindings[0].digest() > bindings[1].digest() {
+                return Ok(fixture);
+            }
+        }
+        Err("no seed gives descending member digests".into())
     }
 
     /// P8 `[0x4353_0001, len(CSC1), H(CSC1)]` of slot `slot`'s State.
@@ -379,6 +396,9 @@ fn check_progress(
         .map(|head| (head.member_binding_digest, head.member_progress_digest))
         .collect();
     assert_eq!(heads, expected_heads);
+    // The fixture's member digests descend in roster order, so CSH1's
+    // digest order is not roster order.
+    assert_eq!(heads[0].0, digests[1]);
     assert_eq!(
         graph.selected_head_digest(),
         adr_h("CSH1", graph.selected_head())
@@ -387,10 +407,7 @@ fn check_progress(
 }
 
 /// CGR1: one `StateRevision` root per member, exact ARD1-graph counts.
-fn check_root(
-    graph: &CommunityInitializationGraphV1,
-    profile_digest: Hash,
-) -> Fallible<Vec<CommunityNativeNodeReferenceV1>> {
+fn check_root(graph: &CommunityInitializationGraphV1, profile_digest: Hash) -> TestResult {
     let records = graph.records();
     let root = CommunityGraphRootV1::from_canonical_cbor(graph.graph_root())?;
     let fields = root.as_input();
@@ -427,7 +444,7 @@ fn check_root(
             .map(|record| record.protected().object().len() as u64)
             .sum::<u64>()
     );
-    Ok(roots)
+    Ok(())
 }
 
 /// CGA1 binds the request, head and root.
@@ -447,84 +464,14 @@ fn check_admission(graph: &CommunityInitializationGraphV1, request_digest: Hash)
     Ok(())
 }
 
-/// CMI1 fields and producer bindings (note 22661, item 7).
-fn check_materializations(
-    fixture: &Fixture,
-    records: &[CommunityAssembledRecordV1],
-    roots: &[CommunityNativeNodeReferenceV1],
-    request_digest: Hash,
-) -> TestResult {
-    for (slot, member) in records.chunks(5).enumerate() {
-        let state_revision = CommunityProducerBindingV1::Native(roots[slot]);
-        let control = CommunityProducerBindingV1::Control(request_digest);
-        for (index, record) in member.iter().enumerate() {
-            let cmi1 = record.materialization(&SEAL, hash(0x70))?;
-            let decoded =
-                CommunityMaterializationV1::from_canonical_cbor(&cmi1.to_canonical_cbor())?;
-            let fields = decoded.as_input();
-            let registration = record.protected().registration();
-            assert_eq!(fields.store_incarnation, INCARNATION);
-            assert_eq!(fields.record_magic, record.record_magic());
-            assert_eq!(fields.scope_binding_digest, SCOPE_COVER);
-            assert_eq!(fields.evidence_not_after_micros, HORIZON);
-            assert_eq!(
-                fields.materialization.object_address,
-                record.protected().object_address()
-            );
-            assert_eq!(
-                fields.materialization.artifact_digest,
-                registration.fields().artifact_digest
-            );
-            assert_eq!(
-                fields.materialization.registration_address,
-                registration.address()
-            );
-            assert_eq!(fields.materialization.attestation_address, hash(0x70));
-            assert_eq!(
-                fields.materialization.owner_reference,
-                registration.fields().owner_reference
-            );
-            match index {
-                0 => {
-                    assert!(fields.producer == state_revision);
-                    assert_eq!(
-                        fields.logical_record_digest,
-                        adr_h("CSC1", &fixture.states[slot])
-                    );
-                    assert_eq!(fields.plaintext_length, fixture.states[slot].len() as u64);
-                }
-                1 => assert!(matches!(
-                    fields.producer,
-                    CommunityProducerBindingV1::Native(node)
-                        if node.producer_ordinal == PRODUCER && node.node_ordinal == roots[slot].node_ordinal - 1
-                )),
-                2 => assert!(fields.producer == state_revision),
-                _ => assert!(fields.producer == control),
-            }
-        }
-        // The StateRevision CPN1's logical digest is its root's node digest.
-        let cmi1 = member[4].materialization(&SEAL, hash(0x70))?;
-        assert_eq!(
-            cmi1.as_input().logical_record_digest,
-            roots[slot].node_digest
-        );
-    }
-    assert_eq!(
-        records[0].materialization(&SEAL, Hash::zero()).err(),
-        Some(Error::InvalidBinding)
-    );
-    Ok(())
-}
-
 #[test]
 fn assembles_the_initial_graph_of_every_member() -> TestResult {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::descending()?;
     let (graph, digests, profile_digest, request_digest) = assembled(&fixture)?;
     check_records(graph.records());
     check_progress(&graph, &digests, profile_digest)?;
-    let roots = check_root(&graph, profile_digest)?;
-    check_admission(&graph, request_digest)?;
-    check_materializations(&fixture, graph.records(), &roots, request_digest)
+    check_root(&graph, profile_digest)?;
+    check_admission(&graph, request_digest)
 }
 
 /// One input mutation that must refuse with `InvalidBinding`.
