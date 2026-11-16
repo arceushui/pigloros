@@ -32,6 +32,7 @@ mod tests {
     /// until `Command::spawn` has observed the exec. A test that releases a
     /// lock and then requires it to be acquirable releases it through
     /// [`release_quiesced`], so no in-flight fork can retain the released lock.
+    /// Any new `Command` or other fork site in this binary must take this gate.
     static FORK_GATE: Mutex<()> = Mutex::new(());
 
     fn fork_gate() -> MutexGuard<'static, ()> {
@@ -516,7 +517,7 @@ mod tests {
                 Some(rustix::io::Errno::CHILD)
             );
         }
-        drop(held);
+        release_quiesced(held);
         operation.complete_cleanly();
         Ok(())
     }
