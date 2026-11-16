@@ -333,9 +333,11 @@ fn check_recomputation(
 /// other provisional edge carries the local host's authority grant. Every
 /// edge carries the run's provenance.
 fn check_edges(edges: &[InputDependencyV1], fixture: &ForkFixtureV1) -> TestResult {
-    let grant = *LocalScheduledAdmissionHostV1::shared()?
-        .authority_grant()
-        .as_bytes();
+    let grant = *LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )?
+    .authority_grant()
+    .as_bytes();
     let mut classes = Vec::new();
     for edge in edges {
         let intervention = edge.dependency_class == DependencyClassV1::InterventionAssigned;

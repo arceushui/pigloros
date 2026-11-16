@@ -64,7 +64,12 @@ fn observe(
     store: &mut MemoryStore,
     timeline: TimelineId,
 ) -> PipelineSecurityRevisionsV1 {
-    test_ok(test_ok(LocalScheduledAdmissionHostV1::shared()).observe(registry, store, timeline))
+    test_ok(
+        test_ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ))
+        .observe(registry, store, timeline),
+    )
 }
 
 /// Admit the staged pass through the local host's atomic admission.
@@ -75,13 +80,10 @@ fn admit(
     commit_head: Seq,
     commit_now_secs: u64,
 ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-    test_ok(LocalScheduledAdmissionHostV1::shared()).admit(
-        registry,
-        store,
-        revisions,
-        commit_head,
-        commit_now_secs,
-    )
+    test_ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ))
+    .admit(registry, store, revisions, commit_head, commit_now_secs)
 }
 
 fn register_protected_schema(registry: &mut RuntimePluginRegistry) {
@@ -2298,7 +2300,9 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
     register_protected_schema(&mut registry);
-    let host = test_ok(LocalScheduledAdmissionHostV1::shared());
+    let host = test_ok(LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    ));
     let revisions = test_ok(host.observe(&registry, &mut store, timeline));
     let drafts = test_ok(registry.step_all_anchored_protected(
         timeline,

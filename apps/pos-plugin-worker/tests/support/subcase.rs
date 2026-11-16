@@ -26,7 +26,7 @@ pub const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 /// Returns the error of building the runner, running the attempt or decoding the observation.
 pub fn observe_attempt(attempt: &CaseAttempt) -> TestResult<SubjectObservation> {
     let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
-    let runner = SupervisorRunnerV1::new(program);
+    let runner = SupervisorRunnerV1::new(program, &TEST_TRUST_ROOT);
     let mut stream = Vec::new();
     write_attempt(&mut stream, attempt)?;
     let mut out = Vec::new();
@@ -109,3 +109,7 @@ pub fn assert_output_is_the_oracle(
     assert_eq!(observation.result, oracle, "{family:?}");
     assert_within_budget(family, observation)
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();

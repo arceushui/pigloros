@@ -55,6 +55,7 @@ fn principal(byte: u8) -> Fallible<PrincipalRefV1> {
 
 fn owner() -> Fallible<AuthenticatedPrincipalResultV1> {
     Ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
         AuthenticatedPrincipalDraftV1 {
             principal: principal(2)?,
             adapter_id: "local-adapter".to_owned(),
@@ -118,6 +119,7 @@ impl Installation {
             .map(CapabilityGrantV1::binding_digest)
             .collect::<Result<Vec<_>, _>>()?;
         let registry = AuthorityRegistrySnapshotV1::try_new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             REGISTRY,
             vec![owner()?.registry_binding_digest()],
             bindings,
@@ -152,6 +154,7 @@ impl Installation {
 
     fn catalogue(&self, catalogue: Hash, native: Hash) -> Fallible<CommunityInstalledCatalogueV1> {
         let authority = CommunityMetadataAuthorityV1::new(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
             CommunityMetadataAuthorityInputV1 {
                 registry: self.registry.clone(),
                 principal: owner()?,
