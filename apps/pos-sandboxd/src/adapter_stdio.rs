@@ -213,9 +213,10 @@ impl AdapterChannels {
             input_window_ms,
             charge,
         } = self;
+        let window_start = tokio::time::Instant::now();
         let start = monotonic_now_ns();
         let window = Duration::from_millis(input_window_ms);
-        let deadline = tokio::time::Instant::now().checked_add(window);
+        let deadline = window_start.checked_add(window);
         let fed = feed(
             provider.input,
             &*payload,
@@ -260,17 +261,20 @@ async fn feed(
     ended: impl Future<Output = bool> + Send,
 ) -> (u64, u64) {
     let mut accepted = 0;
+    // A window already closed, as a zero ELM1[16] is, writes nothing.
+    let open = deadline.is_none_or(|deadline| deadline > tokio::time::Instant::now());
     // The descriptor is the non-blocking write end of a pipe.
-    if let Ok(mut channel) = Sender::from_owned_fd_unchecked(channel) {
+    if let Some(Ok(mut channel)) = open.then(|| Sender::from_owned_fd_unchecked(channel)) {
         let closed = async move {
             match deadline {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
         };
+        // The window and the ending are polled before each write.
         select(
-            std::pin::pin!(write_input(&mut channel, payload, &mut accepted)),
             select(std::pin::pin!(closed), std::pin::pin!(ended)),
+            std::pin::pin!(write_input(&mut channel, payload, &mut accepted)),
         )
         .await;
     }
@@ -298,7 +302,9 @@ async fn write_input(channel: &mut Sender, payload: &dyn AttemptPayload, accepte
                 std::pin::Pin::new(&mut *channel).poll_write(context, &chunk[written..length])
             })
             .await;
-            let Ok(wrote) = wrote else {
+            // A failed write, `EPIPE` among them, or a write of nothing
+            // stops the feed.
+            let Some(wrote) = wrote.ok().filter(|wrote| *wrote > 0) else {
                 return;
             };
             written += wrote;
@@ -384,14 +390,8 @@ async fn read_output(channel: &mut Receiver, limit: u64, bytes: &mut Vec<u8>) ->
             std::pin::Pin::new(&mut *channel).poll_read(context, &mut read)
         })
         .await;
-        match polled.map(|()| read.filled()) {
-            Ok([]) => return CaptureStop::EndOfStream,
-            Ok(read) => {
-                if let Some(stop) = accept(bytes, read, limit) {
-                    return stop;
-                }
-            }
-            Err(_) => return CaptureStop::Aborted,
+        if let Some(stop) = take(bytes, polled.map(|()| read.filled()), limit) {
+            return stop;
         }
     }
 }
@@ -404,15 +404,25 @@ fn drain(channel: &Receiver, limit: u64, bytes: &mut Vec<u8>) -> CaptureStop {
     let mut buffer = vec![0; CAPTURE_CHUNK];
     loop {
         let room = room(limit, bytes.len());
-        match rustix::io::read(channel.as_fd(), &mut buffer[..room]) {
-            Ok(0) | Err(Errno::AGAIN) => return CaptureStop::EndOfStream,
-            Ok(read) => {
-                if let Some(stop) = accept(bytes, &buffer[..read], limit) {
-                    return stop;
-                }
-            }
-            Err(_) => return CaptureStop::Aborted,
+        let read = rustix::io::read(channel.as_fd(), &mut buffer[..room])
+            .map(|read| &buffer[..read])
+            .map_err(io::Error::from);
+        if let Some(stop) = take(bytes, read, limit) {
+            return stop;
         }
+    }
+}
+
+/// One read's effect on the capture: end of file, or `EAGAIN` once the
+/// drain found nothing more queued, is (E); any other failure is (X); bytes
+/// are accepted up to the ceiling. `None` while the capture goes on. A
+/// non-blocking pipe read never fails with `EINTR`.
+fn take(bytes: &mut Vec<u8>, read: io::Result<&[u8]>, limit: u64) -> Option<CaptureStop> {
+    match read {
+        Ok([]) => Some(CaptureStop::EndOfStream),
+        Ok(read) => accept(bytes, read, limit),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Some(CaptureStop::EndOfStream),
+        Err(_) => Some(CaptureStop::Aborted),
     }
 }
 

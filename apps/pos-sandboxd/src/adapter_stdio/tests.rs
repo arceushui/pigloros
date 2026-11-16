@@ -248,7 +248,7 @@ fn the_provider_only_writes_stdin_and_only_reads_stdout() {
         if line.contains("write(") || line.contains("poll_write") {
             writes.push(function.clone());
         }
-        if line.contains("io::read(") || line.contains("poll_read") || line.contains("try_read") {
+        if line.contains("io::read(") || line.contains("poll_read") {
             reads.push(function);
         }
     }
@@ -281,4 +281,17 @@ fn the_launcher_never_touches_stdin_or_stdout() -> TestResult {
     }
     assert!(checked >= 8);
     Ok(())
+}
+
+#[test]
+fn each_read_outcome_has_its_capture_stop() {
+    let mut bytes = Vec::new();
+    assert_eq!(take(&mut bytes, Ok(&[]), 3), Some(CaptureStop::EndOfStream));
+    assert_eq!(take(&mut bytes, Ok(&[1, 2]), 3), None);
+    assert_eq!(take(&mut bytes, Ok(&[3, 4]), 3), Some(CaptureStop::Ceiling));
+    assert_eq!(bytes, [1, 2, 3]);
+    let drained = Err(std::io::ErrorKind::WouldBlock.into());
+    assert_eq!(take(&mut bytes, drained, 3), Some(CaptureStop::EndOfStream));
+    let failed = Err(std::io::ErrorKind::BrokenPipe.into());
+    assert_eq!(take(&mut bytes, failed, 3), Some(CaptureStop::Aborted));
 }

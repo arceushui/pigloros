@@ -454,7 +454,9 @@ async fn a_zero_input_window_is_a_literal_zero_window() -> TestResult {
     let limits = limits(100, 0, GENEROUS_WATCHDOG_MS);
     let run = StdioRun::with(script, TestPayload::with_input(INPUT), limits).await?;
     let fed = run.execution()?.adapter.input();
+    // The closed window stops the feed before its first write.
     assert_eq!(fed.deadline, fed.start);
+    assert_eq!(fed.accepted_bytes, 0);
     assert!(!fed.complete);
     Ok(())
 }
