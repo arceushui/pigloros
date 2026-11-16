@@ -33,7 +33,7 @@ pub struct FdIdentity {
 }
 
 impl FdIdentity {
-    fn decode(value: &Value) -> Result<Self, SandboxProviderProtocolError> {
+    pub(super) fn decode(value: &Value) -> Result<Self, SandboxProviderProtocolError> {
         let pair = array::<2>(value)?;
         Ok(Self {
             mount_id: uint(&pair[0])?,
@@ -41,11 +41,11 @@ impl FdIdentity {
         })
     }
 
-    fn value(self) -> Value {
+    pub(super) fn value(self) -> Value {
         Value::Array(vec![uint_value(self.mount_id), uint_value(self.inode)])
     }
 
-    const fn valid(self) -> bool {
+    pub(super) const fn valid(self) -> bool {
         self.inode != 0
     }
 }
