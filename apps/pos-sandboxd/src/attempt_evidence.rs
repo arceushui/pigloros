@@ -19,7 +19,7 @@
 
 use std::fs::File;
 
-use pos_reference::sandbox_provider_protocol::ExecutionRelease;
+use pos_reference::sandbox_provider_protocol::{ExecutionRelease, KernelObservationEvidence};
 
 use crate::{
     AttemptCgroupError, AttemptLimitEventSnapshot, EffectiveCgroupLimits, KernelObservation,
@@ -72,14 +72,14 @@ impl ReleaseResources {
 #[derive(Debug)]
 pub struct ReleaseOutcome {
     ready1_digest: Option<[u8; 32]>,
-    observed: Option<ObservedUnit>,
+    observed: Option<(ObservedUnit, KernelObservationEvidence)>,
     release: Option<ExecutionRelease>,
 }
 
 impl ReleaseOutcome {
     pub(crate) const fn new(
         ready1_digest: Option<[u8; 32]>,
-        observed: Option<ObservedUnit>,
+        observed: Option<(ObservedUnit, KernelObservationEvidence)>,
         release: Option<ExecutionRelease>,
     ) -> Self {
         Self {
@@ -99,14 +99,24 @@ impl ReleaseOutcome {
     /// made (KOE1 status 1 or 2).
     #[must_use]
     pub fn observation(&self) -> Option<&KernelObservation> {
-        self.observed.as_ref().map(ObservedUnit::observation)
+        self.observed
+            .as_ref()
+            .map(|(observed, _)| observed.observation())
+    }
+
+    /// The status-0 KOE1 frozen with the observation (ADR-069 R9 §4.4).
+    #[must_use]
+    pub fn kernel_observation_evidence(&self) -> Option<&KernelObservationEvidence> {
+        self.observed.as_ref().map(|(_, evidence)| evidence)
     }
 
     /// The `/work` handle the frozen observation opened, kept for the
     /// terminal `work-after` reading.
     #[must_use]
     pub fn work(&self) -> Option<&File> {
-        self.observed.as_ref().and_then(ObservedUnit::work)
+        self.observed
+            .as_ref()
+            .and_then(|(observed, _)| observed.work())
     }
 
     /// The `ReleaseV1` sent; its `observed_readback_digest` is the KOE1

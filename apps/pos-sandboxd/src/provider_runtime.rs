@@ -40,7 +40,7 @@ use pos_reference::selector::installation::authority::{
 use pos_reference::selector::installation::{InstallationObjectKind, InstalledSelectorState};
 use pos_reference::selector::SelectorBoundaryError;
 
-use crate::{KeyFileReleaseSigner, ProviderInstallation, ProviderInstallationError, RuntimeKey};
+use crate::{KeyFileRuntimeSigner, ProviderInstallation, ProviderInstallationError, RuntimeKey};
 
 /// The process's own executable, followed through its magic link.
 const SELF_EXECUTABLE: &str = "/proc/self/exe";
@@ -73,7 +73,7 @@ pub enum ProviderStartupError {
 type RuntimeAuthority = (
     AdmittedSelectorProvider,
     ProviderInstallation,
-    KeyFileReleaseSigner,
+    KeyFileRuntimeSigner,
 );
 
 /// Run R11 §5.1 steps 2 to 6 against the fixed installation and this

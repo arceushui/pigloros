@@ -9,14 +9,17 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_reference::sandbox_provider_protocol::SandboxLimit;
+use pos_reference::sandbox_provider_protocol::{ExecutionReleaseFields, SandboxLimit};
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
 };
 
 use super::{bind, required_slots, ProviderStartupError, RuntimeAuthority};
-use crate::{ProviderInstallation, ProviderInstallationError, ReleaseSigner};
+use crate::{
+    issue_release, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
+    RuntimeAttestationSigner,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -117,6 +120,25 @@ fn hex_name(digest: &[u8; 32]) -> String {
         .collect()
 }
 
+/// A complete RLS1 body for the fixture's runtime key.
+fn release_fields() -> ExecutionReleaseFields {
+    ExecutionReleaseFields {
+        attempt_id: [1; 16],
+        nonce: [2; 32],
+        ready1_digest: [3; 32],
+        trs1_digest: [4; 32],
+        rvs1_digest: [5; 32],
+        apt1_digest: [6; 32],
+        trust_epoch: 1,
+        revocation_epoch: 2,
+        policy_epoch: 3,
+        expected_readback_digest: [7; 32],
+        observed_readback_digest: [8; 32],
+        deadline_monotonic_ns: 9,
+        runtime_attestation_key_id: RUNTIME_KEY_ID.to_owned(),
+    }
+}
+
 /// Bind against the staged SIC1, running as the provider binary itself.
 fn bind_as_provider() -> TestResult<Result<RuntimeAuthority, ProviderStartupError>> {
     let admitted = admitted()?;
@@ -199,11 +221,13 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
     let expected = SigningKey::from_bytes(&RUNTIME_SEED).verifying_key();
     assert_eq!(*admitted.provider().runtime_attestation_key(), expected);
     assert_eq!(signer.runtime_attestation_key_id(), RUNTIME_KEY_ID);
-    let signature = signer.sign(b"message");
-    expected.verify_strict(
-        b"message",
-        &ed25519_dalek::Signature::from_bytes(&signature),
+    // The signer signs an RLS1 that verifies under the admitted key.
+    let release = issue_release(
+        &signer,
+        AdmittedRuntimeKey::new(RUNTIME_KEY_ID, &expected),
+        release_fields(),
     )?;
+    release.verify_signature(&expected)?;
     assert_eq!(installation.attempt_range().slots(), 256);
     assert_eq!(
         admitted.provider().manifest().runtime_attestation_key_id,

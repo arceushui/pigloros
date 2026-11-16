@@ -78,6 +78,8 @@ enum AdapterScript {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     Start,
+    /// The verified start is no valid RQE1.
+    RequestedConfiguration,
     Bind,
     Evidence,
     HangEvidence,
@@ -292,8 +294,57 @@ impl UnitCgroup for FakeCgroup {
     }
 }
 
+/// The fake's start is its unit name; its RQE1 records that name as its
+/// one requested property, and an empty name is no valid RQE1.
+impl RequestedConfiguration for String {
+    fn requested_configuration_evidence(
+        &self,
+        attempt_id: [u8; 16],
+        agr1_digest: [u8; 32],
+    ) -> Result<
+        pos_reference::sandbox_provider_protocol::RequestedConfigurationEvidence,
+        pos_reference::sandbox_provider_protocol::SandboxProviderProtocolError,
+    > {
+        use pos_reference::sandbox_provider_protocol::{
+            DbusProperty, DbusValue, RequestedConfigurationEvidence,
+            RequestedConfigurationEvidenceFields, RequestedConfigurationStatus,
+            SandboxProviderProtocolError,
+        };
+        if self.is_empty() {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+        }
+        let unit = DbusProperty {
+            name: "Description".to_owned(),
+            value: DbusValue::String(self.clone()),
+        };
+        let policy = DbusProperty {
+            name: "RootImagePolicy".to_owned(),
+            value: DbusValue::String(Self::new()),
+        };
+        RequestedConfigurationEvidence::new(&RequestedConfigurationEvidenceFields {
+            attempt_id,
+            agr1_digest,
+            status: RequestedConfigurationStatus::Verified,
+            requested: Some(vec![unit.clone()]),
+            readback: Some(vec![unit, policy]),
+        })
+    }
+}
+
 /// The device and inode every fake cgroup reports.
 const FAKE_CGROUP: (u64, u64) = (0x63, 0x67);
+
+impl FakeHost {
+    /// The fake's verified start: its unit name, or empty, which is the
+    /// fake's invalid RQE1.
+    fn started(&self, unit_name: &TransientServiceUnitName) -> String {
+        if self.faulty(Fault::RequestedConfiguration) {
+            String::new()
+        } else {
+            unit_name.as_str().to_owned()
+        }
+    }
+}
 
 impl UnitHost for FakeHost {
     type Started = String;
@@ -321,7 +372,7 @@ impl UnitHost for FakeHost {
             if let Some(adapter_end) = adapter_end {
                 self.drive(adapter_end);
             }
-            Ok(unit_name.as_str().to_owned())
+            Ok(self.started(&unit_name))
         };
         let hang = self.faulty(Fault::HangStart);
         async move {
@@ -437,16 +488,26 @@ enum BarrierFault {
 struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
+    /// The RQE1 digest each release was handed.
+    requested: Arc<Mutex<Vec<[u8; 32]>>>,
     fault: BarrierFault,
     /// Requested as the release completes, so supervision sees it first.
     cancel_on_release: Option<Arc<AttemptCancel>>,
 }
 
 impl FakeBarrier {
+    /// Record the RQE1 digest a release was handed.
+    fn hand(&self, attempt: &ActiveAttempt) {
+        if let Ok(mut requested) = self.requested.lock() {
+            requested.push(attempt.requested_configuration_evidence());
+        }
+    }
+
     fn new(log: &Log) -> Self {
         Self {
             log: Arc::clone(log),
             released: Arc::default(),
+            requested: Arc::default(),
             fault: BarrierFault::None,
             cancel_on_release: None,
         }
@@ -481,6 +542,7 @@ impl LaunchBarrier for FakeBarrier {
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
         assert_eq!(cgroup.identity(), FAKE_CGROUP);
+        self.hand(attempt);
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
@@ -519,7 +581,7 @@ async fn released(
         std::future::pending::<()>().await;
     }
     if let Some(cancel) = cancel {
-        cancel.cancel();
+        cancel.cancel(pos_reference::sandbox_provider_protocol::CancelSource::CancelRequest);
     }
     outcome
 }
@@ -873,6 +935,7 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let mut barrier = FakeBarrier::new(&log);
     let active = crate::test_fixtures::active()?;
     let released = Arc::clone(&barrier.released);
+    let handed = Arc::clone(&barrier.requested);
     assert_eq!(active.attempt_id(), ATTEMPT);
     let directory = File::open("/")?;
     let _release = barrier.release(&active, CgroupView::new(directory.as_fd(), FAKE_CGROUP));
@@ -883,6 +946,34 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
     assert!(seen[0].1 > Instant::now());
+    let requested = handed.lock().map_err(|error| error.to_string())?.clone();
+    assert_eq!(requested, vec![crate::test_fixtures::RQE1_DIGEST]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_barrier_is_handed_the_verified_start_as_rqe1() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    // Whatever the run's end, its release was handed the start's RQE1.
+    let _outcome = scenario
+        .run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
+        .await?;
+    let expected = TransientServiceUnitName::from_attempt_id(ATTEMPT)
+        .map_err(|error| error.to_string())
+        .and_then(|unit| {
+            unit.as_str()
+                .to_owned()
+                .requested_configuration_evidence(ATTEMPT, crate::test_fixtures::GRANT_DIGEST)
+                .map_err(|error| error.to_string())
+        })?
+        .digest();
+    let requested = scenario
+        .barrier
+        .requested
+        .lock()
+        .map(|requested| requested.clone())
+        .map_err(|error| error.to_string())?;
+    assert_eq!(requested, vec![expected]);
     Ok(())
 }
 
@@ -1829,6 +1920,21 @@ mod release_evidence {
         let (scenario, failed) = timed_out(&[Fault::HangEvidence], false).await?;
         assert!(matches!(failed.error, ExecuteError::HostTimeout));
         assert_eq!(failed.unit, UnitState::Killed);
+        assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_start_that_is_no_valid_rqe1_releases_nothing() -> TestResult {
+        let mut scenario = Scenario::new()?;
+        scenario.host.faults.push(Fault::RequestedConfiguration);
+        let failed = scenario.fails().await?;
+        assert!(matches!(
+            failed.error,
+            ExecuteError::RequestedConfiguration(_)
+        ));
+        assert_eq!(failed.unit, UnitState::Killed);
+        assert!(failed.started.is_some());
         assert!(!scenario.entries().iter().any(|entry| entry == "release"));
         Ok(())
     }

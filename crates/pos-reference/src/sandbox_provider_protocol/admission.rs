@@ -110,6 +110,7 @@ struct ReceiptBinding {
     epochs: [u64; 3],
     host_profile: [u8; 32],
     effective_limits: [u8; 32],
+    negative_probe_evidence: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1016,6 +1017,9 @@ impl AdmittedSandboxProvider {
 
     /// Authenticate an SPR1 and bind it to the admitted provider and AGR1.
     ///
+    /// Its negative-probe evidence (ordinal 21) must be the admitted HCP1's
+    /// ordinal 7 byte for byte (ADR-069 R9 §4.5).
+    ///
     /// # Errors
     /// Rejects a forged receipt or any lifecycle authority substitution.
     pub fn authenticate_receipt(
@@ -1039,6 +1043,7 @@ impl AdmittedSandboxProvider {
             ],
             host_profile: receipt.hcp1_digest,
             effective_limits: receipt.elm1_digest,
+            negative_probe_evidence: receipt.negative_probe_evidence,
         };
         let expected = ReceiptBinding {
             attempt_id: grant.attempt_id,
@@ -1059,6 +1064,7 @@ impl AdmittedSandboxProvider {
             ],
             host_profile: self.host_profile.profile_digest,
             effective_limits: grant.elm1_digest,
+            negative_probe_evidence: self.host_profile.negative_probe_evidence,
         };
         if actual != expected {
             return Err(SandboxAdmissionError::ConformanceMismatch);
@@ -1526,7 +1532,7 @@ const fn attempt_limit(limit_id: u8, attempt: &CaseAttempt) -> u64 {
     }
 }
 
-fn effective_limits_digest(
+pub(super) fn effective_limits_digest(
     limits: &[SandboxLimit],
     broker_caps_digest: [u8; 32],
     apt1_digest: [u8; 32],
