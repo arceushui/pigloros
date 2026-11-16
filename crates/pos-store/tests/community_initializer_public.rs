@@ -17,8 +17,8 @@ use pos_core::community_lifecycle::{
     CommunityActorRowV1, CommunityAuthorityCatalogueInputV1, CommunityAuthorityCatalogueV1,
     CommunityDurableBackendV1, CommunityDurableProfileInputV1, CommunityDurableProfileV1,
     CommunityInitializationSourceV1 as Source, CommunityLifecycleErrorV1 as Error,
-    CommunityProfileMemberV1, CommunityProfileRetentionV1, CommunityStateContentV1,
-    COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
+    CommunityMemberBindingInputV1, CommunityMemberBindingV1, CommunityProfileMemberV1,
+    CommunityProfileRetentionV1, CommunityStateContentV1, COMMUNITY_INITIALIZER_SET_SCHEMA_V1,
 };
 use pos_core::fork_authentication::{
     principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
@@ -34,8 +34,9 @@ use pos_core::{
 use pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1;
 use pos_store::community::{
     CommunityAdministrativeOperationV1 as Operation, CommunityAdministrativeRequestV1 as Request,
-    CommunityAuthorityAdmissionV1, CommunityInitializerOwnerV1, CommunityLifecycleAuthorityInputV1,
-    CommunityLifecycleAuthorityV1, MemoryCommunityDomainV1,
+    CommunityAuthorityAdmissionV1, CommunityAuthorityCallV1, CommunityInitializerOwnerV1,
+    CommunityLifecycleAuthorityInputV1, CommunityLifecycleAuthorityV1, CommunityMemberActionV1,
+    MemoryCommunityDomainV1,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -482,6 +483,13 @@ impl World {
         initializer: Hash,
         leaf: Hash,
     ) -> Fallible<Result<CommunityAuthorityAdmissionV1, Error>> {
+        let call = self.call(operation)?;
+        Ok(self
+            .authority
+            .authorize_initializer(&call, owner, initializer, &self.domain, leaf))
+    }
+
+    fn call(&mut self, operation: &Operation) -> Fallible<CommunityAuthorityCallV1> {
         let request = Request::derive(operation)?;
         let nonce = adr_h(
             "AuthenticationNonce",
@@ -503,10 +511,7 @@ impl World {
                 operation_nonce: *nonce.as_bytes(),
             })?
             .to_canonical_cbor()?;
-        let call = self.authority.authenticate(&credential, request)?;
-        Ok(self
-            .authority
-            .authorize_initializer(&call, owner, initializer, &self.domain, leaf))
+        Ok(self.authority.authenticate(&credential, request)?)
     }
 }
 
@@ -528,7 +533,11 @@ const fn transition() -> Operation {
     Operation::Initialize {
         timeline: target(),
         operation_id: OPERATION,
-        initial_source: Source::PriorState(hash(71)),
+        initial_source: Source::Initializer(ArtifactRefV1 {
+            schema_id: 0x4353_0001,
+            byte_length: 42,
+            digest: [0x30; 32],
+        }),
         expected_prior_generation: Some([0x9a; 16]),
         expected_prior_head_digest: Some(hash(72)),
     }
@@ -567,8 +576,7 @@ fn initializer_scope(digest: &str) -> Scope {
 
 /// I18 and I33: the host emits exactly the 86-byte lower-case
 /// `community-initializer:<D64>` read request; a grant on another digest,
-/// in upper case, or of the administrative mapping does not authorize it,
-/// and an initializer grant authorizes no administrative request.
+/// in upper case, or of the administrative mapping does not authorize it.
 #[test]
 fn initializer_requests_name_the_exact_lowercase_digest() -> TestResult {
     let state = csc1(V4_SCHEMA, b"state")?;
@@ -691,6 +699,47 @@ fn initializer_requests_need_an_installed_state_and_catalogue() -> TestResult {
                 .err(),
             Some(Error::EvidenceUnavailable)
         );
+    }
+    Ok(())
+}
+
+/// I33: an initializer grant admits no administrative or member request.
+#[test]
+fn an_initializer_grant_admits_no_other_mapping() -> TestResult {
+    let state = csc1(V4_SCHEMA, b"state")?;
+    let exact = grant(1, &initializer_scope(&hex(&p8_ref(&state).digest)))?;
+    let mut world = World::new(std::slice::from_ref(&exact))?;
+    let implementation = implementation()?;
+    let member = CommunityMemberBindingV1::new(CommunityMemberBindingInputV1 {
+        stable_entry: "Entry-A_1",
+        implementation: &implementation,
+        pmf1_digest: hash(4),
+        state_schema_digest: V4_SCHEMA,
+        negotiated_tuple_digest: hash(6),
+        initial_state_content_digest: hash(7),
+        protected_owner_binding_digest: hash(8),
+    })?;
+    for operation in [initialize(), transition()] {
+        let call = world.call(&operation)?;
+        assert_eq!(
+            world
+                .authority
+                .authorize_administrative(&call, &world.domain, exact.grant_id())
+                .err(),
+            Some(Error::EvidenceUnavailable)
+        );
+        for action in [
+            CommunityMemberActionV1::Read,
+            CommunityMemberActionV1::Execute,
+        ] {
+            assert_eq!(
+                world
+                    .authority
+                    .authorize_member(&call, &member, action, &world.domain, exact.grant_id())
+                    .err(),
+                Some(Error::EvidenceUnavailable)
+            );
+        }
     }
     Ok(())
 }

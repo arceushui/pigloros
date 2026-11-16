@@ -244,8 +244,8 @@ fn cau1_has_fifteen_fields_with_input_identity_at_index_7() -> TestResult {
         }],
         clock_bound: ClockBound {
             reservation_id: u64::MAX,
-            reservation_sample_micros: u64::MAX - 1,
-            decision_bound_micros: u64::MAX,
+            reservation_sample_micros: MAX_HORIZON - 1,
+            decision_bound_micros: MAX_HORIZON,
         },
         evidence_not_after_micros: MAX_HORIZON,
         ..evidence_input()
@@ -413,6 +413,13 @@ fn evidence_field_cases() -> Fallible<Vec<EvidenceInput>> {
         EvidenceInput {
             clock_bound: ClockBound {
                 reservation_sample_micros: clock.decision_bound_micros,
+                ..clock
+            },
+            ..base()
+        },
+        EvidenceInput {
+            clock_bound: ClockBound {
+                reservation_sample_micros: clock.decision_bound_micros + 1,
                 ..clock
             },
             ..base()
@@ -650,6 +657,8 @@ fn frontier_value(frontier: Frontier) -> Fallible<Value> {
     })
 }
 
+/// The CMI1 codec owns the full class table; these tests use only the
+/// `TimelineReplay` (0) and `ReproManifest` (1) classes.
 fn class_code(class: Class) -> u64 {
     u64::from(class == Class::ReproManifest)
 }
@@ -1145,7 +1154,28 @@ fn view_field_cases() -> Fallible<Vec<ViewInput>> {
 
 fn view_row_cases() -> Fallible<Vec<ViewInput>> {
     let base = view_input;
-    let mut cases = vec![];
+    let mut cases = vec![
+        // Unordered by the leading key, ordered by the trailing one.
+        ViewInput {
+            scope_rows: vec![scope_row(51, 50), scope_row(50, 51)],
+            ..base()?
+        },
+        ViewInput {
+            authority_rows: vec![authority_row(9, 8, 1), authority_row(9, 7, 5)],
+            ..base()?
+        },
+        ViewInput {
+            authority_rows: vec![authority_row(9, 7, 1), authority_row(8, 7, 2)],
+            ..base()?
+        },
+        ViewInput {
+            trust_rows: vec![
+                trust_row("community.trust", "plugin.a"),
+                trust_row("community.other", "plugin.z"),
+            ],
+            ..base()?
+        },
+    ];
     for zeroed in 0..3 {
         let mut row = scope_row(50, 51);
         match zeroed {
