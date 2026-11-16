@@ -1034,12 +1034,6 @@ fn cav1_row_bounds_hold_at_the_limit_and_refuse_one_over() -> TestResult {
     assert!(View::new(full.clone())?.to_canonical_cbor().len() <= 2_097_152);
     assert_view_round_trip(full)?;
 
-    // Zero trust rows are a valid CAV1; completeness is the owner's check.
-    assert_view_round_trip(ViewInput {
-        trust_rows: vec![],
-        ..view_input()?
-    })?;
-
     let mut more_scopes = scopes;
     more_scopes.push(ScopeRow {
         scope_reference: counted(u64::MAX),
@@ -1065,6 +1059,11 @@ fn cav1_row_bounds_hold_at_the_limit_and_refuse_one_over() -> TestResult {
         },
         ViewInput {
             trust_rows: more_trust,
+            ..view_input()?
+        },
+        // R6.5(4): an empty row set is never a valid CAV1.
+        ViewInput {
+            trust_rows: vec![],
             ..view_input()?
         },
         ViewInput {
