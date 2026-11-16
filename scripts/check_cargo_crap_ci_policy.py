@@ -218,6 +218,90 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
         ("set -euo pipefail\n", "baseline resolver must fail closed"),
         ("BASELINE_RETRY_ATTEMPTS=30\n", "baseline retry attempts changed"),
         ("BASELINE_RETRY_DELAY_SECONDS=10\n", "baseline retry delay changed"),
+        ("MAIN_RUN_POLL_DELAY_SECONDS=60\n", "main run poll delay changed"),
+        ("BASELINE_WAIT_LIMIT_SECONDS=7200\n", "baseline wait bound changed"),
+        ("MAIN_RUN_REGISTRATION_LIMIT_SECONDS=600\n", "main run registration window changed"),
+        ("GH_API_ATTEMPTS=3\n", "GitHub API attempts changed"),
+        ("GH_API_RETRY_DELAY_SECONDS=30\n", "GitHub API retry delay changed"),
+        (
+            "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > MAIN_RUN_REGISTRATION_LIMIT_SECONDS)); then\n"
+            '      reason="no main ci.yml run exists for trusted base ${TRUSTED_BASE_SHA} after ${elapsed}s"\n'
+            "      break\n",
+            "baseline resolver must bound the main run registration window and record why it stopped",
+        ),
+        (
+            '  if [[ "${main_run_status}" == "completed" ]]; then\n'
+            "    publish_baseline_if_available\n"
+            '    reason="main ci.yml run ${main_run_id} for trusted base ${TRUSTED_BASE_SHA} completed with conclusion ',
+            "baseline resolver must recheck the artifact and record why it stopped after main's run completed",
+        ),
+        (
+            '  if [[ "${crap_job_status}" == "completed" ]]; then\n'
+            "    publish_baseline_if_available\n"
+            '    reason="the cargo-crap job of main ci.yml run ${main_run_id} for trusted base ${TRUSTED_BASE_SHA} completed with conclusion ',
+            "baseline resolver must recheck the artifact and record why it stopped after main's cargo-crap job completed",
+        ),
+        (
+            '    reason="main ci.yml run ${main_run_id} for trusted base ${TRUSTED_BASE_SHA} is still ${main_run_status} after ${elapsed}s; ',
+            "baseline resolver must record why it stopped at the wait bound",
+        ),
+        (
+            '"repos/${GITHUB_REPOSITORY}/actions/runs/$1/jobs"',
+            "baseline resolver must inspect main's cargo-crap job",
+        ),
+        (
+            '-f filter=latest -f per_page=100',
+            "baseline resolver must read the latest main run attempt",
+        ),
+        (
+            'select(.name == \\"cargo-crap\\")',
+            "baseline resolver must wait for main's cargo-crap job only",
+        ),
+        (
+            '    if GH_API_OUTPUT="$(gh api "$@")"; then\n',
+            "baseline resolver must route GitHub API calls through its retry wrapper",
+        ),
+        (
+            "for ((failure = 1; failure <= GH_API_ATTEMPTS; failure++)); do",
+            "baseline resolver must bound GitHub API retries",
+        ),
+        (
+            "  echo \"::error::GitHub API request $4 failed ${GH_API_ATTEMPTS} consecutive times; "
+            "failing closed without a trusted main baseline\"\n  exit 1\n}\n",
+            "persistent GitHub API failures must fail closed before the bootstrap decision",
+        ),
+        (
+            "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > BASELINE_WAIT_LIMIT_SECONDS)); then",
+            "baseline resolver must bound its wait for main",
+        ),
+        (
+            'sleep "${MAIN_RUN_POLL_DELAY_SECONDS}"',
+            "baseline resolver main run poll delay is not enforced",
+        ),
+        (
+            '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"',
+            "baseline resolver must wait only for main's ci.yml run",
+        ),
+        (
+            '-f branch=main -f head_sha="${TRUSTED_BASE_SHA}" -f per_page=100',
+            "baseline resolver must query main's run of the trusted commit",
+        ),
+        (
+            'select(.head_branch == \\"main\\")',
+            "baseline resolver must wait only for a main-branch run",
+        ),
+        (
+            'select(.head_sha == \\"${TRUSTED_BASE_SHA}\\")',
+            "baseline resolver must wait only for the trusted main commit",
+        ),
+        (
+            "select(.head_repository.id == .repository.id)",
+            "baseline resolver must not wait for fork runs",
+        ),
+        (
+            'if [[ "${main_run_status}" == "completed" ]]; then',
+            "baseline resolver must stop waiting once main's run completed",
+        ),
         (
             "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do",
             "baseline resolver must use bounded retries",
@@ -274,8 +358,22 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
     require(
-        '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"' not in resolver,
-        "baseline resolver must not wait for unrelated main workflow jobs",
+        resolver.count("gh api") == 1,
+        "baseline resolver must issue every GitHub API call through its retry wrapper",
+    )
+    require(
+        resolver.endswith(
+            "  .cargo/config.toml .cargo-crap.toml; then\n"
+            '  echo "::notice::Trusted main baseline unavailable: ${reason}; bootstrapping because '
+            'this pull request changes no Rust or Cargo policy inputs"\n'
+            "  echo 'bootstrap=true' >> \"${GITHUB_OUTPUT}\"\n"
+            "  exit 0\n"
+            "fi\n"
+            'echo "::error::Trusted main baseline unavailable: ${reason}; failing closed because '
+            'this pull request changes Rust or Cargo policy inputs"\n'
+            "exit 1\n"
+        ),
+        "baseline resolver must end with the restricted bootstrap and fail-closed decision",
     )
     require(
         "-f status=success" not in resolver,
@@ -362,7 +460,7 @@ def check_workflow(
         "cargo-crap must skip documentation-only pull requests",
     )
     require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
-    require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
+    require(job.get("timeout-minutes") == 150, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
     require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
@@ -437,6 +535,7 @@ def check_workflow(
         == {
             "name": "Resolve trusted cargo-crap baseline",
             "id": "baseline",
+            "timeout-minutes": 130,
             "env": {
                 "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                 "EVENT_NAME": "${{ github.event_name }}",

@@ -21,6 +21,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
 EXAMPLE_BASE_SHA = "a" * 40
+# The 30-attempt artifact window, then five one-minute polls of the 600 s main
+# run registration window (elapsed 290 s to 530 s) before the final lookup.
+NO_MAIN_RUN_CALLS = ["artifacts"] * 30 + ["runs", "artifacts"] * 5 + ["runs"]
 EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
     "src/fork_event_authority/tests/local_replay.rs",
     "src/sqlite/tests/protected_interval_cleanup.rs",
@@ -96,16 +99,37 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def run_resolver(
         self,
-        gh_response: str,
+        artifact_responses: str | list[str],
+        run_responses: str | list[str] = "",
+        job_responses: str | list[str] = "",
         *,
         base_sha: str = EXAMPLE_BASE_SHA,
         trusted_base_sha: str = EXAMPLE_BASE_SHA,
         git_status: int = 1,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+        """Run the resolver against a stubbed ``gh``, ``git``, ``sleep`` and clock.
+
+        Each list holds the stdout of successive ``gh api`` calls to the
+        artifacts, main-run or run-jobs endpoint; the last entry repeats and
+        an entry of ``FAIL`` makes that call exit non-zero. ``sleep``
+        advances the fake ``date +%s`` clock instead of waiting.
+        """
+        responses = {
+            "artifacts": [artifact_responses] if isinstance(artifact_responses, str) else artifact_responses,
+            "runs": [run_responses] if isinstance(run_responses, str) else run_responses,
+            "jobs": [job_responses] if isinstance(job_responses, str) else job_responses,
+        }
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)
             tools = fixture / "bin"
             tools.mkdir()
+            replies = fixture / "replies"
+            replies.mkdir()
+            for kind, outputs in responses.items():
+                for index, output in enumerate(outputs, start=1):
+                    (replies / f"{kind}.{index}").write_text(output, encoding="utf-8")
+            clock = fixture / "clock"
+            clock.write_text("1000000\n", encoding="utf-8")
             logs = {
                 "output": str(fixture / "github-output"),
                 "gh_args": str(fixture / "gh-args"),
@@ -116,11 +140,29 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             self.write_executable(
                 tools / "gh",
                 "printf '%s\\0' \"$@\" >> \"${GH_ARGS}\"\n"
-                "printf 'call\\n' >> \"${GH_CALLS}\"\n"
-                "printf '%s' \"${GH_RESPONSE}\"\n",
+                "case \"$5\" in\n"
+                "  */actions/artifacts) kind=artifacts ;;\n"
+                "  */actions/workflows/ci.yml/runs) kind=runs ;;\n"
+                "  */actions/runs/*/jobs) kind=jobs ;;\n"
+                "  *) exit 97 ;;\n"
+                "esac\n"
+                "printf '%s\\n' \"${kind}\" >> \"${GH_CALLS}\"\n"
+                "reply=\"$(grep -cx \"${kind}\" \"${GH_CALLS}\")\"\n"
+                "while ((reply > 1)) && [[ ! -e \"${GH_REPLIES}/${kind}.${reply}\" ]]; do\n"
+                "  reply=$((reply - 1))\n"
+                "done\n"
+                "[[ \"$(cat \"${GH_REPLIES}/${kind}.${reply}\")\" != FAIL ]] || exit 1\n"
+                "cat \"${GH_REPLIES}/${kind}.${reply}\"\n",
             )
             self.write_executable(
-                tools / "sleep", "printf '%s\\n' \"$@\" >> \"${SLEEP_CALLS}\"\n"
+                tools / "sleep",
+                "printf '%s\\n' \"$@\" >> \"${SLEEP_CALLS}\"\n"
+                "printf '%s\\n' \"$(($(cat \"${FAKE_CLOCK}\") + $1))\" > \"${FAKE_CLOCK}\"\n",
+            )
+            self.write_executable(
+                tools / "date",
+                "[[ \"$*\" == \"+%s\" ]] || exit 98\n"
+                "cat \"${FAKE_CLOCK}\"\n",
             )
             self.write_executable(
                 tools / "git",
@@ -142,8 +184,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     "GITHUB_REPOSITORY": "owner/repository",
                     "GH_ARGS": logs["gh_args"],
                     "GH_CALLS": logs["gh_calls"],
-                    "GH_RESPONSE": gh_response,
+                    "GH_REPLIES": str(replies),
                     "SLEEP_CALLS": logs["sleep_calls"],
+                    "FAKE_CLOCK": str(clock),
                     "GIT_CALLS": logs["git_calls"],
                     "FAKE_GIT_STATUS": str(git_status),
                 }
@@ -163,6 +206,20 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 for name, path in logs.items()
             }
             return result, contents
+
+    @staticmethod
+    def gh_calls(logs: dict[str, str]) -> list[str]:
+        return logs["gh_calls"].splitlines()
+
+    @staticmethod
+    def gh_invocations(logs: dict[str, str]) -> list[list[str]]:
+        """Split the NUL-separated gh argument log into one list per call."""
+        invocations: list[list[str]] = []
+        for argument in logs["gh_args"].split("\0")[:-1]:
+            if argument == "api":
+                invocations.append([])
+            invocations[-1].append(argument)
+        return invocations
 
     @staticmethod
     def write_executable(path: pathlib.Path, body: str) -> None:
@@ -551,7 +608,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             logs["output"],
             f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
         )
-        self.assertEqual(logs["gh_calls"], "call\n")
+        self.assertEqual(self.gh_calls(logs), ["artifacts"])
         self.assertEqual(logs["sleep_calls"], "")
         self.assertEqual(
             logs["git_calls"],
@@ -588,8 +645,13 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(logs["output"], "")
-        self.assertEqual(logs["gh_calls"].count("call\n"), 30)
-        self.assertEqual(logs["sleep_calls"].count("10\n"), 29)
+        self.assertEqual(self.gh_calls(logs), NO_MAIN_RUN_CALLS)
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29 + "60\n" * 5)
+        self.assertIn(
+            f"Trusted main baseline {EXAMPLE_BASE_SHA} for base {EXAMPLE_BASE_SHA} "
+            "is not available yet (attempt 29/30); retrying in 10s\n",
+            result.stdout,
+        )
         self.assertEqual(
             logs["git_calls"],
             f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n"
@@ -623,7 +685,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(logs["output"], "")
-        self.assertEqual(logs["gh_calls"].count("call\n"), 30)
+        self.assertEqual(self.gh_calls(logs), NO_MAIN_RUN_CALLS)
         self.assertIn(f"name=cargo-crap-baseline-{EXAMPLE_BASE_SHA}", logs["gh_args"])
         self.assertEqual(
             logs["git_calls"],
@@ -656,6 +718,297 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(logs["output"], "")
         self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
+
+    def test_resolver_waits_for_an_in_progress_main_run_to_publish_the_baseline(self) -> None:
+        # 30 short-window misses, one miss after the first main-run poll, then
+        # the artifact appears after the second poll.
+        result, logs = self.run_resolver(
+            [""] * 31 + ["4242\n"],
+            ["777 queued none\n", "777 in_progress none\n"],
+            ["", "queued none\n"],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            logs["output"],
+            f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
+        )
+        self.assertEqual(
+            self.gh_calls(logs),
+            ["artifacts"] * 30 + ["runs", "jobs", "artifacts"] * 2,
+        )
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29 + "60\n" * 2)
+        self.assertIn("Waiting for main ci.yml run 777 (queued, cargo-crap job pending)", result.stdout)
+        self.assertIn(
+            "Waiting for main ci.yml run 777 (in_progress, cargo-crap job queued)", result.stdout
+        )
+        self.assertNotIn("diff", logs["git_calls"])
+        expected_runs_query = (
+            ".workflow_runs[] |\n"
+            '      select(.head_branch == "main") |\n'
+            f'      select(.head_sha == "{EXAMPLE_BASE_SHA}") |\n'
+            "      select(.head_repository.id == .repository.id) |\n"
+            '      "\\(.id) \\(.status) \\(.conclusion // "none")"'
+        )
+        self.assertEqual(
+            self.gh_invocations(logs)[30],
+            [
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "repos/owner/repository/actions/workflows/ci.yml/runs",
+                "-f",
+                "branch=main",
+                "-f",
+                f"head_sha={EXAMPLE_BASE_SHA}",
+                "-f",
+                "per_page=100",
+                "--jq",
+                expected_runs_query,
+            ],
+        )
+
+    def test_resolver_main_run_query_keeps_only_same_repository_main_runs(self) -> None:
+        _, logs = self.run_resolver("")
+        query = self.gh_invocations(logs)[30][-1]
+        same = {"id": 1}
+        other = {"id": 2}
+        runs = [
+            {"id": 10, "status": "in_progress", "conclusion": None, "head_branch": "main",
+             "head_sha": EXAMPLE_BASE_SHA, "head_repository": same, "repository": same},
+            {"id": 11, "status": "completed", "conclusion": "failure", "head_branch": "main",
+             "head_sha": EXAMPLE_BASE_SHA, "head_repository": same, "repository": same},
+            {"id": 12, "status": "queued", "conclusion": None, "head_branch": "main",
+             "head_sha": EXAMPLE_BASE_SHA, "head_repository": other, "repository": same},
+            {"id": 13, "status": "queued", "conclusion": None, "head_branch": "feature",
+             "head_sha": EXAMPLE_BASE_SHA, "head_repository": same, "repository": same},
+            {"id": 14, "status": "queued", "conclusion": None, "head_branch": "main",
+             "head_sha": "b" * 40, "head_repository": same, "repository": same},
+        ]
+        selected = subprocess.run(
+            ["jq", "-r", query],
+            input=json.dumps({"workflow_runs": runs}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(selected.stdout, "10 in_progress none\n11 completed failure\n")
+
+    def test_resolver_prefers_an_unfinished_main_run_over_a_completed_attempt(self) -> None:
+        result, logs = self.run_resolver(
+            [""] * 31 + ["4242\n"], "900 completed failure\n901 in_progress none\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-id=4242\n", logs["output"])
+        self.assertIn("Waiting for main ci.yml run 901 (in_progress, cargo-crap job pending)", result.stdout)
+
+    def test_resolver_accepts_a_baseline_listed_once_the_main_run_completed(self) -> None:
+        result, logs = self.run_resolver([""] * 30 + ["4242\n"], "777 completed success\n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-id=4242\n", logs["output"])
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "artifacts"])
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29)
+
+    def test_resolver_fails_closed_when_the_main_run_failed_without_a_baseline(self) -> None:
+        result, logs = self.run_resolver("", "777 completed failure\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "artifacts"])
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29)
+        self.assertIn(
+            f"::error::Trusted main baseline unavailable: main ci.yml run 777 for trusted base "
+            f"{EXAMPLE_BASE_SHA} completed with conclusion failure without publishing "
+            f"cargo-crap-baseline-{EXAMPLE_BASE_SHA}; failing closed",
+            result.stdout,
+        )
+        self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
+
+    def test_resolver_bootstraps_non_rust_changes_after_a_cancelled_main_run(self) -> None:
+        result, logs = self.run_resolver("", "777 completed cancelled\n", git_status=0)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(logs["output"], "bootstrap=true\n")
+        self.assertIn("completed with conclusion cancelled", result.stdout)
+        self.assertIn("::notice::", result.stdout)
+
+    def test_resolver_fails_closed_when_main_has_no_run_for_the_trusted_base(self) -> None:
+        result, logs = self.run_resolver("", "")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(self.gh_calls(logs), NO_MAIN_RUN_CALLS)
+        self.assertIn(
+            f"::error::Trusted main baseline unavailable: no main ci.yml run exists for "
+            f"trusted base {EXAMPLE_BASE_SHA} after 590s; failing closed",
+            result.stdout,
+        )
+
+    def test_resolver_fails_closed_when_the_wait_bound_expires(self) -> None:
+        result, logs = self.run_resolver("", "777 in_progress none\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        delays = [int(delay) for delay in logs["sleep_calls"].split()]
+        # The 290 s short window plus 115 one-minute polls stays inside 7200 s;
+        # one more poll would exceed the bound, so the resolver stops.
+        self.assertEqual(delays, [10] * 29 + [60] * 115)
+        self.assertLessEqual(sum(delays), 7200)
+        self.assertEqual(
+            self.gh_calls(logs),
+            ["artifacts"] * 30 + ["runs", "jobs", "artifacts"] * 115 + ["runs", "jobs"],
+        )
+        self.assertIn(
+            f"::error::Trusted main baseline unavailable: main ci.yml run 777 for trusted base "
+            f"{EXAMPLE_BASE_SHA} is still in_progress after 7190s; the 7200s wait bound "
+            f"expired without cargo-crap-baseline-{EXAMPLE_BASE_SHA}; failing closed",
+            result.stdout,
+        )
+        self.assertIn(f"{EXAMPLE_BASE_SHA}...HEAD", logs["git_calls"])
+
+    def test_resolver_retries_a_transient_github_api_failure(self) -> None:
+        result, logs = self.run_resolver(["FAIL", "FAIL", "4242\n"])
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            logs["output"],
+            f"run-id=4242\nbaseline-sha={EXAMPLE_BASE_SHA}\nbootstrap=false\n",
+        )
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 3)
+        self.assertEqual(logs["sleep_calls"], "30\n30\n")
+        self.assertIn(
+            "GitHub API request repos/owner/repository/actions/artifacts failed "
+            "(attempt 2/3); retrying in 30s\n",
+            result.stdout,
+        )
+
+    def test_resolver_fails_closed_on_persistent_github_api_failures(self) -> None:
+        # git_status=0 would allow bootstrap; an API failure must never reach it.
+        result, logs = self.run_resolver("FAIL", git_status=0)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 3)
+        self.assertEqual(logs["sleep_calls"], "30\n30\n")
+        self.assertEqual(logs["git_calls"], f"merge-base\n{EXAMPLE_BASE_SHA}\norigin/main\n")
+        self.assertIn(
+            "::error::GitHub API request repos/owner/repository/actions/artifacts failed 3 "
+            "consecutive times; failing closed without a trusted main baseline\n",
+            result.stdout,
+        )
+
+    def test_resolver_fails_closed_on_persistent_failures_while_waiting_for_main(self) -> None:
+        result, logs = self.run_resolver("", "FAIL", git_status=0)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs"] * 3)
+        self.assertNotIn("diff", logs["git_calls"])
+        self.assertIn(
+            "::error::GitHub API request repos/owner/repository/actions/workflows/ci.yml/runs "
+            "failed 3 consecutive times",
+            result.stdout,
+        )
+
+    def test_resolver_stops_once_mains_cargo_crap_job_completed(self) -> None:
+        result, logs = self.run_resolver("", "777 in_progress none\n", "completed failure\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(logs["output"], "")
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "jobs", "artifacts"])
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29)
+        self.assertEqual(
+            self.gh_invocations(logs)[31][:9],
+            [
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "repos/owner/repository/actions/runs/777/jobs",
+                "-f",
+                "filter=latest",
+                "-f",
+                "per_page=100",
+            ],
+        )
+        self.assertIn(
+            f"::error::Trusted main baseline unavailable: the cargo-crap job of main ci.yml run "
+            f"777 for trusted base {EXAMPLE_BASE_SHA} completed with conclusion failure without "
+            f"publishing cargo-crap-baseline-{EXAMPLE_BASE_SHA}; failing closed",
+            result.stdout,
+        )
+
+    def test_resolver_accepts_a_baseline_listed_once_mains_cargo_crap_job_completed(self) -> None:
+        result, logs = self.run_resolver(
+            [""] * 30 + ["4242\n"], "777 in_progress none\n", "completed success\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-id=4242\n", logs["output"])
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "jobs", "artifacts"])
+
+    def test_resolver_reports_the_newest_of_several_completed_main_runs(self) -> None:
+        # GitHub lists the newest run first; it decides the reason.
+        result, _ = self.run_resolver("", "902 completed cancelled\n901 completed failure\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            f"main ci.yml run 902 for trusted base {EXAMPLE_BASE_SHA} completed with "
+            "conclusion cancelled without publishing",
+            result.stdout,
+        )
+        self.assertNotIn("run 901", result.stdout)
+
+    def test_resolver_uses_the_first_listed_cargo_crap_job(self) -> None:
+        result, logs = self.run_resolver(
+            "", "777 in_progress none\n", "completed failure\nin_progress none\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.gh_calls(logs), ["artifacts"] * 30 + ["runs", "jobs", "artifacts"])
+        self.assertIn(
+            "the cargo-crap job of main ci.yml run 777 for trusted base "
+            f"{EXAMPLE_BASE_SHA} completed with conclusion failure",
+            result.stdout,
+        )
+
+    def test_resolver_job_query_selects_only_the_cargo_crap_job(self) -> None:
+        _, logs = self.run_resolver("", "777 in_progress none\n", "completed failure\n")
+        query = self.gh_invocations(logs)[31][-1]
+        jobs = [
+            {"name": "coverage", "status": "completed", "conclusion": "success"},
+            {"name": "cargo-crap", "status": "in_progress", "conclusion": None},
+            {"name": "cargo-crap-report", "status": "completed", "conclusion": "failure"},
+        ]
+        selected = subprocess.run(
+            ["jq", "-r", query],
+            input=json.dumps({"jobs": jobs}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(selected.stdout, "in_progress none\n")
+
+    def test_resolver_waits_for_a_main_run_to_register(self) -> None:
+        result, logs = self.run_resolver(
+            [""] * 32 + ["4242\n"], ["", "", "777 queued none\n"]
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run-id=4242\n", logs["output"])
+        self.assertEqual(
+            self.gh_calls(logs),
+            ["artifacts"] * 30 + ["runs", "artifacts"] * 2 + ["runs", "jobs", "artifacts"],
+        )
+        self.assertEqual(logs["sleep_calls"], "10\n" * 29 + "60\n" * 3)
+        self.assertIn(
+            f"No main ci.yml run for trusted base {EXAMPLE_BASE_SHA} yet "
+            "(290s of 600s registration window elapsed); checking again in 60s\n",
+            result.stdout,
+        )
 
     def test_rejects_unpinned_cargo_crap(self) -> None:
         self.assert_rejected(
@@ -816,6 +1169,94 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 "BASELINE_RETRY_DELAY_SECONDS=1",
             )
         )
+
+    def test_rejects_weakened_main_run_wait(self) -> None:
+        mutations = {
+            "longer bound": ("BASELINE_WAIT_LIMIT_SECONDS=7200", "BASELINE_WAIT_LIMIT_SECONDS=72000"),
+            "faster poll": ("MAIN_RUN_POLL_DELAY_SECONDS=60", "MAIN_RUN_POLL_DELAY_SECONDS=1"),
+            "unbounded wait": (
+                "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > BASELINE_WAIT_LIMIT_SECONDS)); then",
+                "if false; then",
+            ),
+            "fork runs": ("select(.head_repository.id == .repository.id) |", ""),
+            "any branch": ('-f branch=main -f head_sha', '-f head_sha'),
+            "keeps waiting after completion": (
+                'if [[ "${main_run_status}" == "completed" ]]; then',
+                'if [[ "${main_run_status}" == "never" ]]; then',
+            ),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(name):
+                self.assertIn(old, RESOLVER_PATH.read_text(encoding="utf-8"))
+                self.assert_resolver_rejected(lambda resolver: resolver.replace(old, new))
+
+    def test_cargo_crap_timeouts_cover_the_bounded_wait(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 135})
+        )
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update({"timeout-minutes": 140})
+        )
+        self.assert_rejected(
+            lambda workflow: self.cargo_crap_step(
+                workflow, "Resolve trusted cargo-crap baseline"
+            ).pop("timeout-minutes")
+        )
+        self.assert_rejected(
+            lambda workflow: self.cargo_crap_step(
+                workflow, "Resolve trusted cargo-crap baseline"
+            ).update({"timeout-minutes": 125})
+        )
+
+    def test_rejects_resolver_give_up_paths_that_skip_the_recheck_or_reason(self) -> None:
+        mutations = {
+            "no recheck after the run completed": (
+                '  if [[ "${main_run_status}" == "completed" ]]; then\n'
+                "    publish_baseline_if_available\n",
+                '  if [[ "${main_run_status}" == "completed" ]]; then\n',
+            ),
+            "no recheck after the cargo-crap job completed": (
+                '  if [[ "${crap_job_status}" == "completed" ]]; then\n'
+                "    publish_baseline_if_available\n",
+                '  if [[ "${crap_job_status}" == "completed" ]]; then\n',
+            ),
+            "no reason without a run": (
+                '      reason="no main ci.yml run exists for trusted base ${TRUSTED_BASE_SHA} after ${elapsed}s"\n',
+                "",
+            ),
+            "no reason at the bound": (
+                '    reason="main ci.yml run ${main_run_id} for trusted base ${TRUSTED_BASE_SHA} is still ',
+                '    unused="main ci.yml run ${main_run_id} for trusted base ${TRUSTED_BASE_SHA} is still ',
+            ),
+            "unbounded registration window": (
+                "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > MAIN_RUN_REGISTRATION_LIMIT_SECONDS)); then",
+                "if false; then",
+            ),
+            "ignores the cargo-crap job": (
+                'select(.name == \\"cargo-crap\\")', 'select(.name == \\"coverage\\")',
+            ),
+            "fail-open final decision": (
+                "policy inputs\"\nexit 1\n", "policy inputs\"\nexit 0\n",
+            ),
+            "unconditional bootstrap": (
+                "  exit 0\nfi\necho \"::error::Trusted main baseline unavailable",
+                "  exit 0\nfi\necho 'bootstrap=true' >> \"${GITHUB_OUTPUT}\"\n"
+                "echo \"::error::Trusted main baseline unavailable",
+            ),
+            "API failure falls through": (
+                "failing closed without a trusted main baseline\"\n  exit 1\n}\n",
+                "failing closed without a trusted main baseline\"\n  return 1\n}\n",
+            ),
+            "unretried API call": (
+                "  read_main_run\n",
+                "  read_main_run\n  gh api repos/x/y >/dev/null\n",
+            ),
+            "more API retries": ("GH_API_ATTEMPTS=3", "GH_API_ATTEMPTS=30"),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(name):
+                self.assertIn(old, RESOLVER_PATH.read_text(encoding="utf-8"))
+                self.assert_resolver_rejected(lambda resolver: resolver.replace(old, new))
 
     def test_requires_artifact_based_baseline_resolution(self) -> None:
         self.assert_resolver_rejected(
