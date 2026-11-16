@@ -139,7 +139,8 @@ impl<'a> RuntimeSlotTarget<'a> {
         self.challenge
     }
 
-    /// The selector-allocated runtime-instance ID.
+    /// The selector-allocated runtime-instance ID. ADR-069 R12 §4.2 fixes
+    /// this field of the target; the slot binds it into SIR1.
     #[must_use]
     pub const fn runtime_instance_id(&self) -> [u8; 16] {
         self.runtime_instance_id
@@ -247,7 +248,8 @@ impl StaleUnitsObservation {
         self.challenge
     }
 
-    /// How many loaded units were stopped and proven unloaded.
+    /// How many loaded units were stopped and proven unloaded. ADR-069 R12
+    /// §4.2 fixes this field of the observation.
     #[must_use]
     pub const fn stopped_unit_count(&self) -> usize {
         self.stopped_unit_count
@@ -264,6 +266,10 @@ pub enum ProviderLifecycleError {
     #[error("a provider-owned resource remains")]
     ResidualResource,
     /// A resource that the target does not own was found.
+    ///
+    /// Part of the normative error set of ADR-069 R12 §4.2; #349's
+    /// `terminate_previous_runtime` returns it for a foreign unit or intent
+    /// (R12 §7.1 steps 2 and 6).
     #[error("a resource not owned by the target was found")]
     ForeignResource,
     /// The manager's or the kernel's evidence contradicts itself or the target.
