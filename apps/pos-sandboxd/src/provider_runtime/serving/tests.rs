@@ -24,8 +24,8 @@ use super::{root_peer, Responder};
 use crate::provider_runtime::endpoint::bind_endpoints;
 use crate::provider_runtime::reconcile::ReconcileError;
 use crate::provider_runtime::tests::{
-    bind_as_provider, encode, in_isolated_root, install_spi1, spi1, test_lifecycle, Scripted,
-    TestResult, RUNTIME_SEED,
+    bind_as_provider, cancellation_context, encode, in_isolated_root, install_spi1,
+    revocation_update, spi1, test_lifecycle, Scripted, TestResult, RUNTIME_SEED,
 };
 use crate::provider_runtime::{
     serve_with, AdmissionState, ProviderRuntimeError, ProviderStartupError, RuntimeAuthority,
@@ -768,5 +768,97 @@ fn only_a_root_peer_is_answered() -> TestResult {
     // isolated container it is.
     let (local, _) = UnixStream::pair()?;
     assert_eq!(root_peer(&local), rustix::process::geteuid().is_root());
+    Ok(())
+}
+
+/// Assert that `endpoint` answers `bytes` with nothing: the connection
+/// ends, or is reset, with zero bytes written.
+fn assert_silent(endpoint: &str, bytes: &[u8]) -> TestResult {
+    let mut stream = UnixStream::connect(endpoint)?;
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    stream.write_all(bytes)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut byte = [0; 1];
+    match stream.read(&mut byte) {
+        Ok(read) => assert_eq!(read, 0),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+    }
+    Ok(())
+}
+
+/// Serve `responder` with a pool of four while `check` runs, then end
+/// serving through a replaced execute leaf.
+fn while_serving(responder: &Responder<'_>, check: impl FnOnce() -> TestResult) -> TestResult {
+    let (execute, control) = bind_endpoints(Path::new(EXECUTE), Path::new(CONTROL))?;
+    std::thread::scope(|scope| -> TestResult {
+        let serving = scope.spawn(|| responder.serve(&execute, &control, 4));
+        check()?;
+        let replacement = replace_execute_leaf()?;
+        assert_eq!(
+            serving.join().map_err(|_| "the runtime panicked")?,
+            ProviderRuntimeError::UnsafeEndpoint
+        );
+        drop(replacement);
+        Ok(())
+    })?;
+    drop((execute, control));
+    fs::remove_file(EXECUTE)?;
+    Ok(())
+}
+
+#[test]
+fn the_control_socket_acknowledges_and_a_self_revocation_closes_execute() -> TestResult {
+    if !in_isolated_root(
+        "provider_runtime::serving::tests::the_control_socket_acknowledges_and_a_self_revocation_closes_execute",
+    )? {
+        return Ok(());
+    }
+    let staged = stage()?;
+    let (admitted, _, signer) = bind_as_provider()??;
+    let key = *admitted.provider().runtime_attestation_key();
+    let retained = Authority {
+        apt1: admitted.bootstrap().policy().policy_digest(),
+        epoch: admitted.bootstrap().policy().policy_epoch(),
+    };
+    let starting = OnceLock::new();
+    // An acknowledged update fences the runtime for good; describe still
+    // answers and execute is refused with 11 (invariant 24).
+    let fenced = Responder::new(&admitted, &signer, &starting);
+    while_serving(&fenced, || {
+        let (update, _) = revocation_update(&admitted, &[], 1)?;
+        let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
+            .to_canonical_cbor()?;
+        assert!(!exchange_at(CONTROL, &framed(&[&context_bytes, &update])?)?.is_empty());
+        let bytes = describe([1; 16], retained)?;
+        SandboxDescribeResponse::from_canonical_cbor(unframe(&exchange(&[&bytes])?)?)?
+            .verify_signature(&key)?;
+        let refused = exchange(&[staged.evaluation(), staged.request()])?;
+        assert_eq!(
+            refusal(&refused, &key)?.code,
+            SandboxProviderErrorCode::SandboxUnavailable
+        );
+        Ok(())
+    })?;
+    // A self-revoking update is acknowledged. Afterwards every execute
+    // connection gets zero bytes, and only the retained RCA1 is resent
+    // (invariant 25).
+    let revoked = Responder::new(&admitted, &signer, &starting);
+    while_serving(&revoked, || {
+        let manifest = admitted.provider().manifest().manifest_digest;
+        let (update, _) = revocation_update(&admitted, &[manifest], 2)?;
+        let context_bytes = cancellation_context(&admitted, &update, Vec::new(), Vec::new())?
+            .to_canonical_cbor()?;
+        let exchange_bytes = framed(&[&context_bytes, &update])?;
+        let rca1 = exchange_at(CONTROL, &exchange_bytes)?;
+        assert!(!rca1.is_empty());
+        assert_silent(EXECUTE, &framed(&[&describe([2; 16], retained)?])?)?;
+        assert_eq!(exchange_at(CONTROL, &exchange_bytes)?, rca1);
+        let (other, _) = revocation_update(&admitted, &[], 3)?;
+        let context =
+            cancellation_context(&admitted, &other, Vec::new(), Vec::new())?.to_canonical_cbor()?;
+        assert!(exchange_at(CONTROL, &framed(&[&context, &other])?)?.is_empty());
+        Ok(())
+    })?;
+    drop(staged);
     Ok(())
 }

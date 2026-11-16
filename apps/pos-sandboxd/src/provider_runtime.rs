@@ -37,12 +37,14 @@
 mod endpoint;
 mod notify;
 mod reconcile;
+mod revocation;
 mod serving;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 use std::ffi::OsStr;
+use std::future::Future;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -60,6 +62,9 @@ use crate::{
     RuntimeKey,
 };
 use reconcile::Reconcile;
+pub use revocation::{
+    AttemptCleanupState, AttemptStateSource, ExchangeOutcome, RevocationUpdateResponder,
+};
 
 /// The process's own executable, followed through its magic link.
 const SELF_EXECUTABLE: &str = "/proc/self/exe";
@@ -113,11 +118,43 @@ pub(crate) enum ProviderRuntimeError {
 #[derive(Debug)]
 enum AdmissionState {
     /// Reconciliation succeeded. The lifecycle holds the registry lock and
-    /// the ledger for the life of the process.
-    Open { _lifecycle: AttemptLifecycle },
+    /// the ledger for the life of the process; the revocation responder
+    /// fences it.
+    Open { lifecycle: AttemptLifecycle },
     /// Reconciliation failed: admission stays closed for the life of the
     /// process, with no retry (R11 §5.1 step 11).
     ReconcileFailed,
+}
+
+/// The live runtime's attempt state for the revocation responder (R11
+/// §8.1): once `Open`, the lifecycle's permanent fence and snapshot, read
+/// through [`crate::LiveAttemptIdentity::cleanup_proved`]. Before that no
+/// attempt can exist in this runtime, so the view is empty.
+#[derive(Debug)]
+struct LiveAttempts<'a>(&'a OnceLock<AdmissionState>);
+
+impl AttemptStateSource for LiveAttempts<'_> {
+    fn attempt_states(&self) -> impl Future<Output = Option<Vec<AttemptCleanupState>>> + Send {
+        let lifecycle = match self.0.get() {
+            Some(AdmissionState::Open { lifecycle }) => Some(lifecycle),
+            _ => None,
+        };
+        async move {
+            let Some(lifecycle) = lifecycle else {
+                return Some(Vec::new());
+            };
+            lifecycle.fence_and_snapshot().await.ok().map(|snapshot| {
+                snapshot
+                    .attempts()
+                    .iter()
+                    .map(|attempt| AttemptCleanupState {
+                        attempt_id: attempt.attempt_id(),
+                        cleanup_proved: attempt.cleanup_proved(),
+                    })
+                    .collect()
+            })
+        }
+    }
 }
 
 fn unsafe_endpoint<T>(_: T) -> ProviderRuntimeError {
@@ -210,9 +247,7 @@ fn start_reconciliation(
                 .ok();
                 AdmissionState::ReconcileFailed
             },
-            |lifecycle| AdmissionState::Open {
-                _lifecycle: lifecycle,
-            },
+            |lifecycle| AdmissionState::Open { lifecycle },
         );
         admission.set(state).ok();
     }))

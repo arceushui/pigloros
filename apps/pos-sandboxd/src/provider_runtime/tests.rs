@@ -9,10 +9,11 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::provider_admission::test_support::StagedInstallation;
 use pos_reference::sandbox_provider_protocol::{
-    SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxLimit,
+    RecoveryCancellationContext, RevocationUpdateRequest, SandboxDescribeResponse,
+    SandboxDescribeResponseFields, SandboxLimit,
 };
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
@@ -347,4 +348,87 @@ fn a_reconciliation_that_cannot_start_stays_starting() {
         Err(std::io::Error::other("injected spawn failure"))
     });
     assert!(admission.get().is_none());
+}
+
+/// The fixture's administrator-policy signer, which signs RVS1 and RCU1.
+const POLICY_SEED: [u8; 32] = [2; 32];
+
+/// A record signed by the policy key: `[unsigned, digest, signature]`, and
+/// its self-digest.
+fn policy_signed(magic: &str, unsigned: Value) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let mut preimage = format!("PiglorOS.{magic}.v1\0").into_bytes();
+    preimage.extend(encode(&unsigned)?);
+    let digest = *blake3::hash(&preimage).as_bytes();
+    let mut message = format!("PiglorOS.{magic}.Signature.v1\0").into_bytes();
+    message.extend(digest);
+    let signature = SigningKey::from_bytes(&POLICY_SEED)
+        .sign(&message)
+        .to_bytes();
+    let bytes = encode(&Value::Array(vec![
+        unsigned,
+        Value::Bytes(digest.to_vec()),
+        Value::Bytes(signature.to_vec()),
+    ]))?;
+    Ok((bytes, digest))
+}
+
+/// An RCU1 of the staged installation to the next RVS1 epoch, revoking the
+/// sorted `providers`, with `nonce`; and that next RVS1's digest.
+pub(super) fn revocation_update(
+    admitted: &AdmittedSelectorProvider,
+    providers: &[[u8; 32]],
+    nonce: u8,
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let bootstrap = admitted.bootstrap();
+    let text = |value: &str| Value::Text(value.to_owned());
+    let (next, next_digest) = policy_signed(
+        "RVS1",
+        Value::Array(vec![
+            text("RVS1"),
+            Value::Integer(1.into()),
+            Value::Bytes(bootstrap.trust().snapshot_digest().to_vec()),
+            Value::Integer((bootstrap.revocation().revocation_epoch() + 1).into()),
+            Value::Array(Vec::new()),
+            Value::Array(
+                providers
+                    .iter()
+                    .map(|digest| Value::Bytes(digest.to_vec()))
+                    .collect(),
+            ),
+            Value::Array(Vec::new()),
+            text("policy"),
+        ]),
+    )?;
+    let (rcu1, _) = policy_signed(
+        "RCU1",
+        Value::Array(vec![
+            text("RCU1"),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![70; 16]),
+            Value::Bytes(bootstrap.revocation().snapshot_digest().to_vec()),
+            Value::Bytes(next),
+            Value::Bytes(next_digest.to_vec()),
+            Value::Bytes(vec![nonce; 16]),
+            text("policy"),
+        ]),
+    )?;
+    Ok((rcu1, next_digest))
+}
+
+/// The RCC1 of a committed update to `rcu1`, with the `live` and
+/// `required` attempt sets.
+pub(super) fn cancellation_context(
+    admitted: &AdmittedSelectorProvider,
+    rcu1: &[u8],
+    live: Vec<[u8; 16]>,
+    required: Vec<[u8; 16]>,
+) -> TestResult<RecoveryCancellationContext> {
+    let request = RevocationUpdateRequest::authenticate(
+        rcu1,
+        admitted.bootstrap().trust(),
+        admitted.bootstrap().revocation(),
+    )?;
+    Ok(RecoveryCancellationContext::for_committed_recovery(
+        [11; 32], [12; 32], &request, live, required,
+    )?)
 }
