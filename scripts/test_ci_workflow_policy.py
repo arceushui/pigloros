@@ -900,7 +900,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
-    EDGE_ENTRY = "https://mirrors.edge.kernel.org/ubuntu\tpriority:1\n"
+    AZURE_MIRROR = "http://azure.archive.ubuntu.com/ubuntu"
+    AZURE_LIST = {"apt-mirrors.txt": "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"}
     SIMPLE_SOURCES = "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n"
     THIRD_PARTY_SOURCE = "deb [arch=amd64] https://packages.microsoft.com/ubuntu/24.04/prod noble main\n"
 
@@ -979,7 +980,13 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             ]
             return completed, apt_dir, written, apt_calls
 
-    def test_ubuntu_mirror_lists_edge_first_then_runner_and_ubuntu_fallbacks(self) -> None:
+    def test_ubuntu_mirror_lists_no_third_party_mirror(self) -> None:
+        # Hosted runners have no IPv6 route to mirrors.edge.kernel.org and its
+        # IPv4 address timed out on 2026-11-16; only Ubuntu-run hosts are listed.
+        script = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
+        self.assertNotIn("kernel.org", script.split("\nUBUNTU_FALLBACKS=", 1)[1])
+
+    def test_ubuntu_mirror_lists_runner_mirrors_first_then_ubuntu_fallbacks(self) -> None:
         # The GitHub-hosted image's own list (actions/runner-images
         # configure-apt-sources.sh) and the deb822 stanzas it redirects to it.
         runner_list = (
@@ -1016,12 +1023,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n", redirected,
         )
         mirror_list = (
-            self.EDGE_ENTRY
-            + "http://azure.archive.ubuntu.com/ubuntu\tpriority:2\n"
-            "https://archive.ubuntu.com/ubuntu\tpriority:3\n"
-            "https://security.ubuntu.com/ubuntu\tpriority:4\n"
-            "http://archive.ubuntu.com/ubuntu\tpriority:5\n"
-            "http://security.ubuntu.com/ubuntu\tpriority:6\n"
+            "http://azure.archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "https://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "https://security.ubuntu.com/ubuntu\tpriority:3\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:4\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:5\n"
         )
         self.assertEqual(written, {
             "apt-mirrors.txt": runner_list,
@@ -1052,9 +1058,8 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         completed, apt_dir, written, _ = self.run_ubuntu_mirror_preparation(self.SIMPLE_SOURCES, {})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(written["pigloros-mirrors.txt"], (
-            self.EDGE_ENTRY
-            + "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
-            "http://security.ubuntu.com/ubuntu\tpriority:3\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
         ))
         self.assertEqual(
             written["sources.list.d/ubuntu.sources"],
@@ -1083,10 +1088,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         })
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(written["pigloros-mirrors.txt"], (
-            self.EDGE_ENTRY
-            + "http://azure.archive.ubuntu.com/ubuntu\tpriority:2\n"
-            "http://archive.ubuntu.com/ubuntu\tpriority:3\n"
-            "http://security.ubuntu.com/ubuntu\tpriority:4\n"
+            "http://azure.archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:3\n"
         ))
 
     def test_ubuntu_mirror_fails_when_the_runner_sources_have_no_mirror_list(self) -> None:
@@ -1105,24 +1109,25 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertIn("::error::usage:", completed.stdout)
         self.assertEqual(apt_calls, [])
 
-    def assert_edge_free_retry(
+    def assert_runner_mirror_free_retry(
         self, apt_results: tuple[int, ...], failed_calls: int, failure: str,
     ) -> None:
         completed, apt_dir, _, apt_calls = self.run_ubuntu_mirror_preparation(
-            self.SIMPLE_SOURCES, {}, packages=("--no-install-recommends", "valgrind"),
-            apt_results=apt_results,
+            self.SIMPLE_SOURCES, self.AZURE_LIST,
+            packages=("--no-install-recommends", "valgrind"), apt_results=apt_results,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn(
-            f"::warning::apt {failure} on the Ubuntu sources; retrying once with a mirror "
-            "list without https://mirrors.edge.kernel.org/ubuntu\n",
+            f"::warning::apt {failure} on the Ubuntu sources; retrying once with the mirror "
+            f"list without {self.AZURE_MIRROR}\n",
             completed.stdout,
         )
-        with_edge = self.EDGE_ENTRY + (
+        with_first = (
+            f"{self.AZURE_MIRROR}\tpriority:1\n"
             "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
             "http://security.ubuntu.com/ubuntu\tpriority:3\n"
         )
-        without_edge = (
+        without_first = (
             "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
             "http://security.ubuntu.com/ubuntu\tpriority:2\n"
         )
@@ -1133,28 +1138,47 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         install = self.apt_command(
             apt_dir, "install --yes --no-download --no-install-recommends valgrind", bounded=False,
         )
-        first_attempt = [(update, with_edge), (download, with_edge)][:failed_calls]
+        first_attempt = [(update, with_first), (download, with_first)][:failed_calls]
         self.assertEqual(apt_calls, first_attempt + [
-            (update, without_edge), (download, without_edge), (install, without_edge),
+            (update, without_first), (download, without_first), (install, without_first),
         ])
 
-    def test_ubuntu_mirror_retries_without_edge_when_the_refresh_times_out(self) -> None:
+    def test_ubuntu_mirror_retries_without_the_runner_mirror_when_the_refresh_times_out(self) -> None:
         # 124 is timeout's status once the 120 s bound expires; 137 is the
         # SIGKILL it sends when apt ignores SIGTERM for the 10 s grace.
         for status in (124, 137):
             with self.subTest(status=status):
-                self.assert_edge_free_retry(
+                self.assert_runner_mirror_free_retry(
                     (status,), failed_calls=1,
                     failure=f"index refresh timed out after 120s (status {status})",
                 )
 
-    def test_ubuntu_mirror_retries_without_edge_when_a_package_download_fails(self) -> None:
-        # apt-get exits 100 when edge is unreachable (IPv6 "Network unreachable").
-        self.assert_edge_free_retry(
+    def test_ubuntu_mirror_retries_without_the_runner_mirror_when_a_package_download_fails(
+        self,
+    ) -> None:
+        # apt-get exits 100 when a mirror is unreachable.
+        self.assert_runner_mirror_free_retry(
             (0, 100), failed_calls=2, failure="package download failed with status 100",
         )
 
-    def test_ubuntu_mirror_fails_closed_when_the_edge_free_retry_fails(self) -> None:
+    def test_ubuntu_mirror_retries_with_the_full_list_without_a_runner_mirror(self) -> None:
+        completed, apt_dir, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, {}, apt_results=(124,),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(
+            "::warning::apt index refresh timed out after 120s (status 124) on the Ubuntu "
+            "sources; retrying once with the mirror list\n",
+            completed.stdout,
+        )
+        fallbacks = (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        )
+        self.assertEqual([mirror_list for _, mirror_list in apt_calls], [fallbacks] * 4)
+        self.assertEqual(apt_calls[1][0], self.apt_command(apt_dir, "update --error-on=any"))
+
+    def test_ubuntu_mirror_fails_closed_when_the_retry_fails(self) -> None:
         cases = {
             (124, 124): "index refresh timed out after 120s (status 124)",
             (0, 100, 0, 100): "package download failed with status 100",
@@ -1163,12 +1187,12 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         for apt_results, failure in cases.items():
             with self.subTest(apt_results=apt_results):
                 completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
-                    self.SIMPLE_SOURCES, {}, apt_results=apt_results,
+                    self.SIMPLE_SOURCES, self.AZURE_LIST, apt_results=apt_results,
                 )
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn(
-                    f"::error::apt {failure} on the Ubuntu sources again without "
-                    "https://mirrors.edge.kernel.org/ubuntu; failing closed\n",
+                    f"::error::apt {failure} on the Ubuntu sources again with the mirror list "
+                    f"without {self.AZURE_MIRROR}; failing closed\n",
                     completed.stdout,
                 )
                 self.assertEqual(len(apt_calls), len(apt_results))
