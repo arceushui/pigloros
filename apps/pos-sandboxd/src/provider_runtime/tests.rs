@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use pos_reference::provider_admission::test_support::StagedInstallation;
-use pos_reference::sandbox_provider_protocol::{
-    SandboxDescribeResponse, SandboxDescribeResponseFields, SandboxLimit,
-};
+use pos_reference::sandbox_provider_protocol::{ExecutionReleaseFields, SandboxLimit};
 use pos_reference::selector::installation::authority::AdmittedSelectorProvider;
 use pos_reference::selector::installation::{
     InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
@@ -19,7 +17,7 @@ use pos_reference::selector::installation::{
 
 use super::{bind, required_slots, ProviderStartupError, RuntimeAuthority};
 use crate::{
-    sign_verified, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
+    issue_release, AdmittedRuntimeKey, ProviderInstallation, ProviderInstallationError,
     RuntimeAttestationSigner,
 };
 
@@ -122,6 +120,25 @@ fn hex_name(digest: &[u8; 32]) -> String {
         .collect()
 }
 
+/// A complete RLS1 body for the fixture's runtime key.
+fn release_fields() -> ExecutionReleaseFields {
+    ExecutionReleaseFields {
+        attempt_id: [1; 16],
+        nonce: [2; 32],
+        ready1_digest: [3; 32],
+        trs1_digest: [4; 32],
+        rvs1_digest: [5; 32],
+        apt1_digest: [6; 32],
+        trust_epoch: 1,
+        revocation_epoch: 2,
+        policy_epoch: 3,
+        expected_readback_digest: [7; 32],
+        observed_readback_digest: [8; 32],
+        deadline_monotonic_ns: 9,
+        runtime_attestation_key_id: RUNTIME_KEY_ID.to_owned(),
+    }
+}
+
 /// Bind against the staged SIC1, running as the provider binary itself.
 pub(super) fn bind_as_provider() -> TestResult<Result<RuntimeAuthority, ProviderStartupError>> {
     let admitted = admitted()?;
@@ -214,20 +231,13 @@ fn startup_binds_only_the_admitted_binary_installation_and_key() -> TestResult {
     let expected = SigningKey::from_bytes(&RUNTIME_SEED).verifying_key();
     assert_eq!(*admitted.provider().runtime_attestation_key(), expected);
     assert_eq!(signer.runtime_attestation_key_id(), RUNTIME_KEY_ID);
-    let record = SandboxDescribeResponse::self_digested(SandboxDescribeResponseFields {
-        request_id: [1; 16],
-        spm1_digest: [2; 32],
-        provider_binary_digest: [3; 32],
-        hcp1_digest: [4; 32],
-        active_apt1_digest: [5; 32],
-        runtime_attestation_key_id: RUNTIME_KEY_ID.to_owned(),
-    })?;
-    let verified = sign_verified(
+    // The signer signs an RLS1 that verifies under the admitted key.
+    let release = issue_release(
         &signer,
         AdmittedRuntimeKey::new(RUNTIME_KEY_ID, &expected),
-        record,
+        release_fields(),
     )?;
-    SandboxDescribeResponse::new(verified, &expected)?.verify_signature(&expected)?;
+    release.verify_signature(&expected)?;
     assert_eq!(installation.attempt_range().slots(), 256);
     assert_eq!(
         admitted.provider().manifest().runtime_attestation_key_id,

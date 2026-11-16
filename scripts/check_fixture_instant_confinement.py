@@ -68,6 +68,11 @@ GLOB_REEXPORT = re.compile(
     r"\bpub\s+use\s+(?:(?:crate|self)\s*::\s*)?trusted_clock\s*::\s*(?:\*|\{[^;]*\*)"
 )
 SECTIONS = ("dependencies", "build-dependencies", "dev-dependencies")
+# Equivalence of the prefilter: comment stripping only removes text (each comment
+# becomes one space), so a token absent from the raw file is absent from the
+# stripped code, and every finding below needs one of these tokens to match.
+# Rule 3 needs a fixture type name or, for the glob re-export, `trusted_clock`.
+GUARDS = ("FixtureWallSourceV1", "FixtureEvaluationInstantV1", "trusted_clock")
 
 
 def _kept(path: Path, root: Path) -> bool:
@@ -198,8 +203,10 @@ def source_violations(root: Path) -> list[str]:
     found: list[str] = []
     for path in sorted(root.rglob("*.rs")):
         if _kept(path, root):
-            code = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
-            found.extend(_source_violations(path.relative_to(root).as_posix(), code))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if any(token in text for token in GUARDS):
+                name = path.relative_to(root).as_posix()
+                found.extend(_source_violations(name, strip_comments(text)))
     return found
 
 
