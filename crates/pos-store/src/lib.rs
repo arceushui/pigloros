@@ -206,22 +206,25 @@ const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
 /// Validate every row bound to one Timeline, each closure once (ADR-136 §2.6).
 ///
 /// `validate` walks one row's closure as its root and returns every address
-/// it visited. The pass runs in an order-independent sequence:
+/// it visited. The pass has two steps:
 ///
 /// 1. every bound MRM1 row is validated as its own root, so each gets its
 ///    operation-index and recorder checks;
-/// 2. every other bound row that no bound row names as a child, and that no
-///    earlier walk visited, is validated as its own root.
+/// 2. every other bound row that no bound row names as a child and that no
+///    step-1 walk visited is validated as its own root. Step 2 does not feed
+///    its own walks back into that test, so the set of rows it walks depends
+///    only on the bound rows and step 1, never on their order.
 ///
 /// Every remaining row is named as a child by a bound row, so following
 /// parents (finitely, since ARD1 addresses hash the child edges and rule out
 /// cycles) reaches a row walked in step 1 or 2, whose closure contains it.
+/// Every bound row is therefore validated, and the result (`Ok` or the first
+/// failure) is the same for every row order.
 ///
 /// A committed batch binds its complete MRM1 closure, so in a consistent
-/// catalog every non-MRM1 row is visited in step 1 and step 2 walks nothing.
-/// Step 2 walks a row as a root only when its parents are unbound; such a row
-/// must then be `Required`, as any walked root must be, so an unbound parent
-/// of an `Optional` row fails closed whatever the address order.
+/// catalog step 1 visits every non-MRM1 row and step 2 walks nothing. Step 2
+/// walks a row as a root only when its bound parents are missing; such a row
+/// must then be `Required`, as any walked root must be, so it fails closed.
 fn validate_bound_closures_once(
     rows: &[&pos_core::ArtifactRegistrationCatalogRowV1],
     mut validate: impl FnMut(pos_core::Hash) -> Result<BTreeSet<pos_core::Hash>, BoundClosureError>,
@@ -238,7 +241,7 @@ fn validate_bound_closures_once(
     for row in rows.iter().filter(|row| !row.is_repro_manifest_root()) {
         let address = row.registration_address();
         if !named.contains(&address) && !visited.contains(&address) {
-            visited.extend(validate(address)?);
+            validate(address)?;
         }
     }
     Ok(())
@@ -2960,6 +2963,30 @@ mod bound_closure_tests {
         .into_iter()
         .collect();
         assert_eq!(walks, expected);
+
+        // Step 2 never marks rows visited, so an unnamed row reached only
+        // through an unbound intermediate is still walked as its own root,
+        // and fails alike in either order.
+        let reaching = row(ErasureArtifactClassV1::TimelineReplay, b"reaching", &[])?;
+        let reached = row(ErasureArtifactClassV1::TimelineReplay, b"reached", &[])?;
+        let unbound = Hash::from_bytes([0x5a; 32]);
+        for order in [[&reaching, &reached], [&reached, &reaching]] {
+            let mut walked = BTreeSet::new();
+            let result = validate_bound_closures_once(&order, |address| {
+                walked.insert(address);
+                if address == reached.registration_address() {
+                    Err(BoundClosureError::CorruptCatalog)
+                } else {
+                    Ok(BTreeSet::from([
+                        address,
+                        unbound,
+                        reached.registration_address(),
+                    ]))
+                }
+            });
+            assert_eq!(result, Err(BoundClosureError::CorruptCatalog));
+            assert!(walked.contains(&reached.registration_address()));
+        }
 
         // A failed walk fails the pass.
         assert_eq!(
