@@ -196,8 +196,9 @@ pub struct CommunityCurrentViewInputV1 {
     pub scope_rows: Vec<CommunityScopeViewRowV1>,
     /// At most 2048 authority rows.
     pub authority_rows: Vec<CommunityAuthorityViewRowV1>,
-    /// 1..64 Plugin trust rows: an empty or partial row set is never a valid
-    /// CAV1 (R6.5(4)). Completeness against the roster is the owner's check.
+    /// 1..=64 Plugin trust rows: an empty or partial row set is never a
+    /// valid CAV1 (R6.5(4)). Completeness against the roster is the owner's
+    /// check.
     pub trust_rows: Vec<CommunityTrustViewRowV1>,
     /// At most 4096 key rows.
     pub key_rows: Vec<CommunityKeyViewRowV1>,
@@ -214,11 +215,10 @@ impl CommunityCurrentViewV1 {
     ///
     /// # Errors
     /// Returns `BoundsExceeded` for too many rows of any kind, no trust row
-    /// (R6.5(4)),
-    /// a scope, Plugin or owner text of 0 or more than 128 bytes, or an
-    /// invalid scope horizon; `InvalidBinding` for a zero identity, digest
-    /// or epoch, a text outside its grammar, unordered or repeated rows, or a
-    /// missing selected head with a committed frontier.
+    /// (R6.5(4)), a scope, Plugin or owner text of 0 or more than 128 bytes,
+    /// or an invalid scope horizon; `InvalidBinding` for a zero identity,
+    /// digest or epoch, a text outside its grammar, unordered or repeated
+    /// rows, or a missing selected head with a committed frontier.
     pub fn new(input: CommunityCurrentViewInputV1) -> Result<Self> {
         if input.scope_rows.len() > MAX_COMMUNITY_VIEW_SCOPE_ROWS_V1
             || input.authority_rows.len() > MAX_COMMUNITY_VIEW_AUTHORITY_ROWS_V1
