@@ -931,7 +931,10 @@ fn principal() -> Fallible<AuthenticatedPrincipalResultV1> {
         expires_at: WallTime::from_micros(far),
         binding_digest: hash(7),
     };
-    Ok(AuthenticatedPrincipalResultV1::try_from_draft(draft)?)
+    Ok(AuthenticatedPrincipalResultV1::try_from_draft(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        draft,
+    )?)
 }
 
 /// Hold a release guard whose expiries cover `premise` and an access grant.

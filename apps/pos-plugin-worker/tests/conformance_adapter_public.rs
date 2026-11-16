@@ -323,7 +323,7 @@ impl SubCaseRunnerV1 for Spy {
             subcase.clone()
         };
         let mut port = SpyPort {
-            inner: EvaluationStepPortV1::new(self.program.clone()),
+            inner: EvaluationStepPortV1::new(self.program.clone(), &TEST_TRUST_ROOT),
             passes: Vec::new(),
             rollbacks: Vec::new(),
         };
@@ -982,7 +982,8 @@ fn r13_a_trap_under_an_absent_expectation_is_unavailable() -> TestResult {
 
 /// Assert that `run_with` does not execute `attempt`.
 fn assert_not_executed(attempt: &CaseAttempt) -> TestResult {
-    let runner = SupervisorRunnerV1::with_program(WORKER).ok_or("a relative program")?;
+    let runner =
+        SupervisorRunnerV1::with_program(WORKER, &TEST_TRUST_ROOT).ok_or("a relative program")?;
     let mut stream = Vec::new();
     write_attempt(&mut stream, attempt)?;
     let mut out = Vec::new();
@@ -1134,8 +1135,8 @@ fn r8_s9_a_launching_family_without_a_worker_is_unavailable() -> TestResult {
     // that holds no program, which is equivalent (R8-A6): the launch fails and the member is
     // `WorkerCrashed`, so the case is `Unavailable`.
     let missing = std::env::temp_dir().join(format!("pigloros-no-worker-{}", std::process::id()));
-    let runner =
-        SupervisorRunnerV1::with_program(missing).ok_or("the worker path must be absolute")?;
+    let runner = SupervisorRunnerV1::with_program(missing, &TEST_TRUST_ROOT)
+        .ok_or("the worker path must be absolute")?;
     for family in LAUNCHING_FAMILIES {
         let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
         let observation = observe_through(&runner, &attempt)?;
@@ -1264,3 +1265,7 @@ fn r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged() -> TestRe
     assert!(changed >= 2, "{changed}");
     Ok(())
 }
+
+/// The composition-root seal these tests open their evaluation worlds with (ADR-129 A5.9, #1374).
+const TEST_TRUST_ROOT: pos_core::AuthorityTrustRootSealV1 =
+    pos_core::AuthorityTrustRootSealV1::for_composition_root();
