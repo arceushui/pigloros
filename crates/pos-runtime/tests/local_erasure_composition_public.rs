@@ -3184,7 +3184,7 @@ fn the_key_list_is_bounded_on_its_own() -> TestResult {
 fn no_timeline_is_deletable_under_the_host_and_the_partition_survives() -> TestResult {
     let owned = OwnedStore::new()?;
     let request = request_of(1)?;
-    let (host, _) = signed_freeze(
+    let (host, signed) = signed_freeze(
         &owned.store,
         1,
         ErasureScopeV1::PrivateSubjectData,
@@ -3192,24 +3192,38 @@ fn no_timeline_is_deletable_under_the_host_and_the_partition_survives() -> TestR
         |_| Ok(Vec::new()),
     )?;
     drop(host);
-    // A store bound to a fail-closed gate, as the erasure host binds it,
-    // refuses every direct deletion, affected or not.
+    // The fence is binding-level: a store bound to a fail-closed gate, as
+    // the erasure host binds it, refuses every direct deletion before any
+    // lookup, so an affected, an unaffected and a nonexistent Timeline are
+    // refused alike, whatever the request's state.
     {
         let mut sqlite = SqliteStore::open(&owned.store.path)?;
         sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
-        for timeline in [owned.owned, owned.other] {
+        for timeline in [owned.owned, owned.other, TimelineId::new()] {
             assert!(matches!(
                 sqlite.delete_timeline(timeline),
                 Err(pos_core::CoreError::ErasureContainmentUnavailable)
             ));
         }
     }
+    // After a restart the committed freeze still verifies, record for record.
     let mut host = owned.store.host(&local_case()?, 4_096)?;
     assert_eq!(
         lifecycle(&mut host, request)?,
         ErasureLifecycleV1::AccessFrozen
     );
-    assert_frozen(&mut host, &[owned.owned], owned.other)
+    assert_frozen(&mut host, &[owned.owned], owned.other)?;
+    let mut cells = store_cells()?;
+    cells.push(payload_cell(owned.owned)?);
+    cells.extend(subject_key_cells()?);
+    assert_committed_freeze(
+        &owned.store,
+        host,
+        request,
+        vec![owned.owned],
+        &cells,
+        &signed,
+    )
 }
 
 #[test]
