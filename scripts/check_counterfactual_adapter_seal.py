@@ -64,6 +64,11 @@ ADAPTER_MANIFEST = "crates/pos-store/Cargo.toml"
 SOURCE_PREFIXES = ("crates/pos-core/", "crates/pos-store/")
 DEPLOYABLE_SECTIONS = ("dependencies", "build-dependencies")
 SKIPPED_PARTS = {"target", ".git", ".trunk", "node_modules"}
+# Equivalence of the prefilter: comment stripping only removes text (each comment
+# becomes one space), so a token absent from the raw file is absent from the
+# stripped code. Outside the adapter sources the only finding is SEAL, which
+# needs this token; adapter sources are always stripped and checked in full.
+GUARD = "CounterfactualAdapterSealV1"
 
 
 def _kept(path: Path, root: Path) -> bool:
@@ -141,7 +146,10 @@ def source_violations(root: Path) -> list[str]:
             continue
         relative = path.relative_to(root)
         name = relative.as_posix()
-        code = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not name.startswith(ADAPTER_SOURCES) and GUARD not in text:
+            continue
+        code = strip_comments(text)
         if name.startswith(ADAPTER_SOURCES):
             found.extend(_adapter_leaks(name, code))
         if name.startswith(SOURCE_PREFIXES) or _in_crate_tests(relative, root):
