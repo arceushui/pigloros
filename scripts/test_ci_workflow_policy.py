@@ -703,8 +703,9 @@ LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-
 CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
 # Heavy jobs released by core-gate. Browser parity follows WASM packaging on
 # the same budget. cargo-crap starts beside them but compiles nothing (pinned
-# binary, cargo metadata and LCOV parsing in a 10-minute budget), and
-# standard-gate and ci-gate are lightweight fan-ins.
+# binary, cargo metadata and LCOV parsing in a 10-minute budget, plus a bounded
+# idle wait for main's trusted baseline), and standard-gate and ci-gate are
+# lightweight fan-ins.
 STANDARD_STAGE_JOBS = frozenset(
     {
         "rustdoc",
@@ -733,7 +734,7 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
     crap = jobs.get("cargo-crap", {})
-    if "strategy" in crap or crap.get("timeout-minutes") != 10 or "core-gate" not in job_needs(crap):
+    if "strategy" in crap or crap.get("timeout-minutes") != 150 or "core-gate" not in job_needs(crap):
         raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
     if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
         raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
@@ -903,42 +904,115 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
-    def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
-        source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
-        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
-        lines = [
-            line for line in source.replace("\\\n", "").splitlines()
-            if line and not line.startswith("#")
-        ]
-        self.assertEqual(lines[0], "set -euo pipefail")
-        archive_list = "/etc/apt/pigloros-mirrors.txt"
-        security_list = "/etc/apt/pigloros-security-mirrors.txt"
-        # Every entry is an apt mirror+file failover target, so one
-        # unreachable mirror cannot fail an install.
-        self.assertEqual(shlex.split(lines[1]), [
-            "printf", "%s\\n",
-            "https://mirrors.edge.kernel.org/ubuntu",
-            "http://azure.archive.ubuntu.com/ubuntu",
-            "http://archive.ubuntu.com/ubuntu",
-            "|", "sudo", "tee", archive_list, ">/dev/null",
-        ])
-        self.assertEqual(shlex.split(lines[2]), [
-            "printf", "%s\\n",
-            "https://mirrors.edge.kernel.org/ubuntu",
-            "http://security.ubuntu.com/ubuntu",
-            "|", "sudo", "tee", security_list, ">/dev/null",
-        ])
-        expressions = [
-            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: mirror+file:"
-            + archive_list + "|",
-            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: mirror+file:"
-            + security_list + "|",
-        ]
-        self.assertEqual(shlex.split(lines[3]), [
-            "sudo", "sed", "-i", "-e", expressions[0], "-e", expressions[1],
-            "/etc/apt/sources.list.d/ubuntu.sources",
-        ])
-        self.assertEqual(len(lines), 4)
+    AZURE_MIRROR = "http://azure.archive.ubuntu.com/ubuntu"
+    AZURE_LIST = {"apt-mirrors.txt": "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"}
+    SIMPLE_SOURCES = "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n"
+    THIRD_PARTY_SOURCE = "deb [arch=amd64] https://packages.microsoft.com/ubuntu/24.04/prod noble main\n"
+
+    @staticmethod
+    def apt_command(apt_dir: pathlib.Path, arguments: str, *, bounded: bool = True) -> str:
+        """The recorded apt-get call, scoped to the rewritten Ubuntu sources."""
+        scope = (
+            "-o Dir::Etc::sourcelist=/dev/null "
+            f"-o Dir::Etc::sourceparts={apt_dir}/pigloros-sources.d"
+        )
+        bound = "timeout --kill-after=10 120 " if bounded else ""
+        return f"{bound}apt-get {scope} {arguments}"
+
+    def run_ubuntu_mirror_preparation(
+        self, sources: str, runner_lists: dict[str, str],
+        packages: tuple[str, ...] = ("b3sum", "jq"), apt_results: tuple[int, ...] = (),
+        extra_sources: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, dict[str, str], list[tuple[str, str]]]:
+        """Run the installer against a sandboxed apt directory.
+
+        ``sudo`` runs its command, ``timeout`` records its bound and runs the
+        command, and ``apt-get`` records each call with the mirror list it saw
+        and exits with the next of ``apt_results`` (0 once they run out).
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory)
+            apt_dir = fixture / "apt"
+            (apt_dir / "sources.list.d").mkdir(parents=True)
+            (apt_dir / "apt.conf.d").mkdir()
+            (apt_dir / "sources.list.d/ubuntu.sources").write_text(sources)
+            for name, contents in (extra_sources or {}).items():
+                (apt_dir / "sources.list.d" / name).write_text(contents)
+            for name, contents in runner_lists.items():
+                (apt_dir / name).write_text(contents)
+            tools = fixture / "bin"
+            tools.mkdir()
+            calls = fixture / "calls"
+            calls.mkdir()
+            (calls / "log").write_text("")
+            stubs = {
+                "sudo": 'exec "$@"\n',
+                "timeout": (
+                    'printf "timeout %s " "$1 $2" >> "${APT_CALLS}/log"\n'
+                    'shift 2\nexec "$@"\n'
+                ),
+                "apt-get": (
+                    'n=$(($(wc -l < "${APT_CALLS}/log") + 1))\n'
+                    'cp "${PIGLOROS_APT_DIR}/pigloros-mirrors.txt" "${APT_CALLS}/list.${n}"\n'
+                    'printf "apt-get %s\\n" "$*" >> "${APT_CALLS}/log"\n'
+                    'results=(${APT_RESULTS})\n'
+                    'exit "${results[$((n - 1))]:-0}"\n'
+                ),
+            }
+            for name, body in stubs.items():
+                (tools / name).write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+                (tools / name).chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(ROOT / "scripts/prepare-ubuntu-package-mirror.sh"), *packages],
+                env={
+                    **os.environ,
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "PIGLOROS_APT_DIR": str(apt_dir),
+                    "APT_CALLS": str(calls),
+                    "APT_RESULTS": " ".join(str(result) for result in apt_results),
+                },
+                text=True, capture_output=True, check=False,
+            )
+            written = {
+                str(path.relative_to(apt_dir)): path.read_text()
+                for path in sorted(apt_dir.rglob("*")) if path.is_file()
+            }
+            log = (calls / "log").read_text().splitlines()
+            apt_calls = [
+                (line, (calls / f"list.{index}").read_text())
+                for index, line in enumerate(log, start=1)
+            ]
+            return completed, apt_dir, written, apt_calls
+
+    def test_ubuntu_mirror_lists_only_runner_and_ubuntu_hosts(self) -> None:
+        # Hosted runners have no IPv6 route to mirrors.edge.kernel.org and its
+        # IPv4 address timed out on 2026-11-16; no attempt may list a mirror
+        # that neither the runner image nor Ubuntu runs.
+        for runner_lists, apt_results in (({}, (124,)), (self.AZURE_LIST, (0, 100))):
+            with self.subTest(runner_lists=runner_lists):
+                completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+                    self.SIMPLE_SOURCES, runner_lists, apt_results=apt_results,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                hosts = {
+                    entry.split("\t", 1)[0]
+                    for _, mirror_list in apt_calls
+                    for entry in mirror_list.splitlines()
+                }
+                self.assertLessEqual(hosts, {
+                    self.AZURE_MIRROR,
+                    "http://archive.ubuntu.com/ubuntu",
+                    "http://security.ubuntu.com/ubuntu",
+                })
+
+    def test_ubuntu_mirror_lists_runner_mirrors_first_then_ubuntu_fallbacks(self) -> None:
+        # The GitHub-hosted image's own list (actions/runner-images
+        # configure-apt-sources.sh) and the deb822 stanzas it redirects to it.
+        runner_list = (
+            "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+            "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+            "https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+        )
         original = (
             "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
             "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
@@ -952,32 +1026,251 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
             "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
         )
-        completed = subprocess.run(
-            ["sed", "-e", expressions[0], "-e", expressions[1]],
-            input=original, text=True, capture_output=True, check=True,
+        completed, apt_dir, written, apt_calls = self.run_ubuntu_mirror_preparation(
+            original,
+            {
+                "apt-mirrors.txt": runner_list,
+                "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
+            },
+            extra_sources={"microsoft-prod.list": self.THIRD_PARTY_SOURCE},
         )
-        expected = original.replace(
-            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
-            "\nURIs: mirror+file:" + archive_list + "\n",
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        redirected = f"\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\n"
+        rewritten = original.replace(
+            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n", redirected,
         ).replace(
-            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
-            "\nURIs: mirror+file:" + security_list + "\n",
+            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n", redirected,
         )
-        self.assertEqual(completed.stdout, expected)
+        mirror_list = (
+            "http://azure.archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "https://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "https://security.ubuntu.com/ubuntu\tpriority:3\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:4\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:5\n"
+        )
+        self.assertEqual(written, {
+            "apt-mirrors.txt": runner_list,
+            "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
+            "pigloros-mirrors.txt": mirror_list,
+            # No retries, so the mirror method fails over to the next entry at
+            # once; a short connect/read timeout bounds each attempt.
+            "apt.conf.d/80pigloros-mirror-retries": (
+                'Acquire::Retries "0";\n'
+                'Acquire::http::Timeout "10";\n'
+                'Acquire::https::Timeout "10";\n'
+            ),
+            "sources.list.d/ubuntu.sources": rewritten,
+            # The third-party source stays as it was and outside every apt call:
+            # the scoped parts directory holds only the Ubuntu sources.
+            "sources.list.d/microsoft-prod.list": self.THIRD_PARTY_SOURCE,
+            "pigloros-sources.d/ubuntu.sources": rewritten,
+        })
+        # Both network phases are bounded; installation reads only the
+        # downloaded packages from the same Ubuntu-only indices.
+        self.assertEqual(apt_calls, [
+            (self.apt_command(apt_dir, "update --error-on=any"), mirror_list),
+            (self.apt_command(apt_dir, "install --yes --download-only b3sum jq"), mirror_list),
+            (self.apt_command(apt_dir, "install --yes --no-download b3sum jq", bounded=False), mirror_list),
+        ])
 
-    def test_ubuntu_dependency_installers_prepare_the_mirror_before_apt(self) -> None:
-        installers = []
+    def test_ubuntu_mirror_keeps_the_ubuntu_fallbacks_without_a_runner_list(self) -> None:
+        completed, apt_dir, written, _ = self.run_ubuntu_mirror_preparation(self.SIMPLE_SOURCES, {})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(written["pigloros-mirrors.txt"], (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        ))
+        self.assertEqual(
+            written["sources.list.d/ubuntu.sources"],
+            f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n",
+        )
+
+    def test_ubuntu_mirror_leaves_a_direct_host_security_stanza_untouched(self) -> None:
+        # The EC2-hosted image points its security stanza straight at the host.
+        security = (
+            "Types: deb\nURIs: http://security.ubuntu.com/ubuntu\nSuites: noble-security\n"
+        )
+        completed, apt_dir, written, _ = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES + "\n" + security, {},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rewritten = (
+            f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n"
+            "\n" + security
+        )
+        self.assertEqual(written["sources.list.d/ubuntu.sources"], rewritten)
+        self.assertEqual(written["pigloros-sources.d/ubuntu.sources"], rewritten)
+
+    def test_ubuntu_mirror_keeps_a_runner_entry_without_a_trailing_newline(self) -> None:
+        completed, _, written, _ = self.run_ubuntu_mirror_preparation(self.SIMPLE_SOURCES, {
+            "apt-mirrors.txt": "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1",
+        })
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(written["pigloros-mirrors.txt"], (
+            "http://azure.archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:3\n"
+        ))
+
+    def test_ubuntu_mirror_fails_when_the_runner_sources_have_no_mirror_list(self) -> None:
+        original = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n"
+        completed, _, written, apt_calls = self.run_ubuntu_mirror_preparation(original, {})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("has no mirror+file Ubuntu archive source to redirect", completed.stdout)
+        self.assertEqual(written["sources.list.d/ubuntu.sources"], original)
+        self.assertEqual(apt_calls, [])
+
+    def test_ubuntu_mirror_requires_packages_to_install(self) -> None:
+        completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, {}, packages=(),
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("::error::usage:", completed.stdout)
+        self.assertEqual(apt_calls, [])
+
+    def assert_runner_mirror_free_retry(
+        self, apt_results: tuple[int, ...], failed_calls: int, failure: str,
+    ) -> None:
+        completed, apt_dir, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, self.AZURE_LIST,
+            packages=("--no-install-recommends", "valgrind"), apt_results=apt_results,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(
+            f"::warning::apt {failure} on the Ubuntu sources; retrying once with the mirror "
+            f"list without {self.AZURE_MIRROR}\n",
+            completed.stdout,
+        )
+        with_first = (
+            f"{self.AZURE_MIRROR}\tpriority:1\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:3\n"
+        )
+        without_first = (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        )
+        update = self.apt_command(apt_dir, "update --error-on=any")
+        download = self.apt_command(
+            apt_dir, "install --yes --download-only --no-install-recommends valgrind",
+        )
+        install = self.apt_command(
+            apt_dir, "install --yes --no-download --no-install-recommends valgrind", bounded=False,
+        )
+        first_attempt = [(update, with_first), (download, with_first)][:failed_calls]
+        self.assertEqual(apt_calls, first_attempt + [
+            (update, without_first), (download, without_first), (install, without_first),
+        ])
+
+    def test_ubuntu_mirror_retries_without_the_runner_mirror_when_the_refresh_times_out(self) -> None:
+        # 124 is timeout's status once the 120 s bound expires; 137 is the
+        # SIGKILL it sends when apt ignores SIGTERM for the 10 s grace.
+        for status in (124, 137):
+            with self.subTest(status=status):
+                self.assert_runner_mirror_free_retry(
+                    (status,), failed_calls=1,
+                    failure=f"index refresh timed out after 120s (status {status})",
+                )
+
+    def test_ubuntu_mirror_retries_without_the_runner_mirror_when_a_package_download_fails(
+        self,
+    ) -> None:
+        # apt-get exits 100 when a mirror is unreachable.
+        self.assert_runner_mirror_free_retry(
+            (0, 100), failed_calls=2, failure="package download failed with status 100",
+        )
+
+    def test_ubuntu_mirror_retries_with_the_full_list_without_a_runner_mirror(self) -> None:
+        completed, apt_dir, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, {}, apt_results=(124,),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(
+            "::warning::apt index refresh timed out after 120s (status 124) on the Ubuntu "
+            "sources; retrying once with the mirror list\n",
+            completed.stdout,
+        )
+        fallbacks = (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        )
+        self.assertEqual([mirror_list for _, mirror_list in apt_calls], [fallbacks] * 4)
+        self.assertEqual(apt_calls[1][0], self.apt_command(apt_dir, "update --error-on=any"))
+
+    def test_ubuntu_mirror_keeps_the_archive_when_the_runner_lists_it_first(self) -> None:
+        # A runner list that starts with the Ubuntu archive has no in-region
+        # mirror to skip; dropping the archive would leave no main-suite mirror.
+        completed, _, written, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES,
+            {"apt-mirrors.txt": "http://archive.ubuntu.com/ubuntu/\tpriority:1\n"},
+            apt_results=(124,),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("; retrying once with the mirror list\n", completed.stdout)
+        fallbacks = (
+            "http://archive.ubuntu.com/ubuntu\tpriority:1\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:2\n"
+        )
+        self.assertEqual(written["pigloros-mirrors.txt"], fallbacks)
+        self.assertEqual([mirror_list for _, mirror_list in apt_calls], [fallbacks] * 4)
+
+    def test_ubuntu_mirror_fails_closed_when_the_retry_fails(self) -> None:
+        cases = {
+            (124, 124): "index refresh timed out after 120s (status 124)",
+            (0, 100, 0, 100): "package download failed with status 100",
+            (100, 0, 137): "package download timed out after 120s (status 137)",
+        }
+        for apt_results, failure in cases.items():
+            with self.subTest(apt_results=apt_results):
+                completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+                    self.SIMPLE_SOURCES, self.AZURE_LIST, apt_results=apt_results,
+                )
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn(
+                    f"::error::apt {failure} on the Ubuntu sources again with the mirror list "
+                    f"without {self.AZURE_MIRROR}; failing closed\n",
+                    completed.stdout,
+                )
+                self.assertEqual(len(apt_calls), len(apt_results))
+                self.assertNotIn("--no-download", apt_calls[-1][0])
+
+    def test_ubuntu_mirror_fails_closed_when_the_offline_install_fails(self) -> None:
+        completed, _, _, apt_calls = self.run_ubuntu_mirror_preparation(
+            self.SIMPLE_SOURCES, {}, apt_results=(0, 0, 100),
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "::error::apt could not install the downloaded packages; failing closed\n",
+            completed.stdout,
+        )
+        self.assertEqual(len(apt_calls), 3)
+        self.assertIn("--no-download", apt_calls[-1][0])
+        self.assertNotIn("::warning::", completed.stdout)
+
+    def test_ubuntu_dependency_installers_use_only_the_bounded_installer(self) -> None:
+        installers = {}
         for path in (CI_WORKFLOW_PATH, CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml")):
             for job in load_workflow(path)["jobs"].values():
                 for step in job.get("steps", []):
                     run = step.get("run", "")
-                    if "sudo apt-get" in run:
-                        lines = [line.strip() for line in run.splitlines()]
-                        prepare = "bash scripts/prepare-ubuntu-package-mirror.sh"
-                        self.assertIn(prepare, lines)
-                        self.assertLess(run.index(prepare), run.index("sudo apt-get"))
-                        installers.append(step["name"])
-        self.assertEqual(len(installers), 6)
+                    # No caller refreshes or installs outside the bounded script.
+                    self.assertNotIn("apt-get", run)
+                    self.assertNotIn("apt install", run)
+                    lines = [line.strip() for line in run.splitlines()]
+                    for line in lines:
+                        if "prepare-ubuntu-package-mirror.sh" in line:
+                            installers.setdefault(step["name"], []).append(line)
+        prepare = "bash scripts/prepare-ubuntu-package-mirror.sh "
+        self.assertEqual(installers, {
+            "Install evaluator packaging tools": [prepare + "b3sum jq"],
+            "Install fixture verification tools": [prepare + "b3sum jq"] * 2,
+            "Install the musl and aarch64 cross toolchains": [
+                prepare + "--no-install-recommends musl-tools gcc-aarch64-linux-gnu "
+                "libc6-dev-arm64-cross",
+            ],
+            "Install graphviz": [prepare + "graphviz"],
+            "Install heap profiler": [prepare + "--no-install-recommends valgrind"],
+        })
         paths = workflow_triggers(load_workflow(
             CI_WORKFLOW_PATH.with_name("sim1-proof-risk.yml"),
         ))["pull_request"]["paths"]
@@ -2307,10 +2600,9 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
                      'save-if': "${{ github.ref == 'refs/heads/main' }}"}},
            {'name': 'Install the musl and aarch64 cross toolchains',
             'run': 'set -euo pipefail\n'
-                   'bash scripts/prepare-ubuntu-package-mirror.sh\n'
-                   'sudo apt-get update\n'
-                   'sudo apt-get install --yes --no-install-recommends musl-tools '
-                   'gcc-aarch64-linux-gnu libc6-dev-arm64-cross\n'},
+                   'bash scripts/prepare-ubuntu-package-mirror.sh '
+                   '--no-install-recommends musl-tools gcc-aarch64-linux-gnu '
+                   'libc6-dev-arm64-cross\n'},
            {'name': 'Build the provider binary as a static ELF for each architecture',
             'run': 'set -euo pipefail\n'
                    'for target in x86_64-unknown-linux-musl '
