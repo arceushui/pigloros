@@ -452,11 +452,10 @@ impl World {
     /// Observe the Timeline: the admission fence revisions, the Logical Head, the committed prefix
     /// and the Fork ancestry.
     fn observe(&mut self) -> Result<Observed, RuntimeError> {
-        let revisions = LocalScheduledAdmissionHostV1::shared()?.observe(
-            &self.registry,
-            self.store.as_mut(),
-            self.timeline,
-        )?;
+        let revisions = LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        )?
+        .observe(&self.registry, self.store.as_mut(), self.timeline)?;
         let head = self.store.logical_head(self.timeline)?;
         let prefix = self.store.read(self.timeline, SeqRange::all())?;
         let chain = pos_core::fork_ancestry(&*self.store, self.timeline)?;
@@ -503,7 +502,9 @@ impl World {
     ) -> ScheduledPassAdmissionV1 {
         self.attempt_count += 1;
         let key = self.attempt_count;
-        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let host = ok(LocalScheduledAdmissionHostV1::shared(
+            &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+        ));
         ScheduledPassAdmissionV1 {
             attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
             idempotency: AppendIdentity::new(
