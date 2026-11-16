@@ -560,17 +560,21 @@ fn the_encoders_reproduce_the_oracle_records() -> TestResult {
             let decoded = SandboxAuditRecord::from_canonical_cbor(oracle)?;
             let record = SandboxAuditRecord::self_digested(audit_fields(&decoded))?;
             assert_eq!(record.digest(), decoded.record_digest);
+            // The signer checks the key the sealed record names.
+            assert_eq!(record.key_id(), RUNTIME_KEY);
             let encoded = SandboxAuditRecord::new(sign(record, &key)?, &public)?;
             assert_eq!(&encoded.to_canonical_cbor()?, oracle);
         }
         let decoded = SandboxProviderReceipt::from_canonical_cbor(&built.receipt)?;
         let record = SandboxProviderReceipt::self_digested(receipt_fields(&decoded))?;
+        assert_eq!(record.key_id(), RUNTIME_KEY);
         let encoded = SandboxProviderReceipt::new(sign(record, &key)?, &public)?;
         assert_eq!(encoded.receipt_digest(), decoded.receipt_digest());
         assert_eq!(encoded.to_canonical_cbor()?, built.receipt);
 
         let decoded = SandboxProviderResult::from_canonical_cbor(&built.result)?;
         let record = SandboxProviderResult::self_digested(result_fields(&decoded))?;
+        assert_eq!(record.key_id(), RUNTIME_KEY);
         let encoded = SandboxProviderResult::new(sign(record, &key)?, &public)?;
         assert_eq!(encoded.result_digest(), decoded.result_digest());
         assert_eq!(encoded.to_canonical_cbor()?, built.result);
