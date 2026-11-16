@@ -1,7 +1,10 @@
 //! Backend-specific components of the ADR-069 systemd Sandbox Provider Adapter.
 //!
 //! This library does not implement the provider daemon or grant admission. Its
-//! binary currently runs only the closed launcher mode ([`launcher`]).
+//! binary currently runs only the closed launcher mode ([`launcher`]). It also
+//! holds the root selector's provider-runtime lifecycle adapter,
+//! `SystemdProviderLifecycle` (ADR-069 R11 §5.0), which only the
+//! `pos-root-selector` binary composes.
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
@@ -40,6 +43,12 @@ mod namespace_network;
 mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod provider_installation;
+// Public module reachability lets the provider-unit types that `system_bus`
+// shares with the lifecycle adapter stay `pub(crate)` without Clippy's
+// `redundant_pub_crate` lint.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod provider_lifecycle;
 #[cfg(target_os = "linux")]
 mod provider_runtime;
 #[cfg(target_os = "linux")]
@@ -349,6 +358,8 @@ pub use provider_barrier::{
 };
 #[cfg(target_os = "linux")]
 pub use provider_installation::{ProviderInstallation, ProviderInstallationError, RuntimeKey};
+#[cfg(target_os = "linux")]
+pub use provider_lifecycle::SystemdProviderLifecycle;
 #[cfg(target_os = "linux")]
 pub use provider_runtime::{start_runtime_authority, ProviderStartupError, RuntimeAuthority};
 #[cfg(target_os = "linux")]
