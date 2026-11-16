@@ -12447,18 +12447,13 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         if rows.len() > max {
             return Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds);
         }
-        // Bindings cover complete closures, so validating the closure of each
-        // bound row no other bound row names as a child checks every row once.
-        let children: BTreeSet<Hash> = rows
-            .iter()
-            .flat_map(|row| row.registration().fields().child_artifacts.iter())
-            .map(|edge| edge.registration_address)
-            .collect();
-        let validated = rows
-            .iter()
-            .map(|row| row.registration_address())
-            .filter(|address| !children.contains(address))
-            .try_for_each(|address| self.validate_artifact_registration_closure(address));
+        // Every bound row's closure is validated as its own root, as
+        // `read_artifact_registration` does, so a bound MRM1 always gets its
+        // operation-index and recorder checks. The cost is at most `max`
+        // closure walks, each bounded by the ADR-093 graph limits.
+        let validated = rows.iter().try_for_each(|row| {
+            self.validate_artifact_registration_closure(row.registration_address())
+        });
         validated.map(|()| rows.into_iter().cloned().collect())
     }
 }

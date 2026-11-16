@@ -88,33 +88,38 @@ type PreparedReproManifest = (
 );
 
 fn prepared_repro_manifest() -> Result<PreparedReproManifest, Box<dyn std::error::Error>> {
-    prepared_repro_manifest_for(0x51, None, &STRUCTURAL_OWNER)
+    prepared_repro_manifest_for(0x51, timeline(2), None, &STRUCTURAL_OWNER)
 }
 
-/// One complete MRM1 closure for run operation `[seed; 32]`. Closures of
-/// different seeds share only their MAA1 admission row.
+/// One complete MRM1 closure for run operation `[seed; 32]` recorded from
+/// the World run of `world_timeline`. Closures of different seeds share only
+/// their MAA1 admission row.
 fn prepared_repro_manifest_for(
     seed: u8,
+    world_timeline: TimelineId,
     source_timeline: Option<TimelineId>,
     verifier: &TestOnlyStructuralOwnerVerifier,
 ) -> Result<PreparedReproManifest, Box<dyn std::error::Error>> {
-    prepare_repro_manifest_inputs(seed, verifier).and_then(|(owner_id, root_address, inputs)| {
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root_address,
-            source_timeline,
-            inputs,
-            verifier,
-        )
-        .map(|batch| (owner_id, root_address, batch))
-        .map_err(Into::into)
-    })
+    prepare_repro_manifest_inputs(seed, world_timeline, verifier).and_then(
+        |(owner_id, root_address, inputs)| {
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs,
+                verifier,
+            )
+            .map(|batch| (owner_id, root_address, batch))
+            .map_err(Into::into)
+        },
+    )
 }
 
 type ReproManifestInputs = (OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>);
 
 fn prepare_repro_manifest_inputs(
     seed: u8,
+    world_timeline: TimelineId,
     verifier: &TestOnlyStructuralOwnerVerifier,
 ) -> Result<ReproManifestInputs, Box<dyn std::error::Error>> {
     let owner_id = OwnerIdV1::from_static("wave8-store-owner");
@@ -129,7 +134,7 @@ fn prepare_repro_manifest_inputs(
     })?;
     let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
         owner_reference,
-        timeline_id: pos_core::TimelineId::from_ulid(Ulid::from(2_u128)),
+        timeline_id: world_timeline,
         cut_id: 2,
         commit_receipt_digest,
         recording_receipt_digest: recording.digest(),
@@ -1450,7 +1455,8 @@ fn bound_batch(
     source_timeline: TimelineId,
     verifier: &TestOnlyStructuralOwnerVerifier,
 ) -> Result<PreparedArtifactRegistrationBatchV1, Box<dyn std::error::Error>> {
-    prepared_repro_manifest_for(seed, Some(source_timeline), verifier).map(|(_, _, batch)| batch)
+    prepared_repro_manifest_for(seed, source_timeline, Some(source_timeline), verifier)
+        .map(|(_, _, batch)| batch)
 }
 
 /// Every registration address of `batches`, deduplicated and sorted.
@@ -1473,7 +1479,8 @@ fn row_addresses(rows: &[ArtifactRegistrationCatalogRowV1]) -> Vec<Hash> {
 fn destruction_eligible_registrations_require_a_source_timeline(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for verifier in [&PRIVATE_OWNER, &CONSENTED_OWNER] {
-        let (owner_id, root_address, inputs) = prepare_repro_manifest_inputs(0x51, verifier)?;
+        let (owner_id, root_address, inputs) =
+            prepare_repro_manifest_inputs(0x51, timeline(2), verifier)?;
         assert_eq!(
             prepare_artifact_registration_batch_v1(owner_id, root_address, None, inputs, verifier)
                 .err(),
@@ -1492,7 +1499,7 @@ fn destruction_eligible_registrations_require_a_source_timeline(
         let verifier = TestOnlyStructuralOwnerVerifier {
             recording_data_class,
         };
-        let (_, _, unbound) = prepared_repro_manifest_for(0x51, None, &verifier)?;
+        let (_, _, unbound) = prepared_repro_manifest_for(0x51, timeline(2), None, &verifier)?;
         assert_eq!(unbound.source_timeline(), None);
         assert_eq!(
             bound_batch(0x51, timeline(2), &verifier)?.source_timeline(),
@@ -1505,9 +1512,10 @@ fn destruction_eligible_registrations_require_a_source_timeline(
 #[test]
 fn graph_errors_take_precedence_over_a_missing_source_timeline(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (owner_id, root_address, mut inputs) = prepare_repro_manifest_inputs(0x51, &PRIVATE_OWNER)?;
+    let (owner_id, root_address, mut inputs) =
+        prepare_repro_manifest_inputs(0x51, timeline(2), &PRIVATE_OWNER)?;
     // A second WCR1 outside the root closure makes the graph invalid.
-    let (_, _, other) = prepare_repro_manifest_inputs(0x61, &PRIVATE_OWNER)?;
+    let (_, _, other) = prepare_repro_manifest_inputs(0x61, timeline(2), &PRIVATE_OWNER)?;
     inputs.push(other[2].clone());
     for source_timeline in [None, Some(timeline(2))] {
         assert_eq!(
@@ -1536,7 +1544,7 @@ where
     let first = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
     let second = bound_batch(0x61, timeline(2), &CONSENTED_OWNER)?;
     let other = bound_batch(0x71, timeline(3), &PRIVATE_OWNER)?;
-    let unbound = prepared_repro_manifest_for(0x81, None, &STRUCTURAL_OWNER)?.2;
+    let unbound = prepared_repro_manifest_for(0x81, timeline(4), None, &STRUCTURAL_OWNER)?.2;
     for batch in [&first, &second, &other, &unbound] {
         close_repro_manifest_recording(store, batch)?;
         assert_eq!(
@@ -1563,22 +1571,26 @@ where
         .artifact_registrations_for_timeline(timeline(9), 0)?
         .is_empty());
 
-    // An exact retry binds nothing new; the same closure from another
-    // Timeline adds that Timeline's bindings and nothing else.
+    // An exact retry binds nothing new. The unbound closure bound nothing;
+    // committing it again with its World run's Timeline adds only those
+    // bindings, which is `Applied`.
     assert_eq!(
         store.commit_artifact_registration_batch(first.clone())?,
         ArtifactRegistrationCommitOutcomeV1::ExactRetry
     );
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(4), 4)?
+        .is_empty());
     assert_eq!(
         store.commit_artifact_registration_batch(bound_batch(
-            0x51,
+            0x81,
             timeline(4),
-            &PRIVATE_OWNER
+            &STRUCTURAL_OWNER
         )?)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
     );
     let rebound = store.artifact_registrations_for_timeline(timeline(4), 4)?;
-    assert_eq!(row_addresses(&rebound), sorted_addresses(&[&first]));
+    assert_eq!(row_addresses(&rebound), sorted_addresses(&[&unbound]));
     assert_eq!(
         store.artifact_registrations_for_timeline(timeline(2), 7)?,
         bound
@@ -1586,11 +1598,28 @@ where
     Ok(vec![bound, other_rows, rebound])
 }
 
-/// A batch whose registration fails writes no Timeline binding.
+/// A batch whose registration fails writes no Timeline binding, and a
+/// closure whose source Timeline is not its World run's is refused before it
+/// can reach the store.
 fn failed_registration_writes_no_binding<S>(store: &mut S) -> Result<(), Box<dyn std::error::Error>>
 where
     S: ArtifactRegistrationPersistencePortV1,
 {
+    for verifier in [&PRIVATE_OWNER, &STRUCTURAL_OWNER] {
+        assert_eq!(
+            prepared_repro_manifest_for(0xa1, timeline(2), Some(timeline(6)), verifier)
+                .err()
+                .and_then(|error| {
+                    error
+                        .downcast_ref::<pos_core::ArtifactRegistrationPreparationErrorV1>()
+                        .copied()
+                }),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch)
+        );
+    }
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(6), 4)?
+        .is_empty());
     let batch = bound_batch(0x91, timeline(5), &PRIVATE_OWNER)?;
     assert_eq!(
         store.commit_artifact_registration_batch(batch),
@@ -1698,7 +1727,7 @@ fn committed_bound_sqlite_store(
         .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
         .to_owned();
     let (_, root_address, batch) =
-        prepared_repro_manifest_for(0x51, Some(timeline(2)), &PRIVATE_OWNER)?;
+        prepared_repro_manifest_for(0x51, timeline(2), Some(timeline(2)), &PRIVATE_OWNER)?;
     let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
     close_repro_manifest_recording(&mut store, &batch)?;
     store.commit_artifact_registration_batch(batch)?;
@@ -1785,5 +1814,46 @@ fn sqlite_timeline_reads_require_the_complete_catalog_schema(
             expected
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_refuse_a_cyclic_child_edge() -> Result<(), Box<dyn std::error::Error>> {
+    // ARD1 addresses hash the exact bytes that name each child, so a cycle
+    // can only be forged by rewriting a row, which its address then refuses.
+    let (_database, path, root_address) = committed_bound_sqlite_store()?;
+    let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+    let root = batch
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == root_address)
+        .ok_or("root record is missing")?;
+    let recording = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_class() == ErasureArtifactClassV1::TimelineReplay)
+        .ok_or("WCR1 record is missing")?;
+    let mut fields = recording.registration().fields().clone();
+    fields.child_artifacts = vec![pos_core::ArtifactChildEdgeV1 {
+        artifact_class: root.artifact_class(),
+        artifact_digest: root.artifact_digest(),
+        registration_address: root_address,
+        required: true,
+    }];
+    let cyclic = ArtifactRegistrationV1::new(fields)?;
+    rusqlite::Connection::open(&path)?.execute(
+        "UPDATE artifact_registrations SET registration_cbor = ?1
+         WHERE registration_address = ?2",
+        rusqlite::params![
+            cyclic.canonical_cbor(),
+            recording.registration_address().as_bytes().as_slice(),
+        ],
+    )?;
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.artifact_registrations_for_timeline(timeline(2), 8),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
     Ok(())
 }

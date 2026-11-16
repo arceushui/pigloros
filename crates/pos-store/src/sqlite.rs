@@ -9544,23 +9544,17 @@ fn sqlite_artifact_registrations_for_timeline(
     })
 }
 
-/// Validate every bound row once. Bindings cover complete closures, so the
-/// closure of each bound row that no other bound row names as a child
-/// contains all the others; the read costs one walk per such top row.
+/// Validate every bound row's closure as its own root, as
+/// `sqlite_read_artifact_registration` does, so a bound MRM1 always gets its
+/// operation-index and recorder checks. The read costs at most `max` closure
+/// walks, each bounded by the ADR-093 graph limits.
 fn sqlite_validate_bound_closures(
     connection: &Connection,
     rows: Vec<ArtifactRegistrationCatalogRowV1>,
 ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
-    let children: BTreeSet<Hash> = rows
-        .iter()
-        .flat_map(|row| row.registration().fields().child_artifacts.iter())
-        .map(|edge| edge.registration_address)
-        .collect();
-    let validated = rows
-        .iter()
-        .map(ArtifactRegistrationCatalogRowV1::registration_address)
-        .filter(|address| !children.contains(address))
-        .try_for_each(|address| sqlite_validate_artifact_registration_closure(connection, address));
+    let validated = rows.iter().try_for_each(|row| {
+        sqlite_validate_artifact_registration_closure(connection, row.registration_address())
+    });
     validated.map(|()| rows)
 }
 
