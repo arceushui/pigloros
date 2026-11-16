@@ -992,7 +992,9 @@ jobs:
     # out of this pull request.
     if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.owner-bridge-windows.result == 'success' || (needs.ci_change_scope.outputs.owner_windows == 'false' && needs.owner-bridge-windows.result == 'skipped')) && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # 10 minutes of scoring plus the resolver step's bounded wait for main's
+    # trusted baseline (see that step).
+    timeout-minutes: 135
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1033,8 +1035,11 @@ jobs:
         run: cp "${{ runner.temp }}/coverage.lcov" "${{ runner.temp }}/cargo-crap-coverage.lcov"
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
+      # Polls up to 120 minutes while main's ci.yml run for the trusted base is
+      # still queued or in progress, then fails closed as before.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
+        timeout-minutes: 125
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}

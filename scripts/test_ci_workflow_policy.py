@@ -699,8 +699,9 @@ LIGHTWEIGHT_CORE_GATE_CONSUMERS = frozenset({"standard-gate", "ci-gate", "cargo-
 CARGO_CRAP_CONSUMERS = ["ci-gate", "depgraph", "modules-structure"]
 # Heavy jobs released by core-gate. Browser parity follows WASM packaging on
 # the same budget. cargo-crap starts beside them but compiles nothing (pinned
-# binary, cargo metadata and LCOV parsing in a 10-minute budget), and
-# standard-gate and ci-gate are lightweight fan-ins.
+# binary, cargo metadata and LCOV parsing in a 10-minute budget, plus a bounded
+# idle wait for main's trusted baseline), and standard-gate and ci-gate are
+# lightweight fan-ins.
 STANDARD_STAGE_JOBS = frozenset(
     {
         "rustdoc",
@@ -729,7 +730,7 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
         if name not in LIGHTWEIGHT_CORE_GATE_CONSUMERS and "core-gate" in job_needs(job)
     }
     crap = jobs.get("cargo-crap", {})
-    if "strategy" in crap or crap.get("timeout-minutes") != 10 or "core-gate" not in job_needs(crap):
+    if "strategy" in crap or crap.get("timeout-minutes") != 135 or "core-gate" not in job_needs(crap):
         raise AssertionError("cargo-crap must stay one lightweight runner released by core-gate")
     if sorted(name for name, job in jobs.items() if "cargo-crap" in job_needs(job)) != CARGO_CRAP_CONSUMERS:
         raise AssertionError("only ci-gate and the main-only reports may wait for cargo-crap")
@@ -899,20 +900,40 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
 
-    def test_ubuntu_mirror_changes_only_the_hosted_archive_uris(self) -> None:
-        source = (ROOT / "scripts/prepare-ubuntu-package-mirror.sh").read_text()
-        prefix, separator, command = source.partition("\nsudo ")
-        self.assertEqual(prefix, "#!/usr/bin/env bash\nset -euo pipefail\n")
-        self.assertEqual(separator, "\nsudo ")
-        expressions = [
-            r"s|^URIs: mirror+file:/etc/apt/apt-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
-            r"s|^URIs: mirror+file:/etc/apt/apt-security-mirrors\.txt$|URIs: https://mirrors.edge.kernel.org/ubuntu|",
-        ]
-        arguments = shlex.split(command.replace("\\\n", ""))
-        self.assertEqual(arguments, [
-            "sed", "-i", "-e", expressions[0], "-e", expressions[1],
-            "/etc/apt/sources.list.d/ubuntu.sources",
-        ])
+    def run_ubuntu_mirror_preparation(
+        self, sources: str, runner_lists: dict[str, str],
+    ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, dict[str, str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory)
+            apt_dir = fixture / "apt"
+            (apt_dir / "sources.list.d").mkdir(parents=True)
+            (apt_dir / "apt.conf.d").mkdir()
+            (apt_dir / "sources.list.d/ubuntu.sources").write_text(sources)
+            for name, contents in runner_lists.items():
+                (apt_dir / name).write_text(contents)
+            tools = fixture / "bin"
+            tools.mkdir()
+            (tools / "sudo").write_text("#!/usr/bin/env bash\nexec \"$@\"\n")
+            (tools / "sudo").chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(ROOT / "scripts/prepare-ubuntu-package-mirror.sh"), str(apt_dir)],
+                env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"},
+                text=True, capture_output=True, check=False,
+            )
+            written = {
+                str(path.relative_to(apt_dir)): path.read_text()
+                for path in sorted(apt_dir.rglob("*")) if path.is_file()
+            }
+            return completed, apt_dir, written
+
+    def test_ubuntu_mirror_lists_edge_first_then_runner_and_ubuntu_fallbacks(self) -> None:
+        # The GitHub-hosted image's own list (actions/runner-images
+        # configure-apt-sources.sh) and the deb822 stanzas it redirects to it.
+        runner_list = (
+            "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+            "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+            "https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+        )
         original = (
             "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
             "Suites: noble noble-updates noble-backports\nComponents: main universe\n"
@@ -926,18 +947,55 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             "URIs: mirror+file:/etc/apt/apt-mirrorsXtxt\n"
             "URIs: mirror+file:/etc/apt/apt-mirrors.txt.backup\n"
         )
-        completed = subprocess.run(
-            ["sed", "-e", expressions[0], "-e", expressions[1]],
-            input=original, text=True, capture_output=True, check=True,
+        completed, apt_dir, written = self.run_ubuntu_mirror_preparation(original, {
+            "apt-mirrors.txt": runner_list,
+            "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
+        })
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        redirected = f"\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\n"
+        self.assertEqual(written, {
+            "apt-mirrors.txt": runner_list,
+            "apt-security-mirrors.txt": "https://security.ubuntu.com/ubuntu/\tpriority:1\n# note\n",
+            "pigloros-mirrors.txt": (
+                "https://mirrors.edge.kernel.org/ubuntu\tpriority:1\n"
+                "http://azure.archive.ubuntu.com/ubuntu\tpriority:2\n"
+                "https://archive.ubuntu.com/ubuntu\tpriority:3\n"
+                "https://security.ubuntu.com/ubuntu\tpriority:4\n"
+                "http://archive.ubuntu.com/ubuntu\tpriority:5\n"
+                "http://security.ubuntu.com/ubuntu\tpriority:6\n"
+            ),
+            "apt.conf.d/80pigloros-mirror-retries": (
+                'Acquire::Retries "5";\n'
+                'Acquire::http::Timeout "30";\n'
+                'Acquire::https::Timeout "30";\n'
+            ),
+            "sources.list.d/ubuntu.sources": original.replace(
+                "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n", redirected,
+            ).replace(
+                "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n", redirected,
+            ),
+        })
+
+    def test_ubuntu_mirror_keeps_the_ubuntu_fallbacks_without_a_runner_list(self) -> None:
+        original = "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n"
+        completed, apt_dir, written = self.run_ubuntu_mirror_preparation(original, {})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(written["pigloros-mirrors.txt"], (
+            "https://mirrors.edge.kernel.org/ubuntu\tpriority:1\n"
+            "http://archive.ubuntu.com/ubuntu\tpriority:2\n"
+            "http://security.ubuntu.com/ubuntu\tpriority:3\n"
+        ))
+        self.assertEqual(
+            written["sources.list.d/ubuntu.sources"],
+            f"Types: deb\nURIs: mirror+file:{apt_dir}/pigloros-mirrors.txt\nSuites: noble\n",
         )
-        expected = original.replace(
-            "\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n",
-            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
-        ).replace(
-            "\nURIs: mirror+file:/etc/apt/apt-security-mirrors.txt\n",
-            "\nURIs: https://mirrors.edge.kernel.org/ubuntu\n",
-        )
-        self.assertEqual(completed.stdout, expected)
+
+    def test_ubuntu_mirror_fails_when_the_runner_sources_have_no_mirror_list(self) -> None:
+        original = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n"
+        completed, _, written = self.run_ubuntu_mirror_preparation(original, {})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("has no mirror+file Ubuntu archive source to redirect", completed.stderr)
+        self.assertEqual(written["sources.list.d/ubuntu.sources"], original)
 
     def test_ubuntu_dependency_installers_prepare_the_mirror_before_apt(self) -> None:
         installers = []

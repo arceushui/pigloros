@@ -217,6 +217,40 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
         ("set -euo pipefail\n", "baseline resolver must fail closed"),
         ("BASELINE_RETRY_ATTEMPTS=30\n", "baseline retry attempts changed"),
         ("BASELINE_RETRY_DELAY_SECONDS=10\n", "baseline retry delay changed"),
+        ("MAIN_RUN_POLL_DELAY_SECONDS=60\n", "main run poll delay changed"),
+        ("BASELINE_WAIT_LIMIT_SECONDS=7200\n", "baseline wait bound changed"),
+        (
+            "if ((elapsed + MAIN_RUN_POLL_DELAY_SECONDS > BASELINE_WAIT_LIMIT_SECONDS)); then",
+            "baseline resolver must bound its wait for main",
+        ),
+        (
+            'sleep "${MAIN_RUN_POLL_DELAY_SECONDS}"',
+            "baseline resolver main run poll delay is not enforced",
+        ),
+        (
+            '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"',
+            "baseline resolver must wait only for main's ci.yml run",
+        ),
+        (
+            '-f branch=main -f head_sha="${TRUSTED_BASE_SHA}" -f per_page=100',
+            "baseline resolver must query main's run of the trusted commit",
+        ),
+        (
+            'select(.head_branch == \\"main\\")',
+            "baseline resolver must wait only for a main-branch run",
+        ),
+        (
+            'select(.head_sha == \\"${TRUSTED_BASE_SHA}\\")',
+            "baseline resolver must wait only for the trusted main commit",
+        ),
+        (
+            "select(.head_repository.id == .repository.id)",
+            "baseline resolver must not wait for fork runs",
+        ),
+        (
+            'if [[ "${main_run_status}" == "completed" ]]; then',
+            "baseline resolver must stop waiting once main's run completed",
+        ),
         (
             "for ((attempt = 1; attempt <= BASELINE_RETRY_ATTEMPTS; attempt++)); do",
             "baseline resolver must use bounded retries",
@@ -272,10 +306,6 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
     )
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
-    require(
-        '"repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"' not in resolver,
-        "baseline resolver must not wait for unrelated main workflow jobs",
-    )
     require(
         "-f status=success" not in resolver,
         "baseline resolver must not require whole-workflow completion",
@@ -361,7 +391,7 @@ def check_workflow(
         "cargo-crap must skip documentation-only pull requests",
     )
     require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
-    require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
+    require(job.get("timeout-minutes") == 135, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")
     require(len(steps) == 16, "cargo-crap must contain the exact trusted step sequence")
@@ -436,6 +466,7 @@ def check_workflow(
         == {
             "name": "Resolve trusted cargo-crap baseline",
             "id": "baseline",
+            "timeout-minutes": 125,
             "env": {
                 "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                 "EVENT_NAME": "${{ github.event_name }}",
