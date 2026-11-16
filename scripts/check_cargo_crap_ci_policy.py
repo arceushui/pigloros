@@ -87,6 +87,8 @@ TEST_ONLY_EXCLUSIONS = (
     "src/execute/tests/ownership.rs",
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
+    "src/scenario_room/tests.rs",
+    "src/executor/scenario_room/tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

@@ -1099,6 +1099,8 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/scenario_room/tests.rs'
+          --exclude 'src/executor/scenario_room/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1143,6 +1145,8 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/scenario_room/tests.rs'
+          --exclude 'src/executor/scenario_room/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
