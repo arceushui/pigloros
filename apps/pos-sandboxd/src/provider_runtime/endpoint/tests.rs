@@ -186,6 +186,11 @@ fn refuses_unsafe_ancestors() -> TestResult {
             Some(ProviderRuntimeError::UnsafeEndpoint)
         );
     }
+    // The chowned directory, when the container allowed it, is removed
+    // again, so a later run in the same root starts clean.
+    if Path::new("/run/pigloros/foreign").exists() {
+        fs::remove_dir("/run/pigloros/foreign")?;
+    }
     Ok(())
 }
 
