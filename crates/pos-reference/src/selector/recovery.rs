@@ -176,7 +176,7 @@ impl PendingRecoveryTarget {
 ///
 /// let _ = RecoveryTransactionIdentity::from_canonical_cbor(&[]);
 /// ```
-#[derive(Debug, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct RecoveryTransactionIdentity {
     sir1_digest: [u8; 32],
     previous_provider_binding_digest: [u8; 32],
@@ -185,37 +185,6 @@ pub struct RecoveryTransactionIdentity {
     previous_live_attempt_ids: Vec<[u8; 16]>,
     /// Recovery runtime, lifecycle-scope and endpoint IDs, in that order.
     recovery_peer_slot: [[u8; 16]; 3],
-}
-
-// Written out, not derived: the derived impl does not count as a read of the
-// fields, which nothing else reads in this slice. Both sides are destructured
-// exhaustively, so a new element fails to compile until it is compared
-// (R12 I3).
-impl PartialEq for RecoveryTransactionIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        let Self {
-            sir1_digest,
-            previous_provider_binding_digest,
-            previous_runtime_instance_id,
-            previous_lifecycle_scope_id,
-            previous_live_attempt_ids,
-            recovery_peer_slot,
-        } = self;
-        let Self {
-            sir1_digest: other_sir1_digest,
-            previous_provider_binding_digest: other_previous_provider_binding_digest,
-            previous_runtime_instance_id: other_previous_runtime_instance_id,
-            previous_lifecycle_scope_id: other_previous_lifecycle_scope_id,
-            previous_live_attempt_ids: other_previous_live_attempt_ids,
-            recovery_peer_slot: other_recovery_peer_slot,
-        } = other;
-        sir1_digest == other_sir1_digest
-            && previous_provider_binding_digest == other_previous_provider_binding_digest
-            && previous_runtime_instance_id == other_previous_runtime_instance_id
-            && previous_lifecycle_scope_id == other_previous_lifecycle_scope_id
-            && previous_live_attempt_ids == other_previous_live_attempt_ids
-            && recovery_peer_slot == other_recovery_peer_slot
-    }
 }
 
 #[cfg(test)]

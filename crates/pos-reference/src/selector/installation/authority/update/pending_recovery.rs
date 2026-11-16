@@ -59,8 +59,7 @@ impl VerifiedPendingRecovery {
         root.metadata()
             .map_err(map_io_to_boundary_failure)
             .and_then(|metadata| {
-                read_bounded_immutable(root, RECOVERY_NAME, metadata.uid(), RECOVERY_LIMIT as u64)
-                    .map(|bytes| (metadata.uid(), bytes))
+                read_recovery_record(root, metadata.uid()).map(|bytes| (metadata.uid(), bytes))
             })
             .and_then(|(owner, bytes)| {
                 RecordedRecovery::decode(&bytes)
@@ -211,6 +210,12 @@ impl RecordedRecovery {
     }
 }
 
+/// Reads the fixed SIR1 file, refusing it by size before any byte is read
+/// or decoded when it exceeds the 48 MiB SIR1 bound.
+fn read_recovery_record(root: &File, owner: u32) -> Result<Vec<u8>, SelectorBoundaryError> {
+    read_bounded_immutable(root, RECOVERY_NAME, owner, RECOVERY_LIMIT as u64)
+}
+
 /// One embedded SIC1 or RCU1: 1 byte to 16 MiB, independently of the
 /// 48 MiB SIR1 bound (ADR-069 §4.1 CDDL).
 fn record_bytes(value: &Value) -> Result<Vec<u8>, ProtocolError> {
@@ -277,4 +282,57 @@ fn pending_update(
         Value::Bytes(rcu1.to_vec()),
     ]))
     .map_err(map_protocol_to_artifact_invalid)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn an_embedded_record_holds_one_byte_to_exactly_16_mib() {
+        for length in [1, EMBEDDED_RECORD_LIMIT] {
+            assert_eq!(
+                record_bytes(&Value::Bytes(vec![7; length])).map(|bytes| bytes.len()),
+                Ok(length)
+            );
+        }
+        for length in [0, EMBEDDED_RECORD_LIMIT + 1] {
+            assert_eq!(
+                record_bytes(&Value::Bytes(vec![7; length])),
+                Err(ProtocolError::InvalidEncoding)
+            );
+        }
+        assert_eq!(
+            record_bytes(&Value::Null),
+            Err(ProtocolError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn the_sir1_file_is_read_up_to_exactly_48_mib() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let root = File::open(directory.path())?;
+        let owner = root.metadata()?.uid();
+        let path = directory.path().join(RECOVERY_NAME);
+        for length in [RECOVERY_LIMIT, RECOVERY_LIMIT + 1] {
+            if path.exists() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            }
+            fs::write(&path, vec![0; length])?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+            let read = read_recovery_record(&root, owner);
+            if length == RECOVERY_LIMIT {
+                assert_eq!(read?.len(), RECOVERY_LIMIT);
+            } else {
+                assert_eq!(read, Err(SelectorBoundaryError::ArtifactInvalid));
+            }
+        }
+        Ok(())
+    }
 }
