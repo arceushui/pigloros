@@ -7599,6 +7599,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_full_page_filled_by_one_scan_chunk_still_finds_the_next_public_event() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-chunk-boundary")
+            .await
+            .test_ok();
+        let draft = |kind: &str| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(kind),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        };
+        // The first scan chunk holds exactly one public Event and is full, so
+        // only a further chunk can reveal whether another public Event exists.
+        let mut drafts = vec![draft(EVENT_TYPE_ACTION)];
+        drafts.extend((0..MAX_EVENTS_PER_POLL).map(|_| draft("persona.profile")));
+        drafts.push(draft(EVENT_TYPE_ACTION));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1]
+        );
+        let last = u64::try_from(MAX_EVENTS_PER_POLL).test_ok() + 2;
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(last)));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[allow(deprecated)]
     async fn public_page_api_and_compatibility_shim_remain_bounded() {

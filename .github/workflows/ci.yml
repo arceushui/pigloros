@@ -1099,6 +1099,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
@@ -1145,6 +1146,7 @@ jobs:
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
           --exclude 'src/execute/tests/ownership/abandonment.rs'
+          --exclude 'src/provider_lifecycle/tests.rs'
           --exclude 'src/scenario_room/tests.rs'
           --exclude 'src/executor/scenario_room/tests.rs'
           ${NATIVE_SHIM_ALLOW:+--allow "${NATIVE_SHIM_ALLOW}"}
