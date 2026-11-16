@@ -274,8 +274,9 @@ fn reconciliation_opens_admission_only_over_a_clean_host() -> TestResult {
         built.get(),
         Some((installation.attempt_range(), installation.egress_probe()))
     );
-    // The SPI1 cleanup phases (500, 1000, 1500, 3000 and 5000 ms) start
-    // when reconciliation does, within the fixed 10 s bound.
+    // The SPI1 grace, shutdown, unit-absent and released phases (500, 1500,
+    // 3000 and 5000 ms) start when reconciliation does, within the fixed
+    // 10 s bound.
     let now = Instant::now();
     let (cleanup, deadline) = host.restart_bounds(now);
     assert_eq!(
