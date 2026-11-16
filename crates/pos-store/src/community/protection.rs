@@ -402,9 +402,14 @@ fn validate_record(plaintext: &[u8], evidence: CommunityRecordEvidenceV1<'_>) ->
                 || child.registration_address == Hash::zero()
                 || !addresses.insert(child.registration_address)
         })
-        || !children.is_sorted_by(|a, b| {
-            (a.artifact_class, a.artifact_digest, a.registration_address)
-                < (b.artifact_class, b.artifact_digest, b.registration_address)
+        // Non-strict order suffices: repeated addresses are already refused,
+        // so two equal triples cannot both pass.
+        || !children.is_sorted_by_key(|child| {
+            (
+                child.artifact_class,
+                child.artifact_digest,
+                child.registration_address,
+            )
         });
     if invalid {
         Err(Error::InvalidBinding)
