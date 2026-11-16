@@ -409,15 +409,19 @@ async fn an_empty_cgroup_drains_the_output_while_systemd_still_holds_its_end() -
     Ok(())
 }
 
-/// A scenario whose adapter writes `S` and then never exits, under a short
-/// watchdog; `fault` decides whether the kill is acknowledged.
+/// A scenario whose adapter writes `S` at once and then never exits, under a
+/// short watchdog; `fault` decides whether the kill is acknowledged, and
+/// `cancel` cancels the attempt as it is released.
 async fn hung(
     fault: Option<Fault>,
     cancel: bool,
 ) -> TestResult<AttemptExecution<String, FakeCgroup, u64>> {
     let mut scenario = Scenario::new()?;
+    // The output is queued before the release, so the ending, however early,
+    // finds it on the channel.
     scenario.host.stdio = Some(StdioScript {
         output: stream(),
+        input: InputUse::Ignore,
         never_finish: true,
         ..StdioScript::default()
     });
