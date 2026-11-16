@@ -45,6 +45,7 @@ EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
     "src/provider_barrier/tests.rs",
     "src/execute/tests/ownership/abandonment.rs",
     "src/revision/tests.rs",
+    "src/provider_lifecycle/tests.rs",
 )
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
@@ -444,6 +445,8 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/execute/tests/ownership/production.rs",
             "src/provider_barrier.rs",
             "src/provider_barrier/production.rs",
+            "src/provider_lifecycle.rs",
+            "src/provider_lifecycle/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
