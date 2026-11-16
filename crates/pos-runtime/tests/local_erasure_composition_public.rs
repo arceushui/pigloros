@@ -4669,12 +4669,35 @@ fn attempt_0_completes_after_the_bundle_expires() -> TestResult {
 #[test]
 fn attempt_0_is_refused_once_its_bundle_is_revoked_and_rotated() -> TestResult {
     let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    // Control: under the original bundle, attempt 0 is admitted. A probe
+    // evaluates it inside a dispatch whose own admission is refused, so
+    // nothing is committed.
+    let (mut host, probe) =
+        attempted.probe_host(&attempted.case, vec![attempted.attempt.clone()])?;
+    let refused = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        policy: reference(0x41),
+        ..attempted.input.clone()
+    })?;
+    assert_eq!(
+        host.command_sender()?
+            .dispatch_erasure_destruction(attempted.request, &refused)
+            .map(drop),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    drop(host);
+    let results = probe
+        .attempt_results
+        .lock()
+        .map_err(|_| "probe poisoned")?
+        .clone();
+    assert_eq!(results, [Ok(())]);
+    // The revoke-and-rotate makes the original bundle non-current. Attempt
+    // 0 pins only the bundle current at admission, so the same attempt 0 is
+    // now refused (PolicyConflict).
     let revoked = attempted.bundle.signer_key_id.clone();
     let mut new = rotated_bundle(&attempted.store)?;
     new.issued_by = OTHER_ROOT.to_owned();
     let case = Case::signed(&new, &other_root(), &[revoked.as_str()])?;
-    // Attempt 0 pins the bundle current at admission: after the compromise
-    // the frozen request's attempt 0 cannot pin the revoked bundle.
     assert_eq!(
         attempted
             .store
