@@ -409,7 +409,7 @@ fn the_air_gapped_mode_is_refused_where_a_network_capability_is_held() -> TestRe
         return reexecute(&mut runner, CAPABLE, TEST);
     }
     let status = std::fs::read_to_string("/proc/self/status")?;
-    for set in ["CapEff", "CapPrm", "CapAmb", "CapBnd"] {
+    for set in ["CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"] {
         let value = status
             .lines()
             .find_map(|line| line.strip_prefix(set)?.strip_prefix(':'))
