@@ -279,7 +279,7 @@ and manifests, because zbus receives system-bus descriptors without
 ## Launcher mode and release barrier (#441)
 
 The package now builds one binary, `pos-sandboxd`, whose mode is chosen by
-argv. The only mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
+argv. One mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
 Launcher, started by the provider as the transient unit's main process. It
 adopts the descriptors systemd passes (`sd-listen-fds`), validates their names,
 types, count, order and the absence of any other open descriptor, accepts the
@@ -296,6 +296,22 @@ test enforces it). CI builds the binary for `x86_64` and `aarch64`
 `unknown-linux-musl` and requires no `PT_INTERP` and no dynamic section.
 ADR-087 A.3 governs the daemon mode; the launcher's final exec creates no
 process.
+
+## Provider runtime mode (#1358)
+
+The other mode is `provider-runtime`, the provider daemon that the root
+selector starts as its runtime unit (ADR-069 R11 §5). Before any socket
+exists it binds its startup authority: SIC1, the `/proc/self/exe`
+self-binding, SPI1, the slot count and the runtime key. It then binds both
+SIC1 endpoints under the R11 §6 rules (no endpoint under
+`/run/pigloros/sandbox`, no pre-existing node, a UID 0 leaf of mode `0600`),
+sends `READY=1` as one datagram to `NOTIFY_SOCKET`, and serves in state
+`Starting`. `describe` gets the signed SDY1 of the startup authority; every
+other operation gets a signed SPE1 `11` once it passes validation precedence
+steps 1 to 6. A control connection is closed unanswered until the
+RCC1/RCU1 responder lands. Restart reconciliation, which opens admission, is
+the next #1358 slice. The mode reads no environment variable but
+`NOTIFY_SOCKET`.
 
 `release_after_ready` is the provider half: it accepts one `ReadyV1` only from
 the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to

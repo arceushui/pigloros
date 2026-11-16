@@ -1,7 +1,9 @@
 //! Backend-specific components of the ADR-069 systemd Sandbox Provider Adapter.
 //!
-//! This library does not implement the provider daemon or grant admission. Its
-//! binary currently runs only the closed launcher mode ([`launcher`]). It also
+//! Its binary runs the closed launcher mode ([`launcher`]) and the
+//! `provider-runtime` mode, which binds both SIC1 provider endpoints and
+//! serves them before restart reconciliation (ADR-069 R11 §5.1 to §7). That
+//! mode does not grant admission yet. The library also
 //! holds the root selector's provider-runtime lifecycle adapter,
 //! `SystemdProviderLifecycle` (ADR-069 R11 §5.0), which only the
 //! `pos-root-selector` binary composes.
@@ -49,8 +51,12 @@ mod provider_installation;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod provider_lifecycle;
+// Public module reachability lets the `provider-runtime` mode's entry point
+// and its error stay `pub(crate)` without Clippy's `redundant_pub_crate`
+// lint, as for `provider_lifecycle`.
 #[cfg(target_os = "linux")]
-mod provider_runtime;
+#[doc(hidden)]
+pub mod provider_runtime;
 #[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
@@ -606,15 +612,21 @@ impl SystemCallFilter {
 
 /// Run the binary for `arguments` (without the program name).
 ///
-/// The only mode today is `launch-barrier <lpv1-hex>`, which never returns
-/// success: a released adapter replaces the process image. Any other argument
-/// vector, or any launcher failure, ends with a nonzero exit code and a fixed
-/// diagnostic on standard error.
+/// The modes are `launch-barrier <lpv1-hex>` and `provider-runtime`; neither
+/// returns success. A released adapter replaces the launcher's process image,
+/// and the provider runtime serves until a listener invariant fails. Any
+/// other argument vector exits with status 2; a failure of either mode ends
+/// with a nonzero exit code and one fixed diagnostic on standard error.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let arguments: Vec<_> = arguments.into_iter().collect();
     match arguments.as_slice() {
+        [mode] if mode == provider_lifecycle::PROVIDER_RUNTIME_ARGUMENT => {
+            let error = provider_runtime::serve_provider_runtime();
+            report(&format!("pos-sandboxd: {error}"));
+            std::process::ExitCode::FAILURE
+        }
         [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
             let error = lpv1
                 .to_str()
@@ -625,7 +637,7 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
             std::process::ExitCode::FAILURE
         }
         _ => {
-            report("usage: pos-sandboxd launch-barrier <lpv1-hex>");
+            report("usage: pos-sandboxd launch-barrier <lpv1-hex> | provider-runtime");
             std::process::ExitCode::from(2)
         }
     }
