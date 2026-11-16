@@ -1710,11 +1710,18 @@ fn binding_count(path: &str) -> Result<i64, Box<dyn std::error::Error>> {
 #[test]
 fn sqlite_rolls_back_timeline_bindings_with_a_failed_registration(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for trigger in [
-        "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_operations
-         BEGIN SELECT RAISE(ABORT, 'injected operation failure'); END",
-        "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_timelines
-         BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END",
+    // A refused operation-index insert reads as a conflicting operation.
+    for (trigger, expected) in [
+        (
+            "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_operations
+             BEGIN SELECT RAISE(ABORT, 'injected operation failure'); END",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::Conflict,
+        ),
+        (
+            "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_timelines
+             BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+        ),
     ] {
         let database = tempfile::NamedTempFile::new()?;
         let path = database
@@ -1727,7 +1734,7 @@ fn sqlite_rolls_back_timeline_bindings_with_a_failed_registration(
         close_repro_manifest_recording(&mut store, &batch)?;
         assert_eq!(
             store.commit_artifact_registration_batch(batch),
-            Err(pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+            Err(expected)
         );
         assert_eq!(binding_count(path)?, 0);
         assert!(store
