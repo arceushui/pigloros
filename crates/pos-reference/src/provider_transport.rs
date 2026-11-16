@@ -1782,10 +1782,10 @@ mod tests {
             .transport
             .connect_committed_update(valid.committed, Duration::from_secs(1))?;
         std::thread::sleep(Duration::from_millis(150));
-        let (successor, acknowledgement) =
+        let completed =
             ProviderTransport::exchange_committed_update(connected, Duration::from_millis(100))?;
-        assert!(!acknowledgement.is_empty());
-        assert_ne!(successor.installed().manifest().digest(), [0; 32]);
+        assert!(!completed.acknowledgement.is_empty());
+        assert_ne!(completed.successor.installed().manifest().digest(), [0; 32]);
         valid
             .provider
             .join()
