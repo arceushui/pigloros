@@ -236,7 +236,7 @@ impl CommunityAuthorityEvidenceV1 {
 }
 
 /// Exact CAU1 length: framing and version (7), incarnation (17), T and G
-/// (34), the operation, four hashes (4 x 34), both row arrays, the
+/// (34), the operation, three hashes (3 x 34), both row arrays, the
 /// inventory generation, the clock bound and the horizon.
 fn encoded_len(input: &CommunityAuthorityEvidenceInputV1) -> usize {
     let clock = input.clock_bound;
@@ -248,7 +248,7 @@ fn encoded_len(input: &CommunityAuthorityEvidenceInputV1) -> usize {
     7 + 17
         + 34
         + operation_len(input.operation)
-        + 4 * 34
+        + 3 * 34
         + head_len(input.object_bindings.len() as u64)
         + input.object_bindings.len() * OBJECT_ROW_BYTES
         + head_len(input.inventory_generation)

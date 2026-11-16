@@ -506,7 +506,9 @@ impl CommunityLifecycleAuthorityV1 {
     /// generation's selected cells (R6.1(4)).
     ///
     /// The planner asks for one decision per distinct initializer digest of
-    /// a code-0 operation (R6.1(5)).
+    /// a code-0 operation (R6.1(5)), and only for a code-0 source: the call
+    /// carries the action, not the CGI1 source, so a prior-State transition
+    /// is not refused here.
     ///
     /// # Errors
     /// Returns `EvidenceUnavailable` for a Fork, retire or reset call, which
