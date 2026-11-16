@@ -723,6 +723,30 @@ fn assert_disclosure_records() -> TestResult {
     Ok(())
 }
 
+/// The decoder bounds the input before parsing it: a well-formed byte
+/// string of exactly `bound` bytes is parsed and refused as the wrong
+/// shape, and one byte more is refused as out of scope.
+fn assert_size_bound<R: PartialEq + std::fmt::Debug>(
+    from_bytes: fn(&[u8]) -> Result<R, ErasureErrorV1>,
+    bound: usize,
+) {
+    for (total, expected) in [
+        (bound, ErasureErrorV1::InvalidEncoding),
+        (bound + 1, ErasureErrorV1::ScopeInvalid),
+    ] {
+        // A byte string longer than 255 bytes has a three-byte head.
+        let input = Cbor::default().bytes(&vec![0; total - 3]).0;
+        assert_eq!(input.len(), total);
+        assert_eq!(from_bytes(&input), Err(expected), "{total}");
+    }
+}
+
+#[test]
+fn authorization_and_owner_result_records_are_bounded_at_four_kib() {
+    assert_size_bound(LocalErasureAuthorizationV1::from_canonical_cbor, 4_096);
+    assert_size_bound(LocalErasureOwnerResultV1::from_canonical_cbor, 4_096);
+}
+
 #[test]
 fn data_class_codes_are_one_closed_mapping() {
     let classes = [
