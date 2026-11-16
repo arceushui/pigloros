@@ -41,11 +41,11 @@ mod provider_barrier;
 #[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
-mod release_signer;
-#[cfg(target_os = "linux")]
 mod restart;
 #[cfg(target_os = "linux")]
 mod root_attachment;
+#[cfg(target_os = "linux")]
+mod runtime_signer;
 #[cfg(target_os = "linux")]
 mod staging;
 mod system_bus;
@@ -282,10 +282,12 @@ pub use execute::{
     UnitCgroup, UnitHost, UnitKiller, UnitState,
 };
 #[cfg(target_os = "linux")]
+pub use kernel_observation::observation_evidence;
+#[cfg(target_os = "linux")]
 pub use kernel_observation::{
     BlockDevice, CgroupView, DeviceNumber, KernelIdentity, KernelObservation,
-    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext,
-    ObservedStateDigest, ObservedUnit, ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
+    KernelObservationError, KernelObservedReadback, NamespaceSet, ObservationContext, ObservedUnit,
+    ProviderNamespaces, RootIdentity, WorkMount, WorkUsage,
 };
 #[cfg(target_os = "linux")]
 pub use lifecycle::{
@@ -348,7 +350,10 @@ pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
 };
 #[cfg(target_os = "linux")]
-pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
+pub use runtime_signer::{
+    issue_release, sign_verified, AdmittedRuntimeKey, KeyFileRuntimeSigner,
+    RuntimeAttestationSigner, RuntimeSignerError,
+};
 #[cfg(target_os = "linux")]
 pub use staging::{
     AdmittedEntry, ControlFloor, StagedInput, StagingCharge, StagingDirectory, StagingError,
@@ -378,13 +383,16 @@ pub use system_bus::{
 #[cfg(target_os = "linux")]
 pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 pub use transient_unit::{
+    verified_requested_configuration, RequestedConfiguration, RequestedConfigurationProperty,
+    RequestedConfigurationValue,
+};
+pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
     SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,
     SystemdServiceLimitsError, SystemdTransientUnitNumericValue, SystemdTransientUnitProperty,
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
-pub use transient_unit::{RequestedConfigurationProperty, RequestedConfigurationValue};
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
