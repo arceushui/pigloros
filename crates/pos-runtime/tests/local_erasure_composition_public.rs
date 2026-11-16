@@ -3586,7 +3586,16 @@ impl Attempted {
 
     /// Dispatch attempt 0 and admit `acknowledgements` on a fresh host.
     fn acknowledged(&self, acknowledgements: &[ErasureAcknowledgementV1]) -> TestResult {
-        let mut host = self.host()?;
+        self.acknowledged_under(&self.case, acknowledgements)
+    }
+
+    /// As [`Self::acknowledged`], on a host of `case`.
+    fn acknowledged_under(
+        &self,
+        case: &Case,
+        acknowledgements: &[ErasureAcknowledgementV1],
+    ) -> TestResult {
+        let mut host = self.store.host(case, 4_096)?;
         let mut sender = host.command_sender()?;
         sender.dispatch_erasure_destruction(self.request, &self.attempt)?;
         for acknowledged in acknowledgements {
@@ -3922,27 +3931,19 @@ fn an_attempt_must_be_the_one_its_request_derives() -> TestResult {
             .map_err(fail)?;
     }
     drop(host);
-    // An attempt is a new admission, so an expired TPS1 or bundle closes
-    // it.
-    for clock in [after_trust_expiry as fn() -> u64, after_bundle_expiry] {
-        assert_eq!(
-            attempted
-                .store
-                .host(&attempted.case_at(clock)?, 4_096)?
-                .command_sender()?
-                .dispatch_erasure_destruction(request, &attempted.attempt)
-                .map(drop),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-    }
-    let mut host = attempted.host()?;
-    let mut sender = host.command_sender()?;
+    // Attempt 0 continues the frozen request, so it is admitted after the
+    // bundle expires (owner decision of 2026-11-16).
     assert_eq!(
-        sender
+        attempted
+            .store
+            .host(&attempted.case_at(after_bundle_expiry)?, 4_096)?
+            .command_sender()?
             .dispatch_erasure_destruction(request, &attempted.attempt)?
             .lifecycle(),
         ErasureLifecycleV1::AwaitingAcknowledgements
     );
+    let mut host = attempted.host()?;
+    let mut sender = host.command_sender()?;
     // The subject's active attempt holds it.
     assert_eq!(
         sender.submit_local_erasure(&submission(2, ErasureScopeV1::PrivateSubjectData)?),
@@ -4090,7 +4091,9 @@ fn a_complete_receipt_issues_signed_at_its_reached_position() -> TestResult {
     let request = attempted.request;
     let obligations = &attempted.obligations;
     let acknowledgements = attempted.owner_results(obligations, |_| None)?;
-    attempted.acknowledged(&acknowledgements)?;
+    // Attempt 0 is admitted and completes after the TPS1 expires.
+    let expired = attempted.case_at(after_trust_expiry)?;
+    attempted.acknowledged_under(&expired, &acknowledgements)?;
     // Five executed obligations: the complete receipt issues at 2 + 5.
     let body = attempted.receipt_body(&receipt_input(obligations, 7, reference(0xee)))?;
     let receipt_signed = LocalErasureSignaturePurposeV1::ReceiptBody;
@@ -4198,7 +4201,9 @@ impl Attempted {
 
 #[test]
 fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
-    let attempted = Attempted::new(vec![actor()], owned_bundle(&ALL_CLASSES)?)?;
+    let mut expiring = owned_bundle(&ALL_CLASSES)?;
+    expiring.expiry = BUNDLE_EXPIRY;
+    let attempted = Attempted::new(vec![actor()], expiring)?;
     rejected(&attempted.store, &[2])?;
     let request = attempted.request;
     let (receipt, unresolved) = attempted.partially_failed()?;
@@ -4249,6 +4254,22 @@ fn a_partial_failure_retries_only_while_its_subject_is_free() -> TestResult {
             Err(ErasureHostErrorV1::Conflict)
         );
     }
+    drop(sender);
+    drop(host);
+    // A retry is a new admission, so an expired TPS1 or bundle closes it.
+    for clock in [after_trust_expiry as fn() -> u64, after_bundle_expiry] {
+        assert_eq!(
+            attempted
+                .store
+                .host(&attempted.case_at(clock)?, 4_096)?
+                .command_sender()?
+                .dispatch_erasure_destruction(request, &retry)
+                .map(drop),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+    let mut host = attempted.host()?;
+    let mut sender = host.command_sender()?;
     assert_eq!(
         sender
             .dispatch_erasure_destruction(request, &retry)?

@@ -504,17 +504,23 @@ impl ErasureCoordinatorAuthorityV1 for LocalErasureAuthorityV1 {
 
     /// Recompute ERRA1 (ADR-136 §5): the request's ERAZ1, the ELP1 ERQ1
     /// pins, the retained bundle current at admission and the §6 positions,
-    /// within the per-request quota of 64 attempts. It needs no signature,
-    /// but like every new admission it closes on expiry, and it is refused
-    /// while another request of the subject holds it. Automatic retry up to
-    /// `auto_retry_max` is the C4 driver's scheduling (§6).
+    /// within the per-request quota of 64 attempts. It needs no signature.
+    /// Attempt 0 continues the frozen request, so it is admitted after
+    /// expiry; a retry is a new admission and closes on expiry (owner
+    /// decision of 2026-11-16). It is refused while another request of the
+    /// subject holds it. Automatic retry up to `auto_retry_max` is the C4
+    /// driver's scheduling (§6).
     fn admit_attempt(
         &self,
         view: &dyn ErasureAuthorityReadViewV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
-        self.admits_new_work()
-            .and_then(|()| self.attempt_admitted(view, admission))
+        if admission.attempt_ordinal() == 0 {
+            Ok(())
+        } else {
+            self.admits_new_work()
+        }
+        .and_then(|()| self.attempt_admitted(view, admission))
     }
 
     /// The evidence must be a purpose-1 ELS1 over the ELO1 of exactly this
