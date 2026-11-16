@@ -10,6 +10,7 @@ mod tests {
     use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
     use std::time::{Duration, Instant};
 
     use pos_core::CoreError;
@@ -20,6 +21,30 @@ mod tests {
     const NAMESPACE: &str = ".pigloros-store-namespace-v1";
     const MAIN: &str = "main.db";
     const CHILD_DIRECTORY: &str = "PIGLOR_INTERLOCK_TEST_CHILD_DIRECTORY";
+
+    /// Serialises forks against lock releases in this multi-threaded harness.
+    ///
+    /// Between fork and exec a spawned child holds a copy of every parent
+    /// descriptor, `O_CLOEXEC` lock descriptors included, so a `flock` that a
+    /// test thread releases by dropping its interlock stays held by the shared
+    /// open file description until that concurrent child execs. Every fork in
+    /// this binary goes through [`ChildPeer::spawn`], which holds this gate
+    /// until `Command::spawn` has observed the exec. A test that releases a
+    /// lock and then requires it to be acquirable releases it through
+    /// [`release_quiesced`], so no in-flight fork can retain the released lock.
+    /// Any new `Command` or other fork site in this binary must take this gate.
+    static FORK_GATE: Mutex<()> = Mutex::new(());
+
+    fn fork_gate() -> MutexGuard<'static, ()> {
+        FORK_GATE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Drops `held` while no fork of this process is between fork and exec.
+    fn release_quiesced<T>(held: T) {
+        let forks = fork_gate();
+        drop(held);
+        drop(forks);
+    }
 
     struct Fixture {
         directory: tempfile::TempDir,
@@ -105,7 +130,7 @@ mod tests {
         ));
         let unrelated = OwnerStoreFileInterlockV1::try_acquire(&operation, other.path(), MAIN)?;
         drop(unrelated);
-        drop(held);
+        release_quiesced(held);
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
         drop(held);
         operation.complete_cleanly();
@@ -347,6 +372,7 @@ mod tests {
 
     impl ChildPeer {
         fn spawn(directory: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+            let forks = fork_gate();
             let child = Command::new(std::env::current_exe()?)
                 .args([
                     "--exact",
@@ -358,6 +384,7 @@ mod tests {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()?;
+            drop(forks);
             let mut peer = Self {
                 child,
                 output: None,
@@ -459,8 +486,9 @@ mod tests {
         child.await_marker("INTERLOCK_REFUSED")?;
         child.command(b"retry\n")?;
         child.await_marker("INTERLOCK_RETRY_REFUSED")?;
-        drop(held);
+        release_quiesced(held);
         operation.complete_cleanly();
+        child.command(b"acquire\n")?;
         child.await_marker("INTERLOCK_ACQUIRED")?;
         child.finish(Duration::from_secs(10))?;
         assert!(fixture.lock_path()?.is_file());
@@ -489,7 +517,7 @@ mod tests {
                 Some(rustix::io::Errno::CHILD)
             );
         }
-        drop(held);
+        release_quiesced(held);
         operation.complete_cleanly();
         Ok(())
     }
@@ -516,25 +544,20 @@ mod tests {
             return Err("stalled fixture unexpectedly resumed".into());
         }
         assert_eq!(command, "retry\n");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let held = loop {
-            let attempt =
-                OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN);
-            match attempt {
-                Ok(held) => break held,
-                Err(error) => {
-                    if Instant::now() >= deadline {
-                        return Err(error.into());
-                    }
-                    std::io::stdout()
-                        .lock()
-                        .write_all(b"INTERLOCK_RETRY_REFUSED\n")?;
-                    // A concurrent spawn may still hold a fork-inherited lock
-                    // descriptor until exec. Only acquisition proves release.
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        refused(OwnerStoreFileInterlockV1::try_acquire(
+            &operation,
+            Path::new(&directory),
+            MAIN,
+        ));
+        std::io::stdout()
+            .lock()
+            .write_all(b"INTERLOCK_RETRY_REFUSED\n")?;
+        command.clear();
+        std::io::stdin().read_line(&mut command)?;
+        assert_eq!(command, "acquire\n");
+        // The parent released under `FORK_GATE`, so no fork of it retains the
+        // lock: the first attempt after release must succeed.
+        let held = OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN)?;
         std::io::stdout()
             .lock()
             .write_all(b"INTERLOCK_ACQUIRED\n")?;
