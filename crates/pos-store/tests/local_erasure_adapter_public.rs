@@ -61,15 +61,15 @@ fn address(bytes: &[u8]) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         .map(|object| object.reference())
 }
 
-fn limits() -> Result<ErasureRecoveryLimitsV1, ErasureErrorV1> {
+const fn limits() -> Result<ErasureRecoveryLimitsV1, ErasureErrorV1> {
     ErasureRecoveryLimitsV1::from_maximum_requests(16)
 }
 
-fn timeline_id(byte: u8) -> TimelineId {
+const fn timeline_id(byte: u8) -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([byte; 16]))
 }
 
-fn owner() -> pos_core::EntityId {
+const fn owner() -> pos_core::EntityId {
     pos_core::EntityId::from_ulid(Ulid::from_bytes([9; 16]))
 }
 
@@ -274,6 +274,12 @@ fn seed_pending_destruction(store: &mut impl LocalErasureStore) -> TestResult {
 
 fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
     seed_pending_destruction(store)?;
+    record_effects_commit_with_their_owner_result(store)?;
+    refused_effects_commit_nothing(store)?;
+    tombstone_effect_contract(store)
+}
+
+fn record_effects_commit_with_their_owner_result(store: &mut impl LocalErasureStore) -> TestResult {
     for (effect, tag, seed) in [
         (
             LocalOwnerEffectV1::ArtifactDisposition(record("ELAD1", 1)?),
@@ -346,9 +352,12 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
 
-    // A record effect under the wrong tag, or a non-ELO1 owner result,
-    // commits nothing.
+/// A record effect under the wrong tag, or a non-ELO1 owner result, commits
+/// nothing.
+fn refused_effects_commit_nothing(store: &mut impl LocalErasureStore) -> TestResult {
     let refused = record("ELO1", 100)?;
     assert_eq!(
         store.commit_local_owner_effect(
@@ -368,8 +377,11 @@ fn owner_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
         store.read_object(address(&refused)?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
-    // The tombstone and its ELO1 commit together.
+/// The tombstone and its ELO1 commit together.
+fn tombstone_effect_contract(store: &mut impl LocalErasureStore) -> TestResult {
     let tombstone = LocalOwnerEffectV1::KeyTombstone {
         request: Box::new(key_request()),
         deletion_receipt: deletion_receipt(&key_request()),

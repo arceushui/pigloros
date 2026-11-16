@@ -11228,6 +11228,23 @@ mod tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
+        assert_stale_generation_prepare_fails(
+            &view,
+            parent,
+            &current_inventory,
+            &resolving_authority,
+        );
+        Ok(())
+    }
+
+    /// Preparing an identified Fork against a stale generation fails the
+    /// topology transition with `StaleGeneration`.
+    fn assert_stale_generation_prepare_fails(
+        view: &dyn ErasureAuthorityReadViewV1,
+        parent: TimelineId,
+        current_inventory: &ErasureVerifiedInventoryV1,
+        authority: &UnusedCoordinatorAuthorityV1,
+    ) {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -11242,8 +11259,8 @@ mod tests {
                 name: "stale-generation",
                 current_generation: reference(254),
                 maximum_requests: 4,
-                current_inventory: &current_inventory,
-                authority: &resolving_authority,
+                current_inventory,
+                authority,
                 coordinator: reference(64),
             },
             child: &prepare_child,
@@ -11252,7 +11269,7 @@ mod tests {
         let gate = Arc::clone(&host.gate);
         let mut transition_failure = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            let result = host.prepare_identified_fork(&view, &prepare_input, permit);
+            let result = host.prepare_identified_fork(view, &prepare_input, permit);
             if let Err(error) = &result {
                 transition_failure = Some(*error);
             }
@@ -11263,7 +11280,6 @@ mod tests {
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(transition_failure, Some(ErasureErrorV1::StaleGeneration));
-        Ok(())
     }
 
     #[test]

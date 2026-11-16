@@ -17,10 +17,10 @@ use ulid::Ulid;
 fn the_view_reports_exactly_its_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    let owned = TimelineId::from_ulid(Ulid::from_bytes([2; 16]));
+    let owned_timeline = TimelineId::from_ulid(Ulid::from_bytes([2; 16]));
     let owner = EntityId::from_ulid(Ulid::from_bytes([9; 16]));
     store.create_timeline_with_meta(TimelineMeta {
-        id: owned,
+        id: owned_timeline,
         mode: TimelineMode::Live,
         name: Some("owned".to_owned()),
         owner: Some(owner),
@@ -40,11 +40,11 @@ fn the_view_reports_exactly_its_snapshot() -> Result<(), Box<dyn std::error::Err
     let view = host.authority_view()?;
     let read: &dyn ErasureAuthorityReadViewV1 = &view;
     assert_eq!(read.snapshot_generation(), generation);
-    assert_eq!(read.topology(), [owned].as_slice());
+    assert_eq!(read.topology(), [owned_timeline].as_slice());
     assert_eq!(
-        read.timeline_meta(owned),
+        read.timeline_meta(owned_timeline),
         Some(&ErasureAuthorityTimelineRowV1 {
-            id: owned,
+            id: owned_timeline,
             owner: Some(owner),
             fork_point: None,
         })
