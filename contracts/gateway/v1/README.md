@@ -73,8 +73,12 @@ Every operation has an `operationId` and an `x-pigloros-status`:
   composition-verified, never installed or qualified, and carry no reproducibility claim. Their
   public declaration is `execution-mode-profiles.json` (closed schema
   `execution-mode-profiles.schema.json`); `mode_profile_digest` is
-  BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes), and the checker
-  pins the golden digests the examples must name.
+  BLAKE3(UTF-8 `PiglorOS.GatewayModeProfile.v1` || 0x00 || canonical GMP1 bytes). The checker
+  pins each profile's rotation chain (ADR-135 §7.6): every revision's digest, oldest first, each
+  revision naming its predecessor as `previous_mode_profile_digest`. The examples under
+  `examples/` and the gateway-client-conformance fixtures name the head; a frozen example under
+  `compatibility/examples/` may name any revision of the chain, because rule 6 freezes its wire
+  validity, not what the current release serves.
 - `execution_profile` is EPF1-only (ADR-104): `state: installed` with an ADR-058 `profile_id` and
   its raw EPF1 `profile_digest`, or `state: unavailable` with `reason: not-installed`. Until #461
   installs an EPF1, every Gateway resource reports `unavailable`.
