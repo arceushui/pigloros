@@ -17,6 +17,21 @@ MAIN_RUN_REGISTRATION_LIMIT_SECONDS=600
 # without reaching the bootstrap decision.
 GH_API_ATTEMPTS=3
 GH_API_RETRY_DELAY_SECONDS=30
+# When the trusted base never gets its own baseline (its main run failed, was
+# cancelled or skipped, does not exist, or outlasted the wait bound), use the
+# baseline of the nearest first-parent main ancestor among this many commits
+# before it. Every main commit already passed the no-existing-function-grows
+# rule against its own base, so no function in this pull request can score
+# above its ancestor score unnoticed, and code main added after the ancestor
+# is charged to this pull request as new. The older baseline is weaker in one
+# way, accepted by the owner (2026-11-16) for the bounded walk: a function main
+# improved after the ancestor may regrow up to its ancestor score.
+# First-parent history is main's own history because main lands only squash
+# and merge-queue commits, so the trusted base is always on its mainline. The
+# walk adds at most this many sequential artifact queries after the wait
+# bound; the resolver step's timeout leaves room for them, and a step that
+# still runs out of time fails closed.
+ANCESTOR_BASELINE_WALK_LIMIT=30
 
 if [[ "${EVENT_NAME}" != "pull_request" ]]; then
   echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
@@ -45,15 +60,18 @@ gh_api() {
   exit 1
 }
 
-publish_baseline_if_available() {
-  local run_id='' candidate
+# Publishes the baseline of main commit $1 and exits when a non-expired
+# same-repository main artifact cargo-crap-baseline-$1 exists for exactly that
+# commit; returns otherwise. A non-empty $2 is printed as a notice first.
+publish_baseline_of() {
+  local sha="$1" run_id='' candidate
   gh_api --method GET --paginate \
     "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-    -f name="${BASELINE_ARTIFACT_NAME}" -f per_page=100 \
+    -f name="cargo-crap-baseline-${sha}" -f per_page=100 \
     --jq ".artifacts[] |
       select(.expired == false) |
       select(.workflow_run.head_branch == \"main\") |
-      select(.workflow_run.head_sha == \"${TRUSTED_BASE_SHA}\") |
+      select(.workflow_run.head_sha == \"${sha}\") |
       select(.workflow_run.head_repository_id == .workflow_run.repository_id) |
       .workflow_run.id"
   while IFS= read -r candidate; do
@@ -62,11 +80,16 @@ publish_baseline_if_available() {
     break
   done <<< "${GH_API_OUTPUT}"
   if [[ -n "${run_id}" ]]; then
+    [[ -z "${2:-}" ]] || echo "::notice::$2"
     echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
-    echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"
+    echo "baseline-sha=${sha}" >> "${GITHUB_OUTPUT}"
     echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
     exit 0
   fi
+}
+
+publish_baseline_if_available() {
+  publish_baseline_of "${TRUSTED_BASE_SHA}"
 }
 
 # Sets MAIN_RUN to "<id> <status> <conclusion>" for the same-repository main
@@ -92,6 +115,21 @@ read_main_run() {
     [[ -n "${completed}" ]] || completed="${id} ${status} ${conclusion}"
   done <<< "${GH_API_OUTPUT}"
   MAIN_RUN="${completed}"
+}
+
+# Publishes the baseline of the nearest of the ANCESTOR_BASELINE_WALK_LIMIT
+# first-parent ancestors of the trusted base that has one, and returns when
+# none has. A failed git call aborts the resolver (set -e) instead of being
+# read as "no ancestors".
+publish_ancestor_baseline() {
+  local ancestors ancestor
+  ancestors="$(git rev-list --first-parent --skip=1 \
+    --max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"
+  while IFS= read -r ancestor; do
+    [[ -n "${ancestor}" ]] || continue
+    publish_baseline_of "${ancestor}" \
+      "Using the cargo-crap baseline of main ancestor ${ancestor} because ${reason}"
+  done <<< "${ancestors}"
 }
 
 # Sets CRAP_JOB to the "<status> <conclusion>" lines for the cargo-crap job of
@@ -155,12 +193,16 @@ while true; do
   publish_baseline_if_available
 done
 
+publish_ancestor_baseline
+reason="${reason}, and none of its ${ANCESTOR_BASELINE_WALK_LIMIT} nearest first-parent main ancestors has a baseline"
+
 # If the trusted main artifact is missing (for example, after a failed main
 # run), bootstrap only when this PR cannot change Rust or Cargo policy inputs.
 # The generated baseline then describes the unchanged production Rust surface;
 # Rust-affecting PRs continue to fail closed rather than self-baselining.
 if git diff --quiet "${BASE_SHA}...HEAD" -- \
-  '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
+  '*.rs' '**/Cargo.toml' Cargo.toml '**/Cargo.lock' Cargo.lock \
+  rust-toolchain rust-toolchain.toml \
   .cargo/config.toml .cargo-crap.toml; then
   echo "::notice::Trusted main baseline unavailable: ${reason}; bootstrapping because this pull request changes no Rust or Cargo policy inputs"
   echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"

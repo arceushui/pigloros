@@ -1033,8 +1033,10 @@ jobs:
       - name: Reject repository cargo-crap configuration
         run: test ! -e .cargo-crap.toml
       # Polls up to 120 minutes while main's ci.yml run for the trusted base is
-      # still producing its cargo-crap baseline, then fails closed as before.
-      # The extra minutes cover the last poll and GitHub API retry backoff.
+      # still producing its cargo-crap baseline, then falls back to the nearest
+      # first-parent main ancestor's baseline (fetch-depth 0 above provides that
+      # history), then fails closed as before. The extra minutes cover the last
+      # poll, GitHub API retry backoff and the ancestor walk.
       - name: Resolve trusted cargo-crap baseline
         id: baseline
         timeout-minutes: 130

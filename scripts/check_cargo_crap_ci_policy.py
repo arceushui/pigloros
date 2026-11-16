@@ -319,7 +319,7 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must inspect repository artifacts directly",
         ),
         (
-            '-f name="${BASELINE_ARTIFACT_NAME}"',
+            '-f name="cargo-crap-baseline-${sha}"',
             "baseline resolver must request the exact baseline artifact",
         ),
         (
@@ -339,8 +339,8 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline resolver must name the trusted main artifact",
         ),
         (
-            'select(.workflow_run.head_sha == \\"${TRUSTED_BASE_SHA}\\")',
-            "baseline resolver must require the exact trusted main commit",
+            'select(.workflow_run.head_sha == \\"${sha}\\")',
+            "baseline resolver must require the exact main commit of the artifact",
         ),
         (
             "select(.workflow_run.head_repository_id == .workflow_run.repository_id)",
@@ -351,12 +351,34 @@ def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
             "baseline bootstrap must reject Rust or Cargo-policy changes",
         ),
         (
-            'echo "baseline-sha=${TRUSTED_BASE_SHA}" >> "${GITHUB_OUTPUT}"',
-            "baseline resolver must publish the trusted artifact commit",
+            'echo "baseline-sha=${sha}" >> "${GITHUB_OUTPUT}"',
+            "baseline resolver must publish the artifact commit",
+        ),
+        (
+            'publish_baseline_if_available() {\n  publish_baseline_of "${TRUSTED_BASE_SHA}"\n}\n',
+            "baseline resolver must look up the trusted main commit first",
+        ),
+        ("ANCESTOR_BASELINE_WALK_LIMIT=30\n", "ancestor baseline walk bound changed"),
+        (
+            'ancestors="$(git rev-list --first-parent --skip=1 \\\n'
+            '    --max-count="${ANCESTOR_BASELINE_WALK_LIMIT}" "${TRUSTED_BASE_SHA}")"',
+            "ancestor baseline fallback must walk a bounded first-parent main history",
+        ),
+        (
+            '    publish_baseline_of "${ancestor}" \\\n',
+            "ancestor baseline fallback must look up each ancestor's exact artifact",
+        ),
+        (
+            "  publish_baseline_if_available\ndone\n\npublish_ancestor_baseline\n",
+            "ancestor baseline fallback must run only after the wait for main's trusted-base run",
         ),
     )
     for fragment, message in required_fragments:
         require(fragment in resolver, message)
+    require(
+        resolver.count("publish_ancestor_baseline\n") == 1,
+        "ancestor baseline fallback must run exactly once, after the wait",
+    )
     require(
         resolver.count("gh api") == 1,
         "baseline resolver must issue every GitHub API call through its retry wrapper",
