@@ -217,7 +217,10 @@ fn quiet_run<S: ScheduledAdmissionStoreV1>(store: &mut S) -> QuietRun {
         id: timeline,
         ..TimelineMeta::root("root")
     }];
-    let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+    let host = LocalScheduledAdmissionHostV1::shared(
+        &pos_core::AuthorityTrustRootSealV1::for_composition_root(),
+    )
+    .test_ok();
     let mut registry = quiet_registry(gate);
     let reads = RefCell::default();
     let (mut bases, mut cursors) = (Vec::new(), Vec::new());
