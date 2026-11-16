@@ -61,12 +61,18 @@ pub(crate) fn require_absent_evaluator_endpoint(
 /// One authenticated pending SIR1, loaded only from the fixed installation
 /// root.
 ///
-/// Its fields are private, so no other module can build one:
+/// Its fields are private, so no other module can build one, even naming
+/// every field:
 ///
 /// ```compile_fail,E0451
 /// use pos_reference::selector::recovery::PendingRecoveryTarget;
 ///
-/// let _ = PendingRecoveryTarget { pending_update: Vec::new() };
+/// let _ = PendingRecoveryTarget {
+///     identity: todo!(),
+///     previous_installation_digest: [0; 32],
+///     selector_nonce: [0; 16],
+///     pending_update: Vec::new(),
+/// };
 /// ```
 ///
 /// It is not `Clone`:
@@ -161,7 +167,14 @@ impl PendingRecoveryTarget {
 /// ```compile_fail,E0451
 /// use pos_reference::selector::recovery::RecoveryTransactionIdentity;
 ///
-/// let _ = RecoveryTransactionIdentity { sir1_digest: [0; 32] };
+/// let _ = RecoveryTransactionIdentity {
+///     sir1_digest: [0; 32],
+///     previous_provider_binding_digest: [0; 32],
+///     previous_runtime_instance_id: [0; 16],
+///     previous_lifecycle_scope_id: [0; 16],
+///     previous_live_attempt_ids: Vec::new(),
+///     recovery_peer_slot: [[0; 16]; 3],
+/// };
 /// ```
 ///
 /// ```compile_fail,E0277
