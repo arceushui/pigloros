@@ -1400,6 +1400,11 @@ const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artif
          PRIMARY KEY (owner_id, operation_id),
          UNIQUE (owner_id, root_registration_address)
      );
+     CREATE TABLE IF NOT EXISTS artifact_registration_timelines (
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         registration_address BLOB NOT NULL CHECK (length(registration_address) = 32),
+         PRIMARY KEY (timeline_id, registration_address)
+     );
      CREATE TABLE IF NOT EXISTS adapter_recording_sessions (
          owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
          run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
@@ -5869,6 +5874,16 @@ impl EventStore for SqliteStore {
         )
     }
 
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
+            self, timeline, max,
+        )
+    }
+
     fn adapter_recording_open_session(
         &mut self,
         session: AdapterRecordingSessionV1,
@@ -7383,6 +7398,15 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
             for record in batch.records() {
                 inserted |= commit_sqlite_artifact_registration_record(&self.conn, record)?;
             }
+            if let Some(timeline) = batch.source_timeline() {
+                for record in batch.records() {
+                    inserted |= bind_sqlite_artifact_registration_timeline(
+                        &self.conn,
+                        timeline,
+                        record.registration_address(),
+                    )?;
+                }
+            }
             sqlite_commit_artifact_registration_operation(
                 &self.conn,
                 &owner_id,
@@ -7409,6 +7433,14 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
     ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
     {
         sqlite_read_artifact_registration(&self.conn, owner_id, registration_address)
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        sqlite_artifact_registrations_for_timeline(&self.conn, timeline, max)
     }
 }
 
@@ -9453,6 +9485,88 @@ fn commit_sqlite_artifact_registration_record(
     }
 }
 
+/// Bind one registration to its source Timeline; `true` when the binding is new.
+fn bind_sqlite_artifact_registration_timeline(
+    connection: &Connection,
+    timeline: TimelineId,
+    registration_address: Hash,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO artifact_registration_timelines
+             (timeline_id, registration_address) VALUES (?1, ?2)",
+            params![
+                timeline.inner().to_bytes().as_slice(),
+                registration_address.as_bytes().as_slice(),
+            ],
+        )
+        .map(|changed| changed != 0)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+}
+
+/// Every row bound to `timeline`, in registration-address order, streamed so
+/// the read stops one binding past `max`. Rows and bindings are append-only
+/// and committed together, so a binding without a consistent row is
+/// corruption, never a row to skip.
+fn sqlite_artifact_registrations_for_timeline(
+    connection: &Connection,
+    timeline: TimelineId,
+    max: usize,
+) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_artifact_registration_catalog_present(connection).and_then(|present| {
+        if !present {
+            return Ok(Vec::new());
+        }
+        connection
+            .prepare(
+                "SELECT registration_address FROM artifact_registration_timelines
+                 WHERE timeline_id = ?1 ORDER BY registration_address",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![timeline.inner().to_bytes().as_slice()], |row| {
+                        row.get::<_, Vec<u8>>(0)
+                    })
+                    .and_then(|rows| rows.take(max.saturating_add(1)).collect())
+            })
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+            .and_then(|addresses: Vec<Vec<u8>>| {
+                if addresses.len() > max {
+                    Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds)
+                } else {
+                    addresses
+                        .iter()
+                        .map(|bytes| sqlite_bound_artifact_registration(connection, bytes))
+                        .collect::<Result<Vec<_>, _>>()
+                }
+            })
+            .and_then(|rows| sqlite_validate_bound_closures(connection, rows))
+    })
+}
+
+fn sqlite_validate_bound_closures(
+    connection: &Connection,
+    rows: Vec<ArtifactRegistrationCatalogRowV1>,
+) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let bound: Vec<&ArtifactRegistrationCatalogRowV1> = rows.iter().collect();
+    let validated = crate::validate_bound_closures_once(&bound, |address| {
+        sqlite_validate_artifact_registration_closure_visiting(connection, address)
+    });
+    validated.map(|()| rows)
+}
+
+fn sqlite_bound_artifact_registration(
+    connection: &Connection,
+    address_bytes: &[u8],
+) -> Result<ArtifactRegistrationCatalogRowV1, ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_artifact_hash(address_bytes)
+        .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        .and_then(|address| {
+            sqlite_load_artifact_registration_by_address(connection, address)
+                .and_then(|row| row.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog))
+        })
+}
+
 fn sqlite_artifact_registration_table_exists(
     connection: &Connection,
 ) -> Result<bool, rusqlite::Error> {
@@ -9471,10 +9585,31 @@ pub(crate) fn sqlite_artifact_registration_schema_exists(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master
          WHERE type = 'table' AND name = 'artifact_registrations')
          AND EXISTS(SELECT 1 FROM sqlite_master
-         WHERE type = 'table' AND name = 'artifact_registration_operations')",
+         WHERE type = 'table' AND name = 'artifact_registration_operations')
+         AND EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registration_timelines')",
         [],
         |row| row.get(0),
     )
+}
+
+/// `false` when the catalog was never created, which reads as empty; a
+/// catalog with only part of its schema is corruption.
+fn sqlite_artifact_registration_catalog_present(
+    connection: &Connection,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if complete_schema {
+        Ok(true)
+    } else {
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    }
 }
 
 fn sqlite_read_artifact_registration(
@@ -9482,15 +9617,8 @@ fn sqlite_read_artifact_registration(
     owner_id: &OwnerIdV1,
     registration_address: Hash,
 ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
-    let table_exists = sqlite_artifact_registration_table_exists(connection)
-        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
-    if !table_exists {
+    if !sqlite_artifact_registration_catalog_present(connection)? {
         return Ok(None);
-    }
-    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
-        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
-    if !complete_schema {
-        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
     }
     let Some(row) = sqlite_load_artifact_registration_by_address(connection, registration_address)?
     else {
@@ -9577,6 +9705,14 @@ fn sqlite_validate_artifact_registration_closure(
     connection: &Connection,
     root: Hash,
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    sqlite_validate_artifact_registration_closure_visiting(connection, root).map(|_| ())
+}
+
+/// Validate the closure of `root` and return every address it visited.
+fn sqlite_validate_artifact_registration_closure_visiting(
+    connection: &Connection,
+    root: Hash,
+) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     let mut catalog_rows = Vec::new();
@@ -9615,9 +9751,7 @@ fn sqlite_validate_artifact_registration_closure(
     validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
     let root_row = sqlite_load_artifact_registration_by_address(connection, root)?
         .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-        && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-    {
+    if root_row.is_repro_manifest_root() {
         let root_record = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
             .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
         let stored_root = sqlite_artifact_registration_operation_root(
@@ -9631,7 +9765,7 @@ fn sqlite_validate_artifact_registration_closure(
         let transcript_bytes = find_sqlite_root_transcript_bytes(&catalog_rows, &root_record)?;
         sqlite_validate_root_adapter_recording(connection, &root_record, transcript_bytes)?;
     }
-    Ok(())
+    Ok(seen)
 }
 
 fn find_sqlite_root_transcript_bytes<'a>(
@@ -10065,6 +10199,14 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         max: usize,
     ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
         self.local_erasure_retained(tag, max)
+    }
+
+    fn recipient_export_publications(
+        &mut self,
+        timelines: &[TimelineId],
+        max: usize,
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        self.local_erasure_recipient_export_publications(timelines, max)
     }
 
     fn begin_protected_effect_interval(
@@ -28849,6 +28991,7 @@ pub(super) mod key_registry_coverage {
             let batch = prepare_artifact_registration_batch_v1(
                 owner_id,
                 root_address,
+                None,
                 inputs,
                 &StructuralOwnerVerifier,
             )?;

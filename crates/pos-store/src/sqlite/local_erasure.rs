@@ -1,16 +1,20 @@
 //! `SQLite` adapter for the single-host erasure authority (ADR-136 §2.5 and
 //! §4a): the authority snapshot, retained objects, owner effects, the
-//! write-once erasure store identity and the startup sweep.
+//! write-once erasure store identity, the startup sweep and the
+//! recipient-export publication read.
 //!
 //! The authority snapshot reads the erasure inventory, every Timeline's owner
 //! and Fork relation and the store identity in one read transaction. Every
 //! write is one `BEGIN IMMEDIATE` transaction (or a savepoint inside an outer
 //! one), so an error commits nothing.
 
+use std::collections::BTreeSet;
+
 use pos_core::{
     error::CoreError, store::EventStore, ErasureAuthoritySnapshotV1, ErasureAuthorityTimelineRowV1,
     ErasureErrorV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRetainedObjectV1, Hash,
-    KeyDestructionRequestV1, LocalOwnerEffectV1, PreparedLocalOwnerEffectV1, Seq,
+    KeyDestructionRequestV1, LocalOwnerEffectV1, OwnerIdV1, PreparedLocalOwnerEffectV1,
+    RecipientExportPublicationRowV1, Seq, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -154,6 +158,37 @@ impl SqliteStore {
             })
     }
 
+    /// Every visible recipient-export publication of the named Timelines,
+    /// sorted by `(timeline, export_id)`. Only `recipient_export_catalog_v1`
+    /// holds visible publications; a pending one is never read. A store that
+    /// never published has no catalog, which reads as empty.
+    pub(super) fn local_erasure_recipient_export_publications(
+        &self,
+        timelines: &[TimelineId],
+        max: usize,
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        let selected: BTreeSet<TimelineId> = timelines.iter().copied().collect();
+        recipient_export_catalog_present(&self.conn).and_then(|present| {
+            if !present {
+                return Ok(Vec::new());
+            }
+            selected
+                .into_iter()
+                .try_fold(Vec::new(), |mut publications, timeline| {
+                    timeline_publications(&self.conn, timeline, max.saturating_add(1)).and_then(
+                        |rows| {
+                            publications.extend(rows);
+                            if publications.len() > max {
+                                Err(ErasureErrorV1::ScopeInvalid)
+                            } else {
+                                Ok(publications)
+                            }
+                        },
+                    )
+                })
+        })
+    }
+
     /// Complete one pending key destruction inside the caller's transaction,
     /// exactly as the key-registry tombstone command does.
     fn complete_tombstone(
@@ -257,6 +292,66 @@ fn timeline_row(row: &TimelineSqlRowV1) -> Option<ErasureAuthorityTimelineRowV1>
             owner,
             fork_point,
         })
+}
+
+fn recipient_export_catalog_present(connection: &Connection) -> Result<bool, ErasureErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+             WHERE type = 'table' AND name = 'recipient_export_catalog_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(map_erasure_receipt_failure)
+}
+
+/// The first `limit` publications of one Timeline in `export_id` order.
+fn timeline_publications(
+    connection: &Connection,
+    timeline: TimelineId,
+    limit: usize,
+) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
+    let timeline_text = timeline.to_string();
+    connection
+        .prepare(
+            "SELECT export_id, owner_id FROM recipient_export_catalog_v1
+             WHERE timeline_id = ?1 ORDER BY export_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![timeline_text], |row| {
+                    row.get::<_, Vec<u8>>(0).and_then(|export_id| {
+                        row.get::<_, String>(1).map(|owner| (export_id, owner))
+                    })
+                })
+                .and_then(|rows| rows.take(limit).collect::<Result<Vec<_>, _>>())
+        })
+        .map_err(map_erasure_receipt_failure)
+        .and_then(|rows| {
+            rows.into_iter()
+                .map(|(export_id, owner)| publication_row(timeline, export_id, owner))
+                .collect()
+        })
+}
+
+/// Decode one catalog row; a malformed export identity or owner is
+/// [`ErasureErrorV1::ProvenanceMissing`].
+fn publication_row(
+    timeline: TimelineId,
+    export_id: Vec<u8>,
+    owner: String,
+) -> Result<RecipientExportPublicationRowV1, ErasureErrorV1> {
+    <[u8; 16]>::try_from(export_id)
+        .ok()
+        .zip(OwnerIdV1::new(owner).ok())
+        .map(
+            |(export_id, grantee_owner)| RecipientExportPublicationRowV1 {
+                export_id,
+                timeline,
+                grantee_owner,
+            },
+        )
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 fn read_store_identity(connection: &Connection) -> Result<Option<Hash>, ErasureErrorV1> {

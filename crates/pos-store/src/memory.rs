@@ -348,6 +348,9 @@ pub struct MemoryStore {
     artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
     /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
     artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Append-only `(source Timeline, registration address)` bindings
+    /// (ADR-136 §2.6), written with the registration batch that names them.
+    artifact_registration_timelines: BTreeSet<(TimelineId, Hash)>,
     /// Current local manifest-owner generation and complete owned Timeline set.
     manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
     /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
@@ -844,6 +847,7 @@ impl MemoryStore {
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
+            artifact_registration_timelines: BTreeSet::new(),
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
@@ -3970,6 +3974,16 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
     ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
         self.local_erasure_retained(tag, max)
     }
+
+    /// `MemoryStore` has no recipient-export publication path, so no
+    /// publication is ever visible.
+    fn recipient_export_publications(
+        &mut self,
+        _timelines: &[TimelineId],
+        _max: usize,
+    ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+        Ok(Vec::new())
+    }
 }
 
 impl ErasureForkPersistencePortV1 for MemoryStore {
@@ -5588,6 +5602,19 @@ impl EventStore for MemoryStore {
             self,
             owner_id,
             registration_address,
+        )
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<
+        Vec<pos_core::ArtifactRegistrationCatalogRowV1>,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::artifact_registrations_for_timeline(
+            self, timeline, max,
         )
     }
 
@@ -12343,6 +12370,15 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
             batch.root_registration_address(),
         )?;
 
+        let bindings: Vec<_> = batch
+            .source_timeline()
+            .into_iter()
+            .flat_map(|timeline| rows.iter().map(move |(address, _, _)| (timeline, *address)))
+            .collect();
+        let has_new_bindings = bindings
+            .iter()
+            .any(|binding| !self.artifact_registration_timelines.contains(binding));
+        self.artifact_registration_timelines.extend(bindings);
         for (address_key, identity_key, row) in rows {
             self.artifact_registrations
                 .entry(address_key)
@@ -12354,7 +12390,7 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         self.artifact_registration_operations
             .entry(operation_key)
             .or_insert(root_registration_address);
-        Ok(if has_new_rows {
+        Ok(if has_new_rows || has_new_bindings {
             ArtifactRegistrationCommitOutcomeV1::Applied
         } else {
             ArtifactRegistrationCommitOutcomeV1::ExactRetry
@@ -12388,6 +12424,33 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         }
         self.validate_artifact_registration_closure(registration_address)?;
         Ok(Some(row.clone()))
+    }
+
+    fn artifact_registrations_for_timeline(
+        &self,
+        timeline: TimelineId,
+        max: usize,
+    ) -> Result<Vec<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+        // The result is selected from the catalog rows themselves, so a
+        // binding can never name a missing row. The scan is linear in the
+        // catalog, which is acceptable for this in-process adapter.
+        let rows: Vec<&ArtifactRegistrationCatalogRowV1> = self
+            .artifact_registrations
+            .iter()
+            .filter_map(|(address, row)| {
+                self.artifact_registration_timelines
+                    .contains(&(timeline, *address))
+                    .then_some(row)
+            })
+            .take(max.saturating_add(1))
+            .collect();
+        if rows.len() > max {
+            return Err(ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds);
+        }
+        crate::validate_bound_closures_once(&rows, |address| {
+            self.validate_artifact_registration_closure_visiting(address)
+        })
+        .map(|()| rows.into_iter().cloned().collect())
     }
 }
 
@@ -13767,6 +13830,15 @@ impl MemoryStore {
         &self,
         root: Hash,
     ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        self.validate_artifact_registration_closure_visiting(root)
+            .map(|_| ())
+    }
+
+    /// Validate the closure of `root` and return every address it visited.
+    fn validate_artifact_registration_closure_visiting(
+        &self,
+        root: Hash,
+    ) -> Result<BTreeSet<Hash>, ArtifactRegistrationPersistenceErrorV1> {
         let mut pending = vec![root];
         let mut seen = BTreeSet::new();
         let mut catalog_rows = Vec::new();
@@ -13798,9 +13870,7 @@ impl MemoryStore {
             .artifact_registrations
             .get(&root)
             .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-        if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
-            && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
-        {
+        if root_row.is_repro_manifest_root() {
             let root_record =
                 ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
                     .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
@@ -13815,7 +13885,7 @@ impl MemoryStore {
                 find_memory_root_transcript_bytes(catalog_rows.iter(), &root_record)?;
             self.validate_root_adapter_recording(&root_record, transcript_bytes)?;
         }
-        Ok(())
+        Ok(seen)
     }
 }
 
@@ -15162,6 +15232,7 @@ mod coverage_entrypoints {
         let batch = prepare_artifact_registration_batch_v1(
             owner_id,
             root_address,
+            None,
             inputs,
             &MemoryCatalogOwnerVerifier,
         )?;

@@ -14,9 +14,9 @@ use pos_core::{
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
     PreparedArtifactRegistrationBatchV1, ReproManifestRootInputV1,
-    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
-    WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
-    MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, TimelineId,
+    WorldRecordingReceiptInputV1, WorldRecordingReceiptV1, WorldReplayHandleInputV1,
+    WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 use pos_store::{
     memory::MemoryStore, open_store, ArtifactRegistrationCommitOutcomeV1,
@@ -26,7 +26,13 @@ use ulid::Ulid;
 
 // This fixture isolates the store's transactional port. Its synthetic WCR1
 // registration is not Wave 8 owner-verification evidence.
-struct TestOnlyStructuralOwnerVerifier;
+struct TestOnlyStructuralOwnerVerifier {
+    recording_data_class: ArtifactDataClassV1,
+}
+
+const STRUCTURAL_OWNER: TestOnlyStructuralOwnerVerifier = TestOnlyStructuralOwnerVerifier {
+    recording_data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+};
 
 impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
     fn derive_native_registration(
@@ -47,7 +53,7 @@ impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
                 artifact_bytes,
             ),
             owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            data_class: self.recording_data_class,
             optionality: pos_core::ArtifactOptionalityV1::Required,
             transition_rule: ArtifactTransitionRuleV1::PreserveExact,
             required_key_roles: Vec::new(),
@@ -75,17 +81,50 @@ impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
     }
 }
 
-fn prepared_repro_manifest() -> Result<
-    (
-        OwnerIdV1,
-        Hash,
-        pos_core::PreparedArtifactRegistrationBatchV1,
-    ),
-    Box<dyn std::error::Error>,
-> {
+type PreparedReproManifest = (
+    OwnerIdV1,
+    Hash,
+    pos_core::PreparedArtifactRegistrationBatchV1,
+);
+
+fn prepared_repro_manifest() -> Result<PreparedReproManifest, Box<dyn std::error::Error>> {
+    prepared_repro_manifest_for(0x51, timeline(2), None, &STRUCTURAL_OWNER)
+}
+
+/// One complete MRM1 closure for run operation `[seed; 32]` recorded from
+/// the World run of `world_timeline`. Closures of different seeds share only
+/// their MAA1 admission row.
+fn prepared_repro_manifest_for(
+    seed: u8,
+    world_timeline: TimelineId,
+    source_timeline: Option<TimelineId>,
+    verifier: &TestOnlyStructuralOwnerVerifier,
+) -> Result<PreparedReproManifest, Box<dyn std::error::Error>> {
+    prepare_repro_manifest_inputs(seed, world_timeline, verifier).and_then(
+        |(owner_id, root_address, inputs)| {
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs,
+                verifier,
+            )
+            .map(|batch| (owner_id, root_address, batch))
+            .map_err(Into::into)
+        },
+    )
+}
+
+type ReproManifestInputs = (OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>);
+
+fn prepare_repro_manifest_inputs(
+    seed: u8,
+    world_timeline: TimelineId,
+    verifier: &TestOnlyStructuralOwnerVerifier,
+) -> Result<ReproManifestInputs, Box<dyn std::error::Error>> {
     let owner_id = OwnerIdV1::from_static("wave8-store-owner");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
-    let operation_id = Hash::from_bytes([0x51; 32]);
+    let operation_id = Hash::from_bytes([seed; 32]);
     let commit_receipt_digest = Hash::from_bytes([0x52; 32]);
     let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
         binding_hash: Hash::from_bytes([0x53; 32]),
@@ -95,7 +134,7 @@ fn prepared_repro_manifest() -> Result<
     })?;
     let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
         owner_reference,
-        timeline_id: pos_core::TimelineId::from_ulid(Ulid::from(2_u128)),
+        timeline_id: world_timeline,
         cut_id: 2,
         commit_receipt_digest,
         recording_receipt_digest: recording.digest(),
@@ -134,7 +173,7 @@ fn prepared_repro_manifest() -> Result<
         &admission_bytes,
         &admission_registration,
     )?;
-    let recording_registration = TestOnlyStructuralOwnerVerifier.derive_native_registration(
+    let recording_registration = verifier.derive_native_registration(
         &owner_id,
         ErasureArtifactClassV1::TimelineReplay,
         &recording_bytes,
@@ -167,13 +206,7 @@ fn prepared_repro_manifest() -> Result<
         },
     )
     .collect();
-    let batch = prepare_artifact_registration_batch_v1(
-        owner_id,
-        root_address,
-        inputs,
-        &TestOnlyStructuralOwnerVerifier,
-    )?;
-    Ok((owner_id, root_address, batch))
+    Ok((owner_id, root_address, inputs))
 }
 
 fn close_repro_manifest_recording<R: AdapterRecordingStoreV1 + ?Sized>(
@@ -717,8 +750,9 @@ fn memory_catalog_rejects_a_second_root_for_the_same_operation_atomically(
     let alternate = prepare_artifact_registration_batch_v1(
         owner_id,
         alternate_root,
+        None,
         alternate_inputs,
-        &TestOnlyStructuralOwnerVerifier,
+        &STRUCTURAL_OWNER,
     )?;
     assert_eq!(
         store.commit_artifact_registration_batch(alternate),
@@ -836,8 +870,9 @@ fn sqlite_catalog_rejects_a_second_root_for_the_same_operation_atomically(
     let alternate = prepare_artifact_registration_batch_v1(
         owner_id,
         alternate_root,
+        None,
         alternate_inputs,
-        &TestOnlyStructuralOwnerVerifier,
+        &STRUCTURAL_OWNER,
     )?;
     assert_eq!(
         store.commit_artifact_registration_batch(alternate),
@@ -1399,6 +1434,505 @@ fn sqlite_adapter_recording_rejects_durable_bounds() -> Result<(), Box<dyn std::
     assert_eq!(
         store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new()),
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    Ok(())
+}
+
+const PRIVATE_OWNER: TestOnlyStructuralOwnerVerifier = TestOnlyStructuralOwnerVerifier {
+    recording_data_class: ArtifactDataClassV1::PrivateSubjectData,
+};
+
+const CONSENTED_OWNER: TestOnlyStructuralOwnerVerifier = TestOnlyStructuralOwnerVerifier {
+    recording_data_class: ArtifactDataClassV1::ConsentedSharedData,
+};
+
+const fn timeline(value: u128) -> TimelineId {
+    TimelineId::from_ulid(Ulid(value))
+}
+
+fn bound_batch(
+    seed: u8,
+    source_timeline: TimelineId,
+    verifier: &TestOnlyStructuralOwnerVerifier,
+) -> Result<PreparedArtifactRegistrationBatchV1, Box<dyn std::error::Error>> {
+    prepared_repro_manifest_for(seed, source_timeline, Some(source_timeline), verifier)
+        .map(|(_, _, batch)| batch)
+}
+
+/// Every registration address of `batches`, deduplicated and sorted.
+fn sorted_addresses(batches: &[&PreparedArtifactRegistrationBatchV1]) -> Vec<Hash> {
+    let addresses: std::collections::BTreeSet<Hash> = batches
+        .iter()
+        .flat_map(|batch| batch.records().iter())
+        .map(pos_core::PreparedArtifactRegistrationRecordV1::registration_address)
+        .collect();
+    addresses.into_iter().collect()
+}
+
+fn row_addresses(rows: &[ArtifactRegistrationCatalogRowV1]) -> Vec<Hash> {
+    rows.iter()
+        .map(ArtifactRegistrationCatalogRowV1::registration_address)
+        .collect()
+}
+
+#[test]
+fn destruction_eligible_registrations_require_a_source_timeline(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for verifier in [&PRIVATE_OWNER, &CONSENTED_OWNER] {
+        let (owner_id, root_address, inputs) =
+            prepare_repro_manifest_inputs(0x51, timeline(2), verifier)?;
+        assert_eq!(
+            prepare_artifact_registration_batch_v1(owner_id, root_address, None, inputs, verifier)
+                .err(),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::SourceTimelineRequired)
+        );
+        assert_eq!(
+            bound_batch(0x51, timeline(2), verifier)?.source_timeline(),
+            Some(timeline(2))
+        );
+    }
+    for recording_data_class in [
+        ArtifactDataClassV1::PublicRecord,
+        ArtifactDataClassV1::AggregateData,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+    ] {
+        let verifier = TestOnlyStructuralOwnerVerifier {
+            recording_data_class,
+        };
+        let (_, _, unbound) = prepared_repro_manifest_for(0x51, timeline(2), None, &verifier)?;
+        assert_eq!(unbound.source_timeline(), None);
+        assert_eq!(
+            bound_batch(0x51, timeline(2), &verifier)?.source_timeline(),
+            Some(timeline(2))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn graph_errors_take_precedence_over_a_missing_source_timeline(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root_address, mut inputs) =
+        prepare_repro_manifest_inputs(0x51, timeline(2), &PRIVATE_OWNER)?;
+    // A second WCR1 outside the root closure makes the graph invalid.
+    let (_, _, other) = prepare_repro_manifest_inputs(0x61, timeline(2), &PRIVATE_OWNER)?;
+    inputs.push(other[2].clone());
+    // A missing or mismatched source Timeline never hides the graph error.
+    for source_timeline in [None, Some(timeline(2)), Some(timeline(9))] {
+        assert_eq!(
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs.clone(),
+                &PRIVATE_OWNER,
+            )
+            .err(),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+        );
+    }
+    Ok(())
+}
+
+/// Derives like the private-data owner but rejects every committed artifact.
+struct RejectingPrivateOwner;
+
+impl ArtifactRegistrationOwnerVerifierV1 for RejectingPrivateOwner {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        PRIVATE_OWNER.derive_native_registration(owner_id, artifact_class, artifact_bytes)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+}
+
+#[test]
+fn owner_rejection_takes_precedence_over_the_source_timeline(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root_address, inputs) =
+        prepare_repro_manifest_inputs(0x51, timeline(2), &PRIVATE_OWNER)?;
+    for source_timeline in [None, Some(timeline(9))] {
+        assert_eq!(
+            prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                source_timeline,
+                inputs.clone(),
+                &RejectingPrivateOwner,
+            )
+            .err(),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+        );
+    }
+    Ok(())
+}
+
+/// Commit two closures from Timeline 2 and one from Timeline 3, then read
+/// each Timeline at, and one below, its exact row count.
+fn timeline_binding_contract<S>(
+    store: &mut S,
+) -> Result<Vec<Vec<ArtifactRegistrationCatalogRowV1>>, Box<dyn std::error::Error>>
+where
+    S: ArtifactRegistrationPersistencePortV1 + AdapterRecordingStoreV1,
+{
+    let first = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+    let second = bound_batch(0x61, timeline(2), &CONSENTED_OWNER)?;
+    let other = bound_batch(0x71, timeline(3), &PRIVATE_OWNER)?;
+    let unbound = prepared_repro_manifest_for(0x81, timeline(4), None, &STRUCTURAL_OWNER)?.2;
+    for batch in [&first, &second, &other, &unbound] {
+        close_repro_manifest_recording(store, batch)?;
+        assert_eq!(
+            store.commit_artifact_registration_batch(batch.clone())?,
+            ArtifactRegistrationCommitOutcomeV1::Applied
+        );
+    }
+
+    // Seeds 0x51 and 0x61 share their MAA1 row, so Timeline 2 binds seven.
+    let expected = sorted_addresses(&[&first, &second]);
+    assert_eq!(expected.len(), 7);
+    let bound = store.artifact_registrations_for_timeline(timeline(2), 7)?;
+    assert_eq!(row_addresses(&bound), expected);
+    assert_eq!(
+        store.artifact_registrations_for_timeline(timeline(2), 6),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds)
+    );
+    let other_rows = store.artifact_registrations_for_timeline(timeline(3), 4)?;
+    assert_eq!(row_addresses(&other_rows), sorted_addresses(&[&other]));
+    assert!(row_addresses(&other_rows)
+        .iter()
+        .any(|address| expected.contains(address)));
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(9), 0)?
+        .is_empty());
+
+    // An exact retry binds nothing new. The unbound closure bound nothing;
+    // committing it again with its World run's Timeline adds only those
+    // bindings, which is `Applied`.
+    assert_eq!(
+        store.commit_artifact_registration_batch(first.clone())?,
+        ArtifactRegistrationCommitOutcomeV1::ExactRetry
+    );
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(4), 4)?
+        .is_empty());
+    assert_eq!(
+        store.commit_artifact_registration_batch(bound_batch(
+            0x81,
+            timeline(4),
+            &STRUCTURAL_OWNER
+        )?)?,
+        ArtifactRegistrationCommitOutcomeV1::Applied
+    );
+    let rebound = store.artifact_registrations_for_timeline(timeline(4), 4)?;
+    assert_eq!(row_addresses(&rebound), sorted_addresses(&[&unbound]));
+    assert_eq!(
+        store.artifact_registrations_for_timeline(timeline(2), 7)?,
+        bound
+    );
+    Ok(vec![bound, other_rows, rebound])
+}
+
+/// A batch whose registration fails writes no Timeline binding, and a
+/// closure whose source Timeline is not its World run's is refused before it
+/// can reach the store.
+fn failed_registration_writes_no_binding<S>(store: &mut S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: ArtifactRegistrationPersistencePortV1,
+{
+    for verifier in [&PRIVATE_OWNER, &STRUCTURAL_OWNER] {
+        assert_eq!(
+            prepared_repro_manifest_for(0xa1, timeline(2), Some(timeline(6)), verifier)
+                .err()
+                .and_then(|error| {
+                    error
+                        .downcast_ref::<pos_core::ArtifactRegistrationPreparationErrorV1>()
+                        .copied()
+                }),
+            Some(pos_core::ArtifactRegistrationPreparationErrorV1::SourceTimelineMismatch)
+        );
+    }
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(6), 4)?
+        .is_empty());
+    let batch = bound_batch(0x91, timeline(5), &PRIVATE_OWNER)?;
+    assert_eq!(
+        store.commit_artifact_registration_batch(batch),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert!(store
+        .artifact_registrations_for_timeline(timeline(5), 4)?
+        .is_empty());
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn timeline_bindings_have_memory_and_sqlite_parity() -> Result<(), Box<dyn std::error::Error>> {
+    let mut memory = MemoryStore::new();
+    let mut sqlite = pos_store::sqlite::SqliteStore::open_in_memory()?;
+    assert_eq!(
+        timeline_binding_contract(&mut memory)?,
+        timeline_binding_contract(&mut sqlite)?
+    );
+    failed_registration_writes_no_binding(&mut memory)?;
+    failed_registration_writes_no_binding(&mut sqlite)?;
+    assert_eq!(
+        pos_core::store::EventStore::artifact_registrations_for_timeline(&memory, timeline(3), 4)?,
+        pos_core::store::EventStore::artifact_registrations_for_timeline(&sqlite, timeline(3), 4)?
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn binding_count(path: &str) -> Result<i64, Box<dyn std::error::Error>> {
+    let connection = rusqlite::Connection::open(path)?;
+    let count = connection.query_row(
+        "SELECT (SELECT COUNT(*) FROM artifact_registration_timelines)
+              + (SELECT COUNT(*) FROM artifact_registrations)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rolls_back_timeline_bindings_with_a_failed_registration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for trigger in [
+        "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_operations
+         BEGIN SELECT RAISE(ABORT, 'injected operation failure'); END",
+        "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_timelines
+         BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END",
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+        let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+        rusqlite::Connection::open(path)?.execute_batch(trigger)?;
+        let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+        close_repro_manifest_recording(&mut store, &batch)?;
+        assert_eq!(
+            store.commit_artifact_registration_batch(batch),
+            Err(pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
+        assert_eq!(binding_count(path)?, 0);
+        assert!(store
+            .artifact_registrations_for_timeline(timeline(2), 4)?
+            .is_empty());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_bindings_survive_reopen() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let batch = bound_batch(0x51, timeline(2), &CONSENTED_OWNER)?;
+    let expected = sorted_addresses(&[&batch]);
+    let mut writer = pos_store::sqlite::SqliteStore::open(path)?;
+    close_repro_manifest_recording(&mut writer, &batch)?;
+    writer.commit_artifact_registration_batch(batch)?;
+    drop(writer);
+
+    let reopened = pos_store::sqlite::SqliteStore::open(path)?;
+    let rows = reopened.artifact_registrations_for_timeline(timeline(2), 4)?;
+    assert_eq!(row_addresses(&rows), expected);
+    assert_eq!(
+        pos_core::store::EventStore::artifact_registrations_for_timeline(&reopened, timeline(2), 3),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn committed_bound_sqlite_store(
+) -> Result<(tempfile::NamedTempFile, String, Hash), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (_, root_address, batch) =
+        prepared_repro_manifest_for(0x51, timeline(2), Some(timeline(2)), &PRIVATE_OWNER)?;
+    let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    close_repro_manifest_recording(&mut store, &batch)?;
+    store.commit_artifact_registration_batch(batch)?;
+    Ok((database, path, root_address))
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_fail_closed_for_corrupt_bindings() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut timeline_hex = String::with_capacity(32);
+    for byte in timeline(2).inner().to_bytes() {
+        write!(&mut timeline_hex, "{byte:02x}")?;
+    }
+    for (template, expected) in [
+        (
+            "DELETE FROM artifact_registrations WHERE registration_address = X'{root}'",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog,
+        ),
+        (
+            "DELETE FROM artifact_registration_operations
+             WHERE root_registration_address = X'{root}'",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog,
+        ),
+        (
+            "INSERT INTO artifact_registration_timelines VALUES (X'{timeline}', X'00')",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog,
+        ),
+        (
+            "INSERT INTO artifact_registration_timelines
+             VALUES (X'{timeline}', '0123456789abcdef0123456789abcdef')",
+            pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+        ),
+    ] {
+        let (_database, path, root_address) = committed_bound_sqlite_store()?;
+        let mut root_hex = String::with_capacity(64);
+        for byte in root_address.as_bytes() {
+            write!(&mut root_hex, "{byte:02x}")?;
+        }
+        let sql = template
+            .replace("{root}", &root_hex)
+            .replace("{timeline}", &timeline_hex);
+        rusqlite::Connection::open(&path)?
+            .execute_batch(&format!("PRAGMA ignore_check_constraints = ON; {sql};"))?;
+        let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+        assert_eq!(
+            reopened.artifact_registrations_for_timeline(timeline(2), 8),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_require_the_complete_catalog_schema(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (sql, expected) in [
+        (
+            "DROP TABLE artifact_registration_timelines",
+            Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+        ),
+        (
+            "DROP TABLE artifact_registration_timelines;
+             CREATE TABLE artifact_registration_timelines (unrelated BLOB)",
+            Err(pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure),
+        ),
+        (
+            "DROP TABLE artifact_registration_timelines;
+             DROP TABLE artifact_registration_operations;
+             DROP TABLE artifact_registrations",
+            Ok(Vec::new()),
+        ),
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+        let store = pos_store::sqlite::SqliteStore::open(path)?;
+        rusqlite::Connection::open(path)?.execute_batch(sql)?;
+        assert_eq!(
+            store.artifact_registrations_for_timeline(timeline(2), 4),
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_refuse_a_row_rewritten_with_a_forged_child_edge(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // A rewritten ARD1 row no longer hashes to its stored address.
+    let (_database, path, root_address) = committed_bound_sqlite_store()?;
+    let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+    let root = batch
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == root_address)
+        .ok_or("root record is missing")?;
+    let recording = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_class() == ErasureArtifactClassV1::TimelineReplay)
+        .ok_or("WCR1 record is missing")?;
+    let mut fields = recording.registration().fields().clone();
+    fields.child_artifacts = vec![pos_core::ArtifactChildEdgeV1 {
+        artifact_class: root.artifact_class(),
+        artifact_digest: root.artifact_digest(),
+        registration_address: root_address,
+        required: true,
+    }];
+    let cyclic = ArtifactRegistrationV1::new(fields)?;
+    rusqlite::Connection::open(&path)?.execute(
+        "UPDATE artifact_registrations SET registration_cbor = ?1
+         WHERE registration_address = ?2",
+        rusqlite::params![
+            cyclic.canonical_cbor(),
+            recording.registration_address().as_bytes().as_slice(),
+        ],
+    )?;
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.artifact_registrations_for_timeline(timeline(2), 8),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_timeline_reads_validate_bound_rows_outside_any_bound_root(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // With the root and MAA1 unbound and the MAA1 row gone, the bound MAT1 is
+    // in no bound root's closure; its own walk must find the missing child.
+    let (_database, path, root_address) = committed_bound_sqlite_store()?;
+    let batch = bound_batch(0x51, timeline(2), &PRIVATE_OWNER)?;
+    let admission = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_bytes().get(2..6) == Some(b"MAA1"))
+        .ok_or("MAA1 record is missing")?
+        .registration_address();
+    let connection = rusqlite::Connection::open(&path)?;
+    for address in [root_address, admission] {
+        connection.execute(
+            "DELETE FROM artifact_registration_timelines WHERE registration_address = ?1",
+            [address.as_bytes().as_slice()],
+        )?;
+    }
+    connection.execute(
+        "DELETE FROM artifact_registrations WHERE registration_address = ?1",
+        [admission.as_bytes().as_slice()],
+    )?;
+    drop(connection);
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.artifact_registrations_for_timeline(timeline(2), 8),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
     );
     Ok(())
 }

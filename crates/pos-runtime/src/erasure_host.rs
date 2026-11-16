@@ -6922,6 +6922,14 @@ mod tests {
             self.inner.retained_erasure_objects(tag, max)
         }
 
+        fn recipient_export_publications(
+            &mut self,
+            timelines: &[TimelineId],
+            max: usize,
+        ) -> Result<Vec<pos_core::RecipientExportPublicationRowV1>, ErasureErrorV1> {
+            self.inner.recipient_export_publications(timelines, max)
+        }
+
         fn begin_protected_effect_interval(
             &self,
         ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {

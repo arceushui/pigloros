@@ -2875,6 +2875,35 @@ pub trait ErasureInventoryPersistencePortV1 {
         tag: &str,
         max: usize,
     ) -> Result<Vec<Vec<u8>>, ErasureErrorV1>;
+
+    /// Read every visible recipient-export publication whose source Timeline
+    /// is in `timelines`, sorted by `(timeline, export_id)` (ADR-136 §2.6).
+    ///
+    /// A pending publication is not visible and is never returned. An adapter
+    /// with no recipient-export publication path returns an empty list.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when more than `max`
+    /// publications match, never a truncated list,
+    /// [`ErasureErrorV1::ProvenanceMissing`] for a malformed catalog row, or a
+    /// closed persistence error.
+    fn recipient_export_publications(
+        &mut self,
+        timelines: &[TimelineId],
+        max: usize,
+    ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1>;
+}
+
+/// One visible recipient-export publication: its export identity, its source
+/// Timeline and the single grantee owner it was encrypted for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecipientExportPublicationRowV1 {
+    /// The 16-byte export identity.
+    pub export_id: [u8; 16],
+    /// The Timeline the export was published from.
+    pub timeline: TimelineId,
+    /// The recipient owner of the grantee the export was encrypted for.
+    pub grantee_owner: crate::OwnerIdV1,
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.
@@ -7682,6 +7711,14 @@ mod coverage_paths {
             _tag: &str,
             _max: usize,
         ) -> Result<Vec<Vec<u8>>, ErasureErrorV1> {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+
+        fn recipient_export_publications(
+            &mut self,
+            _timelines: &[TimelineId],
+            _max: usize,
+        ) -> Result<Vec<RecipientExportPublicationRowV1>, ErasureErrorV1> {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
     }

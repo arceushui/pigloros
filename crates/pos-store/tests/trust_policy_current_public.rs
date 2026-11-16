@@ -6,7 +6,8 @@
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::TrustPolicySnapshotV1;
 use pos_store::trust_policy_registry::{
-    DeploymentTrustPolicyRegistryV1, OperatorReleaseTrustV1, TrustPolicyRegistryErrorV1,
+    tps1_signed_by_operator_v1, DeploymentTrustPolicyRegistryV1, OperatorReleaseTrustV1,
+    TrustPolicyRegistryErrorV1,
 };
 use std::path::Path;
 
@@ -117,6 +118,25 @@ fn current_trust_policy_refuses_a_signed_expiry_that_is_not_a_utc_time() -> Test
         registry.current_trust_policy().err(),
         Some(TrustPolicyRegistryErrorV1::CorruptState)
     );
+    Ok(())
+}
+
+#[test]
+fn retained_tps1_is_checked_against_the_pinned_operator_key() -> TestResult {
+    let genesis = signed(genesis_snapshot("9999-12-31T23:59:59Z")?)?;
+    let operator_key = operator().verifying_key().to_bytes();
+    assert!(tps1_signed_by_operator_v1(&genesis, &operator_key));
+    // Another operator key, a forged signature or bytes that are not a
+    // canonical TPS1 are refused.
+    let other_key = SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes();
+    assert!(!tps1_signed_by_operator_v1(&genesis, &other_key));
+    let mut forged = TrustPolicySnapshotV1::from_canonical_cbor(&genesis)?;
+    forged.operator_signature = [7; 64];
+    assert!(!tps1_signed_by_operator_v1(
+        &forged.to_canonical_cbor()?,
+        &operator_key
+    ));
+    assert!(!tps1_signed_by_operator_v1(b"not a TPS1", &operator_key));
     Ok(())
 }
 
