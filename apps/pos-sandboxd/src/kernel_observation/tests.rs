@@ -121,7 +121,8 @@ fn a_requested_work_mount_is_observed_and_held_for_after_exit() -> TestResult {
     assert_eq!(usage.available_bytes() % block, 0);
     assert!(usage.available_bytes() >= block);
     // The release outcome keeps this handle for the terminal reading.
-    let outcome = crate::ReleaseOutcome::new(None, Some(observed), None);
+    let evidence = observed.observation().fixture_evidence()?;
+    let outcome = crate::ReleaseOutcome::new(None, Some((observed, evidence)), None);
     assert!(outcome.work().is_some());
     Ok(())
 }

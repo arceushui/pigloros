@@ -103,6 +103,7 @@ pub(crate) enum SelectorProviderTerminal<'a> {
         receipt: Option<&'a [u8]>,
         audit_records: &'a [Vec<u8>],
         output: Option<&'a [u8]>,
+        negative_probe: [u8; 32],
     },
     StagedResult {
         result: &'a [u8],
@@ -110,6 +111,9 @@ pub(crate) enum SelectorProviderTerminal<'a> {
         receipt: Option<&'a [u8]>,
         audit_records: &'a [Vec<u8>],
         output: Option<&'a PayloadDescriptor>,
+        /// The admitted HCP1's negative-probe evidence (ordinal 7), which
+        /// SPR1 ordinal 21 must copy (ADR-069 R9 §4.5).
+        negative_probe: [u8; 32],
     },
     Error {
         error: &'a [u8],
@@ -407,6 +411,7 @@ fn encode_terminal<'a>(
             receipt,
             audit_records,
             output,
+            negative_probe,
         } => encode_result_terminal(
             request,
             execute_request,
@@ -415,6 +420,7 @@ fn encode_terminal<'a>(
             receipt,
             audit_records,
             output.map(SelectorOutput::Bytes),
+            negative_probe,
         ),
         SelectorProviderTerminal::StagedResult {
             result,
@@ -422,6 +428,7 @@ fn encode_terminal<'a>(
             receipt,
             audit_records,
             output,
+            negative_probe,
         } => encode_result_terminal(
             request,
             execute_request,
@@ -430,6 +437,7 @@ fn encode_terminal<'a>(
             receipt,
             audit_records,
             output.map(SelectorOutput::Staged),
+            negative_probe,
         ),
     }
 }
@@ -442,6 +450,7 @@ fn encode_result_terminal<'a>(
     receipt_bytes: Option<&'a [u8]>,
     audit_records: &'a [Vec<u8>],
     output: Option<SelectorOutput<'a>>,
+    negative_probe: [u8; 32],
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let result =
         SandboxProviderResult::from_canonical_cbor(result_bytes).map_err(protocol_failure)?;
@@ -459,6 +468,7 @@ fn encode_result_terminal<'a>(
             receipt_bytes,
             audit_records,
             output,
+            negative_probe,
         ),
         SandboxTerminalOutcome::UnavailableBeforeAdmission | SandboxTerminalOutcome::Rejected => {
             if grant_bytes.is_some()
@@ -489,6 +499,7 @@ fn encode_admitted_result<'a>(
     receipt_bytes: Option<&'a [u8]>,
     audit_records: &'a [Vec<u8>],
     output: Option<SelectorOutput<'a>>,
+    negative_probe: [u8; 32],
 ) -> Result<EncodedTerminal<'a>, AdapterError> {
     let output_kind = admitted_output_kind(result.outcome)?;
     let grant_bytes = grant_bytes.ok_or(AdapterError::ProtocolFailure)?;
@@ -501,7 +512,14 @@ fn encode_admitted_result<'a>(
         .cloned()
         .map(Value::Bytes)
         .collect::<Vec<_>>();
-    validate_encoded_evidence(execute_request, &audit_values, result, &grant, &receipt)?;
+    validate_encoded_evidence(
+        execute_request,
+        &audit_values,
+        result,
+        &grant,
+        &receipt,
+        negative_probe,
+    )?;
     let (trailing, output_descriptor) = match output_kind {
         AdmittedOutputKind::Completed => {
             let output = output.ok_or(AdapterError::ProtocolFailure)?;
@@ -546,17 +564,23 @@ fn encode_admitted_result<'a>(
     ))
 }
 
+/// The root selector's evidence check: everything [`validate_evidence`]
+/// checks, and SPR1 ordinal 21 against the admitted HCP1's ordinal 7, which
+/// only the root selector holds (ADR-069 R9 §4.5).
 fn validate_encoded_evidence(
     execute_request: &[u8],
     audit_values: &[Value],
     result: &SandboxProviderResult,
     grant: &AdmissionGrant,
     receipt: &SandboxProviderReceipt,
+    negative_probe: [u8; 32],
 ) -> Result<(), AdapterError> {
-    let mut fields = vec![Value::Null; 11];
-    fields[5] = Value::Bytes(execute_request.to_vec());
-    fields[10] = Value::Array(audit_values.to_vec());
-    validate_evidence(&fields, result, grant, receipt)
+    require_negative_probe(receipt, negative_probe).and_then(|()| {
+        let mut fields = vec![Value::Null; 11];
+        fields[5] = Value::Bytes(execute_request.to_vec());
+        fields[10] = Value::Array(audit_values.to_vec());
+        validate_evidence(&fields, result, grant, receipt)
+    })
 }
 
 const fn local_phase_code(phase: SandboxLocalErrorPhase) -> u64 {
@@ -972,6 +996,18 @@ fn receipt_matches_grant(
         && receipt.elm1_digest == grant.elm1_digest
 }
 
+/// SPR1 ordinal 21 is the admitted HCP1's ordinal 7, byte for byte.
+fn require_negative_probe(
+    receipt: &SandboxProviderReceipt,
+    negative_probe: [u8; 32],
+) -> Result<(), AdapterError> {
+    if receipt.negative_probe_evidence == negative_probe {
+        Ok(())
+    } else {
+        Err(AdapterError::ProtocolFailure)
+    }
+}
+
 fn audit_authority_matches(record: &SandboxAuditRecord, receipt: &SandboxProviderReceipt) -> bool {
     let grant = receipt.authority.agr1_digest;
     let observed = receipt.kernel_observation_evidence;
@@ -1201,6 +1237,9 @@ mod tests {
     };
 
     use super::*;
+
+    /// The admitted HCP1 ordinal 7 that the test SPR1 ordinal 21 copies.
+    const TEST_NEGATIVE_PROBE: [u8; 32] = [75; 32];
 
     #[test]
     fn execute_record_construction_preserves_the_full_ordinal_mapping(
@@ -1630,8 +1669,26 @@ mod tests {
                 receipt: Some(required_bytes(&fields[9])?),
                 audit_records: &audit_records,
                 output: Some(&trailing),
+                negative_probe: TEST_NEGATIVE_PROBE,
             },
         };
+        // ADR-069 R9 §4.5: an SPR1 whose ordinal 21 is not the admitted
+        // HCP1 ordinal 7 is refused on the root selector path.
+        let forged = AuthenticatedSelectorReply {
+            terminal: SelectorProviderTerminal::Result {
+                result: bytes(&fields[7])?,
+                grant: Some(required_bytes(&fields[8])?),
+                receipt: Some(required_bytes(&fields[9])?),
+                audit_records: &audit_records,
+                output: Some(&trailing),
+                negative_probe: [76; 32],
+            },
+            ..reply
+        };
+        assert_eq!(
+            encode_authenticated_reply(&server_request, forged).map(|_| ()),
+            Err(AdapterError::ProtocolFailure)
+        );
         let encoded = encode_authenticated_reply(&server_request, reply)?;
         assert_eq!(encoded.trailing, trailing);
         assert_eq!(
@@ -1716,6 +1773,7 @@ mod tests {
                     receipt: Some(required_bytes(&fields[9])?),
                     audit_records: &audit_records,
                     output: Some(descriptor),
+                    negative_probe: TEST_NEGATIVE_PROBE,
                 },
             })
         };
@@ -1761,6 +1819,7 @@ mod tests {
                     receipt: None,
                     audit_records: &[],
                     output: None,
+                    negative_probe: TEST_NEGATIVE_PROBE,
                 },
             };
             assert!(encode_authenticated_reply(&server_request, reply).is_ok());
@@ -1773,6 +1832,7 @@ mod tests {
                     receipt: None,
                     audit_records: &[],
                     output: None,
+                    negative_probe: TEST_NEGATIVE_PROBE,
                 },
             };
             assert_eq!(
@@ -1835,6 +1895,7 @@ mod tests {
                     receipt: candidate_receipt,
                     audit_records: &audit_records,
                     output: Some(&trailing),
+                    negative_probe: TEST_NEGATIVE_PROBE,
                 },
             };
             assert_eq!(
@@ -1880,6 +1941,7 @@ mod tests {
                 None,
                 &[],
                 None,
+                TEST_NEGATIVE_PROBE,
             )
             .map(|_| ()),
             Err(AdapterError::ProtocolFailure)
@@ -1915,6 +1977,7 @@ mod tests {
                         receipt: Some(required_bytes(&evidence.fields[9])?),
                         audit_records: &audit_records,
                         output: None,
+                        negative_probe: TEST_NEGATIVE_PROBE,
                     },
                 },
             )?;
@@ -1931,6 +1994,7 @@ mod tests {
                             receipt: Some(required_bytes(&evidence.fields[9])?),
                             audit_records: &audit_records,
                             output: Some(b"unexpected"),
+                            negative_probe: TEST_NEGATIVE_PROBE,
                         },
                     },
                 )
@@ -1958,6 +2022,7 @@ mod tests {
                         receipt: Some(required_bytes(&completed.fields[9])?),
                         audit_records: &completed_audit,
                         output: Some(b"wrong output"),
+                        negative_probe: TEST_NEGATIVE_PROBE,
                     },
                 },
             )

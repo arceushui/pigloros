@@ -107,7 +107,7 @@ impl AdmittedProviderBinary {
     }
 }
 
-fn provider_binary(
+pub(crate) fn admitted_provider_binary(
     admitted: &AdmittedSelectorProvider,
 ) -> Result<AdmittedProviderBinary, SelectorBoundaryError> {
     let digest = admitted.provider().manifest().binary_digest;
@@ -167,7 +167,7 @@ impl ProviderImageSnapshot {
         clock: fn() -> SystemTime,
     ) -> Result<Self, SelectorBoundaryError> {
         check_authority(&admitted, &request)?;
-        provider_binary(&admitted).and_then(|binary| {
+        admitted_provider_binary(&admitted).and_then(|binary| {
             let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
             let launch_bytes = admitted
                 .bootstrap()
